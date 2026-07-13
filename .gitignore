@@ -45,3 +45,6 @@ cursor-models.json
 # Ad-hoc live debug scripts (not part of the test suite)
 test-headers.mjs
 test-real-request.ts
+
+# Firecrawl
+.firecrawl/
