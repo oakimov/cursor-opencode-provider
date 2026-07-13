@@ -46,9 +46,6 @@ export function cursorAgentVersionsDir(): string | undefined {
     case "linux":
     case "darwin":
       return path.join(home, ".local", "share", "cursor-agent", "versions")
-    case "win32":
-      // ponytail: Cursor documents no Windows versions path; add it once verified.
-      return undefined
     default:
       return undefined
   }
