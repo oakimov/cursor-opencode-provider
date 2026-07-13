@@ -1,4 +1,4 @@
-import { CURSOR_API_HOST, CURSOR_AGENT_HOST, CURSOR_CLIENT_VERSION, CONNECT_PROTOCOL_VERSION } from "../shared.js"
+import { CURSOR_API_HOST, CURSOR_AGENT_HOST, FALLBACK_CLIENT_VERSION, CONNECT_PROTOCOL_VERSION } from "../shared.js"
 import { encodeFrame, streamFrames } from "../protocol/framing.js"
 import { createCursorChecksumHeader } from "../protocol/checksum.js"
 import { getDeviceIds } from "../protocol/device-id.js"
@@ -38,7 +38,7 @@ function buildBaseHeaders(token: string, extra?: Record<string, string>): Record
     authorization: `Bearer ${token}`,
     "connect-protocol-version": CONNECT_PROTOCOL_VERSION,
     "x-cursor-client-type": "cli",
-    "x-cursor-client-version": CURSOR_CLIENT_VERSION,
+    "x-cursor-client-version": FALLBACK_CLIENT_VERSION,
     "x-cursor-checksum": createCursorChecksumHeader(machineId, macMachineId),
     "x-ghost-mode": "true",
     "x-request-id": crypto.randomUUID(),
