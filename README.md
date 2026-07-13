@@ -2,9 +2,9 @@
 
 Use [Cursor](https://cursor.com) subscription models from [OpenCode](https://opencode.ai) by speaking Cursor's Connect-RPC agent protocol.
 
-This project is a custom **AI SDK provider** (`LanguageModelV3`) plus an **OpenCode plugin** that handles authentication and model discovery. Instead of calling a generic chat-completions API, it encodes and decodes Cursor's protobuf agent protocol over HTTP/2 to `agentn.api5.cursor.sh`.
+This project is a custom **AI SDK provider** (`LanguageModelV3`) plus an **OpenCode plugin** that handles authentication and model discovery. Instead of calling a generic chat-completions API, it encodes and decodes Cursor's protobuf agent protocol over HTTP/2 to `agentn.global.api5.cursor.sh`.
 
-> **Status:** Under active development.
+> **Status:** Usable end-to-end in OpenCode (auth, models, streaming, tools). See [Known limitations](#known-limitations).
 
 ## Features
 
@@ -38,7 +38,7 @@ Add the plugin and provider to your OpenCode config. Use an absolute `file://` U
 
 ```json
 {
-  "plugin": ["cursor-opencode-provider/plugin"],
+  "plugin": ["file:///absolute/path/to/cursor-opencode-provider/dist/plugin.js"],
   "provider": {
     "cursor": {
       "npm": "file:///absolute/path/to/cursor-opencode-provider/dist/index.js",
@@ -49,34 +49,32 @@ Add the plugin and provider to your OpenCode config. Use an absolute `file://` U
 }
 ```
 
-The plugin auto-registers the provider on startup if it is not already configured.
+If the `cursor` provider block is omitted, the classic plugin auto-registers it on startup (as **Cursor Integration**) using this package's `dist/index.js`. Model entries are filled from the local cache after you authenticate.
 
 For OpenCode builds that use the Effect/Promise **v2** plugin API (`plugins` field), also load:
 
 ```json
 {
-  "plugins": ["cursor-opencode-provider/plugin/v2"]
+  "plugins": ["file:///absolute/path/to/cursor-opencode-provider/dist/plugin-v2.js"]
 }
 ```
 
-That entry registers the provider via `ctx.aisdk.sdk` / `ctx.aisdk.language`. Keep the classic `plugin` entry for auth. Model entries are populated from a local cache after you authenticate.
+That entry registers the provider via `ctx.aisdk.sdk` / `ctx.aisdk.language`. Keep the classic `plugin` entry for auth.
 
 ### Authenticate
 
-Run OpenCode's auth flow for the `cursor` provider:
-
 ```bash
-opencode auth login cursor
+opencode auth login
 ```
 
-Choose one of:
+Choose the **cursor** provider, then one of:
 
 | Method | Description |
 |--------|-------------|
-| **Browser login** | PKCE OAuth — opens cursor.com to sign in |
+| **Cursor account (browser login)** | PKCE OAuth — opens cursor.com to sign in |
 | **API key** | Paste a key from [cursor.com/settings](https://cursor.com/settings) (`sk-...`) |
 
-After login, the plugin fetches your available models and writes them to `cursor-models.json` in your OpenCode config directory.
+After login, the plugin fetches your available models and writes them to `cursor-models.json` (OpenCode config directory, or `CURSOR_CONFIG_DIR` if set).
 
 ### Select a model
 
@@ -87,8 +85,6 @@ opencode run --model cursor/composer-2.5 "Hello from Cursor via OpenCode"
 ```
 
 ## Programmatic usage
-
-You can use the provider outside the plugin by importing `createCursor`:
 
 ```ts
 import { createCursor } from "cursor-opencode-provider"
@@ -102,17 +98,19 @@ const model = cursor.languageModel("composer-2.5")
 // model implements AI SDK LanguageModelV3 (doStream / doGenerate)
 ```
 
-Pass either `accessToken` (JWT from OAuth or key exchange) or `apiKey` (raw `sk-...` key).
+Pass either `accessToken` (JWT from OAuth or key exchange) or `apiKey` (raw `sk-...` key). Optional: `baseURL`, `headers`.
 
 ## Environment variables
 
 | Variable | Description |
 |----------|-------------|
-| `CURSOR_CONFIG_DIR` | Override directory for `cursor-models.json` cache (defaults to OpenCode config dir) |
+| `CURSOR_CONFIG_DIR` | Override directory for `cursor-models.json` cache (defaults to the OpenCode directory passed into the plugin) |
 | `CURSOR_WEBSITE_URL` | Override OAuth login base URL (default `https://cursor.com`) |
 | `CURSOR_API_BASE_URL` | Override API base for auth and model discovery (default `https://api2.cursor.sh`) |
 | `CURSOR_PROVIDER_DEBUG` | Set to `1` or `true` to enable wire-level debug logging |
 | `CURSOR_PROVIDER_DEBUG_FILE` | Debug log path (default `/tmp/cursor-provider-debug.log`) |
+
+`createCursor({ baseURL })` also overrides the agent Run host (default `https://agentn.global.api5.cursor.sh`).
 
 ## Development
 
@@ -130,27 +128,50 @@ bun run test:watch   # watch mode
 OpenCode
   └── CursorPlugin (auth, model cache, config hook)
         └── createCursor() → LanguageModelV3
+              ├── session.ts  held-open Run stream + exec bridge
               ├── protocol/   protobuf messages, framing, tools, thinking
-              └── transport/  Connect-RPC over HTTP/2 to agentn.api5.cursor.sh
+              └── transport/  Connect-RPC over HTTP/2 to agentn.global.api5.cursor.sh
 ```
 
 | Module | Role |
 |--------|------|
-| `src/plugin.ts` | OpenCode hooks: provider registration, OAuth, API key exchange, token refresh |
-| `src/index.ts` | `createCursor` factory and default plugin export |
+| `src/plugin.ts` | Classic OpenCode hooks: provider registration, OAuth, API key exchange, token refresh |
+| `src/plugin-v2.ts` | OpenCode Effect/Promise v2 plugin (`ctx.aisdk.*`); load via `./plugin/v2` only |
+| `src/index.ts` | `createCursor` factory; default export is `CursorPlugin` |
 | `src/language-model.ts` | AI SDK `LanguageModelV3` adapter (`doStream`, `doGenerate`) |
+| `src/session.ts` | Held-open agent Run session and pending exec correlation |
 | `src/auth.ts` | PKCE OAuth, API key exchange, JWT refresh |
 | `src/models.ts` | `AvailableModels` fetch and `cursor-models.json` cache |
 | `src/transport/connect.ts` | HTTP/2 bidi stream and unary RPC calls |
-| `src/protocol/` | Protobuf encode/decode, checksum headers, tool-call mapping |
+| `src/protocol/` | Protobuf encode/decode, checksum/device ids, tool-call mapping |
 
 ## Package exports
 
 | Import path | Export |
 |-------------|--------|
-| `cursor-opencode-provider` | `createCursor`, `CursorPlugin` (default), `CursorPluginV2` |
+| `cursor-opencode-provider` | `createCursor`, `CursorPlugin` (named + default) |
 | `cursor-opencode-provider/plugin` | `CursorPlugin` (classic Hooks — auth) |
 | `cursor-opencode-provider/plugin/v2` | OpenCode Effect/Promise v2 plugin (`ctx.aisdk.*`) |
+
+`CursorPluginV2` is **not** re-exported from the package root — the classic plugin loader would treat it as a broken Hooks export. Always load it via `./plugin/v2`.
+
+## Troubleshooting
+
+| Problem | What to try |
+|---------|-------------|
+| No Cursor models in the picker | Run `opencode auth login`, choose **cursor**, then restart OpenCode so the plugin reloads `cursor-models.json`. Confirm the provider `npm` `file://` path points at a built `dist/index.js`. |
+| Auth / 401 errors mid-session | Re-login. OAuth and exchanged API-key JWTs refresh automatically when near expiry; a revoked refresh token needs a fresh login. |
+| “Too many connections from different devices” | Device IDs are derived from stable OS identifiers (same approach as the Cursor CLI). Avoid running multiple clients that invent different machine fingerprints for the same account. |
+| Empty or stale model list | Delete `cursor-models.json` under the OpenCode config dir (or the dir set by `CURSOR_CONFIG_DIR`) and re-auth / restart so models are fetched again. Cache TTL is 24h; a failed background refresh keeps serving the previous cache. |
+| Stream hangs or HTTP/2 errors | Abort the turn and retry. The agent Run uses a bidirectional HTTP/2 stream to `agentn.global.api5.cursor.sh`; a dropped connection leaves the in-flight session unusable. |
+| Need wire-level logs | Set `CURSOR_PROVIDER_DEBUG=1` (optional `CURSOR_PROVIDER_DEBUG_FILE`, default `/tmp/cursor-provider-debug.log`) and reproduce the issue. |
+
+## Known limitations
+
+- **Personal use / ToS** — this provider speaks Cursor’s private agent protocol (CLI-shaped client identity). Use only with an account you own; Cursor may change or restrict the API without notice.
+- **Partial `request_context`** — each Run advertises tools to Cursor, but does not yet send the full CLI context (env, workspace roots, rules, and related fields). Some Cursor-side behaviors that depend on that context may differ from the real CLI.
+- **Tool-call display stub** — semantic `tool_call_started` frames are only partially decoded. Tool execution itself goes through the exec channel and works; UI that relied solely on the display type would be incomplete.
+- **No fallback models** — if Cursor’s `AvailableModels` API is unreachable and there is no local cache, the provider exposes no models.
 
 ## License
 

@@ -32,7 +32,7 @@ export function trace(msg: string): void {
 }
 trace("connect.ts module loaded")
 
-function buildBaseHeaders(token: string): Record<string, string> {
+function buildBaseHeaders(token: string, extra?: Record<string, string>): Record<string, string> {
   const { machineId, macMachineId } = getDeviceIds()
   return {
     authorization: `Bearer ${token}`,
@@ -42,14 +42,19 @@ function buildBaseHeaders(token: string): Record<string, string> {
     "x-cursor-checksum": createCursorChecksumHeader(machineId, macMachineId),
     "x-ghost-mode": "true",
     "x-request-id": crypto.randomUUID(),
+    ...extra,
   }
 }
 
 // ── Unary (AvailableModels) ──
 
-export async function unaryAvailableModels(token: string): Promise<Record<string, unknown>> {
-  const url = `${API_BASE}/aiserver.v1.AiService/AvailableModels`
-  const headers = buildBaseHeaders(token)
+export async function unaryAvailableModels(
+  token: string,
+  options: { baseURL?: string; headers?: Record<string, string> } = {},
+): Promise<Record<string, unknown>> {
+  const base = options.baseURL ?? API_BASE
+  const url = `${base}/aiserver.v1.AiService/AvailableModels`
+  const headers = buildBaseHeaders(token, options.headers)
 
   const res = await fetch(url, {
     method: "POST",
@@ -78,27 +83,82 @@ export type BidiStream = {
   destroy(): void
 }
 
-// Cache http2 session per host (lazy connect)
-let _http2Session: http2.ClientHttp2Session | null = null
+// Cache http2 sessions keyed by origin so a custom baseURL never reuses a
+// connection opened to the default agent host — and vice versa.
+const _http2Sessions = new Map<string, http2.ClientHttp2Session>()
+// In-flight connects for the same origin share one Promise (avoid parallel races).
+const _http2Connecting = new Map<string, Promise<http2.ClientHttp2Session>>()
 
-function getSession(): Promise<http2.ClientHttp2Session> {
-  if (_http2Session && !_http2Session.destroyed) {
-    return Promise.resolve(_http2Session)
-  }
-  return new Promise((resolve, reject) => {
-    const session = http2.connect(`https://${AGENT}`)
-    session.on("error", reject)
-    session.on("connect", () => {
-      _http2Session = session
-      resolve(session)
-    })
-  })
+// Bound the time we'll wait for the initial connect. Without this, a dead or
+// unreachable host (DNS failure, network partition) hangs the provider forever
+// because the 'connect' / 'error' event may never fire.
+const CONNECT_TIMEOUT_MS = 15_000
+
+/** Resolve the HTTP/2 connect origin for a Run stream (exported for tests). */
+export function resolveAgentOrigin(baseURL?: string): string {
+  // baseURL may be https://host or https://host:port — http2.connect accepts both.
+  return (baseURL ? new URL(baseURL) : new URL(`https://${AGENT}`)).origin
 }
 
-export async function bidiRunStream(token: string, signal?: AbortSignal): Promise<BidiStream> {
-  const session = await getSession()
+function dropSession(origin: string, session: http2.ClientHttp2Session): void {
+  if (_http2Sessions.get(origin) === session) _http2Sessions.delete(origin)
+}
+
+function getSession(baseURL?: string): Promise<http2.ClientHttp2Session> {
+  const origin = resolveAgentOrigin(baseURL)
+  const existing = _http2Sessions.get(origin)
+  if (existing && !existing.destroyed && !existing.closed) {
+    return Promise.resolve(existing)
+  }
+  const inflight = _http2Connecting.get(origin)
+  if (inflight) return inflight
+
+  const promise = new Promise<http2.ClientHttp2Session>((resolve, reject) => {
+    const session = http2.connect(origin)
+    const cleanup = () => {
+      clearTimeout(timer)
+      session.removeListener("error", onError)
+      session.removeListener("connect", onConnect)
+    }
+    const onError = (err: Error) => {
+      cleanup()
+      _http2Connecting.delete(origin)
+      dropSession(origin, session)
+      try { session.destroy() } catch { /* ignore */ }
+      reject(err)
+    }
+    const onConnect = () => {
+      cleanup()
+      _http2Connecting.delete(origin)
+      // Future post-connect errors (GOAWAY, RST_STREAM) must invalidate the
+      // cache; otherwise subsequent getSession() calls reuse a degraded session.
+      const onCloseOrError = () => dropSession(origin, session)
+      session.once("close", onCloseOrError)
+      session.on("error", onCloseOrError)
+      _http2Sessions.set(origin, session)
+      resolve(session)
+    }
+    const timer = setTimeout(() => {
+      cleanup()
+      _http2Connecting.delete(origin)
+      dropSession(origin, session)
+      try { session.destroy() } catch { /* ignore */ }
+      reject(new Error(`HTTP/2 connect to ${origin} timed out after ${CONNECT_TIMEOUT_MS}ms`))
+    }, CONNECT_TIMEOUT_MS)
+    session.on("error", onError)
+    session.on("connect", onConnect)
+  })
+  _http2Connecting.set(origin, promise)
+  return promise
+}
+
+export async function bidiRunStream(
+  token: string,
+  options: { signal?: AbortSignal; baseURL?: string; headers?: Record<string, string> } = {},
+): Promise<BidiStream> {
+  const session = await getSession(options.baseURL)
   const headers = {
-    ...buildBaseHeaders(token),
+    ...buildBaseHeaders(token, options.headers),
     ":method": "POST",
     ":path": "/agent.v1.AgentService/Run",
     "content-type": "application/connect+proto",
@@ -134,8 +194,8 @@ export async function bidiRunStream(token: string, signal?: AbortSignal): Promis
   })
   stream.on("close", () => trace(`h2 stream closed (status=${responseStatus}, err=${streamError?.message ?? "none"})`))
 
-  if (signal) {
-    signal.addEventListener("abort", () => {
+  if (options.signal) {
+    options.signal.addEventListener("abort", () => {
       if (!closed) {
         closed = true
         writable = false

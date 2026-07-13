@@ -4,7 +4,6 @@ import {
   mapToolNameToExecField,
   mapCursorArgsToOpencode,
   parseExecServerMessage,
-  buildExecClientMessage,
   buildExecClientMessages,
   buildToolCallPart,
   parseExecIdFromToolCallId,
@@ -283,7 +282,7 @@ describe("parseExecServerMessage", () => {
     expect(parsed!.args).toEqual({ pattern: "**/*", path: "/src" })
     expect(parsed!.resultField).toBe("mcp_result")
     // And the stream part must be stringified for the AI SDK.
-    const tc = buildToolCallPart(parsed!)
+    const tc = buildToolCallPart(parsed!, "sess_test")
     expect(typeof tc.input).toBe("string")
     expect(JSON.parse(tc.input)).toEqual({ pattern: "**/*", path: "/src" })
   })
@@ -312,14 +311,15 @@ describe("parseExecServerMessage", () => {
   })
 })
 
-describe("buildExecClientMessage", () => {
+describe("buildExecClientMessages", () => {
   it("uses read_result success oneof (agent.v1), not flat content", () => {
-    const data = buildExecClientMessage({
+    const frames = buildExecClientMessages({
       execId: 1,
       resultField: "read_result",
       output: "<path>/README.md</path>\nhello",
     })
-    const ec = decodeMessage<any>("AgentClientMessage", data).exec_client_message
+    expect(frames).toHaveLength(2) // result + stream_close
+    const ec = decodeMessage<any>("AgentClientMessage", frames[0]).exec_client_message
     expect(ec.id).toBe(1)
     expect(ec.read_result?.success?.content).toContain("hello")
     expect(ec.read_result?.success?.path).toBe("/README.md")
@@ -327,13 +327,14 @@ describe("buildExecClientMessage", () => {
   })
 
   it("includes read error as ReadError oneof", () => {
-    const data = buildExecClientMessage({
+    const frames = buildExecClientMessages({
       execId: 2,
       resultField: "read_result",
       output: "",
       error: "File not found",
     })
-    const ec = decodeMessage<any>("AgentClientMessage", data).exec_client_message
+    expect(frames).toHaveLength(2)
+    const ec = decodeMessage<any>("AgentClientMessage", frames[0]).exec_client_message
     expect(ec.id).toBe(2)
     expect(ec.read_result?.error?.error).toBe("File not found")
     expect(ec.read_result?.success).toBeUndefined()
@@ -390,19 +391,21 @@ describe("buildExecClientMessage", () => {
   })
 
   it("routes MCP results to mcp_result success{content:[{text}]}", () => {
-    const data = buildExecClientMessage({ execId: 9, resultField: "mcp_result", output: "{}" })
-    const ec = decodeMessage<any>("AgentClientMessage", data).exec_client_message
+    const frames = buildExecClientMessages({ execId: 9, resultField: "mcp_result", output: "{}" })
+    expect(frames).toHaveLength(2)
+    const ec = decodeMessage<any>("AgentClientMessage", frames[0]).exec_client_message
     expect(ec.mcp_result?.success?.content?.[0]?.text?.text).toBe("{}")
     expect(ec.mcp_result?.content).toBeUndefined()
   })
 
   it("wraps grep/glob output as GrepSuccess files_with_matches", () => {
-    const data = buildExecClientMessage({
+    const frames = buildExecClientMessages({
       execId: 0,
       resultField: "grep_result",
       output: "/workspace/project/README.md\n/workspace/project/src/index.ts",
     })
-    const ec = decodeMessage<any>("AgentClientMessage", data).exec_client_message
+    expect(frames).toHaveLength(2)
+    const ec = decodeMessage<any>("AgentClientMessage", frames[0]).exec_client_message
     const gs = ec.grep_result?.success
     expect(gs?.output_mode).toBe("files_with_matches")
     const wr = gs?.workspace_results
@@ -432,8 +435,8 @@ describe("buildToolCallPart", () => {
       toolName: "read",
       args: { filePath: "/test.txt" },
       resultField: "read_result",
-    })
-    expect(result.toolCallId).toBe("cursor_5")
+    }, "sess_test")
+    expect(result.toolCallId).toBe("cursor_sess_test_5")
     expect(result.toolName).toBe("read")
     // LanguageModelV3ToolCall.input must be a string — AI SDK calls input.trim().
     expect(typeof result.input).toBe("string")
@@ -447,7 +450,7 @@ describe("buildToolCallPart", () => {
       toolName: "grep",
       args: {},
       resultField: "grep_result",
-    })
+    }, "sess_test")
     expect(result.input).toBe("{}")
   })
 
@@ -468,7 +471,7 @@ describe("buildToolCallPart", () => {
     expect(parsed.toolName).toBe("glob")
     expect(parsed.args.pattern).toBe("**/*")
 
-    const tc = buildToolCallPart(parsed)
+    const tc = buildToolCallPart(parsed, "sess_test")
     // Simulate AI SDK: must be able to trim then JSON.parse.
     const trimmed = (tc.input as string).trim()
     const decoded = JSON.parse(trimmed)
@@ -483,8 +486,11 @@ describe("buildToolCallPart", () => {
 })
 
 describe("parseExecIdFromToolCallId", () => {
-  it("extracts exec id from tool call id", () => {
-    expect(parseExecIdFromToolCallId("cursor_42")).toBe(42)
+  it("extracts sessionId and exec id from a tagged tool call id", () => {
+    expect(parseExecIdFromToolCallId("cursor_sess_test_42")).toEqual({
+      sessionId: "sess_test",
+      execId: 42,
+    })
   })
 
   it("returns undefined for non-cursor ids", () => {

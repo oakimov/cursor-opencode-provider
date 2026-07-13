@@ -7,8 +7,13 @@ export type RunRequestInput = {
   modelId: string
   conversationId: string
   systemPrompt?: string
-  /** Prior user/assistant turns (oldest first), excluding the current user message. */
-  history?: Array<{ role: "user" | "assistant"; text: string }>
+  /**
+   * Opaque ConversationStateStructure bytes from the last
+   * conversation_checkpoint_update for this conversation_id. When set, echoed
+   * as AgentRunRequest.conversation_state (CLI parity). When absent, a seed
+   * state with the system prompt (or empty) is built for turn 1.
+   */
+  conversationState?: Uint8Array
   parameterValues?: Array<{ id: string; value: string }>
   maxMode?: boolean
   messageId?: string
@@ -17,22 +22,17 @@ export type RunRequestInput = {
 }
 
 /**
- * Build ConversationStateStructure. The system prompt is delivered here, in
- * `root_prompt_messages_json` (#1) as a JSON-encoded `{"role":"system",...}`
- * message — this is the verified Cursor mechanism (see capture_reference_run
- * + AGENT_RUN_PROTOCOL.md §ConversationState). We deliberately do NOT use
- * `AgentRunRequest.custom_system_prompt` (#8): that field is the internal
- * `--system-prompt` CLI override, gated to Anysphere/OpenAI teams, and the
- * server rejects it for normal accounts with
- * `invalid_argument: unknown option '--system-prompt'`.
+ * Seed ConversationStateStructure for the first turn (no checkpoint yet).
  *
- * Prior chat turns go in `turns` (#8) as AgentConversationTurn messages so
- * multi-turn OpenCode sessions keep context on Cursor's side.
+ * OpenCode needs a system prompt channel; we put it in root_prompt_messages_json
+ * as a JSON chat message. After the first checkpoint arrives we stop inventing
+ * state and echo the server's opaque structure instead (CLI behavior).
+ *
+ * We deliberately do NOT use `AgentRunRequest.custom_system_prompt` (#8): that
+ * field is the internal `--system-prompt` CLI override and the server rejects
+ * it for normal accounts.
  */
-function buildConversationState(
-  systemPrompt?: string,
-  history?: Array<{ role: "user" | "assistant"; text: string }>,
-): Uint8Array {
+function buildSeedConversationState(systemPrompt?: string): Uint8Array {
   const root = getMessageTypes()
   const type = root.lookupType("ConversationStateStructure")
   const obj: Record<string, unknown> = {}
@@ -41,49 +41,7 @@ function buildConversationState(
       JSON.stringify({ role: "system", content: systemPrompt }),
     ]
   }
-  const turns = packHistoryTurns(history)
-  if (turns.length > 0) obj.turns = turns
   return type.encode(type.fromObject(obj)).finish()
-}
-
-/**
- * Pack AI SDK prompt history into ConversationTurn / AgentConversationTurn.
- * Each completed user→assistant exchange becomes one turn; a trailing user
- * message without an assistant reply is omitted here (it is sent as the live
- * `action.user_message_action` instead).
- */
-function packHistoryTurns(
-  history?: Array<{ role: "user" | "assistant"; text: string }>,
-): Array<Record<string, unknown>> {
-  if (!history || history.length === 0) return []
-  const turns: Array<Record<string, unknown>> = []
-  let i = 0
-  while (i < history.length) {
-    const msg = history[i]
-    if (msg.role !== "user") {
-      i++
-      continue
-    }
-    const userText = msg.text
-    i++
-    const steps: Array<Record<string, unknown>> = []
-    while (i < history.length && history[i].role === "assistant") {
-      steps.push({
-        assistant_message: { text: history[i].text },
-      })
-      i++
-    }
-    // Only include completed turns (user + at least one assistant step). A
-    // trailing user-only message is the current action, not history.
-    if (steps.length === 0) continue
-    turns.push({
-      agent_conversation_turn: {
-        user_message: { text: userText, message_id: crypto.randomUUID() },
-        steps,
-      },
-    })
-  }
-  return turns
 }
 
 function buildAvailableModels(models: ModelInfo[]): Array<Record<string, unknown>> {
@@ -97,6 +55,9 @@ function buildAvailableModels(models: ModelInfo[]): Array<Record<string, unknown
 
 /**
  * Build an AgentClientMessage{run_request} for a conversation turn.
+ *
+ * Live `user_message.text` is the current prompt only — same as Cursor CLI.
+ * Cross-turn history is the last server checkpoint re-sent as conversation_state.
  */
 export function buildRunRequest(input: RunRequestInput): Uint8Array {
   const msgId = input.messageId ?? crypto.randomUUID()
@@ -118,6 +79,11 @@ export function buildRunRequest(input: RunRequestInput): Uint8Array {
     userMessageAction.request_context = requestContext
   }
 
+  const conversationState =
+    input.conversationState && input.conversationState.length > 0
+      ? input.conversationState
+      : buildSeedConversationState(input.systemPrompt)
+
   const runRequest: Record<string, unknown> = {
     conversation_id: input.conversationId,
     action: {
@@ -131,7 +97,7 @@ export function buildRunRequest(input: RunRequestInput): Uint8Array {
       max_mode: input.maxMode ?? false,
       parameters: input.parameterValues ?? [],
     },
-    conversation_state: buildConversationState(input.systemPrompt, input.history),
+    conversation_state: conversationState,
     // Keep #4 populated too (harmless on real turns; useful for prewarm /
     // older server builds that still read it).
     mcp_tools: { mcp_tools: mcpTools },

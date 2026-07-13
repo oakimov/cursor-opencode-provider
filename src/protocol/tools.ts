@@ -468,12 +468,6 @@ export function buildExecStreamClose(execId: number): Uint8Array {
   })
 }
 
-/** @deprecated Prefer buildExecClientMessages — kept for single-frame callers/tests. */
-export function buildExecClientMessage(input: ToolResultInput): Uint8Array {
-  const frames = buildExecClientMessages(input)
-  return frames[0]
-}
-
 /**
  * Map OpenCode tool text into the agent.v1 result oneof for each exec variant.
  * OpenCode returns free-form text; we wrap it in the minimal success shape the
@@ -601,9 +595,13 @@ function encodeShellStream(
 
 export function buildToolCallPart(
   execMsg: ParsedExecRequest,
+  sessionId: string,
 ): { toolCallId: string; toolName: string; input: string } {
+  // Tag the toolCallId with the originating session's id so the result-bearing
+  // doStream call can disambiguate the Run stream — Cursor resets exec ids per
+  // stream, so two concurrent conversations would otherwise collide on `id`.
   return {
-    toolCallId: `cursor_${execMsg.id}`,
+    toolCallId: `cursor_${sessionId}_${execMsg.id}`,
     toolName: execMsg.toolName,
     // LanguageModelV3ToolCall.input is a *stringified* JSON object. The AI SDK
     // does `input.trim()` before JSON.parse; emitting a plain object crashes
@@ -615,9 +613,16 @@ export function buildToolCallPart(
 
 // ── Extract exec id from tool call id ──
 
-export function parseExecIdFromToolCallId(toolCallId: string): number | undefined {
-  const match = toolCallId.match(/^cursor_(\d+)$/)
-  return match ? parseInt(match[1], 10) : undefined
+export function parseExecIdFromToolCallId(
+  toolCallId: string,
+): { sessionId: string; execId: number } | undefined {
+  // Format: cursor_<sessionId>_<execId>. sessionId may itself contain
+  // underscores (e.g. UUIDs), so anchor on the trailing _<digits>.
+  const match = toolCallId.match(/^cursor_(.+)_(\d+)$/)
+  if (!match) return undefined
+  const execId = parseInt(match[2], 10)
+  if (!Number.isFinite(execId)) return undefined
+  return { sessionId: match[1], execId }
 }
 
 // ── Safety net: reply to exec variants we don't map to an opencode tool ──

@@ -4,6 +4,8 @@ import {
   decodeJwtPayload,
   exchangeApiKey,
   refreshAccessToken,
+  resolveBearerToken,
+  clearBearerTokenCache,
   AuthExchangeError,
   AuthRefreshError,
   generatePkceParams,
@@ -134,6 +136,72 @@ describe("refreshAccessToken", () => {
     )
     expect(result.accessToken).toBe("new-access.jwt")
     expect(result.refreshToken).toBe("new-refresh.jwt")
+  })
+})
+
+describe("resolveBearerToken", () => {
+  it("returns accessToken as-is when provided", async () => {
+    clearBearerTokenCache()
+    const token = await resolveBearerToken({ accessToken: "jwt-direct" })
+    expect(token).toBe("jwt-direct")
+  })
+
+  it("throws when neither accessToken nor apiKey is provided", async () => {
+    clearBearerTokenCache()
+    await expect(resolveBearerToken({})).rejects.toThrow(/no access token or API key/)
+  })
+
+  it("exchanges apiKey once and reuses the cached JWT", async () => {
+    clearBearerTokenCache()
+    let exchanges = 0
+    using server = Bun.serve({
+      port: 0,
+      fetch() {
+        exchanges++
+        return Response.json({
+          accessToken: makeJwt(3600),
+          refreshToken: "refresh.jwt",
+        })
+      },
+    })
+    const base = `http://localhost:${server.port}`
+    const a = await resolveBearerToken({ apiKey: "sk-cache-test", baseUrl: base })
+    const b = await resolveBearerToken({ apiKey: "sk-cache-test", baseUrl: base })
+    expect(a).toBe(b)
+    expect(exchanges).toBe(1)
+  })
+
+  it("refreshes a near-expiry cached JWT instead of re-exchanging", async () => {
+    clearBearerTokenCache()
+    let exchanges = 0
+    let refreshes = 0
+    using server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url)
+        if (url.pathname.endsWith("/auth/exchange_user_api_key")) {
+          exchanges++
+          return Response.json({
+            accessToken: makeJwt(60),
+            refreshToken: "refresh.jwt",
+          })
+        }
+        if (url.pathname.endsWith("/auth/token")) {
+          refreshes++
+          return Response.json({
+            accessToken: makeJwt(3600),
+            refreshToken: "refresh.jwt.2",
+          })
+        }
+        return new Response("not found", { status: 404 })
+      },
+    })
+    const base = `http://localhost:${server.port}`
+    await resolveBearerToken({ apiKey: "sk-refresh-test", baseUrl: base })
+    const second = await resolveBearerToken({ apiKey: "sk-refresh-test", baseUrl: base })
+    expect(exchanges).toBe(1)
+    expect(refreshes).toBe(1)
+    expect(isExpiringSoon(second)).toBe(false)
   })
 })
 

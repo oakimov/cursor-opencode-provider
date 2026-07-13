@@ -1,4 +1,5 @@
 import path from "node:path"
+import fs from "node:fs"
 import { createHash } from "node:crypto"
 import type { LanguageModelV3, LanguageModelV3CallOptions, LanguageModelV3StreamResult, LanguageModelV3GenerateResult, LanguageModelV3StreamPart, LanguageModelV3Usage, LanguageModelV3FinishReason } from "@ai-sdk/provider"
 import type { CreateCursorOptions } from "./index.js"
@@ -19,10 +20,15 @@ import {
   type OpencodeToolDef,
 } from "./protocol/tools.js"
 import { handleKvServerMessage } from "./protocol/kv.js"
+import { getCheckpoint, setCheckpoint } from "./protocol/checkpoint.js"
+import { conversationBlobCount } from "./protocol/blob-store.js"
 import { sessionManager, type CursorSession, type Frame } from "./session.js"
-import { readCache, resolveVariantParameters, type ModelInfo } from "./models.js"
+import { readCache, cacheFilePath, resolveVariantParameters, type ModelInfo } from "./models.js"
 
 let _availableModels: ModelInfo[] | undefined
+// mtime of the cache file the last time we loaded it. Compared on each call
+// so discoverModels' background refresh is picked up without a process restart.
+let _availableModelsMtimeMs = 0
 
 type V3Part = LanguageModelV3StreamPart
 
@@ -60,26 +66,42 @@ async function doStreamImpl(
   options: CreateCursorOptions,
   callOptions: LanguageModelV3CallOptions,
 ): Promise<LanguageModelV3StreamResult> {
-  const token = options.accessToken ?? options.apiKey
-  if (!token) throw new Error("Cursor provider: no access token or API key provided")
+  // A raw `sk-...` API key must be exchanged for a JWT before it can be used
+  // as a Bearer token (the plugin path does this in auth.ts). The accessToken
+  // path is already a JWT from OAuth/key-exchange, so we use it as-is.
+  // resolveBearerToken caches apiKey exchanges so we don't hit /auth/exchange
+  // on every turn.
+  const { resolveBearerToken } = await import("./auth.js")
+  const token = await resolveBearerToken({
+    accessToken: options.accessToken,
+    apiKey: options.apiKey,
+    baseUrl: options.baseURL,
+  })
 
   const prompt = callOptions.prompt
 
-  // ── Continuation: does this call carry tool results for a held-open stream? ──
-  const toolResults = extractToolResults(prompt)
-  let session = toolResults.length > 0
-    ? sessionManager.findByExecIds(toolResults.map((r) => r.execId))
-    : undefined
+  // ── Continuation vs fresh turn ──
+  // OpenCode embeds *all* historical tool results in every prompt. Only the
+  // trailing tool-message suffix (after the last assistant/user message) is a
+  // live continuation. Treating mid-prompt history as continuation caused
+  // false "orphaned tool results" errors after Cursor turn_ended and OpenCode
+  // started the next step with old tools still in the prompt body.
+  const trailingToolResults = extractTrailingToolResults(prompt)
+  let session = findContinuationSession(trailingToolResults)
 
   if (session) {
-    // Deliver each awaited result back on the SAME Run stream, then resume.
-    trace(`continuation: ${toolResults.length} tool result(s) execIds=[${toolResults.map((r) => r.execId).join(",")}] session=found pending={${[...session.pending.keys()].join(",")}}`)
-    for (const r of toolResults) {
+    // Deliver only results that this live session is still awaiting.
+    const pendingResults = trailingToolResults.filter(
+      (r) => r.sessionId === session!.sessionId && session!.pending.has(r.execId),
+    )
+    trace(
+      `continuation: ${trailingToolResults.length} trailing tool result(s), ` +
+        `${pendingResults.length} pending for sessionId=${session.sessionId} ` +
+        `pending={${[...session.pending.keys()].join(",")}}`,
+    )
+    for (const r of pendingResults) {
       const pending = session.pending.get(r.execId)
-      if (!pending) {
-        trace(`continuation: execId ${r.execId} NOT in pending — dropping result`)
-        continue
-      }
+      if (!pending) continue
       try {
         for (const frame of buildExecClientMessages({
           execId: r.execId,
@@ -90,18 +112,28 @@ async function doStreamImpl(
           session.stream.write(frame)
         }
         trace(`continuation: wrote exec result execId=${r.execId} field=${pending.resultField} outLen=${r.output.length}`)
+        // Only resolve after the write succeeded — if it threw, the server never
+        // got the result and would block on heartbeats forever otherwise.
+        sessionManager.resolve(session.sessionId, r.execId)
       } catch (e) {
-        trace(`continuation: write FAILED execId=${r.execId} err=${(e as Error).message}`)
+        trace(`continuation: write FAILED execId=${r.execId} err=${(e as Error).message} — leaving pending`)
       }
-      sessionManager.resolve(r.execId)
     }
     sessionManager.touch(session)
+  } else if (trailingToolResults.length > 0) {
+    // True continuation (prompt ends with tool results) but the Cursor Run is
+    // gone. Soft-stop instead of re-prompting (doom loop) or hard-erroring.
+    const ids = trailingToolResults.map((r) => `${r.sessionId}:${r.execId}`).join(",")
+    trace(`continuation: ${trailingToolResults.length} orphaned trailing tool result(s) [${ids}] — soft-stop`)
+    return orphanedToolResultsStream(ids)
   } else {
-    if (toolResults.length > 0) {
-      trace(`continuation: ${toolResults.length} tool result(s) but NO session found execIds=[${toolResults.map((r) => r.execId).join(",")}] — starting fresh turn (TOOL LOOP BROKEN)`)
+    // Fresh turn (prompt ends with user/assistant text). Historical tool
+    // results may exist mid-prompt; they are not live exec replies.
+    const historical = extractToolResults(prompt).length
+    if (historical > 0) {
+      trace(`fresh turn: ignoring ${historical} historical tool result(s) (not trailing)`)
     }
-    // ── Fresh turn: open a new Run stream + session. ──
-    session = await startSession(modelId, token, callOptions)
+    session = await startSession(modelId, token, callOptions, options)
   }
 
   const boundSession = session
@@ -111,9 +143,39 @@ async function doStreamImpl(
   return {
     stream: new ReadableStream<V3Part>({
       async pull(controller) {
-        controller.enqueue({ type: "stream-start", warnings: [] } as V3Part)
-        await pump(boundSession, controller, { textId, reasoningId }, callOptions.abortSignal)
-        controller.close()
+        // The outer try is a safety net for any throw that escapes pump() —
+        // e.g. an unhandled decode/gunzip error or a frames-iterator throw on
+        // a non-200 HTTP/2 response. Without it the pull promise rejects, the
+        // ReadableStream errors, and the session is never cleaned up.
+        try {
+          try {
+            controller.enqueue({ type: "stream-start", warnings: [] } as V3Part)
+          } catch (e) {
+            // Controller already cancelled by the consumer — stop pumping.
+            trace(`pull: stream-start enqueue failed (cancelled) err=${(e as Error).message}`)
+            return
+          }
+          boundSession.pumpActive = true
+          try {
+            await pump(boundSession, controller, { textId, reasoningId }, callOptions.abortSignal)
+          } finally {
+            boundSession.pumpActive = false
+          }
+          try {
+            controller.close()
+          } catch (e) {
+            trace(`pull: close failed (already closed/cancelled) err=${(e as Error).message}`)
+          }
+        } catch (e) {
+          boundSession.pumpActive = false
+          trace(`pull: pump threw (cleaning up): ${(e as Error).message}`)
+          sessionManager.closeUnlessPending(boundSession)
+          try {
+            controller.error(e instanceof Error ? e : new Error(String(e)))
+          } catch {
+            /* controller already errored/closed */
+          }
+        }
       },
       cancel() {
         // OpenCode cancels the ReadableStream after "tool-calls"; keep the
@@ -129,12 +191,16 @@ async function startSession(
   modelId: string,
   token: string,
   callOptions: LanguageModelV3CallOptions,
+  options: CreateCursorOptions,
 ): Promise<CursorSession> {
   const prompt = callOptions.prompt
-  const conversationId = crypto.randomUUID()
+  // Cursor stores server-side history keyed by conversation_id. Minting a new
+  // UUID every turn made each OpenCode user message look like a brand-new chat.
+  // OpenCode sends X-Session-Id / x-session-affinity on every call — derive a
+  // stable UUID from that so follow-ups hit the same server conversation.
+  const conversationId = resolveConversationId(callOptions)
   const userText = extractUserText([...prompt].reverse().find((m) => m.role === "user")) || "."
   const systemPrompt = extractSystemPrompt(prompt)
-  const history = extractHistory(prompt)
   const tools = extractTools(callOptions)
 
   await loadAvailableModels()
@@ -149,24 +215,25 @@ async function startSession(
   // Do NOT pass callOptions.abortSignal into the h2 Run stream. OpenCode aborts
   // that signal when a turn ends with tool-calls; the Cursor stream must stay
   // open until we write the exec results on the next doStream.
-  const stream = await bidiRunStream(token)
-  trace(
-    `outbound Run: model=${modelId} params=${JSON.stringify(parameterValues ?? [])} ` +
-      `maxMode=${maxMode} systemPromptLen=${systemPrompt?.length ?? 0} tools=${tools.length} ` +
-      `historyTurns=${history.length} availableModels=${_availableModels?.length ?? 0} userTextLen=${userText.length}`,
-  )
+  const stream = await bidiRunStream(token, {
+    baseURL: options.baseURL,
+    headers: options.headers,
+  })
   // Build the tool descriptors once — advertised in AgentRunRequest #4 mcp_tools
   // AND echoed into the request_context reply (server turn-setup probe).
   const toolDescriptors = tools.length > 0 ? toolsToDescriptors(tools) : []
   // Compaction/summary turns pass tools:{} (and may set toolChoice "none").
   // Cursor still has native Grep/etc.; allowTools gates emitting tool-call parts.
   const allowTools = computeAllowTools(toolDescriptors.length, callOptions.toolChoice)
+  // CLI parity: echo the last conversation_checkpoint_update as conversation_state.
+  // Turn 1 (no checkpoint) seeds system prompt only; live user text is current-only.
+  const conversationState = getCheckpoint(conversationId)
   const reqBytes = buildRunRequest({
     text: userText,
     modelId,
     conversationId,
-    systemPrompt,
-    history,
+    systemPrompt: conversationState ? undefined : systemPrompt,
+    conversationState,
     parameterValues,
     maxMode,
     availableModels: _availableModels,
@@ -175,18 +242,29 @@ async function startSession(
   // Content hashes — Cursor content-addresses large payloads; logging these lets
   // us match a server get_blob_args.blob_id to what it wants served.
   const sha = (b: string | Uint8Array) => createHash("sha256").update(b).digest("hex")
+  trace(
+    `outbound Run: model=${modelId} conversationId=${conversationId} ` +
+      `params=${JSON.stringify(parameterValues ?? [])} ` +
+      `maxMode=${maxMode} systemPromptLen=${systemPrompt?.length ?? 0} tools=${tools.length} ` +
+      `availableModels=${_availableModels?.length ?? 0} userTextLen=${userText.length} ` +
+      `checkpointLen=${conversationState?.length ?? 0}`,
+  )
   trace(`hash run_request sha256=${sha(reqBytes)}`)
   if (systemPrompt) trace(`hash systemPrompt sha256=${sha(systemPrompt)}`)
+  if (conversationState) trace(`hash checkpoint sha256=${sha(conversationState)}`)
 
   stream.write(reqBytes)
 
   const session: CursorSession = {
+    sessionId: crypto.randomUUID(),
+    conversationId,
     stream,
     frames: stream.frames()[Symbol.asyncIterator](),
     pending: new Map(),
     blobs: new Map(),
     toolDescriptors,
     allowTools,
+    pumpActive: false,
     heartbeat: null,
     expiresAt: Date.now() + 300_000,
   }
@@ -202,13 +280,71 @@ async function startSession(
   return session
 }
 
+/** Emit a soft-stop stream when trailing tool results have no live Cursor Run. */
+function orphanedToolResultsStream(ids: string): LanguageModelV3StreamResult {
+  const textId = crypto.randomUUID()
+  const message =
+    `The Cursor agent stream ended before tool results could be delivered ` +
+    `(${ids.split(",").length} result(s)). Please retry your request.`
+  trace(`orphanedToolResultsStream: soft-stop for [${ids}]`)
+  return {
+    stream: new ReadableStream<V3Part>({
+      pull(controller) {
+        try {
+          controller.enqueue({ type: "stream-start", warnings: [] } as V3Part)
+          controller.enqueue({ type: "text-start", id: textId } as V3Part)
+          controller.enqueue({ type: "text-delta", id: textId, delta: message } as V3Part)
+          controller.enqueue({ type: "text-end", id: textId } as V3Part)
+          controller.enqueue({
+            type: "finish",
+            finishReason: { unified: "stop", raw: undefined },
+            usage: {
+              inputTokens: { total: 0, noCache: undefined, cacheRead: 0, cacheWrite: 0 },
+              outputTokens: { total: 0, text: undefined, reasoning: undefined },
+            },
+          } as V3Part)
+          controller.close()
+        } catch (e) {
+          trace(`orphanedToolResultsStream: enqueue failed err=${(e as Error).message}`)
+        }
+      },
+    }),
+  }
+}
+
+/**
+ * OpenCode re-sends the full tool-result history on every continuation. Prefer
+ * the newest result that still has a live pending exec on its tagged session.
+ */
+export function findContinuationSession(
+  toolResults: Array<{ sessionId: string; execId: number }>,
+): CursorSession | undefined {
+  for (let i = toolResults.length - 1; i >= 0; i--) {
+    const r = toolResults[i]
+    const s = sessionManager.findByExecIds(r.sessionId, [r.execId])
+    if (s) return s
+  }
+  return undefined
+}
+
 async function loadAvailableModels(): Promise<void> {
-  if (_availableModels) return
   const configDir = resolveModelCacheDir()
   if (!configDir) return
   try {
-    const cached = await readCache(configDir)
-    _availableModels = cached?.models
+    const filePath = cacheFilePath(configDir)
+    let mtime = 0
+    try {
+      const stat = await fs.promises.stat(filePath)
+      mtime = stat.mtimeMs
+    } catch {
+      // file missing — fall through with mtime=0
+    }
+    // Re-read when the file changed (discoverModels background refresh).
+    if (mtime !== _availableModelsMtimeMs) {
+      const cached = await readCache(configDir)
+      _availableModels = cached?.models
+      _availableModelsMtimeMs = mtime
+    }
   } catch { /* ignore */ }
 }
 
@@ -237,11 +373,36 @@ async function pump(
   const { textId, reasoningId } = ids
   let textStarted = false
   let reasoningStarted = false
+  // OpenCode cancels the ReadableStream between turns (see the cancel handler
+  // in doStreamImpl). The frames iterator can still yield a final `done` after
+  // the cancel lands — controller.enqueue on a cancelled controller throws.
+  // safeEnqueue swallows that throw and tracks the close so we stop pumping.
+  let streamClosed = false
+  const safeEnqueue = (part: V3Part): boolean => {
+    if (streamClosed) return false
+    try {
+      controller.enqueue(part)
+      return true
+    } catch (e) {
+      streamClosed = true
+      trace(`pump: enqueue on closed controller (suppressing) err=${(e as Error).message}`)
+      return false
+    }
+  }
+  const safeError = (err: Error): void => {
+    if (streamClosed) return
+    try {
+      controller.error(err)
+    } catch (e) {
+      trace(`pump: controller.error failed (suppressing) err=${(e as Error).message}`)
+    }
+    streamClosed = true
+  }
 
   /** AI SDK V3 requires text-end / reasoning-end before finish or tool-call. */
   const closeOpenSpans = () => {
     for (const part of spanEndParts({ textStarted, reasoningStarted, textId, reasoningId })) {
-      controller.enqueue(part as V3Part)
+      safeEnqueue(part as V3Part)
     }
     reasoningStarted = false
     textStarted = false
@@ -251,22 +412,22 @@ async function pump(
     if (!text) return
     // Close reasoning before text (hosts expect reasoning-end before text-start).
     if (reasoningStarted && !textStarted) {
-      controller.enqueue({ type: "reasoning-end", id: reasoningId } as V3Part)
+      safeEnqueue({ type: "reasoning-end", id: reasoningId } as V3Part)
       reasoningStarted = false
     }
     if (!textStarted) {
-      controller.enqueue({ type: "text-start", id: textId } as V3Part)
+      safeEnqueue({ type: "text-start", id: textId } as V3Part)
       textStarted = true
     }
-    controller.enqueue({ type: "text-delta", id: textId, delta: text } as V3Part)
+    safeEnqueue({ type: "text-delta", id: textId, delta: text } as V3Part)
   }
   const emitReasoning = (text: string) => {
     if (!text) return
     if (!reasoningStarted) {
-      controller.enqueue({ type: "reasoning-start", id: reasoningId } as V3Part)
+      safeEnqueue({ type: "reasoning-start", id: reasoningId } as V3Part)
       reasoningStarted = true
     }
-    controller.enqueue({ type: "reasoning-delta", id: reasoningId, delta: text } as V3Part)
+    safeEnqueue({ type: "reasoning-delta", id: reasoningId, delta: text } as V3Part)
   }
   const emitFinish = (
     te: Record<string, unknown> | undefined,
@@ -286,10 +447,18 @@ async function pump(
         reasoning: undefined,
       },
     }
-    controller.enqueue({ type: "finish", usage, finishReason: reason } as V3Part)
+    safeEnqueue({ type: "finish", usage, finishReason: reason } as V3Part)
   }
 
   while (true) {
+    // Consumer cancelled / closed the ReadableStream. Stop reading Cursor
+    // frames so a continuation doStream can resume the same iterator —
+    // keeping the loop alive would discard frames the next pump needs.
+    if (streamClosed) {
+      trace(`pump: stream closed (consumer cancelled) pending=${session.pending.size}`)
+      sessionManager.closeUnlessPending(session)
+      return
+    }
     if (abortSignal?.aborted) {
       // Stop feeding this ReadableStream, but keep the Run session if we still
       // owe Cursor an exec result (OpenCode aborts between tool-call turns).
@@ -314,7 +483,7 @@ async function pump(
         try {
           const text = new TextDecoder().decode(decodeFramePayload(frame))
           if (text.includes('"error"')) {
-            controller.error(new Error(`Cursor API error: ${text.slice(0, 500)}`))
+            safeError(new Error(`Cursor API error: ${text.slice(0, 500)}`))
             sessionManager.close(session)
             return
           }
@@ -325,7 +494,15 @@ async function pump(
       return
     }
 
-    const payload = decodeFramePayload(frame)
+    // decodeFramePayload can throw on a corrupt gzip payload (gunzipSync).
+    // Skip the frame rather than abort the whole turn.
+    let payload: Uint8Array
+    try {
+      payload = decodeFramePayload(frame)
+    } catch (e) {
+      trace(`gunzip FAILED (skipping frame): flags=0x${frame.flags.toString(16)} len=${frame.payload.length} err=${(e as Error).message}`)
+      continue
+    }
     let asm: Record<string, unknown>
     try {
       asm = decodeMessage<Record<string, unknown>>("AgentServerMessage", payload)
@@ -345,17 +522,31 @@ async function pump(
     const iu = asm.interaction_update as Record<string, unknown> | undefined
     const esm = asm.exec_server_message as Record<string, unknown> | undefined
     const kv = asm.kv_server_message as Record<string, unknown> | undefined
+    const checkpointRaw = asm.conversation_checkpoint_update
     const topField = payload.length > 0 ? payload[0] >> 3 : 0
 
     {
       const iuKind = iu ? Object.keys(iu).find((k) => iu[k]) : undefined
       trace(
         `pump frame: topField=${topField} interaction_update=${iuKind ?? "-"} ` +
-          `exec=${esm ? "yes" : "no"} kv=${kv ? "yes" : "no"}`,
+          `exec=${esm ? "yes" : "no"} kv=${kv ? "yes" : "no"} ` +
+          `checkpoint=${checkpointRaw ? "yes" : "no"}`,
       )
     }
 
     try {
+    // CLI: conversationCheckpointUpdate → replace agentStore conversation state.
+    // Store opaque bytes keyed by conversation_id; next Run echoes them.
+    if (checkpointRaw != null) {
+      const bytes = normalizeCheckpointBytes(checkpointRaw)
+      if (bytes && bytes.length > 0) {
+        setCheckpoint(session.conversationId, bytes)
+        trace(
+          `checkpoint: stored ${bytes.length}B for conversationId=${session.conversationId}`,
+        )
+      }
+    }
+
     if (iu?.text_delta) {
       emitText(((iu.text_delta as Record<string, unknown>).text as string) ?? "")
     } else if (iu?.thinking_delta) {
@@ -401,14 +592,14 @@ async function pump(
             }
             continue
           }
-          const tc = buildToolCallPart(parsed)
+          const tc = buildToolCallPart(parsed, session.sessionId)
           // Keep the stream open; the result arrives on the next doStream call.
           sessionManager.registerPending(parsed.id, session, parsed.resultField)
           // tc.input is already a JSON string (LanguageModelV3ToolCall.input).
           trace(`exec: EMITTED tool-call toolCallId=${tc.toolCallId} toolName=${tc.toolName} inputLen=${tc.input.length}`)
           // Close open text/reasoning spans before tool-call (required by AI SDK V3).
           closeOpenSpans()
-          controller.enqueue({
+          safeEnqueue({
             type: "tool-call",
             toolCallId: tc.toolCallId,
             toolName: tc.toolName,
@@ -453,8 +644,9 @@ async function pump(
           session.stream.write(handled.reply)
           trace(
             `kv replied: kind=${handled.kind} id=${handled.id} blobId=${handled.blobIdHex.slice(0, 16)}… ` +
-              `found=${handled.found} echoed=${!!handled.echoed} blobs=${session.blobs.size}`,
-          )
+              `found=${handled.found} echoed=${!!handled.echoed} ` +
+              `sessionBlobs=${session.blobs.size} convBlobs=${conversationBlobCount(session.conversationId)}`,
+            )
         } catch { /* stream closed; pump will surface end */ }
       }
     }
@@ -463,14 +655,34 @@ async function pump(
       // exec/args decode) must not abort the whole turn — log and skip.
       trace(`frame dispatch FAILED (skipping): topField=${topField} err=${(e as Error).message}`)
     }
-    // heartbeat / checkpoint / step / partial_tool_call / interaction_query →
-    // ignore (partial args are display-only; the exec channel is authoritative).
+    // heartbeat / step / partial_tool_call / interaction_query →
+    // ignore (partial args are display-only; the exec channel is authoritative.
+    // Checkpoints are handled above.)
   }
+}
+
+/** Normalize protobufjs bytes / Buffer / number[] into a Uint8Array. */
+function normalizeCheckpointBytes(raw: unknown): Uint8Array | undefined {
+  if (raw instanceof Uint8Array) return raw
+  if (Buffer.isBuffer(raw)) return new Uint8Array(raw)
+  if (Array.isArray(raw)) return Uint8Array.from(raw)
+  if (raw && typeof raw === "object" && "type" in (raw as object) && "data" in (raw as object)) {
+    // protobufjs sometimes yields { type: "Buffer", data: number[] }
+    const data = (raw as { data: unknown }).data
+    if (Array.isArray(data)) return Uint8Array.from(data)
+  }
+  return undefined
 }
 
 // ── Prompt extraction ──
 
-type ExtractedToolResult = { execId: number; toolName: string; output: string; error?: string }
+type ExtractedToolResult = {
+  sessionId: string
+  execId: number
+  toolName: string
+  output: string
+  error?: string
+}
 
 function extractToolResults(prompt: LanguageModelV3CallOptions["prompt"]): ExtractedToolResult[] {
   const out: ExtractedToolResult[] = []
@@ -479,11 +691,12 @@ function extractToolResults(prompt: LanguageModelV3CallOptions["prompt"]): Extra
     for (const part of msg.content) {
       const p = part as unknown as Record<string, unknown>
       if (p.type !== "tool-result") continue
-      const execId = parseExecIdFromToolCallId((p.toolCallId as string) ?? "")
-      if (execId === undefined) continue
+      const parsed = parseExecIdFromToolCallId((p.toolCallId as string) ?? "")
+      if (!parsed) continue
       const { text, isError } = toolResultOutputToText(p.output)
       out.push({
-        execId,
+        sessionId: parsed.sessionId,
+        execId: parsed.execId,
         toolName: (p.toolName as string) ?? "mcp",
         output: text,
         error: isError ? text : undefined,
@@ -491,6 +704,23 @@ function extractToolResults(prompt: LanguageModelV3CallOptions["prompt"]): Extra
     }
   }
   return out
+}
+
+/**
+ * Tool results that form a live continuation: only the trailing run of `tool`
+ * messages after the last non-tool message. Mid-prompt historical tool results
+ * are ignored — they are conversation history, not replies for a held-open Run.
+ */
+export function extractTrailingToolResults(
+  prompt: LanguageModelV3CallOptions["prompt"],
+): ExtractedToolResult[] {
+  if (prompt.length === 0) return []
+  let i = prompt.length - 1
+  while (i >= 0 && prompt[i].role === "tool") i--
+  // Continuations end with tool messages. Anything else (user/assistant/system)
+  // means this is a fresh model call that merely carries tools in history.
+  if (i === prompt.length - 1) return []
+  return extractToolResults(prompt.slice(i + 1))
 }
 
 function toolResultOutputToText(output: unknown): { text: string; isError: boolean } {
@@ -526,40 +756,30 @@ function extractSystemPrompt(prompt: LanguageModelV3CallOptions["prompt"]): stri
 }
 
 /**
- * Prior user/assistant text for conversation_state.turns. Excludes the last
- * user message (sent as the live action) and skips tool / system roles.
+ * Map OpenCode's session id header to a stable Cursor conversation_id (UUID).
+ * Falls back to a random UUID when headers are absent (direct SDK use).
  */
-function extractHistory(
-  prompt: LanguageModelV3CallOptions["prompt"],
-): Array<{ role: "user" | "assistant"; text: string }> {
-  const entries: Array<{ role: "user" | "assistant"; text: string }> = []
-  for (const m of prompt) {
-    if (m.role === "user") {
-      const text = extractUserText(m as unknown as Record<string, unknown>)
-      if (text && text !== ".") entries.push({ role: "user", text })
-    } else if (m.role === "assistant") {
-      const text = extractAssistantText(m as unknown as Record<string, unknown>)
-      if (text) entries.push({ role: "assistant", text })
-    }
+export function resolveConversationId(callOptions: LanguageModelV3CallOptions): string {
+  const h = callOptions.headers ?? {}
+  const raw =
+    h["x-session-id"] ??
+    h["X-Session-Id"] ??
+    h["x-session-affinity"] ??
+    h["x-opencode-session"]
+  if (typeof raw === "string" && raw.trim().length > 0) {
+    return sessionIdToUuid(raw.trim())
   }
-  // Drop the trailing user message — it is the current turn's action.
-  if (entries.length > 0 && entries[entries.length - 1].role === "user") {
-    entries.pop()
-  }
-  return entries
+  return crypto.randomUUID()
 }
 
-function extractAssistantText(msg: Record<string, unknown> | undefined): string {
-  if (!msg) return ""
-  const content = msg.content
-  if (typeof content === "string") return content
-  if (!Array.isArray(content)) return ""
-  const texts: string[] = []
-  for (const part of content) {
-    const p = part as Record<string, unknown>
-    if (p.type === "text" && typeof p.text === "string") texts.push(p.text)
-  }
-  return texts.join("\n")
+/** Deterministic UUID (version-4 shape) from an arbitrary session key. */
+export function sessionIdToUuid(sessionId: string): string {
+  const hash = createHash("sha256").update(`cursor-opencode-provider:conv:${sessionId}`).digest()
+  const bytes = Buffer.from(hash.subarray(0, 16))
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80
+  const hex = bytes.toString("hex")
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
 }
 
 function extractTools(callOptions: LanguageModelV3CallOptions): OpencodeToolDef[] {

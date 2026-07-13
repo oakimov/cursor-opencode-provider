@@ -151,21 +151,25 @@ export function resolveVariantParameters(
 
 // ── Fetch + cache orchestration ──
 
-export async function fetchModels(token: string): Promise<ModelInfo[]> {
-  const raw = await unaryAvailableModels(token)
+export async function fetchModels(
+  token: string,
+  options: { baseURL?: string; headers?: Record<string, string> } = {},
+): Promise<ModelInfo[]> {
+  const raw = await unaryAvailableModels(token, options)
   return mapAvailableModelsResponse(raw)
 }
 
 export async function discoverModels(
   token: string,
   configDir: string,
+  options: { baseURL?: string; headers?: Record<string, string> } = {},
 ): Promise<ModelInfo[]> {
   const cached = await readCache(configDir)
 
   // Cache is fresh → return it; refresh in background
   if (cached && isCacheFresh(cached)) {
     // Background refresh (fire and forget)
-    fetchModels(token)
+    fetchModels(token, options)
       .then((models) =>
         writeCache(configDir, { models, fetchedAt: Date.now() }),
       )
@@ -178,7 +182,7 @@ export async function discoverModels(
   // Cache exists but expired → try fetch, serve stale on failure
   if (cached) {
     try {
-      const models = await fetchModels(token)
+      const models = await fetchModels(token, options)
       const newCache: ModelCache = { models, fetchedAt: Date.now() }
       await writeCache(configDir, newCache)
       return models
@@ -188,7 +192,7 @@ export async function discoverModels(
   }
 
   // No cache → must fetch
-  const models = await fetchModels(token)
+  const models = await fetchModels(token, options)
   const newCache: ModelCache = { models, fetchedAt: Date.now() }
   await writeCache(configDir, newCache)
   return models

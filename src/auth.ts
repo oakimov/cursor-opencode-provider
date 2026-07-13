@@ -114,6 +114,50 @@ export async function refreshAccessToken(
   return { accessToken: body.accessToken, refreshToken: body.refreshToken }
 }
 
+// Cache JWTs obtained via API-key exchange so doStream doesn't re-exchange
+// on every turn when the caller only supplied `apiKey`.
+const _apiKeyTokenCache = new Map<string, TokenPair>()
+
+/** Clear the apiKey→JWT cache (tests). */
+export function clearBearerTokenCache(): void {
+  _apiKeyTokenCache.clear()
+}
+
+/**
+ * Resolve a Bearer JWT for Cursor API calls. Prefer an already-exchanged
+ * `accessToken`; otherwise exchange (and cache) from `apiKey`, refreshing
+ * when the cached JWT is near expiry.
+ */
+export async function resolveBearerToken(input: {
+  accessToken?: string
+  apiKey?: string
+  baseUrl?: string
+}): Promise<string> {
+  if (input.accessToken) return input.accessToken
+  if (!input.apiKey) {
+    throw new Error("Cursor provider: no access token or API key provided")
+  }
+
+  const baseUrl = input.baseUrl ?? API_BASE
+  const cached = _apiKeyTokenCache.get(input.apiKey)
+  if (cached && !isExpiringSoon(cached.accessToken)) {
+    return cached.accessToken
+  }
+  if (cached) {
+    try {
+      const refreshed = await refreshAccessToken(cached.refreshToken, baseUrl)
+      _apiKeyTokenCache.set(input.apiKey, refreshed)
+      return refreshed.accessToken
+    } catch {
+      // Fall through to a fresh exchange.
+    }
+  }
+
+  const pair = await exchangeApiKey(input.apiKey, baseUrl)
+  _apiKeyTokenCache.set(input.apiKey, pair)
+  return pair.accessToken
+}
+
 // ── Mode C: PKCE browser login ──
 
 async function sha256(data: BufferSource): Promise<Uint8Array> {
@@ -186,7 +230,15 @@ export async function pollForTokens(
       if (body.accessToken && body.refreshToken) {
         return { accessToken: body.accessToken, refreshToken: body.refreshToken }
       }
+      // 200 OK but missing tokens — same fail-fast policy as the other error
+      // paths, otherwise a partial-body server response stalls the full
+      // ~5-minute poll budget with no diagnostic.
       failures++
+      if (failures >= 3) {
+        throw new AuthPollError(
+          "Poll returned 3 consecutive 200 responses without tokens",
+        )
+      }
     } catch (err) {
       if (err instanceof AuthPollError) throw err
       failures++

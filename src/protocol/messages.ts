@@ -569,10 +569,9 @@ export function createMessageTypes(): protobuf.Root {
     [{ name: "action", fields: ["user_message_action", "resume_action", "cancel_action"] }],
   )
 
-  // Conversation history shape matches agent.v1:
-  // ConversationTurn → AgentConversationTurn → UserMessage + Steps,
-  // where each Step is AssistantMessage{text} (tool/thinking steps omitted for
-  // the text-history path we pack from the AI SDK prompt).
+  // Seed ConversationStateStructure for turn 1 (system prompt as JSON strings
+  // in #1). After the first conversation_checkpoint_update we echo opaque
+  // server bytes instead — CLI's live structure uses blob-id bytes in #1/#8.
   addType(root, "AssistantMessage", [
     { id: 1, name: "text", type: "string" },
   ])
@@ -600,6 +599,8 @@ export function createMessageTypes(): protobuf.Root {
     [{ name: "turn", fields: ["agent_conversation_turn"] }],
   )
 
+  // Seed-only schema (JSON strings). Checkpoint bytes are never decoded here —
+  // AgentRunRequest.conversation_state is typed as bytes and carries them opaque.
   addType(root, "ConversationStateStructure", [
     { id: 1, name: "root_prompt_messages_json", type: "string", repeated: true },
     { id: 8, name: "turns", type: "ConversationTurn", repeated: true },

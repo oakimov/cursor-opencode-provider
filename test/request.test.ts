@@ -136,49 +136,43 @@ describe("buildRunRequest", () => {
     expect(idA).not.toBe(idB)
   })
 
-  it("packs prior user/assistant pairs into conversation_state.turns", () => {
+  it("sends live user text only (CLI-style; no client history replay)", () => {
     const data = buildRunRequest({
       text: "What next?",
       modelId: "m",
       conversationId: "conv-hist",
-      history: [
-        { role: "user", text: "Hello" },
-        { role: "assistant", text: "Hi there" },
-        { role: "user", text: "How are you?" },
-        { role: "assistant", text: "Fine" },
-      ],
+      systemPrompt: "Be brief.",
     })
     const decoded = decodeMessage<any>("AgentClientMessage", data)
+    expect(decoded.run_request.action.user_message_action.user_message.text).toBe(
+      "What next?",
+    )
     const cs = decodeMessage<any>(
       "ConversationStateStructure",
       decoded.run_request.conversation_state,
     )
-    expect(cs.turns).toHaveLength(2)
-    const t0 = cs.turns[0].agent_conversation_turn
-    expect(t0.user_message.text).toBe("Hello")
-    expect(t0.steps[0].assistant_message.text).toBe("Hi there")
-    const t1 = cs.turns[1].agent_conversation_turn
-    expect(t1.user_message.text).toBe("How are you?")
-    expect(t1.steps[0].assistant_message.text).toBe("Fine")
-    // Current user message is the live action, not a history turn.
-    expect(decoded.run_request.action.user_message_action.user_message.text).toBe("What next?")
+    // System only in root_prompt — prior turns live server-side by conversation_id.
+    const root = (cs.root_prompt_messages_json ?? []).map((s: string) => JSON.parse(s))
+    expect(root).toEqual([{ role: "system", content: "Be brief." }])
+    expect(cs.turns ?? []).toHaveLength(0)
   })
 
-  it("omits incomplete trailing user-only history entries", () => {
+  it("omits root_prompt and turns when there is no system prompt", () => {
     const data = buildRunRequest({
       text: "Current",
       modelId: "m",
       conversationId: "c",
-      history: [
-        { role: "user", text: "Orphan user" },
-      ],
     })
     const decoded = decodeMessage<any>("AgentClientMessage", data)
     const cs = decodeMessage<any>(
       "ConversationStateStructure",
       decoded.run_request.conversation_state,
     )
+    expect(cs.root_prompt_messages_json ?? []).toHaveLength(0)
     expect(cs.turns ?? []).toHaveLength(0)
+    expect(decoded.run_request.action.user_message_action.user_message.text).toBe(
+      "Current",
+    )
   })
 })
 
