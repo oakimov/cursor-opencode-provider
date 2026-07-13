@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test"
-import { resolveAgentOrigin } from "../src/transport/connect.js"
+import { buildBaseHeaders, resolveAgentOrigin } from "../src/transport/connect.js"
 import { CURSOR_AGENT_HOST } from "../src/shared.js"
 
 describe("resolveAgentOrigin", () => {
@@ -18,5 +18,12 @@ describe("resolveAgentOrigin", () => {
     const a = resolveAgentOrigin()
     const b = resolveAgentOrigin("https://127.0.0.1:8443")
     expect(a).not.toBe(b)
+  })
+})
+
+describe("buildBaseHeaders", () => {
+  it("uses the supplied client version", () => {
+    const headers = buildBaseHeaders("token", "cli-test-123")
+    expect(headers["x-cursor-client-version"]).toBe("cli-test-123")
   })
 })

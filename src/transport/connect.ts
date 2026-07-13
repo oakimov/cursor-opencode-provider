@@ -1,7 +1,8 @@
-import { CURSOR_API_HOST, CURSOR_AGENT_HOST, FALLBACK_CLIENT_VERSION, CONNECT_PROTOCOL_VERSION } from "../shared.js"
+import { CURSOR_API_HOST, CURSOR_AGENT_HOST, CONNECT_PROTOCOL_VERSION } from "../shared.js"
 import { encodeFrame, streamFrames } from "../protocol/framing.js"
 import { createCursorChecksumHeader } from "../protocol/checksum.js"
 import { getDeviceIds } from "../protocol/device-id.js"
+import { resolveClientVersion } from "../protocol/client-version.js"
 import http2 from "node:http2"
 import fs from "node:fs"
 
@@ -32,13 +33,17 @@ export function trace(msg: string): void {
 }
 trace("connect.ts module loaded")
 
-function buildBaseHeaders(token: string, extra?: Record<string, string>): Record<string, string> {
+export function buildBaseHeaders(
+  token: string,
+  clientVersion: string,
+  extra?: Record<string, string>,
+): Record<string, string> {
   const { machineId, macMachineId } = getDeviceIds()
   return {
     authorization: `Bearer ${token}`,
     "connect-protocol-version": CONNECT_PROTOCOL_VERSION,
     "x-cursor-client-type": "cli",
-    "x-cursor-client-version": FALLBACK_CLIENT_VERSION,
+    "x-cursor-client-version": clientVersion,
     "x-cursor-checksum": createCursorChecksumHeader(machineId, macMachineId),
     "x-ghost-mode": "true",
     "x-request-id": crypto.randomUUID(),
@@ -54,7 +59,8 @@ export async function unaryAvailableModels(
 ): Promise<Record<string, unknown>> {
   const base = options.baseURL ?? API_BASE
   const url = `${base}/aiserver.v1.AiService/AvailableModels`
-  const headers = buildBaseHeaders(token, options.headers)
+  const clientVersion = await resolveClientVersion()
+  const headers = buildBaseHeaders(token, clientVersion, options.headers)
 
   const res = await fetch(url, {
     method: "POST",
@@ -156,9 +162,12 @@ export async function bidiRunStream(
   token: string,
   options: { signal?: AbortSignal; baseURL?: string; headers?: Record<string, string> } = {},
 ): Promise<BidiStream> {
-  const session = await getSession(options.baseURL)
+  const [session, clientVersion] = await Promise.all([
+    getSession(options.baseURL),
+    resolveClientVersion(),
+  ])
   const headers = {
-    ...buildBaseHeaders(token, options.headers),
+    ...buildBaseHeaders(token, clientVersion, options.headers),
     ":method": "POST",
     ":path": "/agent.v1.AgentService/Run",
     "content-type": "application/connect+proto",
