@@ -1,5 +1,5 @@
 import { encodeMessage, getMessageTypes } from "./messages.js"
-import { toolsToDescriptors, buildLiveRequestContext, type OpencodeToolDef } from "./tools.js"
+import { toolsToDescriptors, type OpencodeToolDef } from "./tools.js"
 import type { ModelInfo } from "../models.js"
 
 export type RunRequestInput = {
@@ -19,6 +19,8 @@ export type RunRequestInput = {
   messageId?: string
   availableModels?: ModelInfo[]
   tools?: OpencodeToolDef[]
+  /** Prebuilt RequestContext (OpenCode-sourced). */
+  requestContext?: Record<string, unknown>
 }
 
 /**
@@ -67,7 +69,7 @@ export function buildRunRequest(input: RunRequestInput): Uint8Array {
   // putting tools only there is why the model fell back to native Grep/Read.
   const tools = input.tools ?? []
   const mcpTools = tools.length > 0 ? toolsToDescriptors(tools) : []
-  const requestContext = tools.length > 0 ? buildLiveRequestContext(tools) : undefined
+  const requestContext = input.requestContext
 
   const userMessageAction: Record<string, unknown> = {
     user_message: {

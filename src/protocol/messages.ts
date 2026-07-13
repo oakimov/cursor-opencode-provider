@@ -72,12 +72,15 @@ export function createMessageTypes(): protobuf.Root {
     { id: 4, name: "model_call_id", type: "string" },
   ])
 
+  // agent.v1 StepStartedUpdate / StepCompletedUpdate: step_id is uint64 (T:4),
+  // not string — wrong type made every step_completed frame throw
+  // "index out of range" in decodeMessage.
   addType(root, "StepStarted", [
-    { id: 1, name: "step_id", type: "string" },
+    { id: 1, name: "step_id", type: "uint64" },
   ])
 
   addType(root, "StepCompleted", [
-    { id: 1, name: "step_id", type: "string" },
+    { id: 1, name: "step_id", type: "uint64" },
     { id: 2, name: "step_duration_ms", type: "int64" },
   ])
 
@@ -211,6 +214,28 @@ export function createMessageTypes(): protobuf.Root {
     [
       { id: 1, name: "success", type: "WriteSuccess" },
       { id: 5, name: "error", type: "WriteError" },
+    ],
+    [{ name: "result", fields: ["success", "error"] }],
+  )
+
+  // agent.v1 PiWriteExecArgs / Result (exec #48 / #49) — alternate write path
+  // used by some Cursor models. Args are path+content; success is just output.
+  addType(root, "PiWriteArgs", [
+    { id: 1, name: "path", type: "string" },
+    { id: 2, name: "content", type: "string" },
+  ])
+  addType(root, "PiWriteSuccess", [
+    { id: 1, name: "output", type: "string" },
+  ])
+  addType(root, "PiWriteError", [
+    { id: 1, name: "error", type: "string" },
+  ])
+  addType(
+    root,
+    "PiWriteResult",
+    [
+      { id: 1, name: "success", type: "PiWriteSuccess" },
+      { id: 2, name: "error", type: "PiWriteError" },
     ],
     [{ name: "result", fields: ["success", "error"] }],
   )
@@ -382,9 +407,48 @@ export function createMessageTypes(): protobuf.Root {
     { id: 1, name: "os_version", type: "string" },
     { id: 2, name: "workspace_paths", type: "string", repeated: true },
     { id: 3, name: "shell", type: "string" },
+    { id: 5, name: "sandbox_enabled", type: "bool" },
     { id: 10, name: "time_zone", type: "string" },
     { id: 11, name: "project_folder", type: "string" },
+    { id: 14, name: "sandbox_supported", type: "bool" },
+    { id: 20, name: "is_working_dir_home_dir", type: "bool" },
     { id: 21, name: "process_working_directory", type: "string" },
+  ])
+
+  addType(root, "CursorRule", [
+    { id: 1, name: "full_path", type: "string" },
+    { id: 2, name: "content", type: "string" },
+  ])
+
+  addType(root, "RepositoryIndexingInfo", [
+    { id: 1, name: "relative_workspace_path", type: "string" },
+    { id: 2, name: "remote_urls", type: "string", repeated: true },
+    { id: 3, name: "remote_names", type: "string", repeated: true },
+    { id: 4, name: "repo_name", type: "string" },
+    { id: 5, name: "repo_owner", type: "string" },
+    { id: 6, name: "is_tracked", type: "bool" },
+    { id: 7, name: "is_local", type: "bool" },
+    { id: 9, name: "workspace_uri", type: "string" },
+  ])
+
+  addType(root, "GitRepoInfo", [
+    { id: 1, name: "path", type: "string" },
+    { id: 2, name: "status", type: "string" },
+    { id: 3, name: "branch_name", type: "string" },
+    { id: 4, name: "remote_url", type: "string" },
+  ])
+
+  addType(root, "AgentSkill", [
+    { id: 1, name: "full_path", type: "string" },
+    { id: 2, name: "content", type: "string" },
+    { id: 3, name: "description", type: "string" },
+  ])
+
+  addType(root, "CustomSubagent", [
+    { id: 1, name: "full_path", type: "string" },
+    { id: 2, name: "name", type: "string" },
+    { id: 3, name: "description", type: "string" },
+    { id: 6, name: "prompt", type: "string" },
   ])
 
   // Nested MCP filesystem / meta-tool shapes (agent.v1). Must be defined
@@ -413,14 +477,28 @@ export function createMessageTypes(): protobuf.Root {
   ])
 
   addType(root, "RequestContextPayload", [
+    { id: 2, name: "rules", type: "CursorRule", repeated: true },
     { id: 4, name: "env", type: "RequestContextEnv" },
+    { id: 6, name: "repository_info", type: "RepositoryIndexingInfo", repeated: true },
     { id: 7, name: "tools", type: "McpToolDefinition", repeated: true },
+    { id: 11, name: "git_repos", type: "GitRepoInfo", repeated: true },
+    { id: 13, name: "project_layouts", type: "LsDirectoryTreeNode", repeated: true },
+    { id: 22, name: "custom_subagents", type: "CustomSubagent", repeated: true },
     { id: 23, name: "mcp_file_system_options", type: "McpFileSystemOptions" },
+    { id: 25, name: "hooks_additional_context", type: "string" },
+    { id: 29, name: "agent_skills", type: "AgentSkill", repeated: true },
+    { id: 33, name: "git_repo_info_complete", type: "bool" },
+    { id: 34, name: "mcp_meta_tool_options", type: "McpMetaToolOptions" },
+    { id: 36, name: "mcp_info_complete", type: "bool" },
     { id: 39, name: "rules_info_complete", type: "bool" },
     { id: 40, name: "env_info_complete", type: "bool" },
     { id: 41, name: "repository_info_complete", type: "bool" },
+    { id: 42, name: "custom_subagents_info_complete", type: "bool" },
+    { id: 43, name: "agent_skills_info_complete", type: "bool" },
     { id: 44, name: "mcp_file_system_info_complete", type: "bool" },
     { id: 45, name: "git_status_info_complete", type: "bool" },
+    { id: 46, name: "user_permissions_auto_run", type: "bool" },
+    { id: 47, name: "project_permissions_auto_run", type: "bool" },
   ])
 
   addType(root, "RequestContextSuccess", [
@@ -447,8 +525,10 @@ export function createMessageTypes(): protobuf.Root {
       { id: 10, name: "request_context_args", type: "RequestContextArgs" },
       { id: 11, name: "mcp_args", type: "McpArgs" },
       { id: 14, name: "shell_stream_args", type: "ShellArgs" },
+      // Pi write (#48 args → #49 result). Field numbers differ from classic write (#3).
+      { id: 48, name: "pi_write_args", type: "PiWriteArgs" },
     ],
-    [{ name: "args", fields: ["write_args", "delete_args", "grep_args", "read_args", "ls_args", "request_context_args", "mcp_args", "shell_stream_args"] }],
+    [{ name: "args", fields: ["write_args", "delete_args", "grep_args", "read_args", "ls_args", "request_context_args", "mcp_args", "shell_stream_args", "pi_write_args"] }],
   )
 
   // ExecClientMessage — client sends tool result back
@@ -467,8 +547,9 @@ export function createMessageTypes(): protobuf.Root {
       { id: 10, name: "request_context_result", type: "RequestContextResult" },
       { id: 11, name: "mcp_result", type: "McpResult" },
       { id: 14, name: "shell_stream", type: "ShellStream" },
+      { id: 49, name: "pi_write_result", type: "PiWriteResult" },
     ],
-    [{ name: "result", fields: ["write_result", "delete_result", "grep_result", "read_result", "ls_result", "request_context_result", "mcp_result", "shell_stream"] }],
+    [{ name: "result", fields: ["write_result", "delete_result", "grep_result", "read_result", "ls_result", "request_context_result", "mcp_result", "shell_stream", "pi_write_result"] }],
   )
 
   addType(root, "ExecServerControlMessage", [
@@ -534,15 +615,28 @@ export function createMessageTypes(): protobuf.Root {
   // RequestContext — UserMessageAction #2. Live per-turn tools go here
   // (AgentRunRequest.mcp_tools #4 is prewarm-only / empty on real turns).
   addType(root, "RequestContext", [
+    { id: 2, name: "rules", type: "CursorRule", repeated: true },
     { id: 4, name: "env", type: "RequestContextEnv" },
+    { id: 6, name: "repository_info", type: "RepositoryIndexingInfo", repeated: true },
     { id: 7, name: "tools", type: "McpToolDefinition", repeated: true },
+    { id: 11, name: "git_repos", type: "GitRepoInfo", repeated: true },
+    { id: 13, name: "project_layouts", type: "LsDirectoryTreeNode", repeated: true },
+    { id: 22, name: "custom_subagents", type: "CustomSubagent", repeated: true },
     { id: 23, name: "mcp_file_system_options", type: "McpFileSystemOptions" },
+    { id: 25, name: "hooks_additional_context", type: "string" },
+    { id: 29, name: "agent_skills", type: "AgentSkill", repeated: true },
+    { id: 33, name: "git_repo_info_complete", type: "bool" },
     { id: 34, name: "mcp_meta_tool_options", type: "McpMetaToolOptions" },
+    { id: 36, name: "mcp_info_complete", type: "bool" },
     { id: 39, name: "rules_info_complete", type: "bool" },
     { id: 40, name: "env_info_complete", type: "bool" },
     { id: 41, name: "repository_info_complete", type: "bool" },
+    { id: 42, name: "custom_subagents_info_complete", type: "bool" },
+    { id: 43, name: "agent_skills_info_complete", type: "bool" },
     { id: 44, name: "mcp_file_system_info_complete", type: "bool" },
     { id: 45, name: "git_status_info_complete", type: "bool" },
+    { id: 46, name: "user_permissions_auto_run", type: "bool" },
+    { id: 47, name: "project_permissions_auto_run", type: "bool" },
   ])
 
   addType(root, "UserMessageAction", [

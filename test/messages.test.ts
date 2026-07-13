@@ -74,6 +74,19 @@ describe("message round-trip", () => {
     expect(decoded.turn_ended?.input_tokens).toBe(200)
   })
 
+  it("decodes live step_completed frames (uint64 step_id, not string)", () => {
+    // Captured from /tmp/cursor-provider-debug.log — previously threw
+    // "index out of range" because step_id was typed as string.
+    const hex = "0a098a0106084910c0c610"
+    const payload = Uint8Array.from(hex.match(/../g)!.map((b) => parseInt(b, 16)))
+    const asm = decodeMessage<any>("AgentServerMessage", payload)
+    const sc = asm.interaction_update?.step_completed
+    expect(sc).toBeDefined()
+    // protobufjs may return Long/string for uint64; coerce for assert.
+    expect(Number(sc.step_id)).toBe(73)
+    expect(Number(sc.step_duration_ms)).toBe(271168)
+  })
+
   it("ExecServerMessage with read_args", () => {
     const data = encodeMessage("ExecServerMessage", {
       id: 1,
@@ -193,5 +206,6 @@ describe("message schema accuracy", () => {
     expect(fields).toContain("delete_args")
     expect(fields).toContain("mcp_args")
     expect(fields).toContain("shell_stream_args")
+    expect(fields).toContain("pi_write_args")
   })
 })

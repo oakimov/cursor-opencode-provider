@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test"
 import { buildRunRequest, buildHeartbeat } from "../src/protocol/request.js"
+import { buildLiveRequestContext } from "../src/protocol/tools.js"
 import { decodeMessage } from "../src/protocol/messages.js"
 import { decodeFramePayload, streamFrames } from "../src/protocol/framing.js"
 import { gunzipSync } from "node:zlib"
@@ -47,14 +48,16 @@ describe("buildRunRequest", () => {
   })
 
   it("advertises tools on the LIVE request_context path (not only prewarm #4)", () => {
+    const tools = [
+      { name: "read", description: "Read", inputSchema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] } },
+      { name: "bash", description: "Shell", inputSchema: { type: "object", properties: { command: { type: "string" } } } },
+    ]
     const data = buildRunRequest({
       text: "hi",
       modelId: "m",
       conversationId: "c",
-      tools: [
-        { name: "read", description: "Read", inputSchema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] } },
-        { name: "bash", description: "Shell", inputSchema: { type: "object", properties: { command: { type: "string" } } } },
-      ],
+      tools,
+      requestContext: buildLiveRequestContext(tools),
     })
     const decoded = decodeMessage<any>("AgentClientMessage", data)
     const rc = decoded.run_request.action.user_message_action.request_context

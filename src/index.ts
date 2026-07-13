@@ -8,6 +8,8 @@ export type CreateCursorOptions = {
   apiKey?: string
   baseURL?: string
   headers?: Record<string, string>
+  /** OpenCode project / worktree directory for request_context collectors. */
+  workspaceRoot?: string
 }
 
 export function createCursor(options: CreateCursorOptions) {

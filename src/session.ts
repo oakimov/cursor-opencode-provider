@@ -35,6 +35,8 @@ export type CursorSession = {
   blobs: Map<string, Uint8Array>
   /** McpToolDefinition list advertised this turn — echoed into the request_context reply. */
   toolDescriptors: Array<Record<string, unknown>>
+  /** Full RequestContext for exec #10 replies. */
+  requestContext: Record<string, unknown>
   /**
    * False when OpenCode passed no tools (compaction/summary) or toolChoice "none".
    * Cursor may still fire native Grep/etc.; we must refuse those on the Run

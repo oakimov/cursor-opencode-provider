@@ -168,6 +168,16 @@ describe("parseExecServerMessage", () => {
     expect(result!.resultField).toBe("write_result")
   })
 
+  it("parses pi_write_args as OpenCode write + pi_write_result", () => {
+    const result = parseExecServerMessage({
+      id: 48,
+      pi_write_args: { path: "/out.txt", content: "hello pi" },
+    })
+    expect(result!.toolName).toBe("write")
+    expect(result!.args).toEqual({ filePath: "/out.txt", content: "hello pi" })
+    expect(result!.resultField).toBe("pi_write_result")
+  })
+
   it("parses ls_args as OpenCode read", () => {
     const result = parseExecServerMessage({
       id: 8,
@@ -338,6 +348,19 @@ describe("buildExecClientMessages", () => {
     expect(ec.id).toBe(2)
     expect(ec.read_result?.error?.error).toBe("File not found")
     expect(ec.read_result?.success).toBeUndefined()
+  })
+
+  it("encodes pi_write_result success as { output }", () => {
+    const frames = buildExecClientMessages({
+      execId: 49,
+      resultField: "pi_write_result",
+      output: "Wrote file successfully.",
+    })
+    expect(frames).toHaveLength(2)
+    const ec = decodeMessage<any>("AgentClientMessage", frames[0]).exec_client_message
+    expect(ec.id).toBe(49)
+    expect(ec.pi_write_result?.success?.output).toBe("Wrote file successfully.")
+    expect(ec.write_result).toBeUndefined()
   })
 
   it("uses shell_stream Start→Stdout→Exit then stream_close for bash", () => {
@@ -538,14 +561,18 @@ describe("exec safety net (unmapped variants)", () => {
     expect(ecm.mcp_result).toBeDefined()
   })
 
-  it("buildRequestContextResult carries env + echoed tools", () => {
+  it("buildRequestContextResult encodes a prebuilt request_context", () => {
     const descriptors = toolsToDescriptors([
       { name: "read", description: "Read", inputSchema: { type: "object" } },
     ])
-    const bytes = buildRequestContextResult(9, descriptors)
+    const bytes = buildRequestContextResult(9, {
+      env: { workspace_paths: ["/tmp/ws"], shell: "/bin/zsh" },
+      tools: descriptors,
+      rules_info_complete: true,
+    })
     const dec = decodeMessage<any>("AgentClientMessage", bytes)
     const rc = dec.exec_client_message.request_context_result.success.request_context
-    expect(rc.env.workspace_paths).toEqual([process.cwd()])
+    expect(rc.env.workspace_paths).toEqual(["/tmp/ws"])
     expect(rc.tools).toHaveLength(1)
     expect(rc.tools[0].name).toBe("opencode-read")
   })

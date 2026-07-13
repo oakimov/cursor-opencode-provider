@@ -24,6 +24,7 @@ import { getCheckpoint, setCheckpoint } from "./protocol/checkpoint.js"
 import { conversationBlobCount } from "./protocol/blob-store.js"
 import { sessionManager, type CursorSession, type Frame } from "./session.js"
 import { readCache, cacheFilePath, resolveVariantParameters, type ModelInfo } from "./models.js"
+import { buildRequestContext } from "./context/build.js"
 
 let _availableModels: ModelInfo[] | undefined
 // mtime of the cache file the last time we loaded it. Compared on each call
@@ -225,6 +226,8 @@ async function startSession(
   // Compaction/summary turns pass tools:{} (and may set toolChoice "none").
   // Cursor still has native Grep/etc.; allowTools gates emitting tool-call parts.
   const allowTools = computeAllowTools(toolDescriptors.length, callOptions.toolChoice)
+  const workspaceRoot = options.workspaceRoot || process.cwd()
+  const requestContext = await buildRequestContext({ workspaceRoot, tools })
   // CLI parity: echo the last conversation_checkpoint_update as conversation_state.
   // Turn 1 (no checkpoint) seeds system prompt only; live user text is current-only.
   const conversationState = getCheckpoint(conversationId)
@@ -238,17 +241,27 @@ async function startSession(
     maxMode,
     availableModels: _availableModels,
     tools,
+    requestContext,
   })
   // Content hashes — Cursor content-addresses large payloads; logging these lets
   // us match a server get_blob_args.blob_id to what it wants served.
   const sha = (b: string | Uint8Array) => createHash("sha256").update(b).digest("hex")
+  const skillsCount = Array.isArray(requestContext.agent_skills)
+    ? requestContext.agent_skills.length
+    : 0
+  const hooksCtx =
+    typeof requestContext.hooks_additional_context === "string"
+      ? requestContext.hooks_additional_context
+      : ""
   trace(
     `outbound Run: model=${modelId} conversationId=${conversationId} ` +
       `params=${JSON.stringify(parameterValues ?? [])} ` +
       `maxMode=${maxMode} systemPromptLen=${systemPrompt?.length ?? 0} tools=${tools.length} ` +
+      `skills=${skillsCount} hooks=${hooksCtx ? hooksCtx.split("\n").length : 0} ` +
       `availableModels=${_availableModels?.length ?? 0} userTextLen=${userText.length} ` +
-      `checkpointLen=${conversationState?.length ?? 0}`,
+      `checkpointLen=${conversationState?.length ?? 0} runRequestBytes=${reqBytes.length}`,
   )
+  if (hooksCtx) trace(`outbound Run hooks_additional_context: ${hooksCtx}`)
   trace(`hash run_request sha256=${sha(reqBytes)}`)
   if (systemPrompt) trace(`hash systemPrompt sha256=${sha(systemPrompt)}`)
   if (conversationState) trace(`hash checkpoint sha256=${sha(conversationState)}`)
@@ -263,6 +276,7 @@ async function startSession(
     pending: new Map(),
     blobs: new Map(),
     toolDescriptors,
+    requestContext,
     allowTools,
     pumpActive: false,
     heartbeat: null,
@@ -558,11 +572,21 @@ async function pump(
     } else if (esm) {
       const esmId = (esm.id as number) ?? 0
       if (esm.request_context_args) {
-        // Server turn-setup probe (#10). Reply with env + tools, keep pumping.
-        // Not replying here was the "times out, no response" root cause.
-        trace(`exec request_context: id=${esmId} — replying env+tools(${session.toolDescriptors.length})`)
+        // Server turn-setup probe (#10). Reply with full OpenCode-sourced context.
+        {
+          const rc = session.requestContext
+          const skills = Array.isArray(rc.agent_skills) ? rc.agent_skills.length : 0
+          const hooks =
+            typeof rc.hooks_additional_context === "string" ? rc.hooks_additional_context : ""
+          trace(
+            `exec request_context: id=${esmId} — replying context ` +
+              `tools=${session.toolDescriptors.length} skills=${skills} ` +
+              `hooks=${hooks ? hooks.split("\n").length : 0}`,
+          )
+          if (hooks) trace(`exec request_context hooks_additional_context: ${hooks}`)
+        }
         try {
-          session.stream.write(buildRequestContextResult(esmId, session.toolDescriptors))
+          session.stream.write(buildRequestContextResult(esmId, session.requestContext))
           trace(`exec request_context: replied`)
         } catch (e) {
           trace(`exec request_context: write FAILED ${(e as Error).message}`)

@@ -11,6 +11,7 @@ function fakeSession(): CursorSession {
     pending: new Map(),
     blobs: new Map(),
     toolDescriptors: [],
+    requestContext: {},
     allowTools: false,
     pumpActive: false,
     heartbeat: null,

@@ -67,7 +67,10 @@ export function toolsToMcpDescriptors(
   ]
 }
 
-/** Build the live UserMessageAction.request_context payload for a turn. */
+/**
+ * @deprecated Prefer `buildRequestContext` from `../context/build.js`.
+ * Kept as a sync tools-only fallback for unit tests that don't need collectors.
+ */
 export function buildLiveRequestContext(
   tools: OpencodeToolDef[],
   providerIdentifier = "opencode",
@@ -80,13 +83,7 @@ export function buildLiveRequestContext(
       os_version: process.platform,
       workspace_paths: [cwd],
       shell: process.env.SHELL || "/bin/bash",
-      time_zone: (() => {
-        try {
-          return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
-        } catch {
-          return "UTC"
-        }
-      })(),
+      time_zone: "UTC",
       project_folder: cwd,
       process_working_directory: cwd,
     },
@@ -119,6 +116,7 @@ export function buildLiveRequestContext(
 const cursorToolToOpencode: Record<string, string> = {
   read_args: "read",
   write_args: "write",
+  pi_write_args: "write",
   grep_args: "grep",
   ls_args: "read",
   delete_args: "bash",
@@ -179,6 +177,8 @@ export function mapToolNameToExecField(toolName: string): string | undefined {
 const execVariantToResultField: Record<string, string> = {
   read_args: "read_result",
   write_args: "write_result",
+  // Pi write: args #48, result #49 (not the same field number).
+  pi_write_args: "pi_write_result",
   grep_args: "grep_result",
   ls_args: "ls_result",
   delete_args: "delete_result",
@@ -207,7 +207,7 @@ export function parseExecServerMessage(
 
   // Find which args variant is set
   const execVariant = findOneOfVariant(msg, [
-    "read_args", "write_args",
+    "read_args", "write_args", "pi_write_args",
     "grep_args", "ls_args",
     "delete_args", "shell_stream_args", "mcp_args",
   ])
@@ -520,6 +520,10 @@ export function buildTypedExecResult(
           file_size: output.length,
         },
       }
+    case "pi_write_result":
+      // PiWriteExecSuccess is just { output }; error is { error }.
+      if (error) return { error: { error } }
+      return { success: { output: output || "Wrote file successfully." } }
     case "delete_result":
       if (error) return { error: { path: "", error } }
       return { success: { path: "", deleted_file: "" } }
@@ -677,76 +681,21 @@ function writeVarintRaw(out: number[], n: number): void {
 }
 
 /**
- * Build the request_context reply: a minimal-but-real RequestContext (env +
- * echoed tool list) so the server's turn-setup probe is satisfied and the model
- * keeps the tools opencode advertised. `descriptors` is the same McpToolDefinition
- * list we put in request_context.tools / AgentRunRequest.mcp_tools.
+ * Encode exec #10 request_context_result from a prebuilt RequestContext payload.
  */
 export function buildRequestContextResult(
   execId: number,
-  descriptors: Array<Record<string, unknown>>,
+  requestContext: Record<string, unknown>,
 ): Uint8Array {
-  const cwd = process.cwd()
-  // Rebuild nested descriptors from the flat list so #23 stays in sync with #7.
-  const byServer = new Map<string, Array<Record<string, unknown>>>()
-  for (const d of descriptors) {
-    const server = String(d.provider_identifier ?? "opencode")
-    const list = byServer.get(server) ?? []
-    list.push({
-      tool_name: d.tool_name ?? d.name,
-      description: d.description ?? "",
-      input_schema: d.input_schema,
-    })
-    byServer.set(server, list)
-  }
-  const nested = [...byServer.entries()].map(([server, tools]) => ({
-    server_name: server,
-    server_identifier: server,
-    tools,
-  }))
-
   return encodeMessage("AgentClientMessage", {
     exec_client_message: {
       id: execId,
       request_context_result: {
         success: {
-          request_context: {
-            env: {
-              os_version: osVersionString(),
-              workspace_paths: [cwd],
-              shell: process.env.SHELL || "/bin/bash",
-              time_zone: timeZoneString(),
-              project_folder: cwd,
-              process_working_directory: cwd,
-            },
-            tools: descriptors,
-            mcp_file_system_options: {
-              enabled: true,
-              workspace_project_dir: cwd,
-              mcp_descriptors: nested,
-            },
-            rules_info_complete: true,
-            env_info_complete: true,
-            repository_info_complete: true,
-            mcp_file_system_info_complete: true,
-            git_status_info_complete: true,
-          },
+          request_context: requestContext,
         },
       },
     },
   })
 }
 
-function osVersionString(): string {
-  const p = process.platform
-  const r = (process as { release?: { version?: string } }).release?.version
-  return r ? `${p} ${r}` : p
-}
-
-function timeZoneString(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
-  } catch {
-    return "UTC"
-  }
-}

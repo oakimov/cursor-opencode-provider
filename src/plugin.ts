@@ -186,7 +186,10 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
           discoverModels(accessToken, configDir).catch(() => { /* non-fatal */ })
         }
 
-        return accessToken ? { accessToken } : {}
+        return {
+          ...(accessToken ? { accessToken } : {}),
+          workspaceRoot: input.directory,
+        }
       },
     },
   }
