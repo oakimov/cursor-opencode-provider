@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+*.tsbuildinfo
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# Logs / debug
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+bun-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE / editor
+.idea/
+*.swp
+*.swo
+.claude/settings.local.json
+
+# Test / coverage
+coverage/
+*.lcov
+
+# Local planning / scratch / agent dumps
+plans/
+scratch/
+agent-tools/
+
+# Regenerated local caches
+cursor-models.json
+
+# Ad-hoc live debug scripts (not part of the test suite)
+test-headers.mjs
+test-real-request.ts
