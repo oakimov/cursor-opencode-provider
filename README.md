@@ -23,18 +23,36 @@ This project is a custom **AI SDK provider** (`LanguageModelV3`) plus an **OpenC
 
 ## Installation
 
-Clone and build:
+### From npm (after publish)
+
+Add the package name to OpenCode config. OpenCode installs npm plugins with Bun at startup (cached under `~/.cache/opencode/node_modules/`):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["cursor-opencode-provider"],
+  "provider": {
+    "cursor": {
+      "npm": "cursor-opencode-provider",
+      "name": "Cursor",
+      "models": {}
+    }
+  }
+}
+```
+
+Pin a version if you want: `"cursor-opencode-provider@0.1.1"`.
+
+### From a local clone
 
 ```bash
-git clone <repo-url> cursor-opencode-provider
+git clone https://github.com/oakimov/cursor-opencode-provider.git
 cd cursor-opencode-provider
 bun install
 bun run build
 ```
 
-## OpenCode setup
-
-Add the plugin and provider to your OpenCode config. Use an absolute `file://` URL pointing at the built entry point:
+Point config at the built files with absolute `file://` URLs:
 
 ```json
 {
@@ -49,15 +67,19 @@ Add the plugin and provider to your OpenCode config. Use an absolute `file://` U
 }
 ```
 
-If the `cursor` provider block is omitted, the classic plugin auto-registers it on startup (as **Cursor Integration**) using this package's `dist/index.js`. Model entries are filled from the local cache after you authenticate.
+## OpenCode setup
+
+If the `cursor` provider block is omitted, the classic plugin auto-registers it on startup (as **Cursor Integration**) using this package's entry. Model entries are filled from the local cache after you authenticate.
 
 For OpenCode builds that use the Effect/Promise **v2** plugin API (`plugins` field), also load:
 
 ```json
 {
-  "plugins": ["file:///absolute/path/to/cursor-opencode-provider/dist/plugin-v2.js"]
+  "plugins": ["cursor-opencode-provider/plugin/v2"]
 }
 ```
+
+Local clone equivalent: `"file:///absolute/path/to/cursor-opencode-provider/dist/plugin-v2.js"`.
 
 That entry registers the provider via `ctx.aisdk.sdk` / `ctx.aisdk.language`. Keep the classic `plugin` entry for auth.
 
@@ -159,7 +181,7 @@ OpenCode
 
 | Problem | What to try |
 |---------|-------------|
-| No Cursor models in the picker | Run `opencode auth login`, choose **cursor**, then restart OpenCode so the plugin reloads `cursor-models.json`. Confirm the provider `npm` `file://` path points at a built `dist/index.js`. |
+| No Cursor models in the picker | Run `opencode auth login`, choose **cursor**, then restart OpenCode so the plugin reloads `cursor-models.json`. Confirm `provider.cursor.npm` is the package name (or a built `file://…/dist/index.js`). |
 | Auth / 401 errors mid-session | Re-login. OAuth and exchanged API-key JWTs refresh automatically when near expiry; a revoked refresh token needs a fresh login. |
 | “Too many connections from different devices” | Device IDs are derived from stable OS identifiers (same approach as the Cursor CLI). Avoid running multiple clients that invent different machine fingerprints for the same account. |
 | Empty or stale model list | Delete `cursor-models.json` under the OpenCode config dir (or the dir set by `CURSOR_CONFIG_DIR`) and re-auth / restart so models are fetched again. Cache TTL is 24h; a failed background refresh keeps serving the previous cache. |

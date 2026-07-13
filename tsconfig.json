@@ -8,7 +8,7 @@
     "moduleResolution": "nodenext",
     "declaration": true,
     "lib": ["es2022", "dom", "dom.iterable"],
-    "sourceMap": true
+    "sourceMap": false
   },
   "include": ["src"]
 }

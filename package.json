@@ -1,29 +1,63 @@
 {
   "name": "cursor-opencode-provider",
+  "version": "0.1.1",
+  "description": "Use Cursor subscription models from OpenCode via Cursor's Connect-RPC agent protocol",
   "type": "module",
-  "version": "0.0.1",
-  "private": true,
   "license": "MIT",
+  "author": "oakimov",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oakimov/cursor-opencode-provider.git"
+  },
+  "bugs": {
+    "url": "https://github.com/oakimov/cursor-opencode-provider/issues"
+  },
+  "homepage": "https://github.com/oakimov/cursor-opencode-provider#readme",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "cursor",
+    "ai-sdk",
+    "provider",
+    "plugin"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./plugin": {
+      "types": "./dist/plugin.d.ts",
+      "import": "./dist/plugin.js"
+    },
+    "./plugin/v2": {
+      "types": "./dist/plugin-v2.d.ts",
+      "import": "./dist/plugin-v2.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "test:watch": "bun test --watch"
+    "test:watch": "bun test --watch",
+    "prepublishOnly": "bun run build"
   },
-  "exports": {
-    ".": "./dist/index.js",
-    "./plugin": "./dist/plugin.js",
-    "./plugin/v2": "./dist/plugin-v2.js"
-  },
-  "files": [
-    "dist"
-  ],
   "dependencies": {
     "@ai-sdk/provider": "3.0.8",
-    "protobufjs": "^7.4.0",
-    "@opencode-ai/plugin": "^1.17.13"
+    "protobufjs": "^7.4.0"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "~1.17.13"
   },
   "devDependencies": {
+    "@opencode-ai/plugin": "~1.17.13",
     "@tsconfig/node22": "^22.0.1",
     "@types/node": "^22.15.3",
     "typescript": "^5.8.3"

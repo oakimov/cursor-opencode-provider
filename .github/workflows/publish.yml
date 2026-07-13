@@ -1,0 +1,73 @@
+# Publish to npm via Trusted Publishing (OIDC) — no long-lived npm token.
+#
+# Trusted publishing authenticates each publish with a short-lived OIDC token
+# minted by GitHub Actions, so no NPM_TOKEN secret is required. Provenance
+# attestations are generated automatically (requires a public repo + public
+# package). Requires npm CLI >= 11.5.1 and Node >= 22.14.0 in CI.
+#
+# Setup (one-time, per package — trusted publishing needs the package to exist):
+#   1. First publish is done locally to create the package:
+#        npm publish            # logged in as oakimov, 2FA prompt
+#   2. Register this workflow as a trusted publisher (package now exists):
+#        npm install -g npm@^11.15.0          # npm trust needs >= 11.15.0
+#        npm trust github cursor-opencode-provider \
+#          --file publish.yml \
+#          --repository oakimov/cursor-opencode-provider \
+#          --allow-publish -y
+#      ...or do it via the website: npmjs.com → package → Settings →
+#      Trusted Publisher → GitHub Actions (owner oakimov, repo
+#      cursor-opencode-provider, workflow publish.yml, allow "npm publish").
+#
+# Publish flow (after setup):
+#   - Bump "version" in package.json, commit to main.
+#   - Push a tag matching the version (e.g. git tag v0.1.2 && git push --tags).
+#   - This workflow runs install → typecheck → test → build → npm publish (OIDC).
+#
+# If OIDC publish fails with ENEEDAUTH, check that the workflow filename
+# (publish.yml), repository (oakimov/cursor-opencode-provider), and the
+# package.json "repository.url" all match what's registered on npm.
+
+name: Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  id-token: write   # required for OIDC trusted publishing
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Setup Node + npm registry
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false   # never cache in release builds
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+      - name: Build
+        run: bun run build
+
+      - name: Publish
+        run: npm publish
