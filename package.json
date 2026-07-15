@@ -1,6 +1,6 @@
 {
   "name": "cursor-opencode-provider",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Use Cursor subscription models from OpenCode via Cursor's Connect-RPC agent protocol",
   "type": "module",
   "license": "MIT",

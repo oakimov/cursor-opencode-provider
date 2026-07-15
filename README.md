@@ -47,7 +47,7 @@ Add the package name to OpenCode config. OpenCode installs npm plugins with Bun 
 }
 ```
 
-Pin a version if you want: `"cursor-opencode-provider@0.1.2"`.
+Pin a version if you want: `"cursor-opencode-provider@0.1.3"`.
 
 ### From a local clone
 
