@@ -5,6 +5,7 @@ import {
   MODEL_CACHE_TTL_MS,
   VERSION_CACHE_FILE,
 } from "../shared.js"
+import { opencodeGlobalCacheDir } from "../context/paths.js"
 
 const INSTALL_URL = "https://cursor.com/install"
 const REMOTE_TIMEOUT_MS = 5_000
@@ -88,23 +89,12 @@ export function extractVersionFromInstaller(script: string): string | undefined 
   return match && BUILD_RE.test(match[1]) ? match[1] : undefined
 }
 
-function resolveCacheDir(): string | undefined {
-  if (process.env.CURSOR_CONFIG_DIR) return process.env.CURSOR_CONFIG_DIR
-  const home = process.env.HOME || process.env.USERPROFILE
-  if (!home) return undefined
-  return process.env.XDG_CONFIG_HOME
-    ? path.join(process.env.XDG_CONFIG_HOME, "opencode")
-    : path.join(home, ".config", "opencode")
-}
-
-function versionCachePath(): string | undefined {
-  const dir = resolveCacheDir()
-  return dir ? path.join(dir, VERSION_CACHE_FILE) : undefined
+function versionCachePath(): string {
+  return path.join(opencodeGlobalCacheDir(), VERSION_CACHE_FILE)
 }
 
 function readVersionCache(): VersionCache | undefined {
   const file = versionCachePath()
-  if (!file) return undefined
 
   try {
     const value = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>
@@ -123,7 +113,6 @@ function readVersionCache(): VersionCache | undefined {
 
 function writeVersionCache(cache: VersionCache): void {
   const file = versionCachePath()
-  if (!file) return
 
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true })

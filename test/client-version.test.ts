@@ -18,9 +18,9 @@ FINAL_DIR="$HOME/.local/share/cursor-agent/versions/2026.07.09-a3815c0"
 
 const ENV_KEYS = [
   "CURSOR_CLIENT_VERSION",
-  "CURSOR_CONFIG_DIR",
   "HOME",
   "USERPROFILE",
+  "XDG_CACHE_HOME",
   "XDG_CONFIG_HOME",
 ] as const
 
@@ -28,11 +28,14 @@ let tmp: string
 let realFetch: typeof globalThis.fetch
 let savedEnv: Map<string, string | undefined>
 
+function versionCacheFile(): string {
+  return path.join(tmp, ".cache", "opencode", "cursor-client-version.json")
+}
+
 function writeVersionCache(version: unknown, fetchedAt: unknown): void {
-  fs.writeFileSync(
-    path.join(tmp, "cursor-client-version.json"),
-    JSON.stringify({ version, fetchedAt }),
-  )
+  const file = versionCacheFile()
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, JSON.stringify({ version, fetchedAt }))
 }
 
 beforeEach(() => {
@@ -40,7 +43,6 @@ beforeEach(() => {
   realFetch = globalThis.fetch
   savedEnv = new Map(ENV_KEYS.map((key) => [key, process.env[key]]))
   for (const key of ENV_KEYS) delete process.env[key]
-  process.env.CURSOR_CONFIG_DIR = tmp
   process.env.HOME = tmp
   process.env.USERPROFILE = tmp
   resetClientVersionCache()

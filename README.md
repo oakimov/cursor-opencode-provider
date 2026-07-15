@@ -102,7 +102,7 @@ Choose the **cursor** provider, then one of:
 | **Cursor account (browser login)** | PKCE OAuth — opens cursor.com to sign in |
 | **API key** | Paste a key from [cursor.com/settings](https://cursor.com/settings) (`sk-...`) |
 
-After login, the plugin fetches your available models and writes them to `cursor-models.json` (OpenCode config directory, or `CURSOR_CONFIG_DIR` if set).
+After login, the plugin fetches your available models and writes them to `~/.cache/opencode/cursor-models.json` (or `$XDG_CACHE_HOME/opencode/` when set).
 
 ### Select a model
 
@@ -132,11 +132,11 @@ Pass either `accessToken` (JWT from OAuth or key exchange) or `apiKey` (raw `sk-
 
 | Variable | Description |
 |----------|-------------|
-| `CURSOR_CONFIG_DIR` | Override directory for `cursor-models.json` cache (defaults to the OpenCode directory passed into the plugin) |
 | `CURSOR_WEBSITE_URL` | Override OAuth login base URL (default `https://cursor.com`) |
 | `CURSOR_API_BASE_URL` | Override API base for auth and model discovery (default `https://api2.cursor.sh`) |
 | `CURSOR_PROVIDER_DEBUG` | Set to `1` or `true` to enable wire-level debug logging |
 | `CURSOR_PROVIDER_DEBUG_FILE` | Debug log path (default `/tmp/cursor-provider-debug.log`) |
+| `XDG_CACHE_HOME` | When set, model/version caches go under `$XDG_CACHE_HOME/opencode/` instead of `~/.cache/opencode/` |
 
 `createCursor({ baseURL })` also overrides the agent Run host (default `https://agentn.global.api5.cursor.sh`).
 
@@ -190,7 +190,7 @@ OpenCode
 | No Cursor models in the picker | Run `opencode auth login`, choose **cursor**, then restart OpenCode so the plugin reloads `cursor-models.json`. Confirm `provider.cursor.npm` is the package name (or a built `file://…/dist/index.js`). |
 | Auth / 401 errors mid-session | Re-login. OAuth and exchanged API-key JWTs refresh automatically when near expiry; a revoked refresh token needs a fresh login. |
 | “Too many connections from different devices” | Device IDs are derived from stable OS identifiers (same approach as the Cursor CLI). Avoid running multiple clients that invent different machine fingerprints for the same account. |
-| Empty or stale model list | Delete `cursor-models.json` under the OpenCode config dir (or the dir set by `CURSOR_CONFIG_DIR`) and re-auth / restart so models are fetched again. Cache TTL is 24h; a failed background refresh keeps serving the previous cache. |
+| Empty or stale model list | Delete `~/.cache/opencode/cursor-models.json` (or under `$XDG_CACHE_HOME/opencode/`) and re-auth / restart so models are fetched again. Cache TTL is 24h; a failed background refresh keeps serving the previous cache. |
 | Stream hangs or HTTP/2 errors | Abort the turn and retry. The agent Run uses a bidirectional HTTP/2 stream to `agentn.global.api5.cursor.sh`; a dropped connection leaves the in-flight session unusable. |
 | Need wire-level logs | Set `CURSOR_PROVIDER_DEBUG=1` (optional `CURSOR_PROVIDER_DEBUG_FILE`, default `/tmp/cursor-provider-debug.log`) and reproduce the issue. |
 

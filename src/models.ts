@@ -39,12 +39,12 @@ export function isCacheFresh(cache: ModelCache, ttlMs = MODEL_CACHE_TTL_MS): boo
   return Date.now() - cache.fetchedAt < ttlMs
 }
 
-export function cacheFilePath(configDir: string): string {
-  return path.join(configDir, MODEL_CACHE_FILE)
+export function cacheFilePath(cacheDir: string): string {
+  return path.join(cacheDir, MODEL_CACHE_FILE)
 }
 
-export async function readCache(configDir: string): Promise<ModelCache | null> {
-  const filePath = cacheFilePath(configDir)
+export async function readCache(cacheDir: string): Promise<ModelCache | null> {
+  const filePath = cacheFilePath(cacheDir)
   try {
     if (!existsSync(filePath)) return null
     const data = await readFile(filePath, "utf-8")
@@ -54,8 +54,8 @@ export async function readCache(configDir: string): Promise<ModelCache | null> {
   }
 }
 
-export async function writeCache(configDir: string, cache: ModelCache): Promise<void> {
-  const filePath = cacheFilePath(configDir)
+export async function writeCache(cacheDir: string, cache: ModelCache): Promise<void> {
+  const filePath = cacheFilePath(cacheDir)
   await mkdir(path.dirname(filePath), { recursive: true })
   await writeFile(filePath, JSON.stringify(cache, null, 2), "utf-8")
 }
@@ -161,17 +161,17 @@ export async function fetchModels(
 
 export async function discoverModels(
   token: string,
-  configDir: string,
+  cacheDir: string,
   options: { baseURL?: string; headers?: Record<string, string> } = {},
 ): Promise<ModelInfo[]> {
-  const cached = await readCache(configDir)
+  const cached = await readCache(cacheDir)
 
   // Cache is fresh → return it; refresh in background
   if (cached && isCacheFresh(cached)) {
     // Background refresh (fire and forget)
     fetchModels(token, options)
       .then((models) =>
-        writeCache(configDir, { models, fetchedAt: Date.now() }),
+        writeCache(cacheDir, { models, fetchedAt: Date.now() }),
       )
       .catch(() => {
         /* background refresh failure is non-fatal */
@@ -184,7 +184,7 @@ export async function discoverModels(
     try {
       const models = await fetchModels(token, options)
       const newCache: ModelCache = { models, fetchedAt: Date.now() }
-      await writeCache(configDir, newCache)
+      await writeCache(cacheDir, newCache)
       return models
     } catch {
       return cached.models
@@ -194,6 +194,6 @@ export async function discoverModels(
   // No cache → must fetch
   const models = await fetchModels(token, options)
   const newCache: ModelCache = { models, fetchedAt: Date.now() }
-  await writeCache(configDir, newCache)
+  await writeCache(cacheDir, newCache)
   return models
 }

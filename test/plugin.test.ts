@@ -3,7 +3,7 @@ import { mkdir, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { CursorPlugin, modelInfoToConfig, thinkingSuffixBaseNames } from "../src/plugin.js"
-import { readCache, writeCache, type ModelInfo } from "../src/models.js"
+import { writeCache, type ModelInfo } from "../src/models.js"
 
 // Characters safeLabel must remove from emitted names/keys (issue #2).
 const INVALID = new RegExp("[()<>&\"'`]")
@@ -116,25 +116,25 @@ describe("modelInfoToConfig", () => {
 })
 
 const originalHome = process.env.HOME
-const originalXdg = process.env.XDG_CONFIG_HOME
+const originalXdgCache = process.env.XDG_CACHE_HOME
 
 afterEach(() => {
   if (originalHome === undefined) delete process.env.HOME
   else process.env.HOME = originalHome
-  if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME
-  else process.env.XDG_CONFIG_HOME = originalXdg
+  if (originalXdgCache === undefined) delete process.env.XDG_CACHE_HOME
+  else process.env.XDG_CACHE_HOME = originalXdgCache
 })
 
 describe("CursorPlugin config hook", () => {
-  it("loads cached models from the global OpenCode config dir, not input.directory", async () => {
+  it("loads cached models from ~/.cache/opencode, not input.directory", async () => {
     const fakeHome = path.join(os.tmpdir(), `cursor-plugin-test-${process.pid}-${Date.now()}`)
     process.env.HOME = fakeHome
-    delete process.env.XDG_CONFIG_HOME
+    delete process.env.XDG_CACHE_HOME
     const projectDir = path.join(fakeHome, "project")
-    const globalDir = path.join(fakeHome, ".config", "opencode")
-    await mkdir(globalDir, { recursive: true })
+    const cacheDir = path.join(fakeHome, ".cache", "opencode")
+    await mkdir(cacheDir, { recursive: true })
     await mkdir(projectDir, { recursive: true })
-    await writeCache(globalDir, {
+    await writeCache(cacheDir, {
       fetchedAt: Date.now(),
       models: [{ id: "cursor-test-model", variants: [] }],
     })
@@ -150,16 +150,18 @@ describe("CursorPlugin config hook", () => {
     }
   })
 
-  it("migrates a project-scoped model cache into the global config dir", async () => {
+  it("loads cached models from $XDG_CACHE_HOME/opencode when set", async () => {
     const fakeHome = path.join(os.tmpdir(), `cursor-plugin-test-${process.pid}-${Date.now()}`)
+    const xdgCache = path.join(fakeHome, "xdg-cache")
     process.env.HOME = fakeHome
-    delete process.env.XDG_CONFIG_HOME
+    process.env.XDG_CACHE_HOME = xdgCache
     const projectDir = path.join(fakeHome, "project")
-    const globalDir = path.join(fakeHome, ".config", "opencode")
+    const cacheDir = path.join(xdgCache, "opencode")
+    await mkdir(cacheDir, { recursive: true })
     await mkdir(projectDir, { recursive: true })
-    await writeCache(projectDir, {
+    await writeCache(cacheDir, {
       fetchedAt: Date.now(),
-      models: [{ id: "cursor-legacy-model", variants: [] }],
+      models: [{ id: "cursor-xdg-model", variants: [] }],
     })
 
     try {
@@ -167,8 +169,7 @@ describe("CursorPlugin config hook", () => {
       const config: { provider?: Record<string, { models?: Record<string, unknown> }> } = {}
       await plugin.config?.(config as never)
 
-      expect(config.provider?.cursor?.models).toHaveProperty("cursor-legacy-model")
-      expect((await readCache(globalDir))?.models[0]?.id).toBe("cursor-legacy-model")
+      expect(config.provider?.cursor?.models).toHaveProperty("cursor-xdg-model")
     } finally {
       await rm(fakeHome, { recursive: true, force: true })
     }
