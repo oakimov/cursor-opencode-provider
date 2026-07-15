@@ -75,7 +75,7 @@ Point config at the built files with absolute `file://` URLs:
 
 ## OpenCode setup
 
-If the `cursor` provider block is omitted, the classic plugin auto-registers it on startup (as **Cursor Integration**) using this package's entry. Model entries are filled from the local cache after you authenticate.
+If the `cursor` provider block is omitted, the classic plugin auto-registers it on startup (as **Cursor Integration**) using this package's entry. Model entries come from the local cache, which is filled after auth and again on startup when the cache is empty but credentials remain.
 
 For OpenCode builds that use the Effect/Promise **v2** plugin API (`plugins` field), also load:
 
@@ -102,7 +102,15 @@ Choose the **cursor** provider, then one of:
 | **Cursor account (browser login)** | PKCE OAuth — opens cursor.com to sign in |
 | **API key** | Paste a key from [cursor.com/settings](https://cursor.com/settings) (`sk-...`) |
 
-After login, the plugin fetches your available models and writes them to `~/.cache/opencode/cursor-models.json` (or `$XDG_CACHE_HOME/opencode/` when set).
+After login, the plugin fetches your available models and writes them to `~/.cache/opencode/cursor-models.json` (or `$XDG_CACHE_HOME/opencode/` when set). On later startups, if that cache is missing or empty but Cursor auth is still present, the plugin fetches again during config load.
+
+### Paths (XDG)
+
+| Kind | Default | Override |
+|------|---------|----------|
+| Model / version **cache** | `~/.cache/opencode/` | `$XDG_CACHE_HOME/opencode/` |
+| OpenCode **auth** (`auth.json`) | `~/.local/share/opencode/` | `$XDG_DATA_HOME/opencode/` |
+| OpenCode **config** (AGENTS, skills, …) | `~/.config/opencode/` | (config dir helper; not the model cache) |
 
 ### Select a model
 
@@ -137,6 +145,7 @@ Pass either `accessToken` (JWT from OAuth or key exchange) or `apiKey` (raw `sk-
 | `CURSOR_PROVIDER_DEBUG` | Set to `1` or `true` to enable wire-level debug logging |
 | `CURSOR_PROVIDER_DEBUG_FILE` | Debug log path (default `/tmp/cursor-provider-debug.log`) |
 | `XDG_CACHE_HOME` | When set, model/version caches go under `$XDG_CACHE_HOME/opencode/` instead of `~/.cache/opencode/` |
+| `XDG_DATA_HOME` | When set, OpenCode `auth.json` is read from `$XDG_DATA_HOME/opencode/` instead of `~/.local/share/opencode/` |
 
 `createCursor({ baseURL })` also overrides the agent Run host (default `https://agentn.global.api5.cursor.sh`).
 
@@ -187,10 +196,10 @@ OpenCode
 
 | Problem | What to try |
 |---------|-------------|
-| No Cursor models in the picker | Run `opencode auth login`, choose **cursor**, then restart OpenCode so the plugin reloads `cursor-models.json`. Confirm `provider.cursor.npm` is the package name (or a built `file://…/dist/index.js`). |
+| No Cursor models in the picker | Confirm Cursor auth (`opencode auth login` → **cursor**). Restart OpenCode — if auth is present and the cache is empty, models are fetched on startup. Confirm `provider.cursor.npm` is the package name (or a built `file://…/dist/index.js`). |
 | Auth / 401 errors mid-session | Re-login. OAuth and exchanged API-key JWTs refresh automatically when near expiry; a revoked refresh token needs a fresh login. |
 | “Too many connections from different devices” | Device IDs are derived from stable OS identifiers (same approach as the Cursor CLI). Avoid running multiple clients that invent different machine fingerprints for the same account. |
-| Empty or stale model list | Delete `~/.cache/opencode/cursor-models.json` (or under `$XDG_CACHE_HOME/opencode/`) and re-auth / restart so models are fetched again. Cache TTL is 24h; a failed background refresh keeps serving the previous cache. |
+| Empty or stale model list | Delete `~/.cache/opencode/cursor-models.json` (or under `$XDG_CACHE_HOME/opencode/`) and restart OpenCode. Existing Cursor auth is enough to refill the cache; re-login only if auth itself is broken. Cache TTL is 24h; a failed background refresh keeps serving the previous cache. |
 | Stream hangs or HTTP/2 errors | Abort the turn and retry. The agent Run uses a bidirectional HTTP/2 stream to `agentn.global.api5.cursor.sh`; a dropped connection leaves the in-flight session unusable. |
 | Need wire-level logs | Set `CURSOR_PROVIDER_DEBUG=1` (optional `CURSOR_PROVIDER_DEBUG_FILE`, default `/tmp/cursor-provider-debug.log`) and reproduce the issue. |
 

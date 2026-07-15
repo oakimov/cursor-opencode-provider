@@ -1,9 +1,10 @@
-import { describe, it, expect, afterEach } from "bun:test"
-import { mkdir, rm } from "node:fs/promises"
+import { afterEach, beforeEach, describe, expect, it } from "bun:test"
+import { mkdir, writeFile, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { CursorPlugin, modelInfoToConfig, thinkingSuffixBaseNames } from "../src/plugin.js"
-import { writeCache, type ModelInfo } from "../src/models.js"
+import { readCache, writeCache, type ModelInfo } from "../src/models.js"
+import { resetClientVersionCache } from "../src/protocol/client-version.js"
 
 // Characters safeLabel must remove from emitted names/keys (issue #2).
 const INVALID = new RegExp("[()<>&\"'`]")
@@ -117,12 +118,18 @@ describe("modelInfoToConfig", () => {
 
 const originalHome = process.env.HOME
 const originalXdgCache = process.env.XDG_CACHE_HOME
+const originalXdgData = process.env.XDG_DATA_HOME
+const originalAuthContent = process.env.OPENCODE_AUTH_CONTENT
 
 afterEach(() => {
   if (originalHome === undefined) delete process.env.HOME
   else process.env.HOME = originalHome
   if (originalXdgCache === undefined) delete process.env.XDG_CACHE_HOME
   else process.env.XDG_CACHE_HOME = originalXdgCache
+  if (originalXdgData === undefined) delete process.env.XDG_DATA_HOME
+  else process.env.XDG_DATA_HOME = originalXdgData
+  if (originalAuthContent === undefined) delete process.env.OPENCODE_AUTH_CONTENT
+  else process.env.OPENCODE_AUTH_CONTENT = originalAuthContent
 })
 
 describe("CursorPlugin config hook", () => {
@@ -130,6 +137,7 @@ describe("CursorPlugin config hook", () => {
     const fakeHome = path.join(os.tmpdir(), `cursor-plugin-test-${process.pid}-${Date.now()}`)
     process.env.HOME = fakeHome
     delete process.env.XDG_CACHE_HOME
+    delete process.env.OPENCODE_AUTH_CONTENT
     const projectDir = path.join(fakeHome, "project")
     const cacheDir = path.join(fakeHome, ".cache", "opencode")
     await mkdir(cacheDir, { recursive: true })
@@ -155,6 +163,7 @@ describe("CursorPlugin config hook", () => {
     const xdgCache = path.join(fakeHome, "xdg-cache")
     process.env.HOME = fakeHome
     process.env.XDG_CACHE_HOME = xdgCache
+    delete process.env.OPENCODE_AUTH_CONTENT
     const projectDir = path.join(fakeHome, "project")
     const cacheDir = path.join(xdgCache, "opencode")
     await mkdir(cacheDir, { recursive: true })
@@ -173,5 +182,345 @@ describe("CursorPlugin config hook", () => {
     } finally {
       await rm(fakeHome, { recursive: true, force: true })
     }
+  })
+})
+
+function fakeJwt(expOffsetSec: number): string {
+  const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64")
+  const payload = Buffer.from(
+    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + expOffsetSec }),
+  ).toString("base64")
+  return `${header}.${payload}.sig`
+}
+
+const INSTALLER_FIXTURE = `
+DOWNLOAD_URL="https://downloads.cursor.com/lab/2026.07.09-a3815c0/\${OS}/\${ARCH}/agent-cli-package.tar.gz"
+`
+
+describe("loadModels on cache miss", () => {
+  let fakeHome: string
+  let projectDir: string
+  let cacheDir: string
+  let dataDir: string
+  let realFetch: typeof globalThis.fetch
+  let availableModelsCalls: number
+  let refreshCalls: number
+  let persisted: unknown[]
+
+  async function writeAuth(cursor: unknown): Promise<void> {
+    await mkdir(dataDir, { recursive: true })
+    await writeFile(path.join(dataDir, "auth.json"), JSON.stringify({ cursor }))
+  }
+
+  function pluginInput() {
+    return {
+      directory: projectDir,
+      client: {
+        auth: {
+          set: async (opts: { body: unknown }) => {
+            persisted.push(opts.body)
+            return { data: true }
+          },
+        },
+      },
+    } as never
+  }
+
+  beforeEach(async () => {
+    fakeHome = path.join(os.tmpdir(), `cursor-miss-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+    process.env.HOME = fakeHome
+    delete process.env.XDG_CACHE_HOME
+    delete process.env.XDG_DATA_HOME
+    delete process.env.OPENCODE_AUTH_CONTENT
+    projectDir = path.join(fakeHome, "project")
+    cacheDir = path.join(fakeHome, ".cache", "opencode")
+    dataDir = path.join(fakeHome, ".local", "share", "opencode")
+    await mkdir(projectDir, { recursive: true })
+    availableModelsCalls = 0
+    refreshCalls = 0
+    persisted = []
+    realFetch = globalThis.fetch
+    resetClientVersionCache()
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes("/auth/token")) {
+        refreshCalls += 1
+        return Response.json({
+          accessToken: fakeJwt(3600),
+          refreshToken: "new-refresh",
+        })
+      }
+      if (url.includes("AvailableModels")) {
+        availableModelsCalls += 1
+        return Response.json({
+          models: [{ name: "fetched-model", clientDisplayName: "Fetched" }],
+        })
+      }
+      if (url.includes("cursor.com/install")) {
+        return new Response(INSTALLER_FIXTURE, { status: 200 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }) as typeof fetch
+  })
+
+  afterEach(async () => {
+    globalThis.fetch = realFetch
+    resetClientVersionCache()
+    await rm(fakeHome, { recursive: true, force: true })
+  })
+
+  it("fetches and caches models when oauth auth exists and cache is empty", async () => {
+    await writeAuth({
+      type: "oauth",
+      access: fakeJwt(3600),
+      refresh: "refresh-tok",
+      expires: Date.now() + 3_600_000,
+    })
+
+    const plugin = await CursorPlugin(pluginInput())
+    const config: { provider?: Record<string, { models?: Record<string, unknown> }> } = {}
+    await plugin.config?.(config as never)
+
+    expect(config.provider?.cursor?.models).toHaveProperty("fetched-model")
+    expect(availableModelsCalls).toBe(1)
+    expect(refreshCalls).toBe(0)
+    expect((await readCache(cacheDir))?.models[0]?.id).toBe("fetched-model")
+  })
+
+  it("refreshes expired oauth, preserves extras, then fetches models", async () => {
+    await writeAuth({
+      type: "oauth",
+      access: fakeJwt(-60),
+      refresh: "old-refresh",
+      expires: Date.now() - 60_000,
+      accountId: "acct-1",
+      enterpriseUrl: "https://enterprise.example",
+    })
+
+    const plugin = await CursorPlugin(pluginInput())
+    const config: { provider?: Record<string, { models?: Record<string, unknown> }> } = {}
+    await plugin.config?.(config as never)
+
+    expect(config.provider?.cursor?.models).toHaveProperty("fetched-model")
+    expect(refreshCalls).toBe(1)
+    expect(availableModelsCalls).toBe(1)
+    expect(persisted).toHaveLength(1)
+    expect(persisted[0]).toMatchObject({
+      type: "oauth",
+      refresh: "new-refresh",
+      accountId: "acct-1",
+      enterpriseUrl: "https://enterprise.example",
+    })
+  })
+
+  it("returns empty models when auth.json is absent", async () => {
+    const plugin = await CursorPlugin(pluginInput())
+    const config: { provider?: Record<string, { models?: Record<string, unknown> }> } = {}
+    await plugin.config?.(config as never)
+
+    expect(config.provider?.cursor?.models).toEqual({})
+    expect(availableModelsCalls).toBe(0)
+  })
+
+  it("returns empty models when oauth refresh is missing and token is expired", async () => {
+    await writeAuth({
+      type: "oauth",
+      access: fakeJwt(-60),
+      refresh: "",
+      expires: Date.now() - 60_000,
+    })
+
+    const plugin = await CursorPlugin(pluginInput())
+    const config: { provider?: Record<string, { models?: Record<string, unknown> }> } = {}
+    await plugin.config?.(config as never)
+
+    expect(config.provider?.cursor?.models).toEqual({})
+    expect(availableModelsCalls).toBe(0)
+    expect(refreshCalls).toBe(0)
+    expect(persisted).toHaveLength(0)
+  })
+
+  it("returns empty models when refresh fails and does not persist half-state", async () => {
+    await writeAuth({
+      type: "oauth",
+      access: fakeJwt(-60),
+      refresh: "bad-refresh",
+      expires: Date.now() - 60_000,
+      enterpriseUrl: "https://enterprise.example",
+    })
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes("/auth/token")) {
+        refreshCalls += 1
+        return new Response("nope", { status: 500 })
+      }
+      if (url.includes("cursor.com/install")) {
+        return new Response(INSTALLER_FIXTURE, { status: 200 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }) as typeof fetch
+
+    const plugin = await CursorPlugin(pluginInput())
+    const config: { provider?: Record<string, { models?: Record<string, unknown> }> } = {}
+    await plugin.config?.(config as never)
+
+    expect(config.provider?.cursor?.models).toEqual({})
+    expect(refreshCalls).toBe(1)
+    expect(availableModelsCalls).toBe(0)
+    expect(persisted).toHaveLength(0)
+  })
+
+  it("still uses refreshed oauth token when persistAuth fails", async () => {
+    await writeAuth({
+      type: "oauth",
+      access: fakeJwt(-60),
+      refresh: "old-refresh",
+      expires: Date.now() - 60_000,
+    })
+
+    const plugin = await CursorPlugin({
+      directory: projectDir,
+      client: {
+        auth: {
+          set: async () => {
+            throw new Error("auth.set failed")
+          },
+        },
+      },
+    } as never)
+    const config: { provider?: Record<string, { models?: Record<string, unknown> }> } = {}
+    await plugin.config?.(config as never)
+
+    expect(config.provider?.cursor?.models).toHaveProperty("fetched-model")
+    expect(refreshCalls).toBe(1)
+    expect(availableModelsCalls).toBe(1)
+  })
+
+  it("fetches and caches models when api auth exists and cache is empty", async () => {
+    await writeAuth({
+      type: "api",
+      key: fakeJwt(3600),
+      metadata: { refreshToken: "api-refresh" },
+    })
+
+    const plugin = await CursorPlugin(pluginInput())
+    const config: { provider?: Record<string, { models?: Record<string, unknown> }> } = {}
+    await plugin.config?.(config as never)
+
+    expect(config.provider?.cursor?.models).toHaveProperty("fetched-model")
+    expect(availableModelsCalls).toBe(1)
+    expect(refreshCalls).toBe(0)
+    expect((await readCache(cacheDir))?.models[0]?.id).toBe("fetched-model")
+  })
+
+  it("refreshes expired api key via metadata.refreshToken, then fetches models", async () => {
+    await writeAuth({
+      type: "api",
+      key: fakeJwt(-60),
+      metadata: { refreshToken: "api-refresh", note: "keep-me" },
+    })
+
+    const plugin = await CursorPlugin(pluginInput())
+    const config: { provider?: Record<string, { models?: Record<string, unknown> }> } = {}
+    await plugin.config?.(config as never)
+
+    expect(config.provider?.cursor?.models).toHaveProperty("fetched-model")
+    expect(refreshCalls).toBe(1)
+    expect(availableModelsCalls).toBe(1)
+    expect(persisted).toHaveLength(1)
+    expect(persisted[0]).toMatchObject({
+      type: "api",
+      metadata: { refreshToken: "new-refresh", note: "keep-me" },
+    })
+  })
+
+  it("loader skips discoverModels when config already wrote a fresh cache", async () => {
+    await writeAuth({
+      type: "oauth",
+      access: fakeJwt(3600),
+      refresh: "refresh-tok",
+      expires: Date.now() + 3_600_000,
+    })
+
+    const plugin = await CursorPlugin(pluginInput())
+    const config: { provider?: Record<string, { models?: Record<string, unknown> }> } = {}
+    await plugin.config?.(config as never)
+    expect(availableModelsCalls).toBe(1)
+
+    const auth = plugin.auth
+    if (!auth || !("loader" in auth) || !auth.loader) throw new Error("missing loader")
+    await auth.loader(async () => ({
+      type: "oauth",
+      access: fakeJwt(3600),
+      refresh: "refresh-tok",
+      expires: Date.now() + 3_600_000,
+    }), {} as never)
+
+    // Fresh cache from config — no second AvailableModels (and no background kick).
+    expect(availableModelsCalls).toBe(1)
+  })
+
+  it("loader falls back to session token when getAuth refresh fails after config already refreshed", async () => {
+    await writeAuth({
+      type: "oauth",
+      access: fakeJwt(-60),
+      refresh: "one-shot-refresh",
+      expires: Date.now() - 60_000,
+    })
+
+    let refreshPhase = 0
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes("/auth/token")) {
+        refreshCalls += 1
+        refreshPhase += 1
+        if (refreshPhase === 1) {
+          return Response.json({
+            accessToken: fakeJwt(3600),
+            refreshToken: "new-refresh",
+          })
+        }
+        return new Response("reuse denied", { status: 401 })
+      }
+      if (url.includes("AvailableModels")) {
+        availableModelsCalls += 1
+        return Response.json({
+          models: [{ name: "fetched-model", clientDisplayName: "Fetched" }],
+        })
+      }
+      if (url.includes("cursor.com/install")) {
+        return new Response(INSTALLER_FIXTURE, { status: 200 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }) as typeof fetch
+
+    const plugin = await CursorPlugin({
+      directory: projectDir,
+      client: {
+        auth: {
+          set: async () => {
+            throw new Error("auth.set failed")
+          },
+        },
+      },
+    } as never)
+    const config: { provider?: Record<string, { models?: Record<string, unknown> }> } = {}
+    await plugin.config?.(config as never)
+    expect(config.provider?.cursor?.models).toHaveProperty("fetched-model")
+
+    const auth = plugin.auth
+    if (!auth || !("loader" in auth) || !auth.loader) throw new Error("missing loader")
+    // getAuth still returns pre-refresh credentials; second refresh fails.
+    const opts = await auth.loader(async () => ({
+      type: "oauth",
+      access: fakeJwt(-60),
+      refresh: "one-shot-refresh",
+      expires: Date.now() - 60_000,
+    }), {} as never)
+
+    expect(opts.accessToken).toBeDefined()
+    expect(availableModelsCalls).toBe(1)
   })
 })

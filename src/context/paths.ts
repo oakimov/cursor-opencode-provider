@@ -21,6 +21,18 @@ export function opencodeGlobalCacheDir(): string {
   return path.join(resolveHome(), ".cache", "opencode")
 }
 
+/**
+ * OpenCode global data dir (`~/.local/share/opencode`).
+ * Uses `$XDG_DATA_HOME/opencode` when set, otherwise `$HOME/.local/share/opencode`.
+ * Auth credentials live here in `auth.json`.
+ */
+export function opencodeGlobalDataDir(): string {
+  if (process.env.XDG_DATA_HOME) {
+    return path.join(process.env.XDG_DATA_HOME, "opencode")
+  }
+  return path.join(resolveHome(), ".local", "share", "opencode")
+}
+
 export function resolveHomeRelative(p: string): string {
   if (p.startsWith("~/")) return path.join(homedir(), p.slice(2))
   return p

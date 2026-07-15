@@ -1,8 +1,10 @@
 import type { Hooks, PluginInput, AuthOAuthResult, Config } from "@opencode-ai/plugin"
+import type { Auth } from "@opencode-ai/sdk"
 import { CURSOR_PROVIDER_ID, CURSOR_WEBSITE_HOST, CURSOR_API_HOST } from "./shared.js"
 import { pollForTokens, exchangeApiKey, refreshAccessToken, isExpiringSoon, generatePkceParams, generatePkceChallenge, buildLoginUrl, decodeJwtPayload } from "./auth.js"
-import { readCache, discoverModels, type ModelInfo } from "./models.js"
+import { readCache, discoverModels, isCacheFresh, type ModelInfo } from "./models.js"
 import { opencodeGlobalCacheDir } from "./context/paths.js"
+import { readStoredAuth, type StoredAuth } from "./context/auth-store.js"
 
 const MODULE_URL = new URL("./index.js", import.meta.url).href
 
@@ -88,20 +90,137 @@ export function modelInfoToConfig(
   return config
 }
 
+function modelsToConfig(models: ModelInfo[]): Record<string, any> {
+  const ambiguous = thinkingSuffixBaseNames(models)
+  const out: Record<string, any> = {}
+  for (const m of models) {
+    out[m.id] = modelInfoToConfig(m, {
+      thinkingSuffix: !!m.supportsThinking && ambiguous.has(baseName(m)),
+    })
+  }
+  return out
+}
+
 export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
   const cacheDir = opencodeGlobalCacheDir()
 
+  // Last access token successfully resolved in this plugin instance. Config's
+  // loadModels can only read OpenCode's durable store (auth.json /
+  // OPENCODE_AUTH_CONTENT); auth.loader gets live credentials via getAuth().
+  // Those usually match, but after a refresh where persistAuthBestEffort fails,
+  // getAuth() may still see the old credentials while we already hold a usable
+  // token here — keep it so the loader can still discover models.
+  let sessionAccessToken: string | undefined
+
+  async function persistAuth(body: Auth): Promise<void> {
+    await input.client.auth.set({
+      path: { id: CURSOR_PROVIDER_ID },
+      body,
+    })
+  }
+
+  /** Persist refreshed credentials without failing the caller that already holds a live token. */
+  async function persistAuthBestEffort(body: Auth): Promise<void> {
+    try {
+      await persistAuth(body)
+    } catch {
+      // ignore — token is still usable for this process
+    }
+  }
+
+  /**
+   * Durable credentials OpenCode stores on disk (same file getAuth() reads in
+   * the normal path). Used from `config`, which has no getAuth() callback.
+   */
+  async function authFromStore(): Promise<Auth | StoredAuth | undefined> {
+    return readStoredAuth(CURSOR_PROVIDER_ID)
+  }
+
+  /**
+   * Prefer OpenCode's live getAuth(); fall back to the durable store so loader
+   * and config share the same underlying credentials when possible.
+   */
+  async function authForLoader(
+    getAuth: () => Promise<Auth | undefined>,
+  ): Promise<Auth | StoredAuth | undefined> {
+    return (await getAuth()) ?? (await authFromStore())
+  }
+
+  async function resolveAccessToken(auth: Auth | StoredAuth): Promise<string | undefined> {
+    if (auth.type === "api") {
+      let accessToken = auth.key
+      const refreshToken = auth.metadata?.refreshToken
+      // API-key exchange returns a short-lived JWT stored as `key`. Refresh
+      // it the same way as OAuth when it is expiring / already expired.
+      if (refreshToken && isExpiringSoon(auth.key)) {
+        try {
+          const newTokens = await refreshAccessToken(refreshToken)
+          accessToken = newTokens.accessToken
+          await persistAuthBestEffort({
+            type: "api",
+            key: newTokens.accessToken,
+            metadata: {
+              ...auth.metadata,
+              refreshToken: newTokens.refreshToken,
+            },
+          })
+        } catch {
+          // refresh failed — keep the existing key; the next call may still work
+        }
+      }
+      if (accessToken) sessionAccessToken = accessToken
+      return accessToken
+    }
+
+    if (auth.type === "oauth") {
+      if (!isExpiringSoon(auth.access)) {
+        sessionAccessToken = auth.access
+        return auth.access
+      }
+      if (!auth.refresh) return undefined
+      try {
+        const newTokens = await refreshAccessToken(auth.refresh)
+        // Preserve optional OAuth fields (v2 Auth / plugin may carry these).
+        const extras = auth as { accountId?: string; enterpriseUrl?: string }
+        // Use the new token even if persisting back to OpenCode fails.
+        await persistAuthBestEffort({
+          type: "oauth",
+          access: newTokens.accessToken,
+          refresh: newTokens.refreshToken,
+          expires: decodeExpFromJwt(newTokens.accessToken),
+          ...(extras.accountId !== undefined ? { accountId: extras.accountId } : {}),
+          ...(extras.enterpriseUrl !== undefined ? { enterpriseUrl: extras.enterpriseUrl } : {}),
+        })
+        sessionAccessToken = newTokens.accessToken
+        return newTokens.accessToken
+      } catch {
+        return undefined
+      }
+    }
+
+    return undefined
+  }
+
   async function loadModels(): Promise<Record<string, any>> {
     const cached = await readCache(cacheDir)
-    if (!cached || cached.models.length === 0) return {}
-    const ambiguous = thinkingSuffixBaseNames(cached.models)
-    const models: Record<string, any> = {}
-    for (const m of cached.models) {
-      models[m.id] = modelInfoToConfig(m, {
-        thinkingSuffix: !!m.supportsThinking && ambiguous.has(baseName(m)),
-      })
+    if (!cached || cached.models.length === 0) {
+      // Config runs before auth.loader and has no getAuth(); read the durable
+      // store (normally the same source getAuth() uses).
+      const auth = await authFromStore()
+      if (auth) {
+        const accessToken = await resolveAccessToken(auth)
+        if (accessToken) {
+          try {
+            const models = await discoverModels(accessToken, cacheDir)
+            return modelsToConfig(models)
+          } catch {
+            // discovery failed — leave the list empty
+          }
+        }
+      }
+      return {}
     }
-    return models
+    return modelsToConfig(cached.models)
   }
 
   return {
@@ -188,58 +307,20 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
         },
       ],
       async loader(getAuth) {
-        const auth = await getAuth()
-        if (!auth) return {}
-
-        let accessToken: string | undefined
-
-        if (auth.type === "api") {
-          accessToken = auth.key
-          const refreshToken = auth.metadata?.refreshToken
-          // API-key exchange returns a short-lived JWT stored as `key`. Refresh
-          // it the same way as OAuth when it is expiring / already expired.
-          if (refreshToken && isExpiringSoon(auth.key)) {
-            try {
-              const newTokens = await refreshAccessToken(refreshToken)
-              await input.client.auth.set({
-                path: { id: CURSOR_PROVIDER_ID },
-                body: {
-                  type: "api",
-                  key: newTokens.accessToken,
-                  metadata: { refreshToken: newTokens.refreshToken },
-                },
-              })
-              accessToken = newTokens.accessToken
-            } catch {
-              // refresh failed — keep the existing key; the next call may still work
-            }
-          }
-        } else if (auth.type === "oauth") {
-          if (!isExpiringSoon(auth.access)) {
-            accessToken = auth.access
-          } else if (auth.refresh) {
-            try {
-              const newTokens = await refreshAccessToken(auth.refresh)
-              await input.client.auth.set({
-                path: { id: CURSOR_PROVIDER_ID },
-                body: {
-                  type: "oauth",
-                  access: newTokens.accessToken,
-                  refresh: newTokens.refreshToken,
-                  expires: decodeExpFromJwt(newTokens.accessToken),
-                },
-              })
-              accessToken = newTokens.accessToken
-            } catch {
-              // refresh failed
-            }
-          }
-        }
-
+        const auth = await authForLoader(getAuth as () => Promise<Auth | undefined>)
+        // Prefer credentials from getAuth/store; if refresh already succeeded in
+        // loadModels but persist failed, fall back to the in-memory session token.
+        const accessToken =
+          (auth ? await resolveAccessToken(auth) : undefined) ?? sessionAccessToken
         if (accessToken) {
-          // Use discoverModels so we respect TTL / serve-stale semantics and
-          // write through the same cache path language-model reads.
-          discoverModels(accessToken, cacheDir).catch(() => { /* non-fatal */ })
+          // Skip when config already filled a fresh cache (avoids a second
+          // AvailableModels round-trip + background refresh on cold start).
+          const cached = await readCache(cacheDir)
+          if (!cached || cached.models.length === 0 || !isCacheFresh(cached)) {
+            // Await so an empty/missing cache is written before the loader returns
+            // (fire-and-forget often loses the race on short-lived CLI commands).
+            await discoverModels(accessToken, cacheDir).catch(() => { /* non-fatal */ })
+          }
         }
 
         return {
