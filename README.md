@@ -114,16 +114,36 @@ After login, the plugin fetches your available models and writes them to `~/.cac
 
 ### Select a model
 
-Pick a model from the cached list (for example `composer-2.5`, `default`, or a Claude/GPT variant exposed by your subscription):
+Pick a model from the cached list (for example `composer-2.5`, `default`, or a Claude/GPT model exposed by your subscription):
 
 ```bash
 opencode run --model cursor/composer-2.5 "Hello from Cursor via OpenCode"
 ```
 
-When Cursor exposes both a base context tier and a `1m` tier for the same model,
-the plugin lists the long-context tier as a separate `<model-id>-1m` entry. It
-still routes to Cursor's original model id, but advertises the correct 1M limit
-to OpenCode so overflow checks and compaction match the selected tier.
+#### Variants
+
+Cursor models often expose parameterized variants (effort, thinking, fast, context tier, …). The plugin materializes those as OpenCode **model variants**. In the TUI, pick one from the variant dialog or cycle with OpenCode’s `variant_cycle` keybind (default `ctrl+t`).
+
+The selected variant’s Cursor parameter map is forwarded on the Run as `requested_model.parameters` (isolated under `providerOptions.cursor.cursorVariantParameters` so unrelated OpenCode options are not leaked onto the wire).
+
+#### 1M / long context
+
+OpenCode’s context limit is static per model entry, while Cursor’s long-context tier is a variant parameter (`context=1m`). When a model has both a base tier and a `1m` tier, the plugin emits a separate OpenCode entry `<model-id>-1m` (for example `claude-opus-4-8-1m`) with:
+
+- `limit.context` set to the 1M window (so overflow checks and compaction match the tier)
+- only the long-context variants in its picker
+- the real Cursor model id carried in `options.cursorModelId` (not `config.id`, which would make OpenCode merge base variants into the 1M entry)
+
+The Run still uses Cursor’s original model id; OpenCode’s synthetic `-1m` id is only for picking and limits.
+
+#### Max mode
+
+Cursor IDE has a separate **Max Mode** toggle that sets `requested_model.max_mode` and selects the default max / 1m variant. OpenCode has no equivalent custom toggle, so this provider approximates it:
+
+- Selecting a `*-1m` model (or any resolved params with `context=1m`) sets wire `max_mode` to `true`
+- An explicit `providerOptions.cursor.maxMode` hint also turns it on
+
+There is no independent Max Mode chrome in OpenCode beyond choosing the 1M model / long-context variant.
 
 ## Programmatic usage
 
