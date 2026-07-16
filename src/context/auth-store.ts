@@ -24,7 +24,7 @@ function debugEnabled(): boolean {
 
 function debugAuthStore(message: string): void {
   if (!debugEnabled()) return
-  console.error(`[cursor-opencode-provider] auth-store: ${message}`)
+  console.debug(`[cursor-opencode-provider] auth-store: ${message}`)
 }
 
 /**

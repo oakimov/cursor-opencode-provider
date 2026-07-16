@@ -6,8 +6,15 @@ export type CreateCursorOptions = {
   name: string
   accessToken?: string
   apiKey?: string
+  /** API base for auth, model discovery, and GetServerConfig. */
+  apiBaseURL?: string
+  /** Explicit Cursor agent Run host override. */
+  agentBaseURL?: string
+  /** @deprecated Use agentBaseURL. Kept as the legacy agent Run host override. */
   baseURL?: string
   headers?: Record<string, string>
+  /** Opt in to telemetry on the GetServerConfig endpoint lookup. Defaults to false. */
+  telemetryEnabled?: boolean
   /** OpenCode project / worktree directory for request_context collectors. */
   workspaceRoot?: string
 }

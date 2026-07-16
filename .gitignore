@@ -36,6 +36,7 @@ coverage/
 
 # Local planning / scratch / agent dumps
 plans/
+tasks/
 scratch/
 agent-tools/
 

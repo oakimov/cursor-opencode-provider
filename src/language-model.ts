@@ -2,7 +2,7 @@ import fs from "node:fs"
 import { createHash } from "node:crypto"
 import type { LanguageModelV3, LanguageModelV3CallOptions, LanguageModelV3StreamResult, LanguageModelV3GenerateResult, LanguageModelV3StreamPart, LanguageModelV3Usage, LanguageModelV3FinishReason } from "@ai-sdk/provider"
 import type { CreateCursorOptions } from "./index.js"
-import { bidiRunStream, trace } from "./transport/connect.js"
+import { bidiRunStream, normalizeAgentRunOrigin, trace } from "./transport/connect.js"
 import { buildRunRequest, buildHeartbeat } from "./protocol/request.js"
 import { decodeFramePayload } from "./protocol/framing.js"
 import { decodeMessage } from "./protocol/messages.js"
@@ -25,6 +25,8 @@ import { sessionManager, type CursorSession, type Frame } from "./session.js"
 import { readCache, cacheFilePath, resolveVariantParameters, type ModelInfo } from "./models.js"
 import { buildRequestContext } from "./context/build.js"
 import { opencodeGlobalCacheDir } from "./context/paths.js"
+import { resolveAgentUrl } from "./agent-url.js"
+import { CURSOR_API_HOST } from "./shared.js"
 
 let _availableModels: ModelInfo[] | undefined
 // mtime of the cache file the last time we loaded it. Compared on each call
@@ -76,7 +78,7 @@ async function doStreamImpl(
   const token = await resolveBearerToken({
     accessToken: options.accessToken,
     apiKey: options.apiKey,
-    baseUrl: options.baseURL,
+    baseUrl: resolveApiBaseURL(options),
   })
 
   const prompt = callOptions.prompt
@@ -206,6 +208,16 @@ async function startSession(
 
   await loadAvailableModels()
 
+  // Resolve the region-specific Run stream origin once per process (memoized
+  // in agent-url.ts). Explicit agent host overrides skip GetServerConfig but
+  // still go through the Cursor agent-host allowlist.
+  const agentBaseUrl =
+    resolveExplicitAgentBaseURL(options) ??
+    (await resolveAgentUrl(token, {
+      apiBaseURL: resolveApiBaseURL(options),
+      telemetryEnabled: resolveTelemetryEnabled(options),
+    }))
+
   const providerOptions = callOptions.providerOptions?.cursor as Record<string, unknown> | undefined
   const reasoningEffort = providerOptions?.reasoningEffort as string | undefined
   const maxMode = !!(providerOptions?.maxMode ?? false)
@@ -217,7 +229,7 @@ async function startSession(
   // that signal when a turn ends with tool-calls; the Cursor stream must stay
   // open until we write the exec results on the next doStream.
   const stream = await bidiRunStream(token, {
-    baseURL: options.baseURL,
+    baseURL: agentBaseUrl,
     headers: options.headers,
   })
   // Build the tool descriptors once — advertised in AgentRunRequest #4 mcp_tools
@@ -359,6 +371,30 @@ async function loadAvailableModels(): Promise<void> {
       _availableModelsMtimeMs = mtime
     }
   } catch { /* ignore */ }
+}
+
+function resolveApiBaseURL(options: CreateCursorOptions): string {
+  return options.apiBaseURL ?? process.env.CURSOR_API_BASE_URL ?? `https://${CURSOR_API_HOST}`
+}
+
+function resolveTelemetryEnabled(options: CreateCursorOptions): boolean {
+  return options.telemetryEnabled ?? isTruthyEnv(process.env.CURSOR_GET_SERVER_CONFIG_TELEMETRY)
+}
+
+function resolveExplicitAgentBaseURL(options: CreateCursorOptions): string | undefined {
+  const raw = options.agentBaseURL ?? options.baseURL
+  if (!raw) return undefined
+  const normalized = normalizeAgentRunOrigin(raw)
+  if (!normalized) {
+    throw new Error(
+      "Invalid Cursor agent base URL override: expected https://*.cursor.sh",
+    )
+  }
+  return normalized
+}
+
+function isTruthyEnv(value: string | undefined): boolean {
+  return value === "1" || value === "true"
 }
 
 /**

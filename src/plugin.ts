@@ -5,6 +5,7 @@ import { pollForTokens, exchangeApiKey, refreshAccessToken, isExpiringSoon, gene
 import { readCache, discoverModels, isCacheFresh, type ModelInfo } from "./models.js"
 import { opencodeGlobalCacheDir } from "./context/paths.js"
 import { readStoredAuth, type StoredAuth } from "./context/auth-store.js"
+import { resolveAgentUrl } from "./agent-url.js"
 
 const MODULE_URL = new URL("./index.js", import.meta.url).href
 
@@ -101,8 +102,20 @@ function modelsToConfig(models: ModelInfo[]): Record<string, any> {
   return out
 }
 
+function cursorApiBaseURL(): string {
+  return process.env.CURSOR_API_BASE_URL ?? `https://${CURSOR_API_HOST}`
+}
+
+function cursorGetServerConfigTelemetryEnabled(): boolean {
+  return (
+    process.env.CURSOR_GET_SERVER_CONFIG_TELEMETRY === "1" ||
+    process.env.CURSOR_GET_SERVER_CONFIG_TELEMETRY === "true"
+  )
+}
+
 export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
   const cacheDir = opencodeGlobalCacheDir()
+  const apiBaseURL = cursorApiBaseURL()
 
   // Last access token successfully resolved in this plugin instance. Config's
   // loadModels can only read OpenCode's durable store (auth.json /
@@ -154,7 +167,7 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
       // it the same way as OAuth when it is expiring / already expired.
       if (refreshToken && isExpiringSoon(auth.key)) {
         try {
-          const newTokens = await refreshAccessToken(refreshToken)
+          const newTokens = await refreshAccessToken(refreshToken, apiBaseURL)
           accessToken = newTokens.accessToken
           await persistAuthBestEffort({
             type: "api",
@@ -179,7 +192,7 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
       }
       if (!auth.refresh) return undefined
       try {
-        const newTokens = await refreshAccessToken(auth.refresh)
+        const newTokens = await refreshAccessToken(auth.refresh, apiBaseURL)
         // Preserve optional OAuth fields (v2 Auth / plugin may carry these).
         const extras = auth as { accountId?: string; enterpriseUrl?: string }
         // Use the new token even if persisting back to OpenCode fails.
@@ -211,7 +224,7 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
         const accessToken = await resolveAccessToken(auth)
         if (accessToken) {
           try {
-            const models = await discoverModels(accessToken, cacheDir)
+            const models = await discoverModels(accessToken, cacheDir, { baseURL: apiBaseURL })
             return modelsToConfig(models)
           } catch {
             // discovery failed — leave the list empty
@@ -293,7 +306,7 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
             const apiKey = inputs?.apiKey
             if (!apiKey) return { type: "failed" }
             try {
-              const result = await exchangeApiKey(apiKey)
+              const result = await exchangeApiKey(apiKey, apiBaseURL)
               return {
                 type: "success",
                 key: result.accessToken,
@@ -319,8 +332,16 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
           if (!cached || cached.models.length === 0 || !isCacheFresh(cached)) {
             // Await so an empty/missing cache is written before the loader returns
             // (fire-and-forget often loses the race on short-lived CLI commands).
-            await discoverModels(accessToken, cacheDir).catch(() => { /* non-fatal */ })
+            await discoverModels(accessToken, cacheDir, { baseURL: apiBaseURL }).catch(() => { /* non-fatal */ })
           }
+          // Resolve the region-specific Run stream origin so the first turn
+          // does not spend time on GetServerConfig. Best-effort: a failure is
+          // surfaced by startSession, which can fail the actual model call with
+          // a clear endpoint-resolution error instead of using global fallback.
+          await resolveAgentUrl(accessToken, {
+            apiBaseURL,
+            telemetryEnabled: cursorGetServerConfigTelemetryEnabled(),
+          }).catch(() => { /* non-fatal warmup */ })
         }
 
         return {
