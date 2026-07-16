@@ -11,6 +11,8 @@ export type ModelParameterValue = { id: string; value: string }
 
 /** Dedicated OpenCode provider-option key for a selected Cursor variant. */
 export const CURSOR_VARIANT_PARAMETERS_KEY = "cursorVariantParameters"
+/** Real Cursor model id used when an OpenCode entry has a synthetic id. */
+export const CURSOR_WIRE_MODEL_ID_KEY = "cursorModelId"
 
 export type ModelVariant = {
   key: string
@@ -60,6 +62,14 @@ export function extractCursorVariantParameters(
     params.push({ id, value })
   }
   return params
+}
+
+export function resolveCursorWireModelId(
+  providerOptions: Record<string, unknown> | undefined,
+  fallback: string,
+): string {
+  const value = providerOptions?.[CURSOR_WIRE_MODEL_ID_KEY]
+  return typeof value === "string" && value.trim() ? value : fallback
 }
 
 /** True when resolved params select the long-context (1m) tier. */

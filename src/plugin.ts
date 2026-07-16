@@ -2,7 +2,7 @@ import type { Hooks, PluginInput, AuthOAuthResult, Config } from "@opencode-ai/p
 import type { Auth } from "@opencode-ai/sdk"
 import { CURSOR_PROVIDER_ID, CURSOR_WEBSITE_HOST, CURSOR_API_HOST } from "./shared.js"
 import { pollForTokens, exchangeApiKey, refreshAccessToken, isExpiringSoon, generatePkceParams, generatePkceChallenge, buildLoginUrl, decodeJwtPayload } from "./auth.js"
-import { CURSOR_VARIANT_PARAMETERS_KEY, readCache, discoverModels, isCacheFresh, type ModelInfo, type ModelVariant } from "./models.js"
+import { CURSOR_VARIANT_PARAMETERS_KEY, CURSOR_WIRE_MODEL_ID_KEY, readCache, discoverModels, isCacheFresh, type ModelInfo, type ModelVariant } from "./models.js"
 import { opencodeGlobalCacheDir } from "./context/paths.js"
 import { readStoredAuth, type StoredAuth } from "./context/auth-store.js"
 import { resolveAgentUrl } from "./agent-url.js"
@@ -150,9 +150,9 @@ export function modelInfoToConfig(
   if (variantConfig) config.variants = variantConfig
   if (contextTier === "long") {
     const defaultVariant = variants.find((v) => v.isDefaultMax) ?? variants[0]
-    config.id = mi.id
     if (defaultVariant) {
       config.options = {
+        [CURSOR_WIRE_MODEL_ID_KEY]: mi.id,
         [CURSOR_VARIANT_PARAMETERS_KEY]: defaultVariant.parameterValues.map((p) => ({ ...p })),
       }
     }

@@ -7,6 +7,8 @@ import {
   paramsImplyMaxMode,
   extractCursorVariantParameters,
   CURSOR_VARIANT_PARAMETERS_KEY,
+  CURSOR_WIRE_MODEL_ID_KEY,
+  resolveCursorWireModelId,
 } from "../src/models.js"
 import { modelInfoToConfig, modelsToConfig } from "../src/plugin.js"
 
@@ -261,6 +263,25 @@ describe("modelInfoToConfig (context window selection)", () => {
 })
 
 describe("modelsToConfig (context-tier materialization)", () => {
+  // Mirrors the relevant OpenCode provider-parser contract: config `id` is
+  // used to find an existing model, whose variants are merged into the new
+  // entry before it is stored under modelID.
+  const materializeVariantKeysLikeOpenCode = (config: Record<string, any>) => {
+    const parsed: Record<string, { variants: Record<string, unknown> }> = {}
+    for (const [modelID, model] of Object.entries(config)) {
+      const existing = parsed[model.id ?? modelID]
+      parsed[modelID] = {
+        variants: {
+          ...(existing?.variants ?? {}),
+          ...(model.variants ?? {}),
+        },
+      }
+    }
+    return Object.fromEntries(
+      Object.entries(parsed).map(([id, model]) => [id, Object.keys(model.variants)]),
+    )
+  }
+
   const model: Parameters<typeof modelsToConfig>[0][number] = {
     id: "claude-opus-4-8",
     displayName: "Opus 4.8",
@@ -290,24 +311,32 @@ describe("modelsToConfig (context-tier materialization)", () => {
     ],
   }
 
-  it("emits separate base and 1m entries with the real Cursor id", () => {
+  it("keeps base and 1m variants distinct while carrying the real Cursor wire id", () => {
     const config = modelsToConfig([model])
 
     expect(Object.keys(config)).toEqual(["claude-opus-4-8", "claude-opus-4-8-1m"])
     expect(config["claude-opus-4-8"].limit.context).toBe(300_000)
     expect(config["claude-opus-4-8-1m"]).toMatchObject({
-      id: "claude-opus-4-8",
       name: "Opus 4.8 1M",
       limit: { context: 1_000_000 },
       options: {
+        [CURSOR_WIRE_MODEL_ID_KEY]: "claude-opus-4-8",
         [CURSOR_VARIANT_PARAMETERS_KEY]: [
           { id: "context", value: "1m" },
           { id: "effort", value: "high" },
         ],
       },
     })
+    // OpenCode uses config `id` to look up an existing model and merge its
+    // variants. Keeping the synthetic id avoids inheriting the base variants;
+    // the real Cursor id travels in options instead.
+    expect(config["claude-opus-4-8-1m"]).not.toHaveProperty("id")
     expect(Object.keys(config["claude-opus-4-8"].variants)).toEqual(["Opus 4.8 High"])
     expect(Object.keys(config["claude-opus-4-8-1m"].variants)).toEqual(["Opus 4.8 1M High"])
+    expect(materializeVariantKeysLikeOpenCode(config)).toEqual({
+      "claude-opus-4-8": ["Opus 4.8 High"],
+      "claude-opus-4-8-1m": ["Opus 4.8 1M High"],
+    })
 
     const picked = extractCursorVariantParameters(config["claude-opus-4-8-1m"].options)
     const resolved = resolveVariantParameters(model, { picked })
@@ -321,7 +350,8 @@ describe("modelsToConfig (context-tier materialization)", () => {
       { id: "claude-opus-4-8-1m", displayName: "Real 1M model", variants: [] },
     ])
     expect(config).toHaveProperty("claude-opus-4-8-1m-2")
-    expect(config["claude-opus-4-8-1m-2"].id).toBe("claude-opus-4-8")
+    expect(config["claude-opus-4-8-1m-2"]).not.toHaveProperty("id")
+    expect(config["claude-opus-4-8-1m-2"].options[CURSOR_WIRE_MODEL_ID_KEY]).toBe("claude-opus-4-8")
   })
 })
 
@@ -481,6 +511,20 @@ describe("extractCursorVariantParameters", () => {
     expect(extractCursorVariantParameters({
       [CURSOR_VARIANT_PARAMETERS_KEY]: [{ id: "thinking", value: { enabled: true } }],
     })).toBeUndefined()
+  })
+})
+
+describe("resolveCursorWireModelId", () => {
+  it("uses the dedicated wire id for a synthetic OpenCode model", () => {
+    expect(resolveCursorWireModelId({
+      [CURSOR_WIRE_MODEL_ID_KEY]: "gpt-5.6-sol",
+    }, "gpt-5.6-sol-1m")).toBe("gpt-5.6-sol")
+  })
+
+  it("falls back for missing or malformed aliases", () => {
+    expect(resolveCursorWireModelId(undefined, "gpt-5.6-sol")).toBe("gpt-5.6-sol")
+    expect(resolveCursorWireModelId({ [CURSOR_WIRE_MODEL_ID_KEY]: "" }, "gpt-5.6-sol")).toBe("gpt-5.6-sol")
+    expect(resolveCursorWireModelId({ [CURSOR_WIRE_MODEL_ID_KEY]: 42 }, "gpt-5.6-sol")).toBe("gpt-5.6-sol")
   })
 })
 

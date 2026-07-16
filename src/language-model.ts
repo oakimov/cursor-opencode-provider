@@ -23,7 +23,7 @@ import { handleKvServerMessage } from "./protocol/kv.js"
 import { getCheckpoint, setCheckpoint } from "./protocol/checkpoint.js"
 import { conversationBlobCount } from "./protocol/blob-store.js"
 import { sessionManager, type CursorSession, type Frame } from "./session.js"
-import { readCache, cacheFilePath, resolveVariantParameters, paramsImplyMaxMode, extractCursorVariantParameters, type ModelInfo } from "./models.js"
+import { readCache, cacheFilePath, resolveVariantParameters, paramsImplyMaxMode, extractCursorVariantParameters, resolveCursorWireModelId, type ModelInfo } from "./models.js"
 import { buildRequestContext } from "./context/build.js"
 import { opencodeGlobalCacheDir } from "./context/paths.js"
 import { resolveAgentUrl } from "./agent-url.js"
@@ -225,12 +225,13 @@ async function startSession(
   // them under providerOptions.cursor. Read only the plugin's dedicated nested
   // payload so unrelated options never become requested_model.parameters.
   const picked = extractCursorVariantParameters(providerOptions)
+  const cursorModelId = resolveCursorWireModelId(providerOptions, modelId)
   const reasoningEffort = typeof providerOptions?.reasoningEffort === "string"
     ? providerOptions.reasoningEffort
     : undefined
   const hintMaxMode = !!(providerOptions?.maxMode ?? false)
 
-  const modelInfo = _availableModels?.find((m) => m.id === modelId)
+  const modelInfo = _availableModels?.find((m) => m.id === cursorModelId)
   const parameterValues = resolveVariantParameters(modelInfo, {
     reasoningEffort,
     maxMode: hintMaxMode,
@@ -260,7 +261,7 @@ async function startSession(
   const conversationState = getCheckpoint(conversationId)
   const reqBytes = buildRunRequest({
     text: userText,
-    modelId,
+    modelId: cursorModelId,
     conversationId,
     systemPrompt: conversationState ? undefined : systemPrompt,
     conversationState,
@@ -281,7 +282,7 @@ async function startSession(
       ? requestContext.hooks_additional_context
       : ""
   trace(
-    `outbound Run: model=${modelId} conversationId=${conversationId} ` +
+    `outbound Run: model=${cursorModelId} opencodeModel=${modelId} conversationId=${conversationId} ` +
       `params=${JSON.stringify(parameterValues ?? [])} ` +
       `maxMode=${maxMode} systemPromptLen=${systemPrompt?.length ?? 0} tools=${tools.length} ` +
       `skills=${skillsCount} hooks=${hooksCtx ? hooksCtx.split("\n").length : 0} ` +
