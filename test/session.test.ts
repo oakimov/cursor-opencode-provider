@@ -29,6 +29,16 @@ describe("SessionManager", () => {
     expect(mgr.findByExecIds(s.sessionId, [99])).toBeUndefined()
   })
 
+  it("stores optional toolName on pending for continuation unwrap gating", () => {
+    const mgr = new SessionManager()
+    const s = fakeSession()
+    mgr.registerPending(3, s, "mcp_result", "read")
+    expect(mgr.pendingFor(s.sessionId, 3)).toEqual({
+      resultField: "mcp_result",
+      toolName: "read",
+    })
+  })
+
   it("resolves an exec id so it is no longer found", () => {
     const mgr = new SessionManager()
     const s = fakeSession()

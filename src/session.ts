@@ -1,5 +1,5 @@
 import type { BidiStream } from "./transport/connect.js"
-import { trace } from "./transport/connect.js"
+import { trace } from "./debug.js"
 
 export type Frame = { flags: number; payload: Uint8Array }
 
@@ -14,6 +14,11 @@ export type Frame = { flags: number; payload: Uint8Array }
 export type PendingExec = {
   /** ExecClientMessage result field to reply with (matches the request variant). */
   resultField: string
+  /**
+   * Resolved opencode tool name (read/write/grep/…). Used on continuation so
+   * mcp_result can unwrap read envelopes even if the prompt omits toolName.
+   */
+  toolName?: string
 }
 
 export type CursorSession = {
@@ -70,8 +75,13 @@ export class SessionManager {
   }
 
   /** Register that `session` is awaiting a result for `execId`. */
-  registerPending(execId: number, session: CursorSession, resultField: string): void {
-    session.pending.set(execId, { resultField })
+  registerPending(
+    execId: number,
+    session: CursorSession,
+    resultField: string,
+    toolName?: string,
+  ): void {
+    session.pending.set(execId, { resultField, toolName })
     this.byExecId.set(this.key(session.sessionId, execId), session)
     this.touch(session)
   }

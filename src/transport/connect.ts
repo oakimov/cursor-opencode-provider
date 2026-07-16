@@ -3,36 +3,15 @@ import { encodeFrame, streamFrames } from "../protocol/framing.js"
 import { createCursorChecksumHeader } from "../protocol/checksum.js"
 import { getDeviceIds } from "../protocol/device-id.js"
 import { resolveClientVersion } from "../protocol/client-version.js"
+import { trace } from "../debug.js"
 import http2 from "node:http2"
-import fs from "node:fs"
 
 const API_BASE = `https://${CURSOR_API_HOST}`
 
 function resolveApiBaseURL(options: { apiBaseURL?: string; baseURL?: string }): string {
   return new URL(options.apiBaseURL ?? options.baseURL ?? API_BASE).origin
 }
-// Wire-level diagnostics. Opt in with CURSOR_PROVIDER_DEBUG=1 (or "true").
-// Writes to CURSOR_PROVIDER_DEBUG_FILE (default /tmp/cursor-provider-debug.log).
-// Truncated once per process. Captures h2 response status, parsed frames, and
-// stream errors. Tokens / checksums are redacted in header dumps.
-const DEBUG_ENABLED =
-  process.env.CURSOR_PROVIDER_DEBUG === "1" ||
-  process.env.CURSOR_PROVIDER_DEBUG === "true"
-const DEBUG_FILE = process.env.CURSOR_PROVIDER_DEBUG_FILE || "/tmp/cursor-provider-debug.log"
-let _traceInitialized = false
-export function trace(msg: string): void {
-  if (!DEBUG_ENABLED) return
-  try {
-    if (!_traceInitialized) {
-      _traceInitialized = true
-      fs.writeFileSync(
-        DEBUG_FILE,
-        `--- cursor-provider debug (pid ${process.pid}) ${new Date().toISOString()} ---\n`,
-      )
-    }
-    fs.appendFileSync(DEBUG_FILE, `[${new Date().toISOString()}] ${msg}\n`)
-  } catch { /* ignore */ }
-}
+
 trace("connect.ts module loaded")
 
 export function buildBaseHeaders(

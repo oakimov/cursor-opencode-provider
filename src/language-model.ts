@@ -2,7 +2,8 @@ import fs from "node:fs"
 import { createHash } from "node:crypto"
 import type { LanguageModelV3, LanguageModelV3CallOptions, LanguageModelV3StreamResult, LanguageModelV3GenerateResult, LanguageModelV3StreamPart, LanguageModelV3Usage, LanguageModelV3FinishReason } from "@ai-sdk/provider"
 import type { CreateCursorOptions } from "./index.js"
-import { bidiRunStream, normalizeAgentRunOrigin, trace } from "./transport/connect.js"
+import { bidiRunStream, normalizeAgentRunOrigin } from "./transport/connect.js"
+import { trace } from "./debug.js"
 import { buildRunRequest, buildHeartbeat } from "./protocol/request.js"
 import { decodeFramePayload } from "./protocol/framing.js"
 import { decodeMessage } from "./protocol/messages.js"
@@ -111,6 +112,7 @@ async function doStreamImpl(
           resultField: pending.resultField,
           output: r.output,
           error: r.error,
+          toolName: pending.toolName ?? r.toolName,
         })) {
           session.stream.write(frame)
         }
@@ -633,6 +635,7 @@ async function pump(
                 resultField: parsed.resultField,
                 output: "",
                 error: reason,
+                toolName: parsed.toolName,
               })) {
                 session.stream.write(frame)
               }
@@ -643,7 +646,7 @@ async function pump(
           }
           const tc = buildToolCallPart(parsed, session.sessionId)
           // Keep the stream open; the result arrives on the next doStream call.
-          sessionManager.registerPending(parsed.id, session, parsed.resultField)
+          sessionManager.registerPending(parsed.id, session, parsed.resultField, parsed.toolName)
           // tc.input is already a JSON string (LanguageModelV3ToolCall.input).
           trace(`exec: EMITTED tool-call toolCallId=${tc.toolCallId} toolName=${tc.toolName} inputLen=${tc.input.length}`)
           // Close open text/reasoning spans before tool-call (required by AI SDK V3).

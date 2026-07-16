@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto"
-import { fetchAgentUrl, trace } from "./transport/connect.js"
+import { fetchAgentUrl } from "./transport/connect.js"
+import { trace } from "./debug.js"
 import { CURSOR_API_HOST } from "./shared.js"
 
 const DEFAULT_API_BASE = `https://${CURSOR_API_HOST}`

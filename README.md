@@ -18,7 +18,7 @@ OpenCode driving a Cursor-routed Grok model through this provider:
 - **Authentication** — browser OAuth (PKCE), or API key from [cursor.com/settings](https://cursor.com/settings)
 - **Model discovery** — fetches available models from Cursor's API and caches them locally
 - **Streaming** — bidirectional Connect-RPC stream for agent runs
-- **Tool calls** — maps Cursor exec-server messages to AI SDK tool-call parts
+- **Tool calls** — maps Cursor exec-server messages to AI SDK tool-call parts; strips OpenCode's `read` XML envelope (`<path>`/`<content>` + `N:` prefixes) before returning content to Cursor so the model cannot echo the wrapper into writes
 - **Thinking / reasoning** — surfaces extended-thinking deltas where the model supports it
 
 ## Requirements
@@ -181,6 +181,7 @@ OpenCode
 | `src/index.ts` | `createCursor` factory; default export is `CursorPlugin` |
 | `src/language-model.ts` | AI SDK `LanguageModelV3` adapter (`doStream`, `doGenerate`) |
 | `src/session.ts` | Held-open agent Run session and pending exec correlation |
+| `src/debug.ts` | Opt-in wire-level debug logging (`CURSOR_PROVIDER_DEBUG`) |
 | `src/auth.ts` | PKCE OAuth, API key exchange, JWT refresh |
 | `src/models.ts` | `AvailableModels` fetch and `cursor-models.json` cache |
 | `src/agent-url.ts` | `GetServerConfig` fetch + in-process memo (region-specific Run host) |

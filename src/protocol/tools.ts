@@ -1,5 +1,6 @@
 import { encodeMessage } from "./messages.js"
 import { encodeJsonAsValue, decodeStructEntriesToJson, readAllFields } from "./struct.js"
+import { trace } from "../debug.js"
 
 // Exec variant field number whose reply is the server-initiated request_context
 // probe (ExecServerMessage #10 → ExecClientMessage #10). request/result share a
@@ -414,6 +415,12 @@ export type ToolResultInput = {
   output: string
   error?: string
   executionTimeMs?: number
+  /**
+   * Resolved opencode tool name (read/write/grep/…). Gates read-envelope
+   * unwrapping on the mcp_result path so non-read MCP output is never
+   * rewritten. read_result is always a read, so it unwraps regardless.
+   */
+  toolName?: string
 }
 
 /**
@@ -446,7 +453,7 @@ export function buildExecClientMessages(input: ToolResultInput): Uint8Array[] {
       id: input.execId,
       local_execution_time_ms: input.executionTimeMs ?? 0,
     }
-    clientMsg[resultField] = buildTypedExecResult(resultField, input.output, input.error)
+    clientMsg[resultField] = buildTypedExecResult(resultField, input.output, input.error, input.toolName)
     frames.push(
       encodeMessage("AgentClientMessage", {
         exec_client_message: clientMsg,
@@ -469,6 +476,69 @@ export function buildExecStreamClose(execId: number): Uint8Array {
 }
 
 /**
+ * Strip opencode's `read` envelope, leaving raw file content.
+ *
+ * opencode's read tool (opencode `tool/read.ts`) wraps content in an XML-ish
+ * envelope its own models are trained on, but Cursor's are not:
+ *   <path>{abs}</path>\n<type>file</type>\n<content>\n{N}: {line}\n…\n\n{footer}\n</content>
+ * Forwarding that envelope verbatim made Cursor's model treat the wrapper as
+ * literal file content and write `<path>`/`<content>` tags + `N:` line prefixes
+ * back into files (silent corruption — the write still reports success; seen
+ * across 8+ sessions, e.g. language-model.ts rewritten starting with
+ * `<path>…</path>\n<type>file</type>\n<content>\n1: import fs…`).
+ *
+ * Returns the raw file body (line numbers + footer + `<system-reminder>` dropped).
+ *
+ * Deliberately exception-safe: if the expected envelope is absent — non-read
+ * output, already-raw text, or a future opencode format change — it returns the
+ * input unchanged, so a result is never broken and we never throw mid-turn.
+ * Callers must still gate `mcp_result` on `toolName === "read"`; this helper
+ * alone is not a tool-identity check.
+ */
+export function unwrapReadOutput(output: string): string {
+  if (typeof output !== "string" || output.length === 0) return output
+  // Require the full opencode read-envelope skeleton *before* `<content>`
+  // (read.ts opens with <path>…</path>, <type>file</type>, <content>) so a
+  // stray "<content>" later in tool chatter can't trigger unwrapping just
+  // because path/type tags appear elsewhere in the payload.
+  const contentHeaderIdx = output.indexOf("<content>")
+  if (contentHeaderIdx === -1) return output
+  const header = output.slice(0, contentHeaderIdx)
+  const hasSkeleton =
+    header.indexOf("<path>") !== -1 &&
+    header.indexOf("<type>file</type>") !== -1
+  if (!hasSkeleton) {
+    // Saw "<content>" but not the read skeleton ahead of it — almost certainly
+    // a non-read payload, or an opencode format drift. Surface it so drift
+    // can't silently resurrect the wrapper-corruption bug, but still fail
+    // safe (no mutate).
+    trace("unwrapReadOutput: <content> present without leading <path>/<type>file> skeleton — leaving output unchanged (possible non-read payload or opencode read format drift)")
+    return output
+  }
+  // Body starts right after "<content>\n". opencode emits one numbered line per
+  // file line ("N: <line>"), then a blank, a "(…)" footer, and a standalone
+  // "</content>". The body is a *contiguous run* of /^N: / lines — so we stop at
+  // the first non-numbered line. Critically we do NOT search for a closing
+  // "</content>" substring: a file line that literally contains "</content>"
+  // is rendered as "N: </content>" (a body line), and a raw indexOf would
+  // truncate the read there.
+  let rest = output.slice(contentHeaderIdx + "<content>".length)
+  if (rest.startsWith("\n")) rest = rest.slice(1)
+  const raw: string[] = []
+  for (const line of rest.split("\n")) {
+    const m = /^(\d+):[ \t]?(.*)$/.exec(line)
+    if (!m) break // blank / "(footer)" / "</content>" → end of body run
+    // Strip only the leading "N: " prefix; a line that itself begins with
+    // digits+colon keeps its content (we remove just the first match). Blank
+    // file lines render as "N: " and are preserved (capture group is "").
+    raw.push(m[2])
+  }
+  // Envelope confirmed but no numbered body → empty file. Return "" rather
+  // than the envelope (the envelope is exactly what Cursor echoes into writes).
+  return raw.join("\n")
+}
+
+/**
  * Map OpenCode tool text into the agent.v1 result oneof for each exec variant.
  * OpenCode returns free-form text; we wrap it in the minimal success shape the
  * server accepts (verified against agent.v1 wire captures).
@@ -477,15 +547,20 @@ export function buildTypedExecResult(
   resultField: string,
   output: string,
   error?: string,
+  toolName?: string,
 ): Record<string, unknown> {
   switch (resultField) {
     case "read_result":
       if (error) return { error: { path: "", error } }
+      // Strip opencode's <path>/<content> envelope so Cursor's model receives
+      // raw file content and can't echo the wrapper into subsequent writes.
+      // reads route here only for native read_args; most arrive via mcp_result.
+      const content = unwrapReadOutput(output)
       return {
         success: {
           path: extractPathTag(output) ?? "",
-          content: output,
-          total_lines: countLines(output),
+          content,
+          total_lines: countLines(content),
         },
       }
     case "grep_result": {
@@ -546,9 +621,15 @@ export function buildTypedExecResult(
     }
     case "mcp_result":
       if (error) return { error: { error } }
+      // opencode built-ins (read/write/grep/…) are advertised as MCP tools, so
+      // a read call returns through mcp_result. Scope the unwrap to toolName
+      // "read" so a non-read MCP tool whose output merely contains a
+      // "<content>"-like block is never rewritten.
       return {
         success: {
-          content: [{ text: { text: output } }],
+          content: [
+            { text: { text: toolName === "read" ? unwrapReadOutput(output) : output } },
+          ],
           is_error: false,
         },
       }
@@ -698,4 +779,3 @@ export function buildRequestContextResult(
     },
   })
 }
-

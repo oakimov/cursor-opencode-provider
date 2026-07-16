@@ -11,6 +11,8 @@ import {
   detectExecVariantField,
   buildRawEmptyExecReply,
   buildRequestContextResult,
+  buildTypedExecResult,
+  unwrapReadOutput,
   REQUEST_CONTEXT_RESULT_FIELD,
 } from "../src/protocol/tools.js"
 import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
@@ -447,6 +449,188 @@ describe("mapCursorArgsToOpencode read zeros", () => {
       limit: 0,
     })
     expect(r).toEqual({ toolName: "read", args: { filePath: "/README.md" } })
+  })
+})
+
+// Real opencode read output (tool/read.ts): an XML envelope + `N: ` line
+// prefixes + a footer, which Cursor's model is not trained on and echoes into
+// writes. buildTypedExecResult must strip it down to raw file content.
+const OPENCODE_READ_FULL = [
+  "<path>/abs/file.ts</path>",
+  "<type>file</type>",
+  "<content>",
+  "1: import fs from \"node:fs\"",
+  "2: ",
+  "3: const x = 1",
+  "",
+  "(End of file - total 3 lines)",
+  "</content>",
+].join("\n")
+
+const OPENCODE_READ_PAGED = [
+  "<path>/abs/big.ts</path>",
+  "<type>file</type>",
+  "<content>",
+  "100: lineA",
+  "101: lineB",
+  "",
+  "(Showing lines 100-101 of 500. Use offset=102 to continue.)",
+  "</content>",
+  "",
+  "<system-reminder>",
+  "loaded instruction text",
+  "</system-reminder>",
+].join("\n")
+
+describe("unwrapReadOutput", () => {
+  it("strips the envelope, line numbers, footer → raw file content", () => {
+    expect(unwrapReadOutput(OPENCODE_READ_FULL)).toBe(
+      "import fs from \"node:fs\"\n\nconst x = 1",
+    )
+  })
+
+  it("preserves blank file lines (rendered as `N: `)", () => {
+    expect(unwrapReadOutput(OPENCODE_READ_FULL)).toContain("\n\nconst x = 1")
+  })
+
+  it("handles offset/pagination footer + trailing <system-reminder>", () => {
+    // system-reminder sits after </content> and must be excluded entirely.
+    expect(unwrapReadOutput(OPENCODE_READ_PAGED)).toBe("lineA\nlineB")
+  })
+
+  it("strips only the first N: prefix on a line that itself contains digits+colon", () => {
+    const out = [
+      "<path>/x</path>", "<type>file</type>", "<content>",
+      "1: 42: the answer",
+      "", "(End of file - total 1 lines)", "</content>",
+    ].join("\n")
+    expect(unwrapReadOutput(out)).toBe("42: the answer")
+  })
+
+  it("does NOT truncate when a file line contains the literal </content> (Finding 1)", () => {
+    // opencode renders such a line as "N: </content>". A naive indexOf("</content>")
+    // would close early and drop the rest of the file. The structural parser
+    // treats it as a body line.
+    const out = [
+      "<path>/x</path>", "<type>file</type>", "<content>",
+      "1: before",
+      "2: </content>",
+      "3: after",
+      "", "(End of file - total 3 lines)", "</content>",
+    ].join("\n")
+    expect(unwrapReadOutput(out)).toBe("before\n</content>\nafter")
+  })
+
+  it("does NOT truncate when a file line contains the literal <content>", () => {
+    const out = [
+      "<path>/x</path>", "<type>file</type>", "<content>",
+      "1: a",
+      "2: <content>",
+      "3: b",
+      "", "(End of file - total 3 lines)", "</content>",
+    ].join("\n")
+    expect(unwrapReadOutput(out)).toBe("a\n<content>\nb")
+  })
+
+  it("returns \"\" for an empty-file envelope (Finding 3), not the envelope", () => {
+    const empty = [
+      "<path>/x</path>", "<type>file</type>", "<content>",
+      "", "(End of file - total 0 lines)", "</content>",
+    ].join("\n")
+    expect(unwrapReadOutput(empty)).toBe("")
+  })
+
+  it("is a no-op when <content> lacks the read skeleton (non-read / drift, Finding 4)", () => {
+    // A non-read MCP payload that happens to mention "<content>" must not be rewritten.
+    const trick = "here is a doc\n<content>\n1: fake\n</content>\nmore doc"
+    expect(unwrapReadOutput(trick)).toBe(trick)
+  })
+
+  it("is a no-op when skeleton tags appear only after <content>", () => {
+    // Path/type after the content header must not count — ordered check.
+    const trick = [
+      "<content>",
+      "1: fake",
+      "</content>",
+      "<path>/x</path>",
+      "<type>file</type>",
+    ].join("\n")
+    expect(unwrapReadOutput(trick)).toBe(trick)
+  })
+
+  it("is a no-op for non-envelope output (e.g. grep/bash text)", () => {
+    const grep = "Found 2 matches\n/a.ts:\n  Line 3: foo"
+    expect(unwrapReadOutput(grep)).toBe(grep)
+  })
+
+  it("is a no-op for already-raw / plain content", () => {
+    expect(unwrapReadOutput("just plain text\nno envelope")).toBe("just plain text\nno envelope")
+  })
+
+  it("never throws on non-string / empty input", () => {
+    expect(unwrapReadOutput("" as string)).toBe("")
+    expect(unwrapReadOutput(undefined as unknown as string)).toBe(undefined)
+  })
+})
+
+describe("buildTypedExecResult read-envelope unwrap", () => {
+  it("read_result.content is raw content (no <path>/<content>/N: prefixes)", () => {
+    const r = buildTypedExecResult("read_result", OPENCODE_READ_FULL) as {
+      success: { path: string; content: string; total_lines: number }
+    }
+    expect(r.success.path).toBe("/abs/file.ts") // path still parsed from <path>
+    expect(r.success.content).toBe("import fs from \"node:fs\"\n\nconst x = 1")
+    expect(r.success.content).not.toContain("<path>")
+    expect(r.success.content).not.toContain("<content>")
+    expect(r.success.content).not.toMatch(/^\d+: /m)
+    expect(r.success.total_lines).toBe(3)
+  })
+
+  it("read_result empty file → content \"\" (no envelope echoed)", () => {
+    const empty = [
+      "<path>/x</path>", "<type>file</type>", "<content>",
+      "", "(End of file - total 0 lines)", "</content>",
+    ].join("\n")
+    const r = buildTypedExecResult("read_result", empty) as {
+      success: { content: string }
+    }
+    expect(r.success.content).toBe("")
+  })
+
+  it("mcp_result text is unwrapped for read-via-MCP when toolName=read", () => {
+    const r = buildTypedExecResult("mcp_result", OPENCODE_READ_PAGED, undefined, "read") as {
+      success: { content: Array<{ text: { text: string } }> }
+    }
+    expect(r.success.content[0].text.text).toBe("lineA\nlineB")
+  })
+
+  it("mcp_result text is left untouched for a non-read tool even if it looks enveloped (Finding 2)", () => {
+    // A grep/context7 result that happens to embed an opencode-shaped block
+    // must survive verbatim because toolName != read.
+    const r = buildTypedExecResult("mcp_result", OPENCODE_READ_FULL, undefined, "brave_web_search") as {
+      success: { content: Array<{ text: { text: string } }> }
+    }
+    expect(r.success.content[0].text.text).toBe(OPENCODE_READ_FULL)
+  })
+
+  it("mcp_result text is a no-op for plain non-read MCP output", () => {
+    const r = buildTypedExecResult("mcp_result", "{\"ok\":true}") as {
+      success: { content: Array<{ text: { text: string } }> }
+    }
+    expect(r.success.content[0].text.text).toBe("{\"ok\":true}")
+  })
+
+  it("end-to-end: read-via-MCP envelope → exec_client_message carries raw content", () => {
+    const frames = buildExecClientMessages({
+      execId: 1,
+      resultField: "mcp_result",
+      output: OPENCODE_READ_FULL,
+      toolName: "read",
+    })
+    const ec = decodeMessage<any>("AgentClientMessage", frames[0]).exec_client_message
+    expect(ec.mcp_result.success.content[0].text.text).toBe(
+      "import fs from \"node:fs\"\n\nconst x = 1",
+    )
   })
 })
 
