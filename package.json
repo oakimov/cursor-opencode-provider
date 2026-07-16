@@ -54,10 +54,10 @@
     "protobufjs": "^7.4.0"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": "~1.17.13"
+    "@opencode-ai/plugin": "^1.17.13"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "~1.17.13",
+    "@opencode-ai/plugin": "^1.17.13",
     "@tsconfig/node22": "^22.0.1",
     "@types/node": "^22.15.3",
     "typescript": "^5.8.3"
