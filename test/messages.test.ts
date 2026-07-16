@@ -137,6 +137,25 @@ describe("message round-trip", () => {
     expect(decoded.exec_server_message?.read_args?.path).toBe("/readme.md")
   })
 
+  it("round-trips interaction_query #7 and interaction_response #6", () => {
+    const serverData = encodeMessage("AgentServerMessage", {
+      interaction_query: { id: 9, web_search_request_query: new Uint8Array() },
+    })
+    const query = decodeMessage<any>("AgentServerMessage", serverData).interaction_query
+    expect(query.id).toBe(9)
+    expect(query.web_search_request_query).toBeDefined()
+
+    const clientData = encodeMessage("AgentClientMessage", {
+      interaction_response: {
+        id: 9,
+        web_search_request_response: { rejected: { reason: "headless" } },
+      },
+    })
+    const response = decodeMessage<any>("AgentClientMessage", clientData).interaction_response
+    expect(response.id).toBe(9)
+    expect(response.web_search_request_response?.rejected?.reason).toBe("headless")
+  })
+
   it("AvailableModelsRequest", () => {
     // Should just be an empty message with no fields
     const data = encodeMessage("AvailableModelsRequest", {})
@@ -162,6 +181,7 @@ describe("message schema accuracy", () => {
     const types = [
       "TextDeltaUpdate", "ThinkingDeltaUpdate", "TurnEnded",
       "InteractionUpdate", "ExecServerMessage", "ExecClientMessage",
+      "InteractionQuery", "InteractionResponse",
       "AgentRunRequest", "AgentClientMessage", "AgentServerMessage",
       "RequestedModel", "ParameterValue",
       "AvailableModelsRequest", "AvailableModelsResponse",
@@ -207,5 +227,11 @@ describe("message schema accuracy", () => {
     expect(fields).toContain("mcp_args")
     expect(fields).toContain("shell_stream_args")
     expect(fields).toContain("pi_write_args")
+  })
+
+  it("Agent messages expose the interaction request/reply fields", () => {
+    const root = getMessageTypes()
+    expect(root.lookupType("AgentServerMessage").fields.interaction_query.id).toBe(7)
+    expect(root.lookupType("AgentClientMessage").fields.interaction_response.id).toBe(6)
   })
 })

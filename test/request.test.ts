@@ -78,6 +78,46 @@ describe("buildRunRequest", () => {
     expect(rc.mcp_meta_tool_options.mcp_descriptors[0].tools).toHaveLength(2)
   })
 
+  it("splits LIVE mcp_descriptors by real MCP server", () => {
+    const tools = [
+      { name: "read", description: "Read", inputSchema: { type: "object" } },
+      {
+        name: "github_create_pull_request",
+        description: "Open a PR",
+        inputSchema: { type: "object" },
+      },
+      { name: "brave_web_search", description: "Search", inputSchema: { type: "object" } },
+    ]
+    const data = buildRunRequest({
+      text: "hi",
+      modelId: "m",
+      conversationId: "c-split",
+      tools,
+      requestContext: buildLiveRequestContext(tools),
+    })
+    const decoded = decodeMessage<any>("AgentClientMessage", data)
+    const rc = decoded.run_request.action.user_message_action.request_context
+    const flat = rc.tools
+    expect(flat.map((t: any) => t.name)).toEqual([
+      "opencode-read",
+      "github-create_pull_request",
+      "brave-web_search",
+    ])
+    expect(flat.map((t: any) => t.provider_identifier)).toEqual([
+      "opencode",
+      "github",
+      "brave",
+    ])
+    const descriptors = rc.mcp_file_system_options.mcp_descriptors
+    expect(descriptors.map((d: any) => d.server_identifier)).toEqual([
+      "opencode",
+      "github",
+      "brave",
+    ])
+    expect(descriptors[1].tools[0].tool_name).toBe("create_pull_request")
+    expect(rc.mcp_meta_tool_options.mcp_descriptors).toHaveLength(3)
+  })
+
   it("sends an empty mcp_tools list when no tools are given", () => {
     const data = buildRunRequest({ text: "hi", modelId: "m", conversationId: "c" })
     const decoded = decodeMessage<any>("AgentClientMessage", data)

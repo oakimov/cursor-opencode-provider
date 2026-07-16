@@ -20,14 +20,19 @@ import {
   type OpencodeToolDef,
 } from "./protocol/tools.js"
 import { handleKvServerMessage } from "./protocol/kv.js"
+import { handleInteractionQuery, inspectInteractionQueryWire } from "./protocol/interactions.js"
 import { getCheckpoint, setCheckpoint } from "./protocol/checkpoint.js"
 import { conversationBlobCount } from "./protocol/blob-store.js"
+import {
+  bindConversationId,
+} from "./protocol/conversation-bind.js"
 import { sessionManager, type CursorSession, type Frame } from "./session.js"
 import { readCache, cacheFilePath, resolveVariantParameters, paramsImplyMaxMode, extractCursorVariantParameters, resolveCursorWireModelId, type ModelInfo } from "./models.js"
 import { buildRequestContext } from "./context/build.js"
 import { opencodeGlobalCacheDir } from "./context/paths.js"
 import { resolveAgentUrl } from "./agent-url.js"
 import { CURSOR_API_HOST } from "./shared.js"
+import type { SeedHistoryMessage } from "./protocol/request.js"
 
 let _availableModels: ModelInfo[] | undefined
 // mtime of the cache file the last time we loaded it. Compared on each call
@@ -116,6 +121,8 @@ async function doStreamImpl(
         })) {
           session.stream.write(frame)
         }
+        // Tool results enlarge Cursor's context for the rest of this Run.
+        session.usageEstimate.inputTokens += estimateTokens(r.output.length)
         trace(`continuation: wrote exec result execId=${r.execId} field=${pending.resultField} outLen=${r.output.length}`)
         // Only resolve after the write succeeded — if it threw, the server never
         // got the result and would block on heartbeats forever otherwise.
@@ -199,14 +206,27 @@ async function startSession(
   options: CreateCursorOptions,
 ): Promise<CursorSession> {
   const prompt = callOptions.prompt
-  // Cursor stores server-side history keyed by conversation_id. Minting a new
-  // UUID every turn made each OpenCode user message look like a brand-new chat.
-  // OpenCode sends X-Session-Id / x-session-affinity on every call — derive a
-  // stable UUID from that so follow-ups hit the same server conversation.
-  const conversationId = resolveConversationId(callOptions)
+  const tools = extractTools(callOptions)
+  const toolDescriptors = tools.length > 0 ? toolsToDescriptors(tools) : []
+  // Compaction/summary turns pass tools:{} (and may set toolChoice "none").
+  // Cursor still has native Grep/etc.; allowTools gates emitting tool-call parts.
+  const allowTools = computeAllowTools(toolDescriptors.length, callOptions.toolChoice)
+  const sessionKey = opencodeSessionKey(callOptions)
+  // Compaction/summary must not reuse the prior Cursor conversation: OpenCode
+  // has already pruned locally, but echoing the old checkpoint keeps
+  // TurnEnded.cache_read huge and overflow/UI stuck above 100%.
+  const bound = bindConversationId(sessionKey, { reset: !allowTools })
+  const conversationId = bound.conversationId
+  if (bound.reset) {
+    trace(
+      `conversation reset: sessionKey=${sessionKey ?? "(none)"} ` +
+        `previousId=${bound.previousId ?? "-"} → conversationId=${conversationId}`,
+    )
+  }
+
   const userText = extractUserText([...prompt].reverse().find((m) => m.role === "user")) || "."
   const systemPrompt = extractSystemPrompt(prompt)
-  const tools = extractTools(callOptions)
+  const history = extractPromptHistory(prompt)
 
   await loadAvailableModels()
 
@@ -250,20 +270,17 @@ async function startSession(
   })
   // Build the tool descriptors once — advertised in AgentRunRequest #4 mcp_tools
   // AND echoed into the request_context reply (server turn-setup probe).
-  const toolDescriptors = tools.length > 0 ? toolsToDescriptors(tools) : []
-  // Compaction/summary turns pass tools:{} (and may set toolChoice "none").
-  // Cursor still has native Grep/etc.; allowTools gates emitting tool-call parts.
-  const allowTools = computeAllowTools(toolDescriptors.length, callOptions.toolChoice)
   const workspaceRoot = options.workspaceRoot || process.cwd()
   const requestContext = await buildRequestContext({ workspaceRoot, tools })
   // CLI parity: echo the last conversation_checkpoint_update as conversation_state.
-  // Turn 1 (no checkpoint) seeds system prompt only; live user text is current-only.
-  const conversationState = getCheckpoint(conversationId)
+  // After compaction reset there is no checkpoint — seed from OpenCode history.
+  const conversationState = bound.reset ? undefined : getCheckpoint(conversationId)
   const reqBytes = buildRunRequest({
     text: userText,
     modelId: cursorModelId,
     conversationId,
     systemPrompt: conversationState ? undefined : systemPrompt,
+    history: conversationState ? undefined : history,
     conversationState,
     parameterValues,
     maxMode,
@@ -281,13 +298,24 @@ async function startSession(
     typeof requestContext.hooks_additional_context === "string"
       ? requestContext.hooks_additional_context
       : ""
+  const historyChars = history.reduce((n, m) => n + m.content.length, 0)
+  const usageEstimate = {
+    inputTokens: estimateTokens(
+      (systemPrompt?.length ?? 0) + userText.length + historyChars + (conversationState?.length ?? 0),
+    ),
+    outputTokens: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+  }
   trace(
     `outbound Run: model=${cursorModelId} opencodeModel=${modelId} conversationId=${conversationId} ` +
       `params=${JSON.stringify(parameterValues ?? [])} ` +
       `maxMode=${maxMode} systemPromptLen=${systemPrompt?.length ?? 0} tools=${tools.length} ` +
       `skills=${skillsCount} hooks=${hooksCtx ? hooksCtx.split("\n").length : 0} ` +
       `availableModels=${_availableModels?.length ?? 0} userTextLen=${userText.length} ` +
-      `checkpointLen=${conversationState?.length ?? 0} runRequestBytes=${reqBytes.length}`,
+      `historyMsgs=${history.length} historyChars=${historyChars} ` +
+      `checkpointLen=${conversationState?.length ?? 0} reset=${bound.reset} ` +
+      `usageEstimateIn=${usageEstimate.inputTokens} runRequestBytes=${reqBytes.length}`,
   )
   if (hooksCtx) trace(`outbound Run hooks_additional_context: ${hooksCtx}`)
   trace(`hash run_request sha256=${sha(reqBytes)}`)
@@ -306,6 +334,7 @@ async function startSession(
     toolDescriptors,
     requestContext,
     allowTools,
+    usageEstimate,
     pumpActive: false,
     heartbeat: null,
     expiresAt: Date.now() + 300_000,
@@ -419,7 +448,7 @@ function isTruthyEnv(value: string | undefined): boolean {
  *    and KEEP the session open for the result on the next doStream call;
  *  - turn_ended / stream end → finish "stop" and close the session.
  */
-async function pump(
+export async function pump(
   session: CursorSession,
   controller: ReadableStreamDefaultController<V3Part>,
   ids: { textId: string; reasoningId: string },
@@ -474,6 +503,7 @@ async function pump(
       safeEnqueue({ type: "text-start", id: textId } as V3Part)
       textStarted = true
     }
+    session.usageEstimate.outputTokens += estimateTokens(text.length)
     safeEnqueue({ type: "text-delta", id: textId, delta: text } as V3Part)
   }
   const emitReasoning = (text: string) => {
@@ -482,6 +512,7 @@ async function pump(
       safeEnqueue({ type: "reasoning-start", id: reasoningId } as V3Part)
       reasoningStarted = true
     }
+    session.usageEstimate.outputTokens += estimateTokens(text.length)
     safeEnqueue({ type: "reasoning-delta", id: reasoningId, delta: text } as V3Part)
   }
   const emitFinish = (
@@ -489,19 +520,38 @@ async function pump(
     reason: LanguageModelV3FinishReason,
   ) => {
     closeOpenSpans()
+    if (te) {
+      // Authoritative TurnEnded counts — replace the running estimate.
+      session.usageEstimate = {
+        inputTokens: Number(te.input_tokens ?? 0) || 0,
+        outputTokens: Number(te.output_tokens ?? 0) || 0,
+        cacheRead: Number(te.cache_read ?? 0) || 0,
+        cacheWrite: Number(te.cache_write ?? 0) || 0,
+      }
+    }
+    const est = session.usageEstimate
     const usage: LanguageModelV3Usage = {
       inputTokens: {
-        total: (te?.input_tokens as number) ?? 0,
+        total: est.inputTokens,
         noCache: undefined,
-        cacheRead: (te?.cache_read as number) ?? 0,
-        cacheWrite: (te?.cache_write as number) ?? 0,
+        cacheRead: est.cacheRead,
+        cacheWrite: est.cacheWrite,
       },
       outputTokens: {
-        total: (te?.output_tokens as number) ?? 0,
+        total: est.outputTokens,
         text: undefined,
         reasoning: undefined,
       },
     }
+    const reasonLabel = typeof reason === "object" && reason && "unified" in reason
+      ? String((reason as { unified?: string }).unified ?? "unknown")
+      : String(reason)
+    trace(
+      `finish: reason=${reasonLabel} ` +
+        `in=${est.inputTokens} out=${est.outputTokens} ` +
+        `cacheRead=${est.cacheRead} cacheWrite=${est.cacheWrite} ` +
+        `source=${te ? "turn_ended" : "estimate"}`,
+    )
     safeEnqueue({ type: "finish", usage, finishReason: reason } as V3Part)
   }
 
@@ -577,6 +627,7 @@ async function pump(
     const iu = asm.interaction_update as Record<string, unknown> | undefined
     const esm = asm.exec_server_message as Record<string, unknown> | undefined
     const kv = asm.kv_server_message as Record<string, unknown> | undefined
+    const interactionQuery = asm.interaction_query as Record<string, unknown> | undefined
     const checkpointRaw = asm.conversation_checkpoint_update
     const topField = payload.length > 0 ? payload[0] >> 3 : 0
 
@@ -585,6 +636,7 @@ async function pump(
       trace(
         `pump frame: topField=${topField} interaction_update=${iuKind ?? "-"} ` +
           `exec=${esm ? "yes" : "no"} kv=${kv ? "yes" : "no"} ` +
+          `interaction_query=${interactionQuery ? "yes" : "no"} ` +
           `checkpoint=${checkpointRaw ? "yes" : "no"}`,
       )
     }
@@ -694,6 +746,28 @@ async function pump(
           }
         }
       }
+    } else if (interactionQuery) {
+      // InteractionQuery is a must-reply channel, just like exec and KV. AI
+      // SDK has no Cursor-specific UI callback, so answer immediately with the
+      // conservative headless policy from protocol/interactions.ts.
+      try {
+        const handled = handleInteractionQuery(interactionQuery, payload)
+        session.stream.write(handled.reply)
+        trace(
+          `interaction_query: replied id=${handled.id} variant=${handled.variantName} ` +
+            `field=${handled.variantField} outcome=${handled.outcome}`,
+        )
+      } catch (e) {
+        const info = inspectInteractionQueryWire(payload)
+        const err = e instanceof Error ? e : new Error(String(e))
+        trace(
+          `interaction_query: FAILED id=${info.id ?? "?"} ` +
+            `variantField=${info.variantField ?? "?"} err=${err.message}`,
+        )
+        safeError(err)
+        sessionManager.close(session)
+        return
+      }
     } else if (kv) {
       // KV blob channel: ack set_blob / answer get_blob, then keep pumping.
       // Not replying hangs the turn — see protocol/kv.ts.
@@ -721,9 +795,9 @@ async function pump(
       // exec/args decode) must not abort the whole turn — log and skip.
       trace(`frame dispatch FAILED (skipping): topField=${topField} err=${(e as Error).message}`)
     }
-    // heartbeat / step / partial_tool_call / interaction_query →
-    // ignore (partial args are display-only; the exec channel is authoritative.
-    // Checkpoints are handled above.)
+    // heartbeat / step / partial_tool_call → ignore (partial args are
+    // display-only; the exec channel is authoritative. Checkpoints and
+    // interaction queries are handled above.)
   }
 }
 
@@ -821,32 +895,91 @@ function extractSystemPrompt(prompt: LanguageModelV3CallOptions["prompt"]): stri
   return parts.length > 0 ? parts.join("\n\n") : undefined
 }
 
+/** Rough char→token estimate for mid-turn usage before TurnEnded arrives. */
+export function estimateTokens(chars: number): number {
+  if (!Number.isFinite(chars) || chars <= 0) return 0
+  return Math.ceil(chars / 4)
+}
+
 /**
- * Map OpenCode's session id header to a stable Cursor conversation_id (UUID).
- * Falls back to a random UUID when headers are absent (direct SDK use).
+ * Prior prompt turns for a seed ConversationStateStructure after compaction
+ * reset. Drops the trailing user message (live action) and tool roles.
  */
-export function resolveConversationId(callOptions: LanguageModelV3CallOptions): string {
+export function extractPromptHistory(
+  prompt: LanguageModelV3CallOptions["prompt"],
+): SeedHistoryMessage[] {
+  const out: SeedHistoryMessage[] = []
+  for (const m of prompt) {
+    if (m.role === "system") {
+      if (typeof m.content === "string" && m.content.length > 0) {
+        out.push({ role: "system", content: m.content })
+      }
+      continue
+    }
+    if (m.role === "user") {
+      const text = extractUserText(m as unknown as Record<string, unknown>)
+      if (text && text !== ".") out.push({ role: "user", content: text })
+      continue
+    }
+    if (m.role === "assistant") {
+      const text = extractAssistantHistoryText(m as unknown as Record<string, unknown>)
+      if (text) out.push({ role: "assistant", content: text })
+    }
+  }
+  // Live user message is the Run action, not seed history.
+  if (out.length > 0 && out[out.length - 1]!.role === "user") out.pop()
+  return out
+}
+
+function extractAssistantHistoryText(msg: Record<string, unknown>): string {
+  const content = msg.content
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+  const texts: string[] = []
+  const toolNames: string[] = []
+  for (const part of content) {
+    const p = part as Record<string, unknown>
+    if (p.type === "text" && typeof p.text === "string" && p.text.length > 0) {
+      texts.push(p.text)
+    } else if (p.type === "tool-call" && typeof p.toolName === "string") {
+      toolNames.push(p.toolName)
+    }
+  }
+  if (toolNames.length > 0) {
+    const seen = new Set<string>()
+    const unique: string[] = []
+    for (const n of toolNames) {
+      if (seen.has(n)) continue
+      seen.add(n)
+      unique.push(n)
+    }
+    texts.push(`[Used tools: ${unique.join(", ")}]`)
+  }
+  return texts.join("\n")
+}
+
+/** OpenCode session id header, if present. */
+export function opencodeSessionKey(callOptions: LanguageModelV3CallOptions): string | undefined {
   const h = callOptions.headers ?? {}
   const raw =
     h["x-session-id"] ??
     h["X-Session-Id"] ??
     h["x-session-affinity"] ??
     h["x-opencode-session"]
-  if (typeof raw === "string" && raw.trim().length > 0) {
-    return sessionIdToUuid(raw.trim())
-  }
-  return crypto.randomUUID()
+  if (typeof raw === "string" && raw.trim().length > 0) return raw.trim()
+  return undefined
 }
 
-/** Deterministic UUID (version-4 shape) from an arbitrary session key. */
-export function sessionIdToUuid(sessionId: string): string {
-  const hash = createHash("sha256").update(`cursor-opencode-provider:conv:${sessionId}`).digest()
-  const bytes = Buffer.from(hash.subarray(0, 16))
-  bytes[6] = (bytes[6]! & 0x0f) | 0x40
-  bytes[8] = (bytes[8]! & 0x3f) | 0x80
-  const hex = bytes.toString("hex")
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
+/**
+ * Map OpenCode's session id header to the active Cursor conversation_id.
+ * Compaction resets remint via bindConversationId; otherwise the binding is
+ * sticky for the OpenCode session. Falls back to a random UUID with no header.
+ */
+export function resolveConversationId(callOptions: LanguageModelV3CallOptions): string {
+  return bindConversationId(opencodeSessionKey(callOptions)).conversationId
 }
+
+export { sessionIdToUuid } from "./protocol/conversation-bind.js"
 
 function extractTools(callOptions: LanguageModelV3CallOptions): OpencodeToolDef[] {
   const tools = callOptions.tools

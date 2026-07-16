@@ -1,0 +1,71 @@
+import { describe, it, expect } from "bun:test"
+import type { LanguageModelV3CallOptions } from "@ai-sdk/provider"
+import {
+  estimateTokens,
+  extractPromptHistory,
+} from "../src/language-model.js"
+import { buildSeedConversationState } from "../src/protocol/request.js"
+import { decodeMessage } from "../src/protocol/messages.js"
+
+describe("estimateTokens", () => {
+  it("ceil-divides by 4", () => {
+    expect(estimateTokens(0)).toBe(0)
+    expect(estimateTokens(1)).toBe(1)
+    expect(estimateTokens(4)).toBe(1)
+    expect(estimateTokens(5)).toBe(2)
+  })
+})
+
+describe("extractPromptHistory", () => {
+  it("keeps prior turns and drops the trailing live user message", () => {
+    const history = extractPromptHistory([
+      { role: "system", content: "Be brief." },
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+      { role: "user", content: "Update the anchored summary" },
+    ] as LanguageModelV3CallOptions["prompt"])
+    expect(history).toEqual([
+      { role: "system", content: "Be brief." },
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+    ])
+  })
+
+  it("summarizes assistant tool-call-only turns", () => {
+    const history = extractPromptHistory([
+      { role: "user", content: "do it" },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool-call", toolCallId: "1", toolName: "bash", input: "{}" },
+          { type: "tool-call", toolCallId: "2", toolName: "bash", input: "{}" },
+          { type: "tool-call", toolCallId: "3", toolName: "read", input: "{}" },
+        ],
+      },
+      { role: "user", content: "Continue" },
+    ] as LanguageModelV3CallOptions["prompt"])
+    expect(history).toEqual([
+      { role: "user", content: "do it" },
+      { role: "assistant", content: "[Used tools: bash, read]" },
+    ])
+  })
+})
+
+describe("buildSeedConversationState history", () => {
+  it("embeds system + history into root_prompt_messages_json", () => {
+    const bytes = buildSeedConversationState({
+      systemPrompt: "sys",
+      history: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "hello" },
+      ],
+    })
+    const cs = decodeMessage<any>("ConversationStateStructure", bytes)
+    const root = (cs.root_prompt_messages_json ?? []).map((s: string) => JSON.parse(s))
+    expect(root).toEqual([
+      { role: "system", content: "sys" },
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+    ])
+  })
+})

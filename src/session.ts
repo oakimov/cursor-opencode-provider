@@ -49,6 +49,17 @@ export type CursorSession = {
    */
   allowTools: boolean
   /**
+   * Best-effort token usage for this held-open Run. Updated from text/tool
+   * activity and replaced by TurnEnded when the turn completes. Emitted on
+   * tool-calls finishes so OpenCode does not store all-zero usage mid-loop.
+   */
+  usageEstimate: {
+    inputTokens: number
+    outputTokens: number
+    cacheRead: number
+    cacheWrite: number
+  }
+  /**
    * True while a doStream pull() is actively reading this session's frames.
    * Prevents a late cancel/abort from a prior ReadableStream from destroying
    * the Run connection after tool results were delivered (pending cleared) but

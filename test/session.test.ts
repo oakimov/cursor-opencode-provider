@@ -12,6 +12,7 @@ function fakeSession(): CursorSession {
     blobs: new Map(),
     toolDescriptors: [],
     requestContext: {},
+    usageEstimate: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0 },
     allowTools: false,
     pumpActive: false,
     heartbeat: null,

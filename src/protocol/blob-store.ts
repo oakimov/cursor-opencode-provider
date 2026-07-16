@@ -47,6 +47,11 @@ export function conversationBlobCount(conversationId: string): number {
   return byConversation.get(conversationId)?.size ?? 0
 }
 
+/** Drop all blobs for a conversation (compaction conversation reset). */
+export function clearConversationBlobs(conversationId: string): void {
+  byConversation.delete(conversationId)
+}
+
 /** SHA-256 content hashes are 32 non-text bytes — never echo those as content. */
 export function isBlobIdHash(blobId: Uint8Array): boolean {
   if (blobId.length !== 32) return false

@@ -1,11 +1,14 @@
-import { describe, it, expect } from "bun:test"
+import { describe, it, expect, beforeEach } from "bun:test"
 import type { LanguageModelV3CallOptions } from "@ai-sdk/provider"
 import {
   resolveConversationId,
   sessionIdToUuid,
 } from "../src/language-model.js"
+import { resetConversationBindingsForTests } from "../src/protocol/conversation-bind.js"
 
 describe("sessionIdToUuid / resolveConversationId", () => {
+  beforeEach(() => resetConversationBindingsForTests())
+
   it("is deterministic for the same OpenCode session id", () => {
     const a = sessionIdToUuid("ses_0a630a3a0ffeutu6u0DKQrDZii")
     const b = sessionIdToUuid("ses_0a630a3a0ffeutu6u0DKQrDZii")
@@ -42,5 +45,13 @@ describe("sessionIdToUuid / resolveConversationId", () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     )
     expect(a).not.toBe(b)
+  })
+
+  it("stays sticky across resolves for the same OpenCode session", () => {
+    const opts = {
+      prompt: [],
+      headers: { "X-Session-Id": "ses_sticky" },
+    } as LanguageModelV3CallOptions
+    expect(resolveConversationId(opts)).toBe(resolveConversationId(opts))
   })
 })

@@ -725,6 +725,153 @@ export function createMessageTypes(): protobuf.Root {
 
   addType(root, "ClientHeartbeat", [])
 
+  // ── Interaction query/response channel ──
+  // Cursor sends UI/integration requests outside the exec tool channel. Query
+  // bodies stay opaque: this headless provider only needs their id + variant
+  // to return a conservative typed response on the same Run stream.
+  addType(
+    root,
+    "InteractionQuery",
+    [
+      { id: 1, name: "id", type: "uint32" },
+      { id: 2, name: "web_search_request_query", type: "bytes" },
+      { id: 3, name: "ask_question_interaction_query", type: "bytes" },
+      { id: 4, name: "switch_mode_request_query", type: "bytes" },
+      { id: 7, name: "create_plan_request_query", type: "bytes" },
+      { id: 8, name: "setup_vm_environment_args", type: "bytes" },
+      { id: 9, name: "web_fetch_request_query", type: "bytes" },
+      { id: 10, name: "pr_management_request_query", type: "bytes" },
+      { id: 11, name: "mcp_auth_request_query", type: "bytes" },
+      { id: 12, name: "generate_image_request_query", type: "bytes" },
+      { id: 13, name: "replace_env_args", type: "bytes" },
+      { id: 14, name: "connect_scm_request_query", type: "bytes" },
+    ],
+    [{
+      name: "query",
+      fields: [
+        "web_search_request_query", "ask_question_interaction_query",
+        "switch_mode_request_query", "create_plan_request_query",
+        "setup_vm_environment_args", "web_fetch_request_query",
+        "pr_management_request_query", "mcp_auth_request_query",
+        "generate_image_request_query", "replace_env_args",
+        "connect_scm_request_query",
+      ],
+    }],
+  )
+
+  addType(root, "WebSearchRequestApproved", [])
+  addType(root, "WebSearchRequestRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(root, "WebSearchRequestResponse", [
+    { id: 1, name: "approved", type: "WebSearchRequestApproved" },
+    { id: 2, name: "rejected", type: "WebSearchRequestRejected" },
+  ], [{ name: "result", fields: ["approved", "rejected"] }])
+
+  addType(root, "AskQuestionRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(root, "AskQuestionResult", [
+    { id: 3, name: "rejected", type: "AskQuestionRejected" },
+  ], [{ name: "result", fields: ["rejected"] }])
+  addType(root, "AskQuestionInteractionResponse", [
+    { id: 1, name: "result", type: "AskQuestionResult" },
+  ])
+
+  addType(root, "SwitchModeRequestApproved", [])
+  addType(root, "SwitchModeRequestRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(root, "SwitchModeRequestResponse", [
+    { id: 1, name: "approved", type: "SwitchModeRequestApproved" },
+    { id: 2, name: "rejected", type: "SwitchModeRequestRejected" },
+  ], [{ name: "result", fields: ["approved", "rejected"] }])
+
+  addType(root, "CreatePlanSuccess", [])
+  addType(root, "CreatePlanError", [{ id: 1, name: "error", type: "string" }])
+  addType(root, "CreatePlanResult", [
+    { id: 1, name: "success", type: "CreatePlanSuccess" },
+    { id: 2, name: "error", type: "CreatePlanError" },
+    { id: 3, name: "plan_uri", type: "string" },
+  ], [{ name: "result", fields: ["success", "error"] }])
+  addType(root, "CreatePlanRequestResponse", [
+    { id: 1, name: "result", type: "CreatePlanResult" },
+  ])
+
+  addType(root, "SetupVmEnvironmentSuccess", [])
+  addType(root, "SetupVmEnvironmentResult", [
+    { id: 1, name: "success", type: "SetupVmEnvironmentSuccess" },
+  ], [{ name: "result", fields: ["success"] }])
+
+  addType(root, "WebFetchRequestApproved", [])
+  addType(root, "WebFetchRequestRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(root, "WebFetchRequestResponse", [
+    { id: 1, name: "approved", type: "WebFetchRequestApproved" },
+    { id: 2, name: "rejected", type: "WebFetchRequestRejected" },
+  ], [{ name: "result", fields: ["approved", "rejected"] }])
+
+  addType(root, "PrManagementRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(root, "PrManagementResult", [
+    { id: 3, name: "rejected", type: "PrManagementRejected" },
+  ], [{ name: "result", fields: ["rejected"] }])
+
+  addType(root, "McpAuthRequestApproved", [])
+  addType(root, "McpAuthRequestRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(root, "McpAuthRequestResponse", [
+    { id: 1, name: "approved", type: "McpAuthRequestApproved" },
+    { id: 2, name: "rejected", type: "McpAuthRequestRejected" },
+  ], [{ name: "result", fields: ["approved", "rejected"] }])
+
+  addType(root, "GenerateImageRequestApproved", [{ id: 1, name: "description", type: "string" }])
+  addType(root, "GenerateImageRequestRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(root, "GenerateImageRequestResponse", [
+    { id: 1, name: "approved", type: "GenerateImageRequestApproved" },
+    { id: 2, name: "rejected", type: "GenerateImageRequestRejected" },
+  ], [{ name: "result", fields: ["approved", "rejected"] }])
+
+  addType(root, "ReplaceEnvSuccess", [])
+  addType(root, "ReplaceEnvFailure", [
+    { id: 1, name: "error_message", type: "string" },
+    { id: 2, name: "setup_logs", type: "string" },
+  ])
+  addType(root, "ReplaceEnvResult", [
+    { id: 1, name: "success", type: "ReplaceEnvSuccess" },
+    { id: 2, name: "failure", type: "ReplaceEnvFailure" },
+  ], [{ name: "result", fields: ["success", "failure"] }])
+
+  addType(root, "ConnectScmRequestApproved", [])
+  addType(root, "ConnectScmRequestRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(root, "ConnectScmRequestFailed", [{ id: 1, name: "error", type: "string" }])
+  addType(root, "ConnectScmRequestResponse", [
+    { id: 1, name: "approved", type: "ConnectScmRequestApproved" },
+    { id: 2, name: "rejected", type: "ConnectScmRequestRejected" },
+    { id: 3, name: "failed", type: "ConnectScmRequestFailed" },
+  ], [{ name: "result", fields: ["approved", "rejected", "failed"] }])
+
+  addType(
+    root,
+    "InteractionResponse",
+    [
+      { id: 1, name: "id", type: "uint32" },
+      { id: 2, name: "web_search_request_response", type: "WebSearchRequestResponse" },
+      { id: 3, name: "ask_question_interaction_response", type: "AskQuestionInteractionResponse" },
+      { id: 4, name: "switch_mode_request_response", type: "SwitchModeRequestResponse" },
+      { id: 7, name: "create_plan_request_response", type: "CreatePlanRequestResponse" },
+      { id: 8, name: "setup_vm_environment_result", type: "SetupVmEnvironmentResult" },
+      { id: 9, name: "web_fetch_request_response", type: "WebFetchRequestResponse" },
+      { id: 10, name: "pr_management_result", type: "PrManagementResult" },
+      { id: 11, name: "mcp_auth_request_response", type: "McpAuthRequestResponse" },
+      { id: 12, name: "generate_image_request_response", type: "GenerateImageRequestResponse" },
+      { id: 13, name: "replace_env_result", type: "ReplaceEnvResult" },
+      { id: 14, name: "connect_scm_request_response", type: "ConnectScmRequestResponse" },
+    ],
+    [{
+      name: "result",
+      fields: [
+        "web_search_request_response", "ask_question_interaction_response",
+        "switch_mode_request_response", "create_plan_request_response",
+        "setup_vm_environment_result", "web_fetch_request_response",
+        "pr_management_result", "mcp_auth_request_response",
+        "generate_image_request_response", "replace_env_result",
+        "connect_scm_request_response",
+      ],
+    }],
+  )
+
   // ── KV blob store (cursor moves large payloads out-of-band via this channel) ──
   // Server sends KvServerMessage (AgentServerMessage #4); client MUST reply with
   // KvClientMessage (AgentClientMessage #3) on the same Run stream, echoing `id`.
@@ -775,9 +922,10 @@ export function createMessageTypes(): protobuf.Root {
       { id: 2, name: "exec_client_message", type: "ExecClientMessage" },
       { id: 3, name: "kv_client_message", type: "KvClientMessage" },
       { id: 5, name: "exec_client_control_message", type: "ExecClientControlMessage" },
+      { id: 6, name: "interaction_response", type: "InteractionResponse" },
       { id: 7, name: "client_heartbeat", type: "ClientHeartbeat" },
     ],
-    [{ name: "message", fields: ["run_request", "exec_client_message", "kv_client_message", "exec_client_control_message", "client_heartbeat"] }],
+    [{ name: "message", fields: ["run_request", "exec_client_message", "kv_client_message", "exec_client_control_message", "interaction_response", "client_heartbeat"] }],
   )
 
   // ── AgentServerMessage ──
@@ -791,7 +939,7 @@ export function createMessageTypes(): protobuf.Root {
       { id: 3, name: "conversation_checkpoint_update", type: "bytes" },
       { id: 4, name: "kv_server_message", type: "KvServerMessage" },
       { id: 5, name: "exec_server_control_message", type: "ExecServerControlMessage" },
-      { id: 7, name: "interaction_query", type: "bytes" },
+      { id: 7, name: "interaction_query", type: "InteractionQuery" },
     ],
     [{ name: "message", fields: ["interaction_update", "exec_server_message", "conversation_checkpoint_update", "kv_server_message", "exec_server_control_message", "interaction_query"] }],
   )
