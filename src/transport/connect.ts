@@ -84,14 +84,18 @@ export async function unaryAvailableModels(
 
 // ── Unary (GetServerConfig) ──
 
-/** Cursor Run stream hosts returned by GetServerConfig (agentn.<region>.api5.cursor.sh). */
+/**
+ * Cursor Run stream hosts from GetServerConfig / agentBaseURL.
+ * Any HTTPS subdomain of cursor.sh is accepted — hostnames vary
+ * (agentn.*, agent.*, agent-gcpp-*, api5 / api5lat, …) and may change.
+ */
 export function isAllowedAgentHost(hostname: string): boolean {
-  return /^agentn\.([a-z0-9-]+\.)?api5\.cursor\.sh$/i.test(hostname)
+  return /^([a-z0-9-]+\.)+cursor\.sh$/i.test(hostname)
 }
 
 /**
  * Normalize a GetServerConfig agent URL to an https origin.
- * Returns null for missing, malformed, non-https, or non-Cursor agent hosts.
+ * Returns null for missing, malformed, non-https, or non-*.cursor.sh hosts.
  */
 export function normalizeAgentRunOrigin(raw: string | undefined): string | null {
   if (raw === undefined || raw === null) return null
@@ -115,10 +119,9 @@ export function normalizeAgentRunOrigin(raw: string | undefined): string | null 
  * return the `agentUrlConfig.agentnUrl` field — the region-specific Run stream
  * origin the server routes this account/team to (e.g. `agentn.us.api5.cursor.sh`).
  *
- * Region-routed accounts can be silently rejected by the legacy global host, so
- * this lookup fails closed instead of substituting any host on error. If Cursor
- * returns a valid global `agentn.*.api5.cursor.sh` origin, it is still accepted
- * as the authoritative response.
+ * Region-routed accounts can be silently rejected by the wrong regional host, so
+ * this lookup fails closed instead of substituting any host on error. Any
+ * authoritative `*.cursor.sh` origin from GetServerConfig is accepted.
  */
 export async function fetchAgentUrl(
   token: string,

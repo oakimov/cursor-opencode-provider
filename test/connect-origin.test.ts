@@ -34,23 +34,47 @@ describe("resolveAgentOrigin", () => {
 })
 
 describe("normalizeAgentRunOrigin", () => {
-  it("accepts https origins on agentn.*.api5.cursor.sh", () => {
+  it("accepts https origins under *.cursor.sh", () => {
     expect(normalizeAgentRunOrigin("https://agentn.us.api5.cursor.sh")).toBe(
       "https://agentn.us.api5.cursor.sh",
     )
     expect(normalizeAgentRunOrigin("agentn.eu.api5.cursor.sh")).toBe(
       "https://agentn.eu.api5.cursor.sh",
     )
+    expect(normalizeAgentRunOrigin("https://agent.api5.cursor.sh")).toBe(
+      "https://agent.api5.cursor.sh",
+    )
+    expect(normalizeAgentRunOrigin("https://agentn.api5.cursor.sh")).toBe(
+      "https://agentn.api5.cursor.sh",
+    )
+    expect(normalizeAgentRunOrigin("https://agent-gcpp-uswest.api5.cursor.sh")).toBe(
+      "https://agent-gcpp-uswest.api5.cursor.sh",
+    )
+    expect(normalizeAgentRunOrigin("https://agent-gcpp-eucentral.api5.cursor.sh")).toBe(
+      "https://agent-gcpp-eucentral.api5.cursor.sh",
+    )
+    expect(normalizeAgentRunOrigin("https://agent-gcpp-apsoutheast.api5.cursor.sh")).toBe(
+      "https://agent-gcpp-apsoutheast.api5.cursor.sh",
+    )
+    expect(normalizeAgentRunOrigin("https://agentn.global.api5lat.cursor.sh")).toBe(
+      "https://agentn.global.api5lat.cursor.sh",
+    )
+    expect(normalizeAgentRunOrigin("https://agentn.global.api5.cursor.sh")).toBe(
+      "https://agentn.global.api5.cursor.sh",
+    )
   })
 
-  it("strips paths and rejects non-agent hosts and http", () => {
+  it("strips paths and rejects non-*.cursor.sh hosts and http", () => {
     expect(normalizeAgentRunOrigin("https://evil.example")).toBeNull()
     expect(normalizeAgentRunOrigin("http://agentn.us.api5.cursor.sh")).toBeNull()
     expect(normalizeAgentRunOrigin("https://agentn.us.api5.cursor.sh/extra?a=b#c")).toBe(
       "https://agentn.us.api5.cursor.sh",
     )
     expect(isAllowedAgentHost("agentn.us.api5.cursor.sh")).toBe(true)
+    expect(isAllowedAgentHost("agent-gcpp-uswest.api5.cursor.sh")).toBe(true)
     expect(isAllowedAgentHost("evil.example")).toBe(false)
+    expect(isAllowedAgentHost("cursor.sh")).toBe(false)
+    expect(isAllowedAgentHost("cursor.sh.evil.com")).toBe(false)
   })
 })
 
@@ -62,11 +86,11 @@ describe("buildBaseHeaders", () => {
 })
 
 describe("explicit agent Run host overrides", () => {
-  it("rejects non-agent hosts before opening a Run stream", async () => {
+  it("rejects non-*.cursor.sh hosts before opening a Run stream", async () => {
     const model = createCursor({
       name: "cursor",
       accessToken: "token",
-      agentBaseURL: "https://api2.cursor.sh",
+      agentBaseURL: "https://evil.example",
     }).languageModel("cursor-test")
 
     await expect(

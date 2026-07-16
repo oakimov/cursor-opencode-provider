@@ -387,7 +387,7 @@ function resolveExplicitAgentBaseURL(options: CreateCursorOptions): string | und
   const normalized = normalizeAgentRunOrigin(raw)
   if (!normalized) {
     throw new Error(
-      "Invalid Cursor agent base URL override: expected https://agentn.<region>.api5.cursor.sh",
+      "Invalid Cursor agent base URL override: expected https://*.cursor.sh",
     )
   }
   return normalized
