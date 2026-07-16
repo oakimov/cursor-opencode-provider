@@ -5,8 +5,10 @@ import {
   cacheFilePath,
   resolveVariantParameters,
   paramsImplyMaxMode,
+  extractCursorVariantParameters,
+  CURSOR_VARIANT_PARAMETERS_KEY,
 } from "../src/models.js"
-import { modelInfoToConfig } from "../src/plugin.js"
+import { modelInfoToConfig, modelsToConfig } from "../src/plugin.js"
 
 describe("mapAvailableModelsResponse", () => {
   it("returns empty array for empty models", () => {
@@ -233,17 +235,17 @@ describe("modelInfoToConfig (context window selection)", () => {
     expect(cfg.limit.context).toBe(200000)
   })
 
-  it("uses the max-mode context for *-max entries", () => {
+  it("does not infer max mode from an intrinsic *-max model id", () => {
     const cfg = modelInfoToConfig({
       ...base,
       id: "claude-opus-4-8-max",
       maxContext: 200000,
       maxContextForMaxMode: 1000000,
     } as any)
-    expect(cfg.limit.context).toBe(1000000)
+    expect(cfg.limit.context).toBe(200000)
   })
 
-  it("falls back to the base context for a -max entry with no max-mode limit", () => {
+  it("uses the base context for a -max entry with no max-mode limit", () => {
     const cfg = modelInfoToConfig({
       ...base,
       id: "gpt-5-max",
@@ -255,6 +257,71 @@ describe("modelInfoToConfig (context window selection)", () => {
   it("falls back to 200000 when neither limit is present", () => {
     const cfg = modelInfoToConfig({ ...base, id: "unknown-model" } as any)
     expect(cfg.limit.context).toBe(200000)
+  })
+})
+
+describe("modelsToConfig (context-tier materialization)", () => {
+  const model: Parameters<typeof modelsToConfig>[0][number] = {
+    id: "claude-opus-4-8",
+    displayName: "Opus 4.8",
+    maxContext: 300_000,
+    maxContextForMaxMode: 1_000_000,
+    variants: [
+      {
+        key: "claude-opus-4-8",
+        displayName: "Opus 4.8 High",
+        isDefaultNonMax: true,
+        isDefaultMax: false,
+        parameterValues: [
+          { id: "context", value: "300k" },
+          { id: "effort", value: "high" },
+        ],
+      },
+      {
+        key: "claude-opus-4-8",
+        displayName: "Opus 4.8 1M High",
+        isDefaultNonMax: false,
+        isDefaultMax: true,
+        parameterValues: [
+          { id: "context", value: "1m" },
+          { id: "effort", value: "high" },
+        ],
+      },
+    ],
+  }
+
+  it("emits separate base and 1m entries with the real Cursor id", () => {
+    const config = modelsToConfig([model])
+
+    expect(Object.keys(config)).toEqual(["claude-opus-4-8", "claude-opus-4-8-1m"])
+    expect(config["claude-opus-4-8"].limit.context).toBe(300_000)
+    expect(config["claude-opus-4-8-1m"]).toMatchObject({
+      id: "claude-opus-4-8",
+      name: "Opus 4.8 1M",
+      limit: { context: 1_000_000 },
+      options: {
+        [CURSOR_VARIANT_PARAMETERS_KEY]: [
+          { id: "context", value: "1m" },
+          { id: "effort", value: "high" },
+        ],
+      },
+    })
+    expect(Object.keys(config["claude-opus-4-8"].variants)).toEqual(["Opus 4.8 High"])
+    expect(Object.keys(config["claude-opus-4-8-1m"].variants)).toEqual(["Opus 4.8 1M High"])
+
+    const picked = extractCursorVariantParameters(config["claude-opus-4-8-1m"].options)
+    const resolved = resolveVariantParameters(model, { picked })
+    expect(resolved.find((p) => p.id === "context")?.value).toBe("1m")
+    expect(paramsImplyMaxMode(resolved)).toBe(true)
+  })
+
+  it("avoids collisions with a real model id ending in -1m", () => {
+    const config = modelsToConfig([
+      model,
+      { id: "claude-opus-4-8-1m", displayName: "Real 1M model", variants: [] },
+    ])
+    expect(config).toHaveProperty("claude-opus-4-8-1m-2")
+    expect(config["claude-opus-4-8-1m-2"].id).toBe("claude-opus-4-8")
   })
 })
 
@@ -378,31 +445,42 @@ describe("resolveVariantParameters (picked variant + max mode)", () => {
     expect(params.find((p) => p.id === "fast")?.value).toBe("false")
   })
 
-  it("strips hint keys from picked before matching", () => {
-    const params = resolveVariantParameters(opus, {
-      picked: [
-        { id: "context", value: "1m" },
-        { id: "effort", value: "high" },
-        { id: "fast", value: "false" },
-        { id: "reasoningEffort", value: "high" },
-        { id: "maxMode", value: "true" },
-      ],
-      reasoningEffort: "high",
-      maxMode: true,
-    })
-    expect(params).toEqual([
-      { id: "context", value: "1m" },
-      { id: "effort", value: "high" },
-      { id: "fast", value: "false" },
-    ])
-  })
-
   it("forwards an unmatched picked paramMap instead of silently defaulting", () => {
     const picked = [
       { id: "context", value: "999k" },
       { id: "effort", value: "ultra" },
     ]
     expect(resolveVariantParameters(opus, { picked })).toEqual(picked)
+  })
+})
+
+describe("extractCursorVariantParameters", () => {
+  it("extracts only the dedicated variant payload", () => {
+    expect(extractCursorVariantParameters({
+      temperature: 0.2,
+      thinkingConfig: { enabled: true },
+      [CURSOR_VARIANT_PARAMETERS_KEY]: [
+        { id: "context", value: "1m" },
+        { id: "fast", value: "true" },
+      ],
+    })).toEqual([
+      { id: "context", value: "1m" },
+      { id: "fast", value: "true" },
+    ])
+  })
+
+  it("does not reinterpret unrelated provider options as Cursor parameters", () => {
+    expect(extractCursorVariantParameters({
+      context: "1m",
+      fast: true,
+      thinkingConfig: { enabled: true },
+    })).toBeUndefined()
+  })
+
+  it("rejects malformed dedicated payloads instead of stringifying objects", () => {
+    expect(extractCursorVariantParameters({
+      [CURSOR_VARIANT_PARAMETERS_KEY]: [{ id: "thinking", value: { enabled: true } }],
+    })).toBeUndefined()
   })
 })
 

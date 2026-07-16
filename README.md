@@ -102,7 +102,7 @@ Choose the **cursor** provider, then one of:
 | **Cursor account (browser login)** | PKCE OAuth — opens cursor.com to sign in |
 | **API key** | Paste a key from [cursor.com/settings](https://cursor.com/settings) (`sk-...`) |
 
-After login, the plugin fetches your available models and writes them to `~/.cache/opencode/cursor-models.json` (or `$XDG_CACHE_HOME/opencode/` when set). On later startups, if that cache is missing or empty but Cursor auth is still present, the plugin fetches again during config load.
+After login, the plugin fetches your available models and writes them to `~/.cache/opencode/cursor-models.json` (or `$XDG_CACHE_HOME/opencode/` when set). On later startups, a missing, empty, expired, or old-schema cache is refreshed during config load when Cursor auth is available; an existing stale cache remains usable if refresh fails.
 
 ### Paths (XDG)
 
@@ -119,6 +119,11 @@ Pick a model from the cached list (for example `composer-2.5`, `default`, or a C
 ```bash
 opencode run --model cursor/composer-2.5 "Hello from Cursor via OpenCode"
 ```
+
+When Cursor exposes both a base context tier and a `1m` tier for the same model,
+the plugin lists the long-context tier as a separate `<model-id>-1m` entry. It
+still routes to Cursor's original model id, but advertises the correct 1M limit
+to OpenCode so overflow checks and compaction match the selected tier.
 
 ## Programmatic usage
 

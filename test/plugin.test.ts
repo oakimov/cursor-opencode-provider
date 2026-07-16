@@ -3,12 +3,15 @@ import { mkdir, writeFile, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { CursorPlugin, modelInfoToConfig, thinkingSuffixBaseNames } from "../src/plugin.js"
-import { readCache, writeCache, type ModelInfo } from "../src/models.js"
+import { CURSOR_VARIANT_PARAMETERS_KEY, readCache, writeCache, type ModelInfo } from "../src/models.js"
 import { resetClientVersionCache } from "../src/protocol/client-version.js"
 import { resetAgentUrlCache } from "../src/agent-url.js"
 
 // Characters safeLabel must remove from emitted names/keys (issue #2).
 const INVALID = new RegExp("[()<>&\"'`]")
+const variantParams = (params: Array<{ id: string; value: string }>) => ({
+  [CURSOR_VARIANT_PARAMETERS_KEY]: params,
+})
 
 describe("modelInfoToConfig", () => {
   it("strips markup-breaking chars and parens from name + variant keys, keeps names readable", () => {
@@ -49,8 +52,12 @@ describe("modelInfoToConfig", () => {
     const keys = Object.keys(config.variants)
     expect(keys).toEqual(["Claude Opus 4.8 Low", "Claude Opus 4.8 Max"])
     for (const k of keys) expect(k).not.toMatch(INVALID)
-    expect(config.variants["Claude Opus 4.8 Low"]).toEqual({ effort: "low" })
-    expect(config.variants["Claude Opus 4.8 Max"]).toEqual({ effort: "max" })
+    expect(config.variants["Claude Opus 4.8 Low"]).toEqual(
+      variantParams([{ id: "effort", value: "low" }]),
+    )
+    expect(config.variants["Claude Opus 4.8 Max"]).toEqual(
+      variantParams([{ id: "effort", value: "max" }]),
+    )
   })
 
   it("leaves already-clean names unchanged and omits variants when none exist", () => {
@@ -91,8 +98,12 @@ describe("modelInfoToConfig", () => {
     const keys = Object.keys(config.variants)
     expect(keys).toHaveLength(2)
     expect(keys).toEqual(["Composer 2.5 default", "Composer 2.5 Fast"])
-    expect(config.variants["Composer 2.5 default"]).toEqual({ fast: "false" })
-    expect(config.variants["Composer 2.5 Fast"]).toEqual({ fast: "true" })
+    expect(config.variants["Composer 2.5 default"]).toEqual(
+      variantParams([{ id: "fast", value: "false" }]),
+    )
+    expect(config.variants["Composer 2.5 Fast"]).toEqual(
+      variantParams([{ id: "fast", value: "true" }]),
+    )
   })
 
   it("disambiguates variant keys that collide after sanitization", () => {
@@ -120,8 +131,12 @@ describe("modelInfoToConfig", () => {
     }
     const config = modelInfoToConfig(mi)
     expect(Object.keys(config.variants)).toEqual(["Same x", "Same x Fast"])
-    expect(config.variants["Same x"]).toEqual({ fast: "false" })
-    expect(config.variants["Same x Fast"]).toEqual({ fast: "true" })
+    expect(config.variants["Same x"]).toEqual(
+      variantParams([{ id: "fast", value: "false" }]),
+    )
+    expect(config.variants["Same x Fast"]).toEqual(
+      variantParams([{ id: "fast", value: "true" }]),
+    )
   })
 
   it("falls back to default when the colliding variant has no distinguishing param", () => {
@@ -362,6 +377,31 @@ describe("loadModels on cache miss", () => {
     expect(availableModelsCalls).toBe(1)
     expect(refreshCalls).toBe(0)
     expect((await readCache(cacheDir))?.models[0]?.id).toBe("fetched-model")
+  })
+
+  it("refreshes an old-schema nonempty cache before config materializes models", async () => {
+    await writeCache(cacheDir, {
+      fetchedAt: Date.now(),
+      models: [{ id: "stale-model", displayName: "Stale", variants: [] }],
+    })
+    await writeAuth({
+      type: "oauth",
+      access: fakeJwt(3600),
+      refresh: "refresh-tok",
+      expires: Date.now() + 3_600_000,
+    })
+
+    const plugin = await CursorPlugin(pluginInput())
+    const config: { provider?: Record<string, { models?: Record<string, unknown> }> } = {}
+    await plugin.config?.(config as never)
+
+    expect(config.provider?.cursor?.models).toHaveProperty("fetched-model")
+    expect(config.provider?.cursor?.models).not.toHaveProperty("stale-model")
+    expect(availableModelsCalls).toBe(1)
+    expect(await readCache(cacheDir)).toMatchObject({
+      schemaVersion: 2,
+      models: [{ id: "fetched-model" }],
+    })
   })
 
   it("refreshes expired oauth, preserves extras, then fetches models", async () => {

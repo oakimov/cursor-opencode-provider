@@ -23,7 +23,7 @@ import { handleKvServerMessage } from "./protocol/kv.js"
 import { getCheckpoint, setCheckpoint } from "./protocol/checkpoint.js"
 import { conversationBlobCount } from "./protocol/blob-store.js"
 import { sessionManager, type CursorSession, type Frame } from "./session.js"
-import { readCache, cacheFilePath, resolveVariantParameters, paramsImplyMaxMode, type ModelInfo } from "./models.js"
+import { readCache, cacheFilePath, resolveVariantParameters, paramsImplyMaxMode, extractCursorVariantParameters, type ModelInfo } from "./models.js"
 import { buildRequestContext } from "./context/build.js"
 import { opencodeGlobalCacheDir } from "./context/paths.js"
 import { resolveAgentUrl } from "./agent-url.js"
@@ -221,18 +221,10 @@ async function startSession(
     }))
 
   const providerOptions = callOptions.providerOptions?.cursor as Record<string, unknown> | undefined
-  // opencode sends the *full* paramMap of the user-selected variant as
-  // `providerOptions["<slug>"]`; the slug is the provider id (`cursor`).
-  // Forward it (minus hint keys) so every chosen param (context, effort, fast,
-  // thinking, …) reaches Cursor — picking a variant in the TUI must end up in
-  // `requested_model.parameters`.
-  const pickedVariant = providerOptions
-    ? Object.entries(providerOptions)
-        .filter(([k]) => k !== "reasoningEffort" && k !== "maxMode")
-        .map(([k, v]) => ({ id: k, value: String(v) }))
-    : undefined
-  const picked =
-    pickedVariant && pickedVariant.length > 0 ? pickedVariant : undefined
+  // OpenCode merges model, agent, and selected-variant options before placing
+  // them under providerOptions.cursor. Read only the plugin's dedicated nested
+  // payload so unrelated options never become requested_model.parameters.
+  const picked = extractCursorVariantParameters(providerOptions)
   const reasoningEffort = typeof providerOptions?.reasoningEffort === "string"
     ? providerOptions.reasoningEffort
     : undefined

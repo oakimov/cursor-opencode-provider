@@ -2,7 +2,7 @@ import type { Hooks, PluginInput, AuthOAuthResult, Config } from "@opencode-ai/p
 import type { Auth } from "@opencode-ai/sdk"
 import { CURSOR_PROVIDER_ID, CURSOR_WEBSITE_HOST, CURSOR_API_HOST } from "./shared.js"
 import { pollForTokens, exchangeApiKey, refreshAccessToken, isExpiringSoon, generatePkceParams, generatePkceChallenge, buildLoginUrl, decodeJwtPayload } from "./auth.js"
-import { readCache, discoverModels, isCacheFresh, type ModelInfo } from "./models.js"
+import { CURSOR_VARIANT_PARAMETERS_KEY, readCache, discoverModels, isCacheFresh, type ModelInfo, type ModelVariant } from "./models.js"
 import { opencodeGlobalCacheDir } from "./context/paths.js"
 import { readStoredAuth, type StoredAuth } from "./context/auth-store.js"
 import { resolveAgentUrl } from "./agent-url.js"
@@ -35,8 +35,11 @@ function baseName(mi: ModelInfo): string {
   return safeLabel(mi.displayName ?? mi.id)
 }
 
-function modelInfoVariants(mi: ModelInfo): Record<string, Record<string, unknown>> | undefined {
-  if (mi.variants.length === 0) return undefined
+function modelInfoVariants(
+  mi: ModelInfo,
+  variants: ModelVariant[],
+): Record<string, Record<string, unknown>> | undefined {
+  if (variants.length === 0) return undefined
   const entries: Record<string, Record<string, unknown>> = {}
   const usedKeys = new Set<string>()
   const baseName = safeLabel(mi.displayName ?? mi.id)
@@ -66,7 +69,7 @@ function modelInfoVariants(mi: ModelInfo): Record<string, Record<string, unknown
     return " default"
   }
 
-  for (const v of mi.variants) {
+  for (const v of variants) {
     const sanitized = safeLabel(v.displayName || v.key || "default")
     let key = sanitized
     // Never let a variant key equal the model name — that would make the
@@ -81,11 +84,19 @@ function modelInfoVariants(mi: ModelInfo): Record<string, Record<string, unknown
     while (usedKeys.has(key)) key = `${sanitized}${tagDims(v.parameterValues)} ${n++}`
     usedKeys.add(key)
 
-    const params: Record<string, unknown> = {}
-    for (const p of v.parameterValues) params[p.id] = p.value
-    entries[key] = params
+    entries[key] = {
+      [CURSOR_VARIANT_PARAMETERS_KEY]: v.parameterValues.map((p) => ({ ...p })),
+    }
   }
   return entries
+}
+
+function isLongContextVariant(v: ModelVariant): boolean {
+  return v.parameterValues.some((p) => p.id === "context" && p.value === "1m")
+}
+
+function variantsForTier(mi: ModelInfo, tier: "base" | "long"): ModelVariant[] {
+  return mi.variants.filter((v) => isLongContextVariant(v) === (tier === "long"))
 }
 
 /**
@@ -112,17 +123,19 @@ export function thinkingSuffixBaseNames(models: ModelInfo[]): Set<string> {
 
 export function modelInfoToConfig(
   mi: ModelInfo,
-  options: { thinkingSuffix?: boolean } = {},
+  options: { thinkingSuffix?: boolean; contextTier?: "base" | "long" } = {},
 ) {
+  const contextTier = options.contextTier ?? "base"
+  const variants = variantsForTier(mi, contextTier)
   let name = baseName(mi)
   if (options.thinkingSuffix) name += " Thinking"
-  // Cursor explodes max-mode into its own model id (e.g. "...-max"); use the
-  // max-mode context limit (proto field 16) for those, the base limit (field
-  // 15) for everything else. 200k stays only as a last-resort fallback.
-  const isMaxEntry = /(^|-)max(-|$)/i.test(mi.id)
-  const context = (isMaxEntry
-    ? (mi.maxContextForMaxMode ?? mi.maxContext)
-    : mi.maxContext) ?? 200000
+  if (contextTier === "long") name += " 1M"
+  // OpenCode's context limit is static per model entry, while Cursor's context
+  // tier is a variant parameter. Long-context choices are therefore emitted as
+  // separate OpenCode entries by modelsToConfig.
+  const context = contextTier === "long"
+    ? (mi.maxContextForMaxMode ?? 1_000_000)
+    : (mi.maxContext ?? 200_000)
   const config: Record<string, any> = {
     name,
     reasoning: mi.supportsThinking ?? false,
@@ -133,18 +146,44 @@ export function modelInfoToConfig(
       output: 4096,
     },
   }
-  const variants = modelInfoVariants(mi)
-  if (variants) config.variants = variants
+  const variantConfig = modelInfoVariants(mi, variants)
+  if (variantConfig) config.variants = variantConfig
+  if (contextTier === "long") {
+    const defaultVariant = variants.find((v) => v.isDefaultMax) ?? variants[0]
+    config.id = mi.id
+    if (defaultVariant) {
+      config.options = {
+        [CURSOR_VARIANT_PARAMETERS_KEY]: defaultVariant.parameterValues.map((p) => ({ ...p })),
+      }
+    }
+  }
   return config
 }
 
-function modelsToConfig(models: ModelInfo[]): Record<string, any> {
+export function modelsToConfig(models: ModelInfo[]): Record<string, any> {
   const ambiguous = thinkingSuffixBaseNames(models)
   const out: Record<string, any> = {}
+  const usedIds = new Set(models.map((m) => m.id))
   for (const m of models) {
-    out[m.id] = modelInfoToConfig(m, {
-      thinkingSuffix: !!m.supportsThinking && ambiguous.has(baseName(m)),
-    })
+    const thinkingSuffix = !!m.supportsThinking && ambiguous.has(baseName(m))
+    const baseVariants = variantsForTier(m, "base")
+    const longVariants = variantsForTier(m, "long")
+
+    if (baseVariants.length > 0 || longVariants.length === 0) {
+      out[m.id] = modelInfoToConfig(m, { thinkingSuffix, contextTier: "base" })
+    }
+    if (longVariants.length === 0) continue
+
+    if (baseVariants.length === 0) {
+      out[m.id] = modelInfoToConfig(m, { thinkingSuffix, contextTier: "long" })
+      continue
+    }
+
+    let longId = `${m.id}-1m`
+    let suffix = 2
+    while (usedIds.has(longId)) longId = `${m.id}-1m-${suffix++}`
+    usedIds.add(longId)
+    out[longId] = modelInfoToConfig(m, { thinkingSuffix, contextTier: "long" })
   }
   return out
 }
@@ -263,24 +302,28 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
 
   async function loadModels(): Promise<Record<string, any>> {
     const cached = await readCache(cacheDir)
-    if (!cached || cached.models.length === 0) {
-      // Config runs before auth.loader and has no getAuth(); read the durable
-      // store (normally the same source getAuth() uses).
-      const auth = await authFromStore()
-      if (auth) {
-        const accessToken = await resolveAccessToken(auth)
-        if (accessToken) {
-          try {
-            const models = await discoverModels(accessToken, cacheDir, { baseURL: apiBaseURL })
-            return modelsToConfig(models)
-          } catch {
-            // discovery failed — leave the list empty
-          }
+    if (cached?.models.length && isCacheFresh(cached)) {
+      return modelsToConfig(cached.models)
+    }
+
+    // Config runs before auth.loader and has no getAuth(); read the durable
+    // store (normally the same source getAuth() uses). Refresh missing, expired,
+    // or old-schema caches here so this process materializes the new model set.
+    const auth = await authFromStore()
+    if (auth) {
+      const accessToken = await resolveAccessToken(auth)
+      if (accessToken) {
+        try {
+          const models = await discoverModels(accessToken, cacheDir, { baseURL: apiBaseURL })
+          return modelsToConfig(models)
+        } catch {
+          // No usable cache and discovery failed — leave the list empty.
         }
       }
-      return {}
     }
-    return modelsToConfig(cached.models)
+
+    // Preserve stale-on-failure/offline behavior for an existing cache.
+    return cached?.models.length ? modelsToConfig(cached.models) : {}
   }
 
   return {
