@@ -50,7 +50,17 @@ export async function unaryAvailableModels(
       "content-type": "application/json",
       accept: "application/json",
     },
-    body: "{}",
+    // AvailableModelsRequest flags (proto aiserver.v1). The IDE sets these
+    // (modelConfigService.js useModelParameters, entry.js includeLongContextModels).
+    // useModelParameters + useCloudAgentEffortModes return parameterized
+    // variants (effort/context/fast). includeLongContextModels may populate
+    // context_token_limit fields; when those stay empty we still derive limits
+    // from each variant's `context` param in mapAvailableModelsResponse.
+    body: JSON.stringify({
+      includeLongContextModels: true,
+      useModelParameters: true,
+      useCloudAgentEffortModes: true,
+    }),
   })
 
   if (!res.ok) {

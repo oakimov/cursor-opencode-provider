@@ -23,7 +23,7 @@ import { handleKvServerMessage } from "./protocol/kv.js"
 import { getCheckpoint, setCheckpoint } from "./protocol/checkpoint.js"
 import { conversationBlobCount } from "./protocol/blob-store.js"
 import { sessionManager, type CursorSession, type Frame } from "./session.js"
-import { readCache, cacheFilePath, resolveVariantParameters, type ModelInfo } from "./models.js"
+import { readCache, cacheFilePath, resolveVariantParameters, paramsImplyMaxMode, type ModelInfo } from "./models.js"
 import { buildRequestContext } from "./context/build.js"
 import { opencodeGlobalCacheDir } from "./context/paths.js"
 import { resolveAgentUrl } from "./agent-url.js"
@@ -221,11 +221,32 @@ async function startSession(
     }))
 
   const providerOptions = callOptions.providerOptions?.cursor as Record<string, unknown> | undefined
-  const reasoningEffort = providerOptions?.reasoningEffort as string | undefined
-  const maxMode = !!(providerOptions?.maxMode ?? false)
+  // opencode sends the *full* paramMap of the user-selected variant as
+  // `providerOptions["<slug>"]`; the slug is the provider id (`cursor`).
+  // Forward it (minus hint keys) so every chosen param (context, effort, fast,
+  // thinking, …) reaches Cursor — picking a variant in the TUI must end up in
+  // `requested_model.parameters`.
+  const pickedVariant = providerOptions
+    ? Object.entries(providerOptions)
+        .filter(([k]) => k !== "reasoningEffort" && k !== "maxMode")
+        .map(([k, v]) => ({ id: k, value: String(v) }))
+    : undefined
+  const picked =
+    pickedVariant && pickedVariant.length > 0 ? pickedVariant : undefined
+  const reasoningEffort = typeof providerOptions?.reasoningEffort === "string"
+    ? providerOptions.reasoningEffort
+    : undefined
+  const hintMaxMode = !!(providerOptions?.maxMode ?? false)
 
   const modelInfo = _availableModels?.find((m) => m.id === modelId)
-  const parameterValues = resolveVariantParameters(modelInfo, { reasoningEffort, maxMode })
+  const parameterValues = resolveVariantParameters(modelInfo, {
+    reasoningEffort,
+    maxMode: hintMaxMode,
+    picked,
+  })
+  // Wire max_mode from the hint *or* a 1m context pick — OpenCode's variant
+  // paramMap does not include a maxMode key when the user selects 1m.
+  const maxMode = hintMaxMode || paramsImplyMaxMode(parameterValues)
 
   // Do NOT pass callOptions.abortSignal into the h2 Run stream. OpenCode aborts
   // that signal when a turn ends with tool-calls; the Cursor stream must stay

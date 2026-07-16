@@ -12,9 +12,10 @@ const INVALID = new RegExp("[()<>&\"'`]")
 
 describe("modelInfoToConfig", () => {
   it("strips markup-breaking chars and parens from name + variant keys, keeps names readable", () => {
+    // The HTML-tag strip keeps inner text, so <span>…</span>Opus becomes Opus.
     const mi: ModelInfo = {
       id: "claude-opus-4-8",
-      displayName: 'Claude <opus> "4.8"',
+      displayName: 'Claude <span style="color: var(--cursor-text-tertiary);">Opus</span> 4.8',
       supportsThinking: false,
       supportsAgent: true,
       maxContext: 300000,
@@ -39,8 +40,9 @@ describe("modelInfoToConfig", () => {
 
     const config = modelInfoToConfig(mi)
 
-    // Model name: < > " removed, readable text preserved.
-    expect(config.name).toBe("Claude opus 4.8")
+    // Model name: HTML tags stripped, parens and markup chars gone, the
+    // plain-text tokens adjacent to the markup are preserved.
+    expect(config.name).toBe("Claude Opus 4.8")
     expect(config.name).not.toMatch(INVALID)
 
     // Variant keys: parens removed, no markup chars, unique, params intact.
@@ -58,7 +60,45 @@ describe("modelInfoToConfig", () => {
     expect(config.variants).toBeUndefined()
   })
 
+  it("disambiguates variants that share a display name by tagging distinguishing params", () => {
+    // Mirrors Cursor's Composer 2.5: both variants render the same base
+    // display name (the "Fast" suffix is in a <span> that safeLabel drops);
+    // without disambiguation the colliding variant would silently overwrite
+    // the first under the same key. The first variant's key also gets
+    // suffixed so it never equals the model name itself.
+    const mi: ModelInfo = {
+      id: "composer-2.5",
+      displayName: "Composer 2.5",
+      variants: [
+        {
+          key: "composer-2.5",
+          displayName: "Composer 2.5",
+          isDefaultNonMax: true,
+          isDefaultMax: false,
+          parameterValues: [{ id: "fast", value: "false" }],
+        },
+        {
+          key: "composer-2.5",
+          displayName: "Composer 2.5",
+          isDefaultNonMax: false,
+          isDefaultMax: true,
+          parameterValues: [{ id: "fast", value: "true" }],
+        },
+      ],
+    }
+
+    const config = modelInfoToConfig(mi)
+    const keys = Object.keys(config.variants)
+    expect(keys).toHaveLength(2)
+    expect(keys).toEqual(["Composer 2.5 default", "Composer 2.5 Fast"])
+    expect(config.variants["Composer 2.5 default"]).toEqual({ fast: "false" })
+    expect(config.variants["Composer 2.5 Fast"]).toEqual({ fast: "true" })
+  })
+
   it("disambiguates variant keys that collide after sanitization", () => {
+    // Two variants share a sanitized display name and differ only by the
+    // `fast` param; the second should be tagged Fast so the picker keeps
+    // both visible.
     const mi: ModelInfo = {
       id: "m",
       variants: [
@@ -67,21 +107,39 @@ describe("modelInfoToConfig", () => {
           displayName: "Same (x)",
           isDefaultNonMax: true,
           isDefaultMax: false,
-          parameterValues: [{ id: "effort", value: "low" }],
+          parameterValues: [{ id: "fast", value: "false" }],
         },
         {
           key: "m",
           displayName: "Same (x)",
           isDefaultNonMax: false,
           isDefaultMax: true,
-          parameterValues: [{ id: "effort", value: "high" }],
+          parameterValues: [{ id: "fast", value: "true" }],
         },
       ],
     }
     const config = modelInfoToConfig(mi)
-    expect(Object.keys(config.variants)).toEqual(["Same x", "Same x--2"])
-    expect(config.variants["Same x"]).toEqual({ effort: "low" })
-    expect(config.variants["Same x--2"]).toEqual({ effort: "high" })
+    expect(Object.keys(config.variants)).toEqual(["Same x", "Same x Fast"])
+    expect(config.variants["Same x"]).toEqual({ fast: "false" })
+    expect(config.variants["Same x Fast"]).toEqual({ fast: "true" })
+  })
+
+  it("falls back to default when the colliding variant has no distinguishing param", () => {
+    const mi: ModelInfo = {
+      id: "m",
+      displayName: "M",
+      variants: [
+        { key: "m", displayName: "M", isDefaultNonMax: true, isDefaultMax: false,
+          parameterValues: [{ id: "effort", value: "low" }] },
+        { key: "m", displayName: "M", isDefaultNonMax: false, isDefaultMax: true,
+          parameterValues: [{ id: "effort", value: "high" }] },
+      ],
+    }
+    const config = modelInfoToConfig(mi)
+    // First variant collides with the model name itself, gets suffixed.
+    // Second variant collides with the first, also gets default since
+    // "effort" is not in the distinguishing set.
+    expect(Object.keys(config.variants)).toEqual(["M default", "M default 2"])
   })
 
   it("tags only the thinking model of an ambiguous pair (Cursor's Claude convention)", () => {

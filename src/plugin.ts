@@ -10,14 +10,21 @@ import { resolveAgentUrl } from "./agent-url.js"
 const MODULE_URL = new URL("./index.js", import.meta.url).href
 
 /**
- * Strip characters that break rendering in the OpenCode Desktop webview from a
- * model or variant display name: HTML/markup chars (`< > & " ' \``), parentheses,
- * Tabs/newlines collapse to single spaces; dots and unicode letters are preserved so names
- * stay readable. Fixes https://github.com/oakimov/cursor-opencode-provider/issues/2.
+ * Strip characters and markup that break rendering in the OpenCode TUI/GUI from
+ * a model or variant display name:
+ *   • HTML tags (e.g. `<span style="…">Medium</span>`) — the IDE colours variant
+ *     suffixes with a CSS var that doesn't exist in OpenCode, so the raw markup
+ *     would show as literal text. We drop the tags and keep the inner text
+ *     ("Medium").
+ *   • HTML/markup chars (`< > & " ' \``), parentheses.
+ *   • Tabs/newlines collapse to single spaces.
+ * Dots and unicode letters are preserved so names stay readable.
+ * Fixes https://github.com/oakimov/cursor-opencode-provider/issues/2.
  */
 function safeLabel(value: string): string {
   return (
     value
+      .replace(/<[^>]+>/g, "")
       .replace(/[()<>&"'`]/g, "")
       .replace(/\s+/g, " ")
       .trim() || "default"
@@ -32,17 +39,50 @@ function modelInfoVariants(mi: ModelInfo): Record<string, Record<string, unknown
   if (mi.variants.length === 0) return undefined
   const entries: Record<string, Record<string, unknown>> = {}
   const usedKeys = new Set<string>()
+  const baseName = safeLabel(mi.displayName ?? mi.id)
+
+  // Each variant's key is `safeLabel(displayName)` (the IDE's own label, e.g.
+  // "Opus 4.8 1M High Fast Thinking") so the picker matches what the user
+  // sees in Cursor. Two variants can sanitize to the same name when the IDE
+  // wraps a differentiator in `<span>…</span>` (e.g. Composer's "Fast"
+  // suffix collapses to the bare model name after stripping). To guarantee
+  // every variant stays pickable:
+  //   1. If the sanitized displayName matches the model name itself, suffix
+  //      it with distinguishing params (or "default") so it never collides
+  //      with the model entry in the variant panel.
+  //   2. If two variants still collide, tag the later one with its params.
+  // Suffixes must stay free of `()` / markup chars — same constraint as
+  // safeLabel (issue #2); use spaced tokens, not parenthetical tags.
+  const tagDims = (p: { id: string; value: string }[]): string => {
+    const labels: string[] = []
+    for (const d of p) {
+      if (d.id === "fast" && d.value === "true") labels.push("Fast")
+      else if (d.id === "thinking" && d.value === "true") labels.push("Thinking")
+      else if (d.id === "context") labels.push(d.value)
+    }
+    if (labels.length > 0) return ` ${labels.join(" ")}`
+    // No params at all — still disambiguate from the model name itself.
+    if (p.length === 0) return ""
+    return " default"
+  }
+
   for (const v of mi.variants) {
-    const base = safeLabel(v.displayName || v.key || "default")
-    let key = base
-    let suffix = 2
-    while (usedKeys.has(key)) key = `${base}--${suffix++}`
+    const sanitized = safeLabel(v.displayName || v.key || "default")
+    let key = sanitized
+    // Never let a variant key equal the model name — that would make the
+    // variant entry indistinguishable from the model entry in pickers that
+    // collapse them.
+    if (key === baseName && !usedKeys.has(key)) {
+      key = `${baseName}${tagDims(v.parameterValues)}` || `${baseName} default`
+    } else if (usedKeys.has(key)) {
+      key = `${sanitized}${tagDims(v.parameterValues)}`
+    }
+    let n = 2
+    while (usedKeys.has(key)) key = `${sanitized}${tagDims(v.parameterValues)} ${n++}`
     usedKeys.add(key)
 
     const params: Record<string, unknown> = {}
-    for (const p of v.parameterValues) {
-      params[p.id] = p.value
-    }
+    for (const p of v.parameterValues) params[p.id] = p.value
     entries[key] = params
   }
   return entries
@@ -76,13 +116,20 @@ export function modelInfoToConfig(
 ) {
   let name = baseName(mi)
   if (options.thinkingSuffix) name += " Thinking"
+  // Cursor explodes max-mode into its own model id (e.g. "...-max"); use the
+  // max-mode context limit (proto field 16) for those, the base limit (field
+  // 15) for everything else. 200k stays only as a last-resort fallback.
+  const isMaxEntry = /(^|-)max(-|$)/i.test(mi.id)
+  const context = (isMaxEntry
+    ? (mi.maxContextForMaxMode ?? mi.maxContext)
+    : mi.maxContext) ?? 200000
   const config: Record<string, any> = {
     name,
     reasoning: mi.supportsThinking ?? false,
     tool_call: mi.supportsAgent ?? true,
     temperature: false,
     limit: {
-      context: mi.maxContext ?? 200000,
+      context,
       output: 4096,
     },
   }

@@ -1,4 +1,4 @@
-import { MODEL_CACHE_FILE, MODEL_CACHE_TTL_MS } from "./shared.js"
+import { MODEL_CACHE_FILE, MODEL_CACHE_SCHEMA_VERSION, MODEL_CACHE_TTL_MS } from "./shared.js"
 import { unaryAvailableModels } from "./transport/connect.js"
 import { buildRequestedModelParams } from "./protocol/thinking.js"
 import { readFile, writeFile, mkdir } from "node:fs/promises"
@@ -24,6 +24,8 @@ export type ModelInfo = {
   supportsThinking?: boolean
   supportsAgent?: boolean
   maxContext?: number
+  /** Context window when max-mode is on (proto field 16). */
+  maxContextForMaxMode?: number
   supportsMaxMode?: boolean
   variants: ModelVariant[]
 }
@@ -31,11 +33,52 @@ export type ModelInfo = {
 export type ModelCache = {
   models: ModelInfo[]
   fetchedAt: number
+  /** Absent or mismatched → treat cache as stale (forces AvailableModels refetch). */
+  schemaVersion?: number
+}
+
+/** OpenCode/provider hint keys that may ride alongside a variant paramMap. */
+const PROVIDER_HINT_KEYS = new Set(["reasoningEffort", "maxMode"])
+
+/** Drop hint keys so they never poison variant signature matching. */
+export function stripProviderHints(
+  params: ModelParameterValue[],
+): ModelParameterValue[] {
+  return params.filter((p) => !PROVIDER_HINT_KEYS.has(p.id))
+}
+
+/** True when resolved params select the long-context (1m) tier. */
+export function paramsImplyMaxMode(params: ModelParameterValue[]): boolean {
+  return params.some((p) => p.id === "context" && p.value === "1m")
+}
+
+// Cursor encodes a model's context window as a variant parameter `id: "context"`
+// whose value is a tier string — the same 200k / 272k / 300k / 1m the IDE's
+// picker shows. The base tier rides on the default non-max variant; the 1M
+// tier (when the model supports max mode) rides on the default max variant.
+// `context_token_limit` (#15) / `context_token_limit_for_max_mode` (#16) are
+// also defined on AvailableModel but the server often leaves them empty — the
+// variant param is the primary source (request flags may still populate them).
+const CONTEXT_TIER_TO_TOKENS: Record<string, number> = {
+  "200k": 200_000,
+  "272k": 272_000,
+  "300k": 300_000,
+  "1m": 1_000_000,
+}
+
+function variantContextTokens(v: ModelVariant | undefined): number | undefined {
+  const raw = v?.parameterValues.find((p) => p.id === "context")?.value
+  if (!raw) return undefined
+  const mapped = CONTEXT_TIER_TO_TOKENS[raw]
+  if (mapped !== undefined) return mapped
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : undefined
 }
 
 // ── Cache helpers ──
 
 export function isCacheFresh(cache: ModelCache, ttlMs = MODEL_CACHE_TTL_MS): boolean {
+  if (cache.schemaVersion !== MODEL_CACHE_SCHEMA_VERSION) return false
   return Date.now() - cache.fetchedAt < ttlMs
 }
 
@@ -90,12 +133,28 @@ export function mapAvailableModelsResponse(
       })
     }
 
+    // Derive the context window from the variant `context` param (primary
+    // source). Base tier ← default non-max variant; max tier ← default max
+    // variant. Fall back to the (often empty) proto fields, then undefined.
+    // Prefer a non-1m context when isDefaultNonMax is missing so a leading
+    // max-mode variant cannot inflate the base window.
+    const variantBaseContext =
+      variantContextTokens(variants.find((v) => v.isDefaultNonMax)) ??
+      variantContextTokens(
+        variants.find((v) =>
+          v.parameterValues.some((p) => p.id === "context" && p.value !== "1m"),
+        ),
+      ) ??
+      variantContextTokens(variants.find((v) => v.parameterValues.some((p) => p.id === "context")))
+    const variantMaxContext = variantContextTokens(variants.find((v) => v.isDefaultMax))
+
     models.push({
       id: name,
       displayName: (e.clientDisplayName ?? e.client_display_name ?? name) as string,
       supportsThinking: !!(e.supportsThinking ?? e.supports_thinking ?? false),
       supportsAgent: !!(e.supportsAgent ?? e.supports_agent ?? false),
-      maxContext: (e.contextTokenLimit ?? e.context_token_limit ?? undefined) as number | undefined,
+      maxContext: (variantBaseContext ?? e.contextTokenLimit ?? e.context_token_limit ?? undefined) as number | undefined,
+      maxContextForMaxMode: (variantMaxContext ?? e.contextTokenLimitForMaxMode ?? e.context_token_limit_for_max_mode ?? undefined) as number | undefined,
       supportsMaxMode: !!(e.supportsMaxMode ?? e.supports_max_mode ?? false),
       variants,
     })
@@ -108,17 +167,28 @@ export function mapAvailableModelsResponse(
 
 /**
  * Resolve the parameter values to send in `requested_model.parameters` for a
- * given model + requested reasoning effort. Each variant already carries the
- * full `{id,value}` set (per-model vocabulary), so we pick the matching variant
- * and return its parameters verbatim — the client never constructs these by
- * hand.
+ * given model + the variant opencode selected. Each variant already carries
+ * the full `{id,value}` set (per-model vocabulary — effort, fast, thinking,
+ * context, …), so we pick the matching variant and return its parameters
+ * verbatim — the client never constructs these by hand.
+ *
+ * `picked` is the user-selected variant paramMap (opencode sends it under
+ * `providerOptions.cursor`); when present it wins over effort/maxMode hints
+ * so every param the user chose (context, fast, …) is forwarded to Cursor.
+ * Hint keys (`reasoningEffort`, `maxMode`) are stripped before matching.
  */
 export function resolveVariantParameters(
   model: ModelInfo | undefined,
-  opts: { reasoningEffort?: string; maxMode?: boolean } = {},
+  opts: {
+    reasoningEffort?: string
+    maxMode?: boolean
+    picked?: ModelParameterValue[]
+  } = {},
 ): ModelParameterValue[] {
+  const picked = opts.picked?.length ? stripProviderHints(opts.picked) : undefined
+
   if (!model || model.variants.length === 0) {
-    // No variant metadata: fall back to a bare effort param if requested.
+    if (picked?.length) return picked
     return opts.reasoningEffort ? [{ id: "effort", value: opts.reasoningEffort }] : []
   }
 
@@ -126,13 +196,43 @@ export function resolveVariantParameters(
     v.parameterValues.find((p) => p.id === "effort" || p.id === "reasoning")?.value
   const isFast = (v: ModelVariant): boolean =>
     v.parameterValues.find((p) => p.id === "fast")?.value === "true"
+  const contextOf = (v: ModelVariant): string | undefined =>
+    v.parameterValues.find((p) => p.id === "context")?.value
+  const isMaxVariant = (v: ModelVariant): boolean =>
+    v.isDefaultMax || contextOf(v) === "1m"
 
   const wantMax = opts.maxMode ?? false
-  const candidates = model.variants.filter((v) => !isFast(v))
-  const pool = candidates.length > 0 ? candidates : model.variants
+  // Non-fast pool for hint-based resolution only. Exact `picked` matching
+  // searches all variants so Fast selections are not silently dropped.
+  const pool = model.variants.filter((v) => !isFast(v))
+  const scoped = pool.length > 0 ? pool : model.variants
 
+  // 1. Variant explicitly picked by opencode (verbatim — preserves context, fast, …).
+  if (picked?.length) {
+    const signature = new Set(picked.map((p) => `${p.id}=${p.value}`))
+    const exact = model.variants.find(
+      (v) =>
+        v.parameterValues.every((p) => signature.has(`${p.id}=${p.value}`)) &&
+        signature.size === v.parameterValues.length,
+    )
+    if (exact) {
+      return buildRequestedModelParams(exact.parameterValues, {
+        reasoningEffort: opts.reasoningEffort,
+        maxMode: wantMax,
+      })
+    }
+    // Unmatched: forward the stripped pick so the TUI choice is not discarded.
+    return picked
+  }
+
+  // When maxMode is requested, prefer max-tier variants for effort matching
+  // so "high + max" lands on 1m high rather than the first 300k high.
+  const maxScoped = wantMax ? scoped.filter(isMaxVariant) : []
+  const effortPool = maxScoped.length > 0 ? maxScoped : scoped
+
+  // 2. Effort hint (e.g. user passed reasoningEffort through the CLI).
   if (opts.reasoningEffort) {
-    const match = pool.find((v) => effortOf(v) === opts.reasoningEffort)
+    const match = effortPool.find((v) => effortOf(v) === opts.reasoningEffort)
     if (match) {
       return buildRequestedModelParams(match.parameterValues, {
         reasoningEffort: opts.reasoningEffort,
@@ -141,11 +241,17 @@ export function resolveVariantParameters(
     }
   }
 
-  const byDefault = pool.find((v) => (wantMax ? v.isDefaultMax : v.isDefaultNonMax))
-  const base = (byDefault ?? pool[0]).parameterValues
-  return buildRequestedModelParams(base, {
+  // 3. Max-mode hint → prefer the default max variant (1m context).
+  if (wantMax) {
+    const max = scoped.find((v) => v.isDefaultMax) ?? scoped.find((v) => contextOf(v) === "1m")
+    if (max) return buildRequestedModelParams(max.parameterValues, { maxMode: true })
+  }
+
+  // 4. Default non-max variant.
+  const byDefault = scoped.find((v) => v.isDefaultNonMax) ?? scoped[0]
+  return buildRequestedModelParams(byDefault.parameterValues, {
     reasoningEffort: opts.reasoningEffort,
-    maxMode: wantMax,
+    maxMode: false,
   })
 }
 
@@ -171,7 +277,11 @@ export async function discoverModels(
     // Background refresh (fire and forget)
     fetchModels(token, options)
       .then((models) =>
-        writeCache(cacheDir, { models, fetchedAt: Date.now() }),
+        writeCache(cacheDir, {
+          models,
+          fetchedAt: Date.now(),
+          schemaVersion: MODEL_CACHE_SCHEMA_VERSION,
+        }),
       )
       .catch(() => {
         /* background refresh failure is non-fatal */
@@ -183,7 +293,11 @@ export async function discoverModels(
   if (cached) {
     try {
       const models = await fetchModels(token, options)
-      const newCache: ModelCache = { models, fetchedAt: Date.now() }
+      const newCache: ModelCache = {
+        models,
+        fetchedAt: Date.now(),
+        schemaVersion: MODEL_CACHE_SCHEMA_VERSION,
+      }
       await writeCache(cacheDir, newCache)
       return models
     } catch {
@@ -193,7 +307,11 @@ export async function discoverModels(
 
   // No cache → must fetch
   const models = await fetchModels(token, options)
-  const newCache: ModelCache = { models, fetchedAt: Date.now() }
+  const newCache: ModelCache = {
+    models,
+    fetchedAt: Date.now(),
+    schemaVersion: MODEL_CACHE_SCHEMA_VERSION,
+  }
   await writeCache(cacheDir, newCache)
   return models
 }
