@@ -88,12 +88,14 @@ describe("buildRunRequest", () => {
       },
       { name: "brave_web_search", description: "Search", inputSchema: { type: "object" } },
     ]
+    const requestContext = buildLiveRequestContext(tools, "opencode", ["github", "brave"])
     const data = buildRunRequest({
       text: "hi",
       modelId: "m",
       conversationId: "c-split",
       tools,
-      requestContext: buildLiveRequestContext(tools),
+      toolDescriptors: requestContext.tools as Array<Record<string, unknown>>,
+      requestContext,
     })
     const decoded = decodeMessage<any>("AgentClientMessage", data)
     const rc = decoded.run_request.action.user_message_action.request_context

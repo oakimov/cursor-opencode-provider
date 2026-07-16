@@ -31,23 +31,37 @@ describe("extractPromptHistory", () => {
     ])
   })
 
-  it("summarizes assistant tool-call-only turns", () => {
+  it("preserves real tool results instead of inventing a used-tools claim", () => {
     const history = extractPromptHistory([
       { role: "user", content: "do it" },
       {
         role: "assistant",
         content: [
+          { type: "text", text: "Checking the debug log and recent tool-call behavior." },
           { type: "tool-call", toolCallId: "1", toolName: "bash", input: "{}" },
-          { type: "tool-call", toolCallId: "2", toolName: "bash", input: "{}" },
-          { type: "tool-call", toolCallId: "3", toolName: "read", input: "{}" },
+          { type: "tool-call", toolCallId: "2", toolName: "grep", input: "{}" },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          { type: "tool-result", toolCallId: "1", toolName: "bash", output: { type: "text", value: "ACTUAL DEBUG LOG OUTPUT" } },
+          { type: "tool-result", toolCallId: "2", toolName: "grep", output: { type: "error-text", value: "ACTUAL GREP ERROR" } },
         ],
       },
       { role: "user", content: "Continue" },
     ] as LanguageModelV3CallOptions["prompt"])
     expect(history).toEqual([
       { role: "user", content: "do it" },
-      { role: "assistant", content: "[Used tools: bash, read]" },
+      {
+        role: "assistant",
+        content:
+          "Checking the debug log and recent tool-call behavior.\n\n" +
+          "Tool result (bash):\nACTUAL DEBUG LOG OUTPUT\n\n" +
+          "Tool error (grep):\nACTUAL GREP ERROR",
+      },
     ])
+    expect(history[1]?.content).not.toContain("[Used tools:")
   })
 })
 

@@ -47,16 +47,24 @@ describe("resolveToolServerIdentity", () => {
     })
   })
 
-  it("splits OpenCode MCP names on the first underscore", () => {
-    expect(resolveToolServerIdentity("github_create_pull_request")).toEqual({
+  it("uses only configured MCP server ids and prefers the longest match", () => {
+    expect(resolveToolServerIdentity("github_create_pull_request", "opencode", ["github"])).toEqual({
       server: "github",
       toolName: "create_pull_request",
       opencodeName: "github_create_pull_request",
     })
-    expect(resolveToolServerIdentity("brave_web_search")).toEqual({
-      server: "brave",
-      toolName: "web_search",
-      opencodeName: "brave_web_search",
+    expect(resolveToolServerIdentity("my_server_lookup", "opencode", ["my", "my_server"])).toEqual({
+      server: "my_server",
+      toolName: "lookup",
+      opencodeName: "my_server_lookup",
+    })
+  })
+
+  it("keeps unknown underscore-containing custom tools under opencode", () => {
+    expect(resolveToolServerIdentity("custom_helper")).toEqual({
+      server: "opencode",
+      toolName: "custom_helper",
+      opencodeName: "custom_helper",
     })
   })
 })
@@ -78,7 +86,7 @@ describe("toolsToDescriptors", () => {
     const d = toolsToDescriptors([
       { name: "read", description: "Read" },
       { name: "github_create_pull_request", description: "Open a PR" },
-    ])
+    ], "opencode", ["github"])
     expect(d[0].provider_identifier).toBe("opencode")
     expect(d[0].name).toBe("opencode-read")
     expect(d[1].provider_identifier).toBe("github")
@@ -101,7 +109,7 @@ describe("toolsToMcpDescriptors", () => {
       { name: "github_get_me", description: "Who am I" },
       { name: "brave_web_search", description: "Search" },
       { name: "bash", description: "Shell" },
-    ])
+    ], "opencode", ["github", "brave"])
     expect(d.map((x) => x.server_identifier)).toEqual(["opencode", "github", "brave"])
     expect(d[0].server_name).toBe("opencode")
     expect((d[0].tools as Array<{ tool_name: string }>).map((t) => t.tool_name)).toEqual([

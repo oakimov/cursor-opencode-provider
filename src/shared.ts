@@ -2,6 +2,8 @@ export const CURSOR_API_HOST = "api2.cursor.sh"
 export const CURSOR_WEBSITE_HOST = "cursor.com"
 export const FALLBACK_CLIENT_VERSION = "cli-2026.07.09-a3815c0"
 export const CURSOR_PROVIDER_ID = "cursor"
+/** Private provider option injected by the OpenCode plugin for summary turns. */
+export const CURSOR_COMPACTION_OPTION = "opencodeCompaction"
 export const TOKEN_EXPIRY_THRESHOLD_S = 300
 
 export const RUN_PATH = "/agent.v1.AgentService/Run"

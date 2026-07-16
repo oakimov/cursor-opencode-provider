@@ -1,6 +1,6 @@
 import type { Hooks, PluginInput, AuthOAuthResult, Config } from "@opencode-ai/plugin"
 import type { Auth } from "@opencode-ai/sdk"
-import { CURSOR_PROVIDER_ID, CURSOR_WEBSITE_HOST, CURSOR_API_HOST } from "./shared.js"
+import { CURSOR_COMPACTION_OPTION, CURSOR_PROVIDER_ID, CURSOR_WEBSITE_HOST, CURSOR_API_HOST } from "./shared.js"
 import { pollForTokens, exchangeApiKey, refreshAccessToken, isExpiringSoon, generatePkceParams, generatePkceChallenge, buildLoginUrl, decodeJwtPayload } from "./auth.js"
 import { CURSOR_VARIANT_PARAMETERS_KEY, CURSOR_WIRE_MODEL_ID_KEY, readCache, discoverModels, isCacheFresh, type ModelInfo, type ModelVariant } from "./models.js"
 import { opencodeGlobalCacheDir } from "./context/paths.js"
@@ -332,6 +332,16 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
   }
 
   return {
+    async "chat.params"(hookInput, output) {
+      if (hookInput.model.providerID !== CURSOR_PROVIDER_ID) return
+      // OpenCode's compaction pipeline invokes the LLM with agent="compaction".
+      // Carry that stable runtime fact into LanguageModelV3 providerOptions so
+      // the provider never has to guess from an empty tool list.
+      if (hookInput.agent === "compaction") {
+        output.options[CURSOR_COMPACTION_OPTION] = true
+      }
+    },
+
     async config(cfg: Config) {
       cfg.provider ??= {}
       const models = await loadModels()

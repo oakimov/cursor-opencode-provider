@@ -6,6 +6,7 @@ import { CursorPlugin, modelInfoToConfig, thinkingSuffixBaseNames } from "../src
 import { CURSOR_VARIANT_PARAMETERS_KEY, readCache, writeCache, type ModelInfo } from "../src/models.js"
 import { resetClientVersionCache } from "../src/protocol/client-version.js"
 import { resetAgentUrlCache } from "../src/agent-url.js"
+import { CURSOR_COMPACTION_OPTION } from "../src/shared.js"
 
 // Characters safeLabel must remove from emitted names/keys (issue #2).
 const INVALID = new RegExp("[()<>&\"'`]")
@@ -187,6 +188,27 @@ describe("modelInfoToConfig", () => {
     for (const m of models) {
       expect(modelInfoToConfig(m, { thinkingSuffix: false }).name).toBe(m.displayName)
     }
+  })
+})
+
+describe("CursorPlugin compaction marker", () => {
+  it("marks only the OpenCode compaction agent in provider options", async () => {
+    const plugin = await CursorPlugin({ directory: process.cwd() } as never)
+    const compaction = { options: {} as Record<string, unknown> }
+    await plugin["chat.params"]?.({
+      sessionID: "ses_1",
+      agent: "compaction",
+      model: { providerID: "cursor" },
+    } as never, compaction as never)
+    expect(compaction.options[CURSOR_COMPACTION_OPTION]).toBe(true)
+
+    const normal = { options: {} as Record<string, unknown> }
+    await plugin["chat.params"]?.({
+      sessionID: "ses_1",
+      agent: "build",
+      model: { providerID: "cursor" },
+    } as never, normal as never)
+    expect(normal.options[CURSOR_COMPACTION_OPTION]).toBeUndefined()
   })
 })
 

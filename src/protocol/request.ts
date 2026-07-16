@@ -30,6 +30,8 @@ export type RunRequestInput = {
   messageId?: string
   availableModels?: ModelInfo[]
   tools?: OpencodeToolDef[]
+  /** Pre-resolved descriptors (including config-backed MCP server identity). */
+  toolDescriptors?: Array<Record<string, unknown>>
   /** Prebuilt RequestContext (OpenCode-sourced). */
   requestContext?: Record<string, unknown>
 }
@@ -91,7 +93,7 @@ export function buildRunRequest(input: RunRequestInput): Uint8Array {
   // (#2). AgentRunRequest.mcp_tools (#4) is prewarm-only / empty on real turns —
   // putting tools only there is why the model fell back to native Grep/Read.
   const tools = input.tools ?? []
-  const mcpTools = tools.length > 0 ? toolsToDescriptors(tools) : []
+  const mcpTools = input.toolDescriptors ?? (tools.length > 0 ? toolsToDescriptors(tools) : [])
   const requestContext = input.requestContext
 
   const userMessageAction: Record<string, unknown> = {

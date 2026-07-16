@@ -12,7 +12,6 @@ import {
   buildToolCallPart,
   buildExecClientMessages,
   parseExecIdFromToolCallId,
-  toolsToDescriptors,
   detectExecVariantField,
   buildRawEmptyExecReply,
   buildRequestContextResult,
@@ -31,13 +30,18 @@ import { readCache, cacheFilePath, resolveVariantParameters, paramsImplyMaxMode,
 import { buildRequestContext } from "./context/build.js"
 import { opencodeGlobalCacheDir } from "./context/paths.js"
 import { resolveAgentUrl } from "./agent-url.js"
-import { CURSOR_API_HOST } from "./shared.js"
+import { CURSOR_API_HOST, CURSOR_COMPACTION_OPTION } from "./shared.js"
 import type { SeedHistoryMessage } from "./protocol/request.js"
 
 let _availableModels: ModelInfo[] | undefined
 // mtime of the cache file the last time we loaded it. Compared on each call
 // so discoverModels' background refresh is picked up without a process restart.
 let _availableModelsMtimeMs = -1
+
+// OpenCode omits tools from compaction calls. Keep the last real catalog per
+// session so the new Cursor conversation is still born with tool definitions;
+// execution remains disabled for the summary turn itself.
+const toolCatalogBySession = new Map<string, OpencodeToolDef[]>()
 
 type V3Part = LanguageModelV3StreamPart
 
@@ -206,16 +210,24 @@ async function startSession(
   options: CreateCursorOptions,
 ): Promise<CursorSession> {
   const prompt = callOptions.prompt
-  const tools = extractTools(callOptions)
-  const toolDescriptors = tools.length > 0 ? toolsToDescriptors(tools) : []
-  // Compaction/summary turns pass tools:{} (and may set toolChoice "none").
-  // Cursor still has native Grep/etc.; allowTools gates emitting tool-call parts.
-  const allowTools = computeAllowTools(toolDescriptors.length, callOptions.toolChoice)
+  const incomingTools = extractTools(callOptions)
   const sessionKey = opencodeSessionKey(callOptions)
+  const providerOptions = callOptions.providerOptions?.cursor as Record<string, unknown> | undefined
+  // The classic plugin marks OpenCode's agent="compaction" through chat.params.
+  // Do not infer this from tools/toolChoice: standalone no-tool calls are valid.
+  const isCompaction = providerOptions?.[CURSOR_COMPACTION_OPTION] === true
+  const toolState = resolveTurnToolState({
+    sessionKey,
+    incomingTools,
+    toolChoice: callOptions.toolChoice,
+    isCompaction,
+  })
+  const tools = toolState.advertisedTools
+  const allowTools = toolState.allowTools
   // Compaction/summary must not reuse the prior Cursor conversation: OpenCode
   // has already pruned locally, but echoing the old checkpoint keeps
   // TurnEnded.cache_read huge and overflow/UI stuck above 100%.
-  const bound = bindConversationId(sessionKey, { reset: !allowTools })
+  const bound = bindConversationId(sessionKey, { reset: isCompaction })
   const conversationId = bound.conversationId
   if (bound.reset) {
     trace(
@@ -240,7 +252,6 @@ async function startSession(
       telemetryEnabled: resolveTelemetryEnabled(options),
     }))
 
-  const providerOptions = callOptions.providerOptions?.cursor as Record<string, unknown> | undefined
   // OpenCode merges model, agent, and selected-variant options before placing
   // them under providerOptions.cursor. Read only the plugin's dedicated nested
   // payload so unrelated options never become requested_model.parameters.
@@ -268,10 +279,13 @@ async function startSession(
     baseURL: agentBaseUrl,
     headers: options.headers,
   })
-  // Build the tool descriptors once — advertised in AgentRunRequest #4 mcp_tools
-  // AND echoed into the request_context reply (server turn-setup probe).
   const workspaceRoot = options.workspaceRoot || process.cwd()
   const requestContext = await buildRequestContext({ workspaceRoot, tools })
+  // Resolve descriptors once from the merged OpenCode config so MCP identity is
+  // consistent across AgentRunRequest and both request_context reply paths.
+  const toolDescriptors = Array.isArray(requestContext.tools)
+    ? requestContext.tools as Array<Record<string, unknown>>
+    : []
   // CLI parity: echo the last conversation_checkpoint_update as conversation_state.
   // After compaction reset there is no checkpoint — seed from OpenCode history.
   const conversationState = bound.reset ? undefined : getCheckpoint(conversationId)
@@ -286,6 +300,7 @@ async function startSession(
     maxMode,
     availableModels: _availableModels,
     tools,
+    toolDescriptors,
     requestContext,
   })
   // Content hashes — Cursor content-addresses large payloads; logging these lets
@@ -310,7 +325,8 @@ async function startSession(
   trace(
     `outbound Run: model=${cursorModelId} opencodeModel=${modelId} conversationId=${conversationId} ` +
       `params=${JSON.stringify(parameterValues ?? [])} ` +
-      `maxMode=${maxMode} systemPromptLen=${systemPrompt?.length ?? 0} tools=${tools.length} ` +
+      `maxMode=${maxMode} systemPromptLen=${systemPrompt?.length ?? 0} ` +
+      `tools=${tools.length} incomingTools=${incomingTools.length} compaction=${isCompaction} ` +
       `skills=${skillsCount} hooks=${hooksCtx ? hooksCtx.split("\n").length : 0} ` +
       `availableModels=${_availableModels?.length ?? 0} userTextLen=${userText.length} ` +
       `historyMsgs=${history.length} historyChars=${historyChars} ` +
@@ -903,7 +919,8 @@ export function estimateTokens(chars: number): number {
 
 /**
  * Prior prompt turns for a seed ConversationStateStructure after compaction
- * reset. Drops the trailing user message (live action) and tool roles.
+ * reset. Drops the trailing user message (live action), but preserves tool
+ * result payloads as labeled assistant observations for Cursor's text history.
  */
 export function extractPromptHistory(
   prompt: LanguageModelV3CallOptions["prompt"],
@@ -923,7 +940,20 @@ export function extractPromptHistory(
     }
     if (m.role === "assistant") {
       const text = extractAssistantHistoryText(m as unknown as Record<string, unknown>)
-      if (text) out.push({ role: "assistant", content: text })
+      if (text) appendSeedHistory(out, "assistant", text)
+      continue
+    }
+    if (m.role === "tool" && Array.isArray(m.content)) {
+      const results: string[] = []
+      for (const part of m.content) {
+        const p = part as unknown as Record<string, unknown>
+        if (p.type !== "tool-result") continue
+        const toolName = typeof p.toolName === "string" && p.toolName ? p.toolName : "tool"
+        const result = toolResultOutputToText(p.output)
+        const label = result.isError ? "Tool error" : "Tool result"
+        results.push(`${label} (${toolName}):\n${result.text}`)
+      }
+      if (results.length > 0) appendSeedHistory(out, "assistant", results.join("\n\n"))
     }
   }
   // Live user message is the Run action, not seed history.
@@ -936,26 +966,27 @@ function extractAssistantHistoryText(msg: Record<string, unknown>): string {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
   const texts: string[] = []
-  const toolNames: string[] = []
   for (const part of content) {
     const p = part as Record<string, unknown>
     if (p.type === "text" && typeof p.text === "string" && p.text.length > 0) {
       texts.push(p.text)
-    } else if (p.type === "tool-call" && typeof p.toolName === "string") {
-      toolNames.push(p.toolName)
     }
-  }
-  if (toolNames.length > 0) {
-    const seen = new Set<string>()
-    const unique: string[] = []
-    for (const n of toolNames) {
-      if (seen.has(n)) continue
-      seen.add(n)
-      unique.push(n)
-    }
-    texts.push(`[Used tools: ${unique.join(", ")}]`)
   }
   return texts.join("\n")
+}
+
+function appendSeedHistory(
+  out: SeedHistoryMessage[],
+  role: SeedHistoryMessage["role"],
+  content: string,
+): void {
+  if (!content) return
+  const last = out[out.length - 1]
+  if (last?.role === role) {
+    last.content += `\n\n${content}`
+    return
+  }
+  out.push({ role, content })
 }
 
 /** OpenCode session id header, if present. */
@@ -1020,6 +1051,30 @@ export function computeAllowTools(
   toolChoice: LanguageModelV3CallOptions["toolChoice"] | undefined,
 ): boolean {
   return toolCount > 0 && toolChoice?.type !== "none"
+}
+
+export function resolveTurnToolState(input: {
+  sessionKey?: string
+  incomingTools: OpencodeToolDef[]
+  toolChoice?: LanguageModelV3CallOptions["toolChoice"]
+  isCompaction: boolean
+}): { advertisedTools: OpencodeToolDef[]; allowTools: boolean } {
+  const { sessionKey, incomingTools, isCompaction } = input
+  if (sessionKey && incomingTools.length > 0) {
+    toolCatalogBySession.set(sessionKey, incomingTools.map((tool) => ({ ...tool })))
+  }
+  const cached = sessionKey ? toolCatalogBySession.get(sessionKey) : undefined
+  const advertisedTools = isCompaction && incomingTools.length === 0
+    ? (cached?.map((tool) => ({ ...tool })) ?? [])
+    : incomingTools
+  return {
+    advertisedTools,
+    allowTools: !isCompaction && computeAllowTools(incomingTools.length, input.toolChoice),
+  }
+}
+
+export function resetTurnToolStateForTests(): void {
+  toolCatalogBySession.clear()
 }
 
 function extractUserText(lastUser: Record<string, unknown> | undefined): string {

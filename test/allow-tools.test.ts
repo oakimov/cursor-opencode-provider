@@ -1,5 +1,13 @@
-import { describe, it, expect } from "bun:test"
-import { computeAllowTools } from "../src/language-model.js"
+import { beforeEach, describe, it, expect } from "bun:test"
+import {
+  computeAllowTools,
+  resetTurnToolStateForTests,
+  resolveTurnToolState,
+} from "../src/language-model.js"
+import {
+  bindConversationId,
+  resetConversationBindingsForTests,
+} from "../src/protocol/conversation-bind.js"
 import { buildExecClientMessages } from "../src/protocol/tools.js"
 import { decodeMessage } from "../src/protocol/messages.js"
 
@@ -17,6 +25,62 @@ describe("computeAllowTools", () => {
     expect(computeAllowTools(1, undefined)).toBe(true)
     expect(computeAllowTools(2, { type: "auto" })).toBe(true)
     expect(computeAllowTools(1, { type: "required" })).toBe(true)
+  })
+})
+
+describe("compaction tool catalog", () => {
+  beforeEach(() => {
+    resetTurnToolStateForTests()
+    resetConversationBindingsForTests()
+  })
+
+  it("advertises the prior catalog during compaction but refuses execution", () => {
+    const tools = [{ name: "bash" }, { name: "grep" }]
+    expect(resolveTurnToolState({
+      sessionKey: "ses_1",
+      incomingTools: tools,
+      isCompaction: false,
+    })).toEqual({ advertisedTools: tools, allowTools: true })
+
+    expect(resolveTurnToolState({
+      sessionKey: "ses_1",
+      incomingTools: [],
+      isCompaction: true,
+    })).toEqual({ advertisedTools: tools, allowTools: false })
+  })
+
+  it("does not reinterpret an ordinary no-tool call as compaction", () => {
+    expect(resolveTurnToolState({
+      sessionKey: "ses_2",
+      incomingTools: [],
+      toolChoice: { type: "none" },
+      isCompaction: false,
+    })).toEqual({ advertisedTools: [], allowTools: false })
+  })
+
+  it("keeps the reset conversation and restores execution on the next normal turn", () => {
+    const sessionKey = "ses_transition"
+    const tools = [{ name: "bash" }, { name: "grep" }]
+
+    resolveTurnToolState({ sessionKey, incomingTools: tools, isCompaction: false })
+    const beforeCompaction = bindConversationId(sessionKey).conversationId
+
+    const compacted = resolveTurnToolState({
+      sessionKey,
+      incomingTools: [],
+      isCompaction: true,
+    })
+    const afterCompaction = bindConversationId(sessionKey, { reset: true }).conversationId
+    expect(afterCompaction).not.toBe(beforeCompaction)
+    expect(compacted).toEqual({ advertisedTools: tools, allowTools: false })
+
+    const resumed = resolveTurnToolState({
+      sessionKey,
+      incomingTools: tools,
+      isCompaction: false,
+    })
+    expect(bindConversationId(sessionKey).conversationId).toBe(afterCompaction)
+    expect(resumed).toEqual({ advertisedTools: tools, allowTools: true })
   })
 })
 

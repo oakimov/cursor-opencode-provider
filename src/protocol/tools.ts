@@ -24,75 +24,58 @@ export type ToolServerIdentity = {
   opencodeName: string
 }
 
-/**
- * OpenCode built-ins stay under the synthetic default server. Names with
- * underscores that are not builtins follow OpenCode's `<server>_<tool>` MCP
- * convention (tool may itself contain underscores).
- */
-const OPENCODE_BUILTIN_TOOLS = new Set([
-  "bash",
-  "read",
-  "write",
-  "edit",
-  "multiedit",
-  "grep",
-  "glob",
-  "list",
-  "lsp",
-  "codesearch",
-  "webfetch",
-  "websearch",
-  "task",
-  "question",
-  "todowrite",
-  "todoread",
-  "skill",
-  "batch",
-  // Cursor/OpenCode MCP meta helpers if they ever appear in the model tool list.
-  "list_mcp_resources",
-  "list_mcp_resource_templates",
-  "read_mcp_resource",
-])
+/** Match OpenCode's McpCatalog.sanitize for config server ids. */
+export function sanitizeMcpServerId(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, "_")
+}
 
 /**
- * Split an OpenCode tool id into Cursor server + bare tool identity.
- * Builtins → defaultServer; MCP `github_create_pull_request` → github / create_pull_request.
+ * Resolve an OpenCode tool id using known MCP server ids from merged config.
+ * Unknown names remain under the synthetic default server: a flattened tool
+ * name alone cannot distinguish plugin/custom tools from `<server>_<tool>`.
  */
 export function resolveToolServerIdentity(
   opencodeName: string,
   defaultServer = "opencode",
+  knownMcpServers: Iterable<string> = [],
 ): ToolServerIdentity {
   if (!opencodeName) {
     return { server: defaultServer, toolName: "mcp", opencodeName: "mcp" }
   }
-  if (OPENCODE_BUILTIN_TOOLS.has(opencodeName) || !opencodeName.includes("_")) {
-    return { server: defaultServer, toolName: opencodeName, opencodeName }
+
+  // Longest first handles configured ids where one is a prefix of another
+  // (e.g. "git" and "git_hub"). OpenCode flattens with the sanitized id.
+  const servers = [...new Set([...knownMcpServers].map(sanitizeMcpServerId).filter(Boolean))]
+    .sort((a, b) => b.length - a.length)
+  for (const server of servers) {
+    const prefix = `${server}_`
+    if (!opencodeName.startsWith(prefix) || opencodeName.length === prefix.length) continue
+    return {
+      server,
+      toolName: opencodeName.slice(prefix.length),
+      opencodeName,
+    }
   }
-  const idx = opencodeName.indexOf("_")
-  const server = opencodeName.slice(0, idx)
-  const toolName = opencodeName.slice(idx + 1)
-  if (!server || !toolName) {
-    return { server: defaultServer, toolName: opencodeName, opencodeName }
-  }
-  return { server, toolName, opencodeName }
+  return { server: defaultServer, toolName: opencodeName, opencodeName }
 }
 
 /**
  * Convert opencode's per-turn tool list into Cursor `McpToolDefinition`
  * entries for `request_context.tools` (#7) and `AgentRunRequest.mcp_tools`.
  *
- * Builtins are advertised under the synthetic default server (`opencode`).
- * Real MCP tools keep their upstream server id (`github`, …) so Cursor's
- * catalog matches user language ("github mcp"). Composite `name` is
+ * Builtins and unknown plugin/custom tools are advertised under the synthetic
+ * default server (`opencode`). Tools whose prefixes match configured MCP
+ * servers keep those server ids (`github`, …). Composite `name` is
  * `<server>-<bareTool>`; local execution still uses the full OpenCode id
  * reconstructed in `mcpRealToolName`.
  */
 export function toolsToDescriptors(
   tools: OpencodeToolDef[],
   providerIdentifier = "opencode",
+  knownMcpServers: Iterable<string> = [],
 ): Array<Record<string, unknown>> {
   return tools.map((t) => {
-    const id = resolveToolServerIdentity(t.name, providerIdentifier)
+    const id = resolveToolServerIdentity(t.name, providerIdentifier, knownMcpServers)
     return {
       name: `${id.server}-${id.toolName}`,
       description: t.description ?? "",
@@ -112,12 +95,14 @@ function normalizeInputSchema(schema: unknown): Record<string, unknown> {
 
 /**
  * Build the nested McpFileSystemOptions / McpMetaToolOptions shape used by
- * requestContext.#23 / #34. One `McpDescriptor` per real server (builtins
- * under the synthetic default; MCP tools under their upstream server id).
+ * requestContext.#23 / #34. One `McpDescriptor` per resolved server (builtins
+ * and unknown tools under the synthetic default; configured MCP tools under
+ * their upstream server id).
  */
 export function toolsToMcpDescriptors(
   tools: OpencodeToolDef[],
   providerIdentifier = "opencode",
+  knownMcpServers: Iterable<string> = [],
 ): Array<Record<string, unknown>> {
   if (tools.length === 0) return []
 
@@ -125,7 +110,7 @@ export function toolsToMcpDescriptors(
   const byServer = new Map<string, Array<Record<string, unknown>>>()
 
   for (const t of tools) {
-    const id = resolveToolServerIdentity(t.name, providerIdentifier)
+    const id = resolveToolServerIdentity(t.name, providerIdentifier, knownMcpServers)
     let list = byServer.get(id.server)
     if (!list) {
       list = []
@@ -153,9 +138,10 @@ export function toolsToMcpDescriptors(
 export function buildLiveRequestContext(
   tools: OpencodeToolDef[],
   providerIdentifier = "opencode",
+  knownMcpServers: Iterable<string> = [],
 ): Record<string, unknown> {
-  const flat = toolsToDescriptors(tools, providerIdentifier)
-  const nested = toolsToMcpDescriptors(tools, providerIdentifier)
+  const flat = toolsToDescriptors(tools, providerIdentifier, knownMcpServers)
+  const nested = toolsToMcpDescriptors(tools, providerIdentifier, knownMcpServers)
   const cwd = process.cwd()
   return {
     env: {
