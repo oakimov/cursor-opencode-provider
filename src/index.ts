@@ -44,17 +44,12 @@ export function createCursor(options: CreateCursorOptions) {
 
 export { CursorPlugin }
 export type { CursorContinuationOptions, CursorContinuationPolicy } from "./session.js"
-export {
-  CursorAuthError,
-  CursorLocalCancellationError,
-  CursorProtocolError,
-  CursorProviderError,
-  CursorRetryExhaustedError,
-  CursorServerError,
-  CursorTransportError,
-} from "./errors.js"
 export default CursorPlugin
 
+// Keep root runtime exports plugin-safe. OpenCode's legacy plugin loader
+// treats package-root exports as potential plugins, so extra public runtime
+// APIs belong on subpaths such as "cursor-opencode-provider/errors".
+//
 // CursorPluginV2 is NOT re-exported here — see plugin-v2.ts.
 // OpenCode's legacy plugin loader (getLegacyPlugins) iterates all exports
 // and calls getServerPlugin on each; the v2 define() return is not a

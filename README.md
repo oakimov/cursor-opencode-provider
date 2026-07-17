@@ -230,8 +230,9 @@ If this guidance causes issues, update `buildOpenCodeInteractionGuidance` in [`s
 | `cursor-opencode-provider` | `createCursor`, `CursorPlugin` (named + default) |
 | `cursor-opencode-provider/plugin` | `CursorPlugin` (classic Hooks — auth) |
 | `cursor-opencode-provider/plugin/v2` | OpenCode Effect/Promise v2 plugin (`ctx.aisdk.*`) |
+| `cursor-opencode-provider/errors` | Structured provider error classes |
 
-`CursorPluginV2` is **not** re-exported from the package root — the classic plugin loader would treat it as a broken Hooks export. Always load it via `./plugin/v2`.
+The package root intentionally stays plugin-safe for OpenCode's classic loader. `CursorPluginV2` and non-plugin runtime APIs are **not** re-exported from the package root; load them through their dedicated subpaths.
 
 ## Troubleshooting
 

@@ -14,11 +14,18 @@ import {
   resetCursorShellCalls,
 } from "../src/shell-timeout.js"
 import { sessionActivity } from "../src/activity.js"
+import * as rootExports from "../src/index.js"
 
 // Characters safeLabel must remove from emitted names/keys (issue #2).
 const INVALID = new RegExp("[()<>&\"'`]")
 const variantParams = (params: Array<{ id: string; value: string }>) => ({
   [CURSOR_VARIANT_PARAMETERS_KEY]: params,
+})
+
+describe("package root exports", () => {
+  it("keeps runtime root exports safe for OpenCode's legacy plugin loader", () => {
+    expect(Object.keys(rootExports).sort()).toEqual(["CursorPlugin", "createCursor", "default"])
+  })
 })
 
 describe("session activity hooks", () => {

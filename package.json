@@ -35,6 +35,10 @@
     "./plugin/v2": {
       "types": "./dist/plugin-v2.d.ts",
       "import": "./dist/plugin-v2.js"
+    },
+    "./errors": {
+      "types": "./dist/errors.d.ts",
+      "import": "./dist/errors.js"
     }
   },
   "files": [
