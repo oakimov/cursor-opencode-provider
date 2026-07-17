@@ -12,27 +12,49 @@ import {
   buildToolCallPart,
   buildExecClientMessages,
   parseExecIdFromToolCallId,
-  toolsToDescriptors,
   detectExecVariantField,
   buildRawEmptyExecReply,
   buildRequestContextResult,
   REQUEST_CONTEXT_RESULT_FIELD,
   type OpencodeToolDef,
 } from "./protocol/tools.js"
+import {
+  advertisedToolNamesFromDescriptors,
+  extractExecDisplayCallId,
+  extractProtobufSubmessage,
+  listProtobufFieldNumbers,
+  parseDisplayToolCall,
+  resolveBridgedOpenCodeToolCall,
+} from "./protocol/tool-call-bridge.js"
 import { handleKvServerMessage } from "./protocol/kv.js"
+import { handleInteractionQuery, inspectInteractionQueryWire } from "./protocol/interactions.js"
 import { getCheckpoint, setCheckpoint } from "./protocol/checkpoint.js"
 import { conversationBlobCount } from "./protocol/blob-store.js"
+import {
+  bindConversationId,
+} from "./protocol/conversation-bind.js"
 import { sessionManager, type CursorSession, type Frame } from "./session.js"
 import { readCache, cacheFilePath, resolveVariantParameters, paramsImplyMaxMode, extractCursorVariantParameters, resolveCursorWireModelId, type ModelInfo } from "./models.js"
 import { buildRequestContext } from "./context/build.js"
 import { opencodeGlobalCacheDir } from "./context/paths.js"
 import { resolveAgentUrl } from "./agent-url.js"
-import { CURSOR_API_HOST } from "./shared.js"
+import { CURSOR_API_HOST, CURSOR_COMPACTION_OPTION } from "./shared.js"
+import type { SeedHistoryMessage } from "./protocol/request.js"
 
 let _availableModels: ModelInfo[] | undefined
 // mtime of the cache file the last time we loaded it. Compared on each call
 // so discoverModels' background refresh is picked up without a process restart.
 let _availableModelsMtimeMs = -1
+
+// OpenCode omits tools from compaction calls. Keep the last real catalog per
+// session so the new Cursor conversation is still born with tool definitions;
+// execution remains disabled for the summary turn itself.
+const toolCatalogBySession = new Map<string, OpencodeToolDef[]>()
+// A compaction Run uses its own summary-agent system prompt. Its opaque Cursor
+// checkpoint must never become the base for the resumed normal agent: doing so
+// suppresses OpenCode's compacted prompt/system seed and makes Cursor narrate
+// tool use instead of emitting exec requests. Rebase once on the next turn.
+const postCompactionRebaseBySession = new Set<string>()
 
 type V3Part = LanguageModelV3StreamPart
 
@@ -106,6 +128,16 @@ async function doStreamImpl(
     for (const r of pendingResults) {
       const pending = session.pending.get(r.execId)
       if (!pending) continue
+      if (pending.bridged) {
+        // Display-only Cursor tool — OpenCode already ran it; nothing to write
+        // back on the Run stream.
+        session.usageEstimate.inputTokens += estimateTokens(r.output.length)
+        trace(
+          `continuation: bridged tool result execId=${r.execId} toolName=${pending.toolName ?? r.toolName} outLen=${r.output.length}`,
+        )
+        sessionManager.resolve(session.sessionId, r.execId)
+        continue
+      }
       try {
         for (const frame of buildExecClientMessages({
           execId: r.execId,
@@ -116,6 +148,8 @@ async function doStreamImpl(
         })) {
           session.stream.write(frame)
         }
+        // Tool results enlarge Cursor's context for the rest of this Run.
+        session.usageEstimate.inputTokens += estimateTokens(r.output.length)
         trace(`continuation: wrote exec result execId=${r.execId} field=${pending.resultField} outLen=${r.output.length}`)
         // Only resolve after the write succeeded — if it threw, the server never
         // got the result and would block on heartbeats forever otherwise.
@@ -199,14 +233,41 @@ async function startSession(
   options: CreateCursorOptions,
 ): Promise<CursorSession> {
   const prompt = callOptions.prompt
-  // Cursor stores server-side history keyed by conversation_id. Minting a new
-  // UUID every turn made each OpenCode user message look like a brand-new chat.
-  // OpenCode sends X-Session-Id / x-session-affinity on every call — derive a
-  // stable UUID from that so follow-ups hit the same server conversation.
-  const conversationId = resolveConversationId(callOptions)
+  const incomingTools = extractTools(callOptions)
+  const sessionKey = opencodeSessionKey(callOptions)
+  const providerOptions = callOptions.providerOptions?.cursor as Record<string, unknown> | undefined
+  // The classic plugin marks OpenCode's agent="compaction" through chat.params.
+  // Do not infer this from tools/toolChoice: standalone no-tool calls are valid.
+  const isCompaction = providerOptions?.[CURSOR_COMPACTION_OPTION] === true
+  const toolState = resolveTurnToolState({
+    sessionKey,
+    incomingTools,
+    toolChoice: callOptions.toolChoice,
+    isCompaction,
+  })
+  const tools = toolState.advertisedTools
+  const allowTools = toolState.allowTools
+  const resetState = resolveTurnConversationReset({ sessionKey, isCompaction })
+  // Compaction must not reuse the prior conversation; its first normal turn
+  // must also rebase so the summary-agent checkpoint cannot replace the normal
+  // system prompt and OpenCode's newly compacted history.
+  const bound = bindConversationId(sessionKey, { reset: resetState.reset })
+  const conversationId = bound.conversationId
+  if (bound.reset) {
+    trace(
+      `conversation reset: reason=${resetState.reason ?? "unknown"} ` +
+        `sessionKey=${sessionKey ?? "(none)"} ` +
+        `previousId=${bound.previousId ?? "-"} → conversationId=${conversationId}`,
+    )
+  }
+
   const userText = extractUserText([...prompt].reverse().find((m) => m.role === "user")) || "."
-  const systemPrompt = extractSystemPrompt(prompt)
-  const tools = extractTools(callOptions)
+  const baseSystemPrompt = extractSystemPrompt(prompt)
+  const interactionGuidance = buildOpenCodeInteractionGuidance(tools, isCompaction)
+  const systemPrompt = interactionGuidance
+    ? [baseSystemPrompt, interactionGuidance].filter(Boolean).join("\n\n")
+    : baseSystemPrompt
+  const history = extractPromptHistory(prompt)
 
   await loadAvailableModels()
 
@@ -220,7 +281,6 @@ async function startSession(
       telemetryEnabled: resolveTelemetryEnabled(options),
     }))
 
-  const providerOptions = callOptions.providerOptions?.cursor as Record<string, unknown> | undefined
   // OpenCode merges model, agent, and selected-variant options before placing
   // them under providerOptions.cursor. Read only the plugin's dedicated nested
   // payload so unrelated options never become requested_model.parameters.
@@ -248,27 +308,28 @@ async function startSession(
     baseURL: agentBaseUrl,
     headers: options.headers,
   })
-  // Build the tool descriptors once — advertised in AgentRunRequest #4 mcp_tools
-  // AND echoed into the request_context reply (server turn-setup probe).
-  const toolDescriptors = tools.length > 0 ? toolsToDescriptors(tools) : []
-  // Compaction/summary turns pass tools:{} (and may set toolChoice "none").
-  // Cursor still has native Grep/etc.; allowTools gates emitting tool-call parts.
-  const allowTools = computeAllowTools(toolDescriptors.length, callOptions.toolChoice)
   const workspaceRoot = options.workspaceRoot || process.cwd()
   const requestContext = await buildRequestContext({ workspaceRoot, tools })
+  // Resolve descriptors once from the merged OpenCode config so MCP identity is
+  // consistent across AgentRunRequest and both request_context reply paths.
+  const toolDescriptors = Array.isArray(requestContext.tools)
+    ? requestContext.tools as Array<Record<string, unknown>>
+    : []
   // CLI parity: echo the last conversation_checkpoint_update as conversation_state.
-  // Turn 1 (no checkpoint) seeds system prompt only; live user text is current-only.
-  const conversationState = getCheckpoint(conversationId)
+  // After compaction reset there is no checkpoint — seed from OpenCode history.
+  const conversationState = bound.reset ? undefined : getCheckpoint(conversationId)
   const reqBytes = buildRunRequest({
     text: userText,
     modelId: cursorModelId,
     conversationId,
     systemPrompt: conversationState ? undefined : systemPrompt,
+    history: conversationState ? undefined : history,
     conversationState,
     parameterValues,
     maxMode,
     availableModels: _availableModels,
     tools,
+    toolDescriptors,
     requestContext,
   })
   // Content hashes — Cursor content-addresses large payloads; logging these lets
@@ -281,13 +342,25 @@ async function startSession(
     typeof requestContext.hooks_additional_context === "string"
       ? requestContext.hooks_additional_context
       : ""
+  const historyChars = history.reduce((n, m) => n + m.content.length, 0)
+  const usageEstimate = {
+    inputTokens: estimateTokens(
+      (systemPrompt?.length ?? 0) + userText.length + historyChars + (conversationState?.length ?? 0),
+    ),
+    outputTokens: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+  }
   trace(
     `outbound Run: model=${cursorModelId} opencodeModel=${modelId} conversationId=${conversationId} ` +
       `params=${JSON.stringify(parameterValues ?? [])} ` +
-      `maxMode=${maxMode} systemPromptLen=${systemPrompt?.length ?? 0} tools=${tools.length} ` +
+      `maxMode=${maxMode} systemPromptLen=${systemPrompt?.length ?? 0} ` +
+      `tools=${tools.length} incomingTools=${incomingTools.length} compaction=${isCompaction} ` +
       `skills=${skillsCount} hooks=${hooksCtx ? hooksCtx.split("\n").length : 0} ` +
       `availableModels=${_availableModels?.length ?? 0} userTextLen=${userText.length} ` +
-      `checkpointLen=${conversationState?.length ?? 0} runRequestBytes=${reqBytes.length}`,
+      `historyMsgs=${history.length} historyChars=${historyChars} ` +
+      `checkpointLen=${conversationState?.length ?? 0} reset=${bound.reset} ` +
+      `usageEstimateIn=${usageEstimate.inputTokens} runRequestBytes=${reqBytes.length}`,
   )
   if (hooksCtx) trace(`outbound Run hooks_additional_context: ${hooksCtx}`)
   trace(`hash run_request sha256=${sha(reqBytes)}`)
@@ -302,10 +375,13 @@ async function startSession(
     stream,
     frames: stream.frames()[Symbol.asyncIterator](),
     pending: new Map(),
+    displayToolCalls: new Map(),
+    nextBridgedExecId: 900_000,
     blobs: new Map(),
     toolDescriptors,
     requestContext,
     allowTools,
+    usageEstimate,
     pumpActive: false,
     heartbeat: null,
     expiresAt: Date.now() + 300_000,
@@ -419,7 +495,7 @@ function isTruthyEnv(value: string | undefined): boolean {
  *    and KEEP the session open for the result on the next doStream call;
  *  - turn_ended / stream end → finish "stop" and close the session.
  */
-async function pump(
+export async function pump(
   session: CursorSession,
   controller: ReadableStreamDefaultController<V3Part>,
   ids: { textId: string; reasoningId: string },
@@ -474,6 +550,7 @@ async function pump(
       safeEnqueue({ type: "text-start", id: textId } as V3Part)
       textStarted = true
     }
+    session.usageEstimate.outputTokens += estimateTokens(text.length)
     safeEnqueue({ type: "text-delta", id: textId, delta: text } as V3Part)
   }
   const emitReasoning = (text: string) => {
@@ -482,6 +559,7 @@ async function pump(
       safeEnqueue({ type: "reasoning-start", id: reasoningId } as V3Part)
       reasoningStarted = true
     }
+    session.usageEstimate.outputTokens += estimateTokens(text.length)
     safeEnqueue({ type: "reasoning-delta", id: reasoningId, delta: text } as V3Part)
   }
   const emitFinish = (
@@ -489,19 +567,38 @@ async function pump(
     reason: LanguageModelV3FinishReason,
   ) => {
     closeOpenSpans()
+    if (te) {
+      // Authoritative TurnEnded counts — replace the running estimate.
+      session.usageEstimate = {
+        inputTokens: Number(te.input_tokens ?? 0) || 0,
+        outputTokens: Number(te.output_tokens ?? 0) || 0,
+        cacheRead: Number(te.cache_read ?? 0) || 0,
+        cacheWrite: Number(te.cache_write ?? 0) || 0,
+      }
+    }
+    const est = session.usageEstimate
     const usage: LanguageModelV3Usage = {
       inputTokens: {
-        total: (te?.input_tokens as number) ?? 0,
+        total: est.inputTokens,
         noCache: undefined,
-        cacheRead: (te?.cache_read as number) ?? 0,
-        cacheWrite: (te?.cache_write as number) ?? 0,
+        cacheRead: est.cacheRead,
+        cacheWrite: est.cacheWrite,
       },
       outputTokens: {
-        total: (te?.output_tokens as number) ?? 0,
+        total: est.outputTokens,
         text: undefined,
         reasoning: undefined,
       },
     }
+    const reasonLabel = typeof reason === "object" && reason && "unified" in reason
+      ? String((reason as { unified?: string }).unified ?? "unknown")
+      : String(reason)
+    trace(
+      `finish: reason=${reasonLabel} ` +
+        `in=${est.inputTokens} out=${est.outputTokens} ` +
+        `cacheRead=${est.cacheRead} cacheWrite=${est.cacheWrite} ` +
+        `source=${te ? "turn_ended" : "estimate"}`,
+    )
     safeEnqueue({ type: "finish", usage, finishReason: reason } as V3Part)
   }
 
@@ -577,6 +674,7 @@ async function pump(
     const iu = asm.interaction_update as Record<string, unknown> | undefined
     const esm = asm.exec_server_message as Record<string, unknown> | undefined
     const kv = asm.kv_server_message as Record<string, unknown> | undefined
+    const interactionQuery = asm.interaction_query as Record<string, unknown> | undefined
     const checkpointRaw = asm.conversation_checkpoint_update
     const topField = payload.length > 0 ? payload[0] >> 3 : 0
 
@@ -585,6 +683,7 @@ async function pump(
       trace(
         `pump frame: topField=${topField} interaction_update=${iuKind ?? "-"} ` +
           `exec=${esm ? "yes" : "no"} kv=${kv ? "yes" : "no"} ` +
+          `interaction_query=${interactionQuery ? "yes" : "no"} ` +
           `checkpoint=${checkpointRaw ? "yes" : "no"}`,
       )
     }
@@ -610,6 +709,89 @@ async function pump(
       emitFinish(iu.turn_ended as Record<string, unknown>, { unified: "stop", raw: undefined })
       sessionManager.close(session)
       return
+    } else if (iu?.tool_call_started) {
+      // Stash Cursor display ToolCall until exec claims it, or completed bridges it.
+      const started = iu.tool_call_started as Record<string, unknown>
+      const callId = typeof started.call_id === "string" ? started.call_id : ""
+      const toolCall = started.tool_call as Record<string, unknown> | undefined
+      if (callId && toolCall) {
+        session.displayToolCalls.set(callId, toolCall)
+        const variant = Object.keys(toolCall).find((k) => k.endsWith("_tool_call")) ?? "?"
+        const callIdLog = callId.replace(/\r?\n/g, "\\n")
+        let wireFields = ""
+        if (variant === "?") {
+          const toolBytes = extractProtobufSubmessage(payload, [1, 2, 2])
+          if (toolBytes) {
+            wireFields = ` wireFields=[${listProtobufFieldNumbers(toolBytes).join(",")}]`
+          }
+        }
+        trace(`display tool_call_started: callId=${callIdLog} variant=${variant}${wireFields}`)
+      }
+    } else if (iu?.tool_call_completed) {
+      const completed = iu.tool_call_completed as Record<string, unknown>
+      const callId = typeof completed.call_id === "string" ? completed.call_id : ""
+      // If exec already claimed this call_id, display map entry is gone — skip.
+      if (!callId || !session.displayToolCalls.has(callId)) {
+        if (callId) {
+          trace(`display tool_call_completed: ignore (exec-handled or unknown) callId=${callId}`)
+        }
+      } else {
+        const stored = session.displayToolCalls.get(callId)!
+        session.displayToolCalls.delete(callId)
+        const toolCall =
+          (completed.tool_call as Record<string, unknown> | undefined) ?? stored
+        if (!session.allowTools) {
+          trace(`display tool_call_completed: SKIPPED (allowTools=false) callId=${callId}`)
+        } else {
+          const display = parseDisplayToolCall(callId, toolCall)
+          const advertised = advertisedToolNamesFromDescriptors(session.toolDescriptors)
+          const bridged = display
+            ? resolveBridgedOpenCodeToolCall(display, advertised)
+            : undefined
+          if (!display) {
+            const callIdLog = callId.replace(/\r?\n/g, "\\n")
+            // AgentServerMessage.interaction_update(1).tool_call_completed(3).tool_call(2)
+            const toolBytes = extractProtobufSubmessage(payload, [1, 3, 2])
+            const wire = toolBytes
+              ? ` wireFields=[${listProtobufFieldNumbers(toolBytes).join(",")}]`
+              : ""
+            trace(
+              `display tool_call_completed: unparsed callId=${callIdLog} ` +
+                `keys=[${Object.keys(toolCall).join(",")}]${wire}`,
+            )
+          } else if (!bridged) {
+            trace(
+              `display tool_call_completed: no advertised OpenCode tool ` +
+                `callId=${callId} variant=${display.variant} preferred=${display.preferredToolName} ` +
+                `advertised=[${advertised.join(",")}]`,
+            )
+          } else {
+            const execId = session.nextBridgedExecId++
+            sessionManager.registerPending(
+              execId,
+              session,
+              "bridged",
+              bridged.toolName,
+              true,
+            )
+            const toolCallId = `cursor_${session.sessionId}_${execId}`
+            const input = JSON.stringify(bridged.args ?? {})
+            trace(
+              `display BRIDGED tool-call toolCallId=${toolCallId} toolName=${bridged.toolName} ` +
+                `variant=${bridged.variant} callId=${callId} inputLen=${input.length}`,
+            )
+            closeOpenSpans()
+            safeEnqueue({
+              type: "tool-call",
+              toolCallId,
+              toolName: bridged.toolName,
+              input,
+            } as V3Part)
+            emitFinish(undefined, { unified: "tool-calls", raw: undefined })
+            return
+          }
+        }
+      }
     } else if (esm) {
       const esmId = (esm.id as number) ?? 0
       if (esm.request_context_args) {
@@ -634,6 +816,11 @@ async function pump(
         }
       } else {
         const parsed = parseExecServerMessage(esm)
+        const displayCallId = extractExecDisplayCallId(esm)
+        if (displayCallId) {
+          session.displayToolCalls.delete(displayCallId)
+          trace(`exec: claimed display callId=${displayCallId}`)
+        }
         trace(`exec: id=${parsed?.id} variant=${parsed ? Object.keys(parsed).join(",") : "none"} toolName=${parsed?.toolName} resultField=${parsed?.resultField}`)
         if (parsed) {
           // OpenCode throws "Tool call not allowed while generating summary"
@@ -694,6 +881,28 @@ async function pump(
           }
         }
       }
+    } else if (interactionQuery) {
+      // InteractionQuery is a must-reply channel, just like exec and KV. AI
+      // SDK has no Cursor-specific UI callback, so answer immediately with the
+      // conservative headless policy from protocol/interactions.ts.
+      try {
+        const handled = handleInteractionQuery(interactionQuery, payload)
+        session.stream.write(handled.reply)
+        trace(
+          `interaction_query: replied id=${handled.id} variant=${handled.variantName} ` +
+            `field=${handled.variantField} outcome=${handled.outcome}`,
+        )
+      } catch (e) {
+        const info = inspectInteractionQueryWire(payload)
+        const err = e instanceof Error ? e : new Error(String(e))
+        trace(
+          `interaction_query: FAILED id=${info.id ?? "?"} ` +
+            `variantField=${info.variantField ?? "?"} err=${err.message}`,
+        )
+        safeError(err)
+        sessionManager.close(session)
+        return
+      }
     } else if (kv) {
       // KV blob channel: ack set_blob / answer get_blob, then keep pumping.
       // Not replying hangs the turn — see protocol/kv.ts.
@@ -721,9 +930,9 @@ async function pump(
       // exec/args decode) must not abort the whole turn — log and skip.
       trace(`frame dispatch FAILED (skipping): topField=${topField} err=${(e as Error).message}`)
     }
-    // heartbeat / step / partial_tool_call / interaction_query →
-    // ignore (partial args are display-only; the exec channel is authoritative.
-    // Checkpoints are handled above.)
+    // heartbeat / step / partial_tool_call → ignore (partial args are
+    // display-only; the exec channel is authoritative. Checkpoints and
+    // interaction queries are handled above.)
   }
 }
 
@@ -822,31 +1031,149 @@ function extractSystemPrompt(prompt: LanguageModelV3CallOptions["prompt"]): stri
 }
 
 /**
- * Map OpenCode's session id header to a stable Cursor conversation_id (UUID).
- * Falls back to a random UUID when headers are absent (direct SDK use).
+ * Cursor's native UI interactions cannot be surfaced through the AI SDK.
+ * Redirect only to OpenCode tools that are genuinely advertised this turn;
+ * compaction keeps its dedicated summary prompt unchanged.
  */
-export function resolveConversationId(callOptions: LanguageModelV3CallOptions): string {
+export function buildOpenCodeInteractionGuidance(
+  tools: OpencodeToolDef[],
+  isCompaction: boolean,
+): string | undefined {
+  if (isCompaction) return undefined
+  const names = new Set(tools.map((tool) => tool.name))
+  const instructions: string[] = []
+
+  if (names.has("question")) {
+    instructions.push(
+      "- When user input is required, call the OpenCode `question` tool; do not use Cursor's native AskQuestion interaction.",
+    )
+  }
+  if (names.has("plan_enter")) {
+    instructions.push(
+      "- To enter plan mode, call the OpenCode `plan_enter` tool; do not use Cursor's native SwitchMode or CreatePlan interactions.",
+    )
+  } else if (names.has("todowrite")) {
+    instructions.push(
+      "- For planning, call the OpenCode `todowrite` tool and explain the plan in normal text; do not use Cursor's native SwitchMode or CreatePlan interactions.",
+    )
+  }
+  if (names.has("plan_exit")) {
+    instructions.push("- To leave plan mode, call the OpenCode `plan_exit` tool.")
+  }
+  if (names.has("webfetch")) {
+    instructions.push(
+      "- To fetch a known URL, call the OpenCode `webfetch` tool; do not use Cursor's native WebFetch interaction.",
+    )
+  }
+  if (instructions.length === 0) return undefined
+
+  return [
+    "OpenCode owns interactive workflows and tool execution for this session. Use the advertised OpenCode tools below instead of equivalent Cursor-native UI interactions:",
+    ...instructions,
+    "Emit the actual tool call and wait for its result; never merely claim or summarize that a tool was used.",
+  ].join("\n")
+}
+
+/** Rough char→token estimate for mid-turn usage before TurnEnded arrives. */
+export function estimateTokens(chars: number): number {
+  if (!Number.isFinite(chars) || chars <= 0) return 0
+  return Math.ceil(chars / 4)
+}
+
+/**
+ * Prior prompt turns for a seed ConversationStateStructure after compaction
+ * reset. Drops the trailing user message (live action), but preserves tool
+ * result payloads as labeled assistant observations for Cursor's text history.
+ */
+export function extractPromptHistory(
+  prompt: LanguageModelV3CallOptions["prompt"],
+): SeedHistoryMessage[] {
+  const out: SeedHistoryMessage[] = []
+  for (const m of prompt) {
+    if (m.role === "system") {
+      if (typeof m.content === "string" && m.content.length > 0) {
+        out.push({ role: "system", content: m.content })
+      }
+      continue
+    }
+    if (m.role === "user") {
+      const text = extractUserText(m as unknown as Record<string, unknown>)
+      if (text && text !== ".") out.push({ role: "user", content: text })
+      continue
+    }
+    if (m.role === "assistant") {
+      const text = extractAssistantHistoryText(m as unknown as Record<string, unknown>)
+      if (text) appendSeedHistory(out, "assistant", text)
+      continue
+    }
+    if (m.role === "tool" && Array.isArray(m.content)) {
+      const results: string[] = []
+      for (const part of m.content) {
+        const p = part as unknown as Record<string, unknown>
+        if (p.type !== "tool-result") continue
+        const toolName = typeof p.toolName === "string" && p.toolName ? p.toolName : "tool"
+        const result = toolResultOutputToText(p.output)
+        const label = result.isError ? "Tool error" : "Tool result"
+        results.push(`${label} (${toolName}):\n${result.text}`)
+      }
+      if (results.length > 0) appendSeedHistory(out, "assistant", results.join("\n\n"))
+    }
+  }
+  // Live user message is the Run action, not seed history.
+  if (out.length > 0 && out[out.length - 1]!.role === "user") out.pop()
+  return out
+}
+
+function extractAssistantHistoryText(msg: Record<string, unknown>): string {
+  const content = msg.content
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+  const texts: string[] = []
+  for (const part of content) {
+    const p = part as Record<string, unknown>
+    if (p.type === "text" && typeof p.text === "string" && p.text.length > 0) {
+      texts.push(p.text)
+    }
+  }
+  return texts.join("\n")
+}
+
+function appendSeedHistory(
+  out: SeedHistoryMessage[],
+  role: SeedHistoryMessage["role"],
+  content: string,
+): void {
+  if (!content) return
+  const last = out[out.length - 1]
+  if (last?.role === role) {
+    last.content += `\n\n${content}`
+    return
+  }
+  out.push({ role, content })
+}
+
+/** OpenCode session id header, if present. */
+export function opencodeSessionKey(callOptions: LanguageModelV3CallOptions): string | undefined {
   const h = callOptions.headers ?? {}
   const raw =
     h["x-session-id"] ??
     h["X-Session-Id"] ??
     h["x-session-affinity"] ??
     h["x-opencode-session"]
-  if (typeof raw === "string" && raw.trim().length > 0) {
-    return sessionIdToUuid(raw.trim())
-  }
-  return crypto.randomUUID()
+  if (typeof raw === "string" && raw.trim().length > 0) return raw.trim()
+  return undefined
 }
 
-/** Deterministic UUID (version-4 shape) from an arbitrary session key. */
-export function sessionIdToUuid(sessionId: string): string {
-  const hash = createHash("sha256").update(`cursor-opencode-provider:conv:${sessionId}`).digest()
-  const bytes = Buffer.from(hash.subarray(0, 16))
-  bytes[6] = (bytes[6]! & 0x0f) | 0x40
-  bytes[8] = (bytes[8]! & 0x3f) | 0x80
-  const hex = bytes.toString("hex")
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
+/**
+ * Map OpenCode's session id header to the active Cursor conversation_id.
+ * Compaction resets remint via bindConversationId; otherwise the binding is
+ * sticky for the OpenCode session. Falls back to a random UUID with no header.
+ */
+export function resolveConversationId(callOptions: LanguageModelV3CallOptions): string {
+  return bindConversationId(opencodeSessionKey(callOptions)).conversationId
 }
+
+export { sessionIdToUuid } from "./protocol/conversation-bind.js"
 
 function extractTools(callOptions: LanguageModelV3CallOptions): OpencodeToolDef[] {
   const tools = callOptions.tools
@@ -887,6 +1214,46 @@ export function computeAllowTools(
   toolChoice: LanguageModelV3CallOptions["toolChoice"] | undefined,
 ): boolean {
   return toolCount > 0 && toolChoice?.type !== "none"
+}
+
+export function resolveTurnToolState(input: {
+  sessionKey?: string
+  incomingTools: OpencodeToolDef[]
+  toolChoice?: LanguageModelV3CallOptions["toolChoice"]
+  isCompaction: boolean
+}): { advertisedTools: OpencodeToolDef[]; allowTools: boolean } {
+  const { sessionKey, incomingTools, isCompaction } = input
+  if (sessionKey && incomingTools.length > 0) {
+    toolCatalogBySession.set(sessionKey, incomingTools.map((tool) => ({ ...tool })))
+  }
+  const cached = sessionKey ? toolCatalogBySession.get(sessionKey) : undefined
+  const advertisedTools = isCompaction && incomingTools.length === 0
+    ? (cached?.map((tool) => ({ ...tool })) ?? [])
+    : incomingTools
+  return {
+    advertisedTools,
+    allowTools: !isCompaction && computeAllowTools(incomingTools.length, input.toolChoice),
+  }
+}
+
+export function resolveTurnConversationReset(input: {
+  sessionKey?: string
+  isCompaction: boolean
+}): { reset: boolean; reason?: "compaction" | "post-compaction-rebase" } {
+  const { sessionKey, isCompaction } = input
+  if (isCompaction) {
+    if (sessionKey) postCompactionRebaseBySession.add(sessionKey)
+    return { reset: true, reason: "compaction" }
+  }
+  if (sessionKey && postCompactionRebaseBySession.delete(sessionKey)) {
+    return { reset: true, reason: "post-compaction-rebase" }
+  }
+  return { reset: false }
+}
+
+export function resetTurnStateForTests(): void {
+  toolCatalogBySession.clear()
+  postCompactionRebaseBySession.clear()
 }
 
 function extractUserText(lastUser: Record<string, unknown> | undefined): string {

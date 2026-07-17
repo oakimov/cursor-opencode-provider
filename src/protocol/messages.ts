@@ -45,12 +45,262 @@ export function createMessageTypes(): protobuf.Root {
 
   addType(root, "Heartbeat", [])
 
-  // Tool call types
-  addType(root, "ToolCall", [
-    { id: 1, name: "call_id", type: "string" },
-    { id: 2, name: "tool_name", type: "string" },
-    { id: 3, name: "args", type: "string" },
+  // Display ToolCall (interaction_update.tool_call_*) — agent.v1 oneof, not
+  // {tool_name,args} strings. Args-only wrappers are enough to bridge into
+  // OpenCode; result payloads are ignored on decode.
+  addType(root, "TodoItem", [
+    { id: 1, name: "id", type: "string" },
+    { id: 2, name: "content", type: "string" },
+    { id: 3, name: "status", type: "int32" },
+    { id: 4, name: "created_at", type: "int64" },
+    { id: 5, name: "updated_at", type: "int64" },
+    { id: 6, name: "dependencies", type: "string", repeated: true },
   ])
+  addType(root, "UpdateTodosArgs", [
+    { id: 1, name: "todos", type: "TodoItem", repeated: true },
+    { id: 2, name: "merge", type: "bool" },
+  ])
+  addType(root, "UpdateTodosSuccess", [
+    { id: 1, name: "todos", type: "TodoItem", repeated: true },
+    { id: 2, name: "total_count", type: "int32" },
+    { id: 3, name: "was_merge", type: "bool" },
+  ])
+  addType(root, "UpdateTodosError", [{ id: 1, name: "error", type: "string" }])
+  addType(
+    root,
+    "UpdateTodosResult",
+    [
+      { id: 1, name: "success", type: "UpdateTodosSuccess" },
+      { id: 2, name: "error", type: "UpdateTodosError" },
+    ],
+    [{ name: "result", fields: ["success", "error"] }],
+  )
+  addType(root, "UpdateTodosToolCall", [
+    { id: 1, name: "args", type: "UpdateTodosArgs" },
+    { id: 2, name: "result", type: "UpdateTodosResult" },
+  ])
+  addType(root, "ReadToolArgs", [
+    { id: 1, name: "path", type: "string" },
+    { id: 2, name: "offset", type: "int32" },
+    { id: 3, name: "limit", type: "int32" },
+  ])
+  addType(root, "ReadToolCall", [{ id: 1, name: "args", type: "ReadToolArgs" }])
+  addType(root, "ShellToolCall", [{ id: 1, name: "args", type: "ShellArgs" }])
+  addType(root, "DeleteToolCall", [{ id: 1, name: "args", type: "DeleteArgs" }])
+  addType(root, "GlobToolCall", [{ id: 1, name: "args", type: "GlobArgs" }])
+  addType(root, "GrepToolCall", [{ id: 1, name: "args", type: "GrepArgs" }])
+  addType(root, "EditToolArgs", [
+    { id: 1, name: "path", type: "string" },
+    { id: 6, name: "stream_content", type: "string" },
+  ])
+  addType(root, "EditToolCall", [{ id: 1, name: "args", type: "EditToolArgs" }])
+  addType(root, "LsToolCall", [{ id: 1, name: "args", type: "LsArgs" }])
+  addType(root, "McpToolCall", [{ id: 1, name: "args", type: "McpArgs" }])
+  addType(root, "CreatePlanArgs", [
+    { id: 1, name: "plan", type: "string" },
+    { id: 2, name: "todos", type: "TodoItem", repeated: true },
+    { id: 3, name: "overview", type: "string" },
+    { id: 4, name: "name", type: "string" },
+    { id: 5, name: "is_project", type: "bool" },
+  ])
+  addType(root, "CreatePlanToolCall", [{ id: 1, name: "args", type: "CreatePlanArgs" }])
+  addType(root, "WebSearchToolArgs", [
+    { id: 1, name: "search_term", type: "string" },
+    { id: 2, name: "tool_call_id", type: "string" },
+  ])
+  addType(root, "WebSearchToolCall", [{ id: 1, name: "args", type: "WebSearchToolArgs" }])
+  addType(root, "SubagentTypeUnspecified", [])
+  addType(root, "SubagentTypeComputerUse", [])
+  addType(root, "SubagentTypeCustom", [{ id: 1, name: "name", type: "string" }])
+  addType(root, "SubagentTypeExplore", [])
+  addType(root, "SubagentTypeMediaReview", [])
+  addType(root, "SubagentTypeBash", [])
+  addType(root, "SubagentTypeBrowserUse", [])
+  addType(root, "SubagentTypeShell", [])
+  addType(root, "SubagentTypeVmSetupHelper", [])
+  addType(root, "SubagentTypeDebug", [])
+  addType(root, "SubagentTypeCursorGuide", [])
+  addType(root, "SubagentTypeWatchVideo", [])
+  addType(
+    root,
+    "SubagentType",
+    [
+      { id: 1, name: "unspecified", type: "SubagentTypeUnspecified" },
+      { id: 2, name: "computer_use", type: "SubagentTypeComputerUse" },
+      { id: 3, name: "custom", type: "SubagentTypeCustom" },
+      { id: 4, name: "explore", type: "SubagentTypeExplore" },
+      { id: 5, name: "media_review", type: "SubagentTypeMediaReview" },
+      { id: 6, name: "bash", type: "SubagentTypeBash" },
+      { id: 7, name: "browser_use", type: "SubagentTypeBrowserUse" },
+      { id: 8, name: "shell", type: "SubagentTypeShell" },
+      { id: 9, name: "vm_setup_helper", type: "SubagentTypeVmSetupHelper" },
+      { id: 10, name: "debug", type: "SubagentTypeDebug" },
+      { id: 11, name: "cursor_guide", type: "SubagentTypeCursorGuide" },
+      { id: 12, name: "watch_video", type: "SubagentTypeWatchVideo" },
+    ],
+    [{
+      name: "type",
+      fields: [
+        "unspecified", "computer_use", "custom", "explore", "media_review", "bash",
+        "browser_use", "shell", "vm_setup_helper", "debug", "cursor_guide", "watch_video",
+      ],
+    }],
+  )
+  addType(root, "TaskToolArgs", [
+    { id: 1, name: "description", type: "string" },
+    { id: 2, name: "prompt", type: "string" },
+    { id: 3, name: "subagent_type", type: "SubagentType" },
+    { id: 4, name: "model", type: "string" },
+    { id: 5, name: "resume", type: "string" },
+    { id: 6, name: "agent_id", type: "string" },
+  ])
+  addType(root, "TaskToolCall", [{ id: 1, name: "args", type: "TaskToolArgs" }])
+  addType(root, "AskQuestionOption", [
+    { id: 1, name: "id", type: "string" },
+    { id: 2, name: "label", type: "string" },
+  ])
+  addType(root, "AskQuestionItem", [
+    { id: 1, name: "id", type: "string" },
+    { id: 2, name: "prompt", type: "string" },
+    { id: 3, name: "options", type: "AskQuestionOption", repeated: true },
+    { id: 4, name: "allow_multiple", type: "bool" },
+  ])
+  addType(root, "AskQuestionArgs", [
+    { id: 1, name: "title", type: "string" },
+    { id: 2, name: "questions", type: "AskQuestionItem", repeated: true },
+  ])
+  addType(root, "AskQuestionToolCall", [{ id: 1, name: "args", type: "AskQuestionArgs" }])
+  addType(root, "FetchToolArgs", [
+    { id: 1, name: "url", type: "string" },
+    { id: 2, name: "tool_call_id", type: "string" },
+  ])
+  addType(root, "FetchToolCall", [{ id: 1, name: "args", type: "FetchToolArgs" }])
+  addType(root, "WebFetchToolCall", [{ id: 1, name: "args", type: "FetchToolArgs" }])
+  addType(root, "SwitchModeToolArgs", [
+    { id: 1, name: "target_mode_id", type: "string" },
+    { id: 2, name: "explanation", type: "string" },
+    { id: 3, name: "tool_call_id", type: "string" },
+  ])
+  addType(root, "SwitchModeToolCall", [{ id: 1, name: "args", type: "SwitchModeToolArgs" }])
+  addType(root, "PiReadToolArgs", [
+    { id: 1, name: "path", type: "string" },
+    { id: 2, name: "offset", type: "int32" },
+    { id: 3, name: "limit", type: "int32" },
+  ])
+  addType(root, "PiBashToolArgs", [
+    { id: 1, name: "command", type: "string" },
+    { id: 2, name: "timeout", type: "double" },
+  ])
+  addType(root, "PiEditReplacement", [
+    { id: 1, name: "old_text", type: "string" },
+    { id: 2, name: "new_text", type: "string" },
+  ])
+  addType(root, "PiEditToolArgs", [
+    { id: 1, name: "path", type: "string" },
+    { id: 2, name: "edits", type: "PiEditReplacement", repeated: true },
+  ])
+  addType(root, "PiWriteToolArgs", [
+    { id: 1, name: "path", type: "string" },
+    { id: 2, name: "content", type: "string" },
+  ])
+  addType(root, "PiGrepToolArgs", [
+    { id: 1, name: "pattern", type: "string" },
+    { id: 2, name: "path", type: "string" },
+    { id: 3, name: "glob", type: "string" },
+    { id: 4, name: "ignore_case", type: "bool" },
+    { id: 5, name: "literal", type: "bool" },
+    { id: 6, name: "context", type: "int32" },
+    { id: 7, name: "limit", type: "int32" },
+  ])
+  addType(root, "PiFindToolArgs", [
+    { id: 1, name: "pattern", type: "string" },
+    { id: 2, name: "path", type: "string" },
+    { id: 3, name: "limit", type: "int32" },
+  ])
+  addType(root, "PiLsToolArgs", [
+    { id: 1, name: "path", type: "string" },
+    { id: 2, name: "limit", type: "int32" },
+  ])
+  addType(root, "PiWriteToolCall", [{ id: 1, name: "args", type: "PiWriteToolArgs" }])
+  addType(root, "PiReadToolCall", [{ id: 1, name: "args", type: "PiReadToolArgs" }])
+  addType(root, "PiBashToolCall", [{ id: 1, name: "args", type: "PiBashToolArgs" }])
+  addType(root, "PiEditToolCall", [{ id: 1, name: "args", type: "PiEditToolArgs" }])
+  addType(root, "PiGrepToolCall", [{ id: 1, name: "args", type: "PiGrepToolArgs" }])
+  addType(root, "PiFindToolCall", [{ id: 1, name: "args", type: "PiFindToolArgs" }])
+  addType(root, "PiLsToolCall", [{ id: 1, name: "args", type: "PiLsToolArgs" }])
+  // Display-only native tools Cursor may complete without an ExecServerMessage.
+  addType(root, "ReadTodosArgs", [
+    { id: 1, name: "todo_ids", type: "string", repeated: true },
+  ])
+  addType(root, "ReadTodosToolCall", [{ id: 1, name: "args", type: "ReadTodosArgs" }])
+  addType(root, "AwaitArgs", [
+    { id: 1, name: "task_id", type: "string" },
+    { id: 2, name: "block_until_ms", type: "uint32" },
+    { id: 3, name: "regex", type: "string" },
+  ])
+  addType(root, "AwaitToolCall", [{ id: 1, name: "args", type: "AwaitArgs" }])
+  addType(root, "GetMcpToolsArgs", [
+    { id: 1, name: "server", type: "string" },
+    { id: 2, name: "tool_name", type: "string" },
+    { id: 3, name: "pattern", type: "string" },
+    { id: 4, name: "tool_call_id", type: "string" },
+  ])
+  addType(root, "GetMcpToolsToolCall", [{ id: 1, name: "args", type: "GetMcpToolsArgs" }])
+
+  addType(root, "GenerateImageToolArgs", [
+    { id: 1, name: "description", type: "string" },
+    { id: 2, name: "file_path", type: "string" },
+    { id: 5, name: "reference_image_paths", type: "string", repeated: true },
+  ])
+  addType(root, "GenerateImageToolCall", [{ id: 1, name: "args", type: "GenerateImageToolArgs" }])
+
+  addType(
+    root,
+    "ToolCall",
+    [
+      { id: 57, name: "tool_call_id", type: "string" },
+      { id: 1, name: "shell_tool_call", type: "ShellToolCall" },
+      { id: 3, name: "delete_tool_call", type: "DeleteToolCall" },
+      { id: 4, name: "glob_tool_call", type: "GlobToolCall" },
+      { id: 5, name: "grep_tool_call", type: "GrepToolCall" },
+      { id: 8, name: "read_tool_call", type: "ReadToolCall" },
+      { id: 9, name: "update_todos_tool_call", type: "UpdateTodosToolCall" },
+      { id: 10, name: "read_todos_tool_call", type: "ReadTodosToolCall" },
+      { id: 12, name: "edit_tool_call", type: "EditToolCall" },
+      { id: 13, name: "ls_tool_call", type: "LsToolCall" },
+      { id: 15, name: "mcp_tool_call", type: "McpToolCall" },
+      { id: 17, name: "create_plan_tool_call", type: "CreatePlanToolCall" },
+      { id: 18, name: "web_search_tool_call", type: "WebSearchToolCall" },
+      { id: 19, name: "task_tool_call", type: "TaskToolCall" },
+      { id: 23, name: "ask_question_tool_call", type: "AskQuestionToolCall" },
+      { id: 24, name: "fetch_tool_call", type: "FetchToolCall" },
+      { id: 25, name: "switch_mode_tool_call", type: "SwitchModeToolCall" },
+      { id: 28, name: "generate_image_tool_call", type: "GenerateImageToolCall" },
+      { id: 37, name: "web_fetch_tool_call", type: "WebFetchToolCall" },
+      { id: 42, name: "await_tool_call", type: "AwaitToolCall" },
+      { id: 44, name: "get_mcp_tools_tool_call", type: "GetMcpToolsToolCall" },
+      { id: 61, name: "pi_read_tool_call", type: "PiReadToolCall" },
+      { id: 62, name: "pi_bash_tool_call", type: "PiBashToolCall" },
+      { id: 63, name: "pi_edit_tool_call", type: "PiEditToolCall" },
+      { id: 64, name: "pi_write_tool_call", type: "PiWriteToolCall" },
+      { id: 65, name: "pi_grep_tool_call", type: "PiGrepToolCall" },
+      { id: 66, name: "pi_find_tool_call", type: "PiFindToolCall" },
+      { id: 67, name: "pi_ls_tool_call", type: "PiLsToolCall" },
+    ],
+    [{
+      name: "tool",
+      fields: [
+        "shell_tool_call", "delete_tool_call", "glob_tool_call", "grep_tool_call",
+        "read_tool_call", "update_todos_tool_call", "read_todos_tool_call",
+        "edit_tool_call", "ls_tool_call",
+        "mcp_tool_call", "create_plan_tool_call", "web_search_tool_call", "task_tool_call",
+        "ask_question_tool_call", "fetch_tool_call", "switch_mode_tool_call",
+        "generate_image_tool_call", "web_fetch_tool_call", "await_tool_call", "get_mcp_tools_tool_call",
+        "pi_read_tool_call", "pi_bash_tool_call", "pi_edit_tool_call",
+        "pi_write_tool_call", "pi_grep_tool_call", "pi_find_tool_call", "pi_ls_tool_call",
+      ],
+    }],
+  )
 
   addType(root, "ToolCallStarted", [
     { id: 1, name: "call_id", type: "string" },
@@ -58,11 +308,12 @@ export function createMessageTypes(): protobuf.Root {
     { id: 3, name: "model_call_id", type: "string" },
   ])
 
+  // agent.v1 ToolCallCompletedUpdate has no string result field — result lives
+  // inside the typed ToolCall variant.
   addType(root, "ToolCallCompleted", [
     { id: 1, name: "call_id", type: "string" },
     { id: 2, name: "tool_call", type: "ToolCall" },
     { id: 3, name: "model_call_id", type: "string" },
-    { id: 4, name: "result", type: "string" },
   ])
 
   addType(root, "PartialToolCall", [
@@ -725,6 +976,153 @@ export function createMessageTypes(): protobuf.Root {
 
   addType(root, "ClientHeartbeat", [])
 
+  // ── Interaction query/response channel ──
+  // Cursor sends UI/integration requests outside the exec tool channel. Query
+  // bodies stay opaque: this headless provider only needs their id + variant
+  // to return a conservative typed response on the same Run stream.
+  addType(
+    root,
+    "InteractionQuery",
+    [
+      { id: 1, name: "id", type: "uint32" },
+      { id: 2, name: "web_search_request_query", type: "bytes" },
+      { id: 3, name: "ask_question_interaction_query", type: "bytes" },
+      { id: 4, name: "switch_mode_request_query", type: "bytes" },
+      { id: 7, name: "create_plan_request_query", type: "bytes" },
+      { id: 8, name: "setup_vm_environment_args", type: "bytes" },
+      { id: 9, name: "web_fetch_request_query", type: "bytes" },
+      { id: 10, name: "pr_management_request_query", type: "bytes" },
+      { id: 11, name: "mcp_auth_request_query", type: "bytes" },
+      { id: 12, name: "generate_image_request_query", type: "bytes" },
+      { id: 13, name: "replace_env_args", type: "bytes" },
+      { id: 14, name: "connect_scm_request_query", type: "bytes" },
+    ],
+    [{
+      name: "query",
+      fields: [
+        "web_search_request_query", "ask_question_interaction_query",
+        "switch_mode_request_query", "create_plan_request_query",
+        "setup_vm_environment_args", "web_fetch_request_query",
+        "pr_management_request_query", "mcp_auth_request_query",
+        "generate_image_request_query", "replace_env_args",
+        "connect_scm_request_query",
+      ],
+    }],
+  )
+
+  addType(root, "WebSearchRequestApproved", [])
+  addType(root, "WebSearchRequestRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(root, "WebSearchRequestResponse", [
+    { id: 1, name: "approved", type: "WebSearchRequestApproved" },
+    { id: 2, name: "rejected", type: "WebSearchRequestRejected" },
+  ], [{ name: "result", fields: ["approved", "rejected"] }])
+
+  addType(root, "AskQuestionRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(root, "AskQuestionResult", [
+    { id: 3, name: "rejected", type: "AskQuestionRejected" },
+  ], [{ name: "result", fields: ["rejected"] }])
+  addType(root, "AskQuestionInteractionResponse", [
+    { id: 1, name: "result", type: "AskQuestionResult" },
+  ])
+
+  addType(root, "SwitchModeRequestApproved", [])
+  addType(root, "SwitchModeRequestRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(root, "SwitchModeRequestResponse", [
+    { id: 1, name: "approved", type: "SwitchModeRequestApproved" },
+    { id: 2, name: "rejected", type: "SwitchModeRequestRejected" },
+  ], [{ name: "result", fields: ["approved", "rejected"] }])
+
+  addType(root, "CreatePlanSuccess", [])
+  addType(root, "CreatePlanError", [{ id: 1, name: "error", type: "string" }])
+  addType(root, "CreatePlanResult", [
+    { id: 1, name: "success", type: "CreatePlanSuccess" },
+    { id: 2, name: "error", type: "CreatePlanError" },
+    { id: 3, name: "plan_uri", type: "string" },
+  ], [{ name: "result", fields: ["success", "error"] }])
+  addType(root, "CreatePlanRequestResponse", [
+    { id: 1, name: "result", type: "CreatePlanResult" },
+  ])
+
+  addType(root, "SetupVmEnvironmentSuccess", [])
+  addType(root, "SetupVmEnvironmentResult", [
+    { id: 1, name: "success", type: "SetupVmEnvironmentSuccess" },
+  ], [{ name: "result", fields: ["success"] }])
+
+  addType(root, "WebFetchRequestApproved", [])
+  addType(root, "WebFetchRequestRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(root, "WebFetchRequestResponse", [
+    { id: 1, name: "approved", type: "WebFetchRequestApproved" },
+    { id: 2, name: "rejected", type: "WebFetchRequestRejected" },
+  ], [{ name: "result", fields: ["approved", "rejected"] }])
+
+  addType(root, "PrManagementRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(root, "PrManagementResult", [
+    { id: 3, name: "rejected", type: "PrManagementRejected" },
+  ], [{ name: "result", fields: ["rejected"] }])
+
+  addType(root, "McpAuthRequestApproved", [])
+  addType(root, "McpAuthRequestRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(root, "McpAuthRequestResponse", [
+    { id: 1, name: "approved", type: "McpAuthRequestApproved" },
+    { id: 2, name: "rejected", type: "McpAuthRequestRejected" },
+  ], [{ name: "result", fields: ["approved", "rejected"] }])
+
+  addType(root, "GenerateImageRequestApproved", [{ id: 1, name: "description", type: "string" }])
+  addType(root, "GenerateImageRequestRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(root, "GenerateImageRequestResponse", [
+    { id: 1, name: "approved", type: "GenerateImageRequestApproved" },
+    { id: 2, name: "rejected", type: "GenerateImageRequestRejected" },
+  ], [{ name: "result", fields: ["approved", "rejected"] }])
+
+  addType(root, "ReplaceEnvSuccess", [])
+  addType(root, "ReplaceEnvFailure", [
+    { id: 1, name: "error_message", type: "string" },
+    { id: 2, name: "setup_logs", type: "string" },
+  ])
+  addType(root, "ReplaceEnvResult", [
+    { id: 1, name: "success", type: "ReplaceEnvSuccess" },
+    { id: 2, name: "failure", type: "ReplaceEnvFailure" },
+  ], [{ name: "result", fields: ["success", "failure"] }])
+
+  addType(root, "ConnectScmRequestApproved", [])
+  addType(root, "ConnectScmRequestRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(root, "ConnectScmRequestFailed", [{ id: 1, name: "error", type: "string" }])
+  addType(root, "ConnectScmRequestResponse", [
+    { id: 1, name: "approved", type: "ConnectScmRequestApproved" },
+    { id: 2, name: "rejected", type: "ConnectScmRequestRejected" },
+    { id: 3, name: "failed", type: "ConnectScmRequestFailed" },
+  ], [{ name: "result", fields: ["approved", "rejected", "failed"] }])
+
+  addType(
+    root,
+    "InteractionResponse",
+    [
+      { id: 1, name: "id", type: "uint32" },
+      { id: 2, name: "web_search_request_response", type: "WebSearchRequestResponse" },
+      { id: 3, name: "ask_question_interaction_response", type: "AskQuestionInteractionResponse" },
+      { id: 4, name: "switch_mode_request_response", type: "SwitchModeRequestResponse" },
+      { id: 7, name: "create_plan_request_response", type: "CreatePlanRequestResponse" },
+      { id: 8, name: "setup_vm_environment_result", type: "SetupVmEnvironmentResult" },
+      { id: 9, name: "web_fetch_request_response", type: "WebFetchRequestResponse" },
+      { id: 10, name: "pr_management_result", type: "PrManagementResult" },
+      { id: 11, name: "mcp_auth_request_response", type: "McpAuthRequestResponse" },
+      { id: 12, name: "generate_image_request_response", type: "GenerateImageRequestResponse" },
+      { id: 13, name: "replace_env_result", type: "ReplaceEnvResult" },
+      { id: 14, name: "connect_scm_request_response", type: "ConnectScmRequestResponse" },
+    ],
+    [{
+      name: "result",
+      fields: [
+        "web_search_request_response", "ask_question_interaction_response",
+        "switch_mode_request_response", "create_plan_request_response",
+        "setup_vm_environment_result", "web_fetch_request_response",
+        "pr_management_result", "mcp_auth_request_response",
+        "generate_image_request_response", "replace_env_result",
+        "connect_scm_request_response",
+      ],
+    }],
+  )
+
   // ── KV blob store (cursor moves large payloads out-of-band via this channel) ──
   // Server sends KvServerMessage (AgentServerMessage #4); client MUST reply with
   // KvClientMessage (AgentClientMessage #3) on the same Run stream, echoing `id`.
@@ -775,9 +1173,10 @@ export function createMessageTypes(): protobuf.Root {
       { id: 2, name: "exec_client_message", type: "ExecClientMessage" },
       { id: 3, name: "kv_client_message", type: "KvClientMessage" },
       { id: 5, name: "exec_client_control_message", type: "ExecClientControlMessage" },
+      { id: 6, name: "interaction_response", type: "InteractionResponse" },
       { id: 7, name: "client_heartbeat", type: "ClientHeartbeat" },
     ],
-    [{ name: "message", fields: ["run_request", "exec_client_message", "kv_client_message", "exec_client_control_message", "client_heartbeat"] }],
+    [{ name: "message", fields: ["run_request", "exec_client_message", "kv_client_message", "exec_client_control_message", "interaction_response", "client_heartbeat"] }],
   )
 
   // ── AgentServerMessage ──
@@ -791,7 +1190,7 @@ export function createMessageTypes(): protobuf.Root {
       { id: 3, name: "conversation_checkpoint_update", type: "bytes" },
       { id: 4, name: "kv_server_message", type: "KvServerMessage" },
       { id: 5, name: "exec_server_control_message", type: "ExecServerControlMessage" },
-      { id: 7, name: "interaction_query", type: "bytes" },
+      { id: 7, name: "interaction_query", type: "InteractionQuery" },
     ],
     [{ name: "message", fields: ["interaction_update", "exec_server_message", "conversation_checkpoint_update", "kv_server_message", "exec_server_control_message", "interaction_query"] }],
   )

@@ -48,20 +48,28 @@ export function parseInteractionUpdate(payload: Uint8Array): StreamEvent | null 
   if (iu.tool_call_started) {
     const tc = iu.tool_call_started as Record<string, unknown>
     const toolCall = tc.tool_call as Record<string, unknown> | undefined
+    const variant =
+      toolCall && typeof toolCall === "object"
+        ? Object.keys(toolCall).find((k) => k.endsWith("_tool_call"))
+        : undefined
+    const variantPayload =
+      variant && toolCall ? (toolCall[variant] as Record<string, unknown> | undefined) : undefined
+    const args = variantPayload?.args ?? variantPayload
     return {
       type: "tool-call-started",
       callId: (tc.call_id as string) ?? "",
-      toolName: (toolCall?.tool_name as string) ?? "",
-      args: (toolCall?.args as string) ?? "{}",
+      toolName: variant ?? "",
+      args: JSON.stringify(args ?? {}),
     }
   }
 
   if (iu.tool_call_completed) {
     const tc = iu.tool_call_completed as Record<string, unknown>
+    const toolCall = tc.tool_call as Record<string, unknown> | undefined
     return {
       type: "tool-call-completed",
       callId: (tc.call_id as string) ?? "",
-      result: (tc.result as string) ?? "{}",
+      result: JSON.stringify(toolCall ?? {}),
     }
   }
 

@@ -2,11 +2,22 @@ import { encodeMessage, getMessageTypes } from "./messages.js"
 import { toolsToDescriptors, type OpencodeToolDef } from "./tools.js"
 import type { ModelInfo } from "../models.js"
 
+export type SeedHistoryMessage = {
+  role: "system" | "user" | "assistant"
+  content: string
+}
+
 export type RunRequestInput = {
   text: string
   modelId: string
   conversationId: string
   systemPrompt?: string
+  /**
+   * Prior chat turns for a seed ConversationStateStructure (no checkpoint).
+   * Used after compaction reset so Cursor sees OpenCode's compacted history
+   * instead of an empty conversation.
+   */
+  history?: SeedHistoryMessage[]
   /**
    * Opaque ConversationStateStructure bytes from the last
    * conversation_checkpoint_update for this conversation_id. When set, echoed
@@ -19,6 +30,8 @@ export type RunRequestInput = {
   messageId?: string
   availableModels?: ModelInfo[]
   tools?: OpencodeToolDef[]
+  /** Pre-resolved descriptors (including config-backed MCP server identity). */
+  toolDescriptors?: Array<Record<string, unknown>>
   /** Prebuilt RequestContext (OpenCode-sourced). */
   requestContext?: Record<string, unknown>
 }
@@ -30,19 +43,31 @@ export type RunRequestInput = {
  * as a JSON chat message. After the first checkpoint arrives we stop inventing
  * state and echo the server's opaque structure instead (CLI behavior).
  *
+ * Compaction resets also use this seed, with `history` carrying OpenCode's
+ * compacted prompt turns so Cursor can summarize without the old checkpoint.
+ *
  * We deliberately do NOT use `AgentRunRequest.custom_system_prompt` (#8): that
  * field is the internal `--system-prompt` CLI override and the server rejects
  * it for normal accounts.
  */
-function buildSeedConversationState(systemPrompt?: string): Uint8Array {
+export function buildSeedConversationState(input?: {
+  systemPrompt?: string
+  history?: SeedHistoryMessage[]
+}): Uint8Array {
   const root = getMessageTypes()
   const type = root.lookupType("ConversationStateStructure")
-  const obj: Record<string, unknown> = {}
-  if (systemPrompt && systemPrompt.length > 0) {
-    obj.root_prompt_messages_json = [
-      JSON.stringify({ role: "system", content: systemPrompt }),
-    ]
+  const messages: string[] = []
+  if (input?.systemPrompt && input.systemPrompt.length > 0) {
+    messages.push(JSON.stringify({ role: "system", content: input.systemPrompt }))
   }
+  for (const entry of input?.history ?? []) {
+    if (!entry.content) continue
+    // Avoid duplicating the system prompt when history also carries one.
+    if (entry.role === "system" && input?.systemPrompt) continue
+    messages.push(JSON.stringify({ role: entry.role, content: entry.content }))
+  }
+  const obj: Record<string, unknown> = {}
+  if (messages.length > 0) obj.root_prompt_messages_json = messages
   return type.encode(type.fromObject(obj)).finish()
 }
 
@@ -68,7 +93,7 @@ export function buildRunRequest(input: RunRequestInput): Uint8Array {
   // (#2). AgentRunRequest.mcp_tools (#4) is prewarm-only / empty on real turns —
   // putting tools only there is why the model fell back to native Grep/Read.
   const tools = input.tools ?? []
-  const mcpTools = tools.length > 0 ? toolsToDescriptors(tools) : []
+  const mcpTools = input.toolDescriptors ?? (tools.length > 0 ? toolsToDescriptors(tools) : [])
   const requestContext = input.requestContext
 
   const userMessageAction: Record<string, unknown> = {
@@ -84,7 +109,10 @@ export function buildRunRequest(input: RunRequestInput): Uint8Array {
   const conversationState =
     input.conversationState && input.conversationState.length > 0
       ? input.conversationState
-      : buildSeedConversationState(input.systemPrompt)
+      : buildSeedConversationState({
+          systemPrompt: input.systemPrompt,
+          history: input.history,
+        })
 
   const runRequest: Record<string, unknown> = {
     conversation_id: input.conversationId,

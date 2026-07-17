@@ -15,27 +15,75 @@ export type OpencodeToolDef = {
   inputSchema?: unknown
 }
 
+export type ToolServerIdentity = {
+  /** Cursor MCP server id / provider_identifier (e.g. opencode, github). */
+  server: string
+  /** Bare tool name inside that server (Cursor McpArgs.tool_name). */
+  toolName: string
+  /** Full OpenCode tool id used for local execution (e.g. github_create_pull_request). */
+  opencodeName: string
+}
+
+/** Match OpenCode's McpCatalog.sanitize for config server ids. */
+export function sanitizeMcpServerId(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, "_")
+}
+
+/**
+ * Resolve an OpenCode tool id using known MCP server ids from merged config.
+ * Unknown names remain under the synthetic default server: a flattened tool
+ * name alone cannot distinguish plugin/custom tools from `<server>_<tool>`.
+ */
+export function resolveToolServerIdentity(
+  opencodeName: string,
+  defaultServer = "opencode",
+  knownMcpServers: Iterable<string> = [],
+): ToolServerIdentity {
+  if (!opencodeName) {
+    return { server: defaultServer, toolName: "mcp", opencodeName: "mcp" }
+  }
+
+  // Longest first handles configured ids where one is a prefix of another
+  // (e.g. "git" and "git_hub"). OpenCode flattens with the sanitized id.
+  const servers = [...new Set([...knownMcpServers].map(sanitizeMcpServerId).filter(Boolean))]
+    .sort((a, b) => b.length - a.length)
+  for (const server of servers) {
+    const prefix = `${server}_`
+    if (!opencodeName.startsWith(prefix) || opencodeName.length === prefix.length) continue
+    return {
+      server,
+      toolName: opencodeName.slice(prefix.length),
+      opencodeName,
+    }
+  }
+  return { server: defaultServer, toolName: opencodeName, opencodeName }
+}
+
 /**
  * Convert opencode's per-turn tool list into Cursor `McpToolDefinition`
  * entries for `request_context.tools` (#7) and `AgentRunRequest.mcp_tools`.
  *
- * opencode tools are already namespaced (e.g. `read`, `grep`, or
- * `<server>_<tool>` for MCP). We advertise them all under a synthetic
- * `opencode` provider so Cursor routes their calls back to us as
- * `mcp_args` on the exec channel. The composite `name` is what the model
- * calls and what comes back as `McpArgs.name`.
+ * Builtins and unknown plugin/custom tools are advertised under the synthetic
+ * default server (`opencode`). Tools whose prefixes match configured MCP
+ * servers keep those server ids (`github`, …). Composite `name` is
+ * `<server>-<bareTool>`; local execution still uses the full OpenCode id
+ * reconstructed in `mcpRealToolName`.
  */
 export function toolsToDescriptors(
   tools: OpencodeToolDef[],
   providerIdentifier = "opencode",
+  knownMcpServers: Iterable<string> = [],
 ): Array<Record<string, unknown>> {
-  return tools.map((t) => ({
-    name: `${providerIdentifier}-${t.name}`,
-    description: t.description ?? "",
-    input_schema: encodeJsonAsValue(normalizeInputSchema(t.inputSchema)),
-    provider_identifier: providerIdentifier,
-    tool_name: t.name,
-  }))
+  return tools.map((t) => {
+    const id = resolveToolServerIdentity(t.name, providerIdentifier, knownMcpServers)
+    return {
+      name: `${id.server}-${id.toolName}`,
+      description: t.description ?? "",
+      input_schema: encodeJsonAsValue(normalizeInputSchema(t.inputSchema)),
+      provider_identifier: id.server,
+      tool_name: id.toolName,
+    }
+  })
 }
 
 function normalizeInputSchema(schema: unknown): Record<string, unknown> {
@@ -47,25 +95,40 @@ function normalizeInputSchema(schema: unknown): Record<string, unknown> {
 
 /**
  * Build the nested McpFileSystemOptions / McpMetaToolOptions shape used by
- * requestContext.#23 / #34. Groups every tool under one synthetic server so
- * Cursor's IDE-style decoder also sees the list.
+ * requestContext.#23 / #34. One `McpDescriptor` per resolved server (builtins
+ * and unknown tools under the synthetic default; configured MCP tools under
+ * their upstream server id).
  */
 export function toolsToMcpDescriptors(
   tools: OpencodeToolDef[],
   providerIdentifier = "opencode",
+  knownMcpServers: Iterable<string> = [],
 ): Array<Record<string, unknown>> {
   if (tools.length === 0) return []
-  return [
-    {
-      server_name: providerIdentifier,
-      server_identifier: providerIdentifier,
-      tools: tools.map((t) => ({
-        tool_name: t.name,
-        description: t.description ?? "",
-        input_schema: encodeJsonAsValue(normalizeInputSchema(t.inputSchema)),
-      })),
-    },
-  ]
+
+  const order: string[] = []
+  const byServer = new Map<string, Array<Record<string, unknown>>>()
+
+  for (const t of tools) {
+    const id = resolveToolServerIdentity(t.name, providerIdentifier, knownMcpServers)
+    let list = byServer.get(id.server)
+    if (!list) {
+      list = []
+      byServer.set(id.server, list)
+      order.push(id.server)
+    }
+    list.push({
+      tool_name: id.toolName,
+      description: t.description ?? "",
+      input_schema: encodeJsonAsValue(normalizeInputSchema(t.inputSchema)),
+    })
+  }
+
+  return order.map((server) => ({
+    server_name: server,
+    server_identifier: server,
+    tools: byServer.get(server)!,
+  }))
 }
 
 /**
@@ -75,9 +138,10 @@ export function toolsToMcpDescriptors(
 export function buildLiveRequestContext(
   tools: OpencodeToolDef[],
   providerIdentifier = "opencode",
+  knownMcpServers: Iterable<string> = [],
 ): Record<string, unknown> {
-  const flat = toolsToDescriptors(tools, providerIdentifier)
-  const nested = toolsToMcpDescriptors(tools, providerIdentifier)
+  const flat = toolsToDescriptors(tools, providerIdentifier, knownMcpServers)
+  const nested = toolsToMcpDescriptors(tools, providerIdentifier, knownMcpServers)
   const cwd = process.cwd()
   return {
     env: {
@@ -163,6 +227,18 @@ const CURSOR_INTERNAL_KEYS = new Set([
   "ignore",
 ])
 
+/** Required content fields where an empty string is meaningful (for example, truncating a file). */
+const PRESERVE_EMPTY_STRING_KEYS = new Set([
+  "content",
+  "file_text",
+  "fileText",
+  "stream_content",
+  "oldString",
+  "old_string",
+  "newString",
+  "new_string",
+])
+
 export function mapExecServerToToolName(execField: string): string | undefined {
   return cursorToolToOpencode[execField]
 }
@@ -187,7 +263,6 @@ const execVariantToResultField: Record<string, string> = {
   mcp_args: "mcp_result",
 }
 
-const MCP_PREFIX = "opencode-"
 
 // ── Extract exec args from ExecServerMessage ──
 
@@ -263,8 +338,9 @@ export function mapCursorArgsToOpencode(
   for (const [k, v] of Object.entries(raw)) {
     if (v === undefined || v === null) continue
     if (CURSOR_INTERNAL_KEYS.has(k)) continue
-    // Drop empty strings from optional protobuf defaults.
-    if (typeof v === "string" && v.length === 0) continue
+    // Drop empty strings from optional protobuf defaults, but retain required
+    // content fields where empty means a valid destructive edit/write.
+    if (typeof v === "string" && v.length === 0 && !PRESERVE_EMPTY_STRING_KEYS.has(k)) continue
     cleaned[k] = v
   }
 
@@ -300,7 +376,7 @@ export function mapCursorArgsToOpencode(
       const args: Record<string, unknown> = {}
       const filePath = str(cleaned.filePath) ?? str(cleaned.path) ?? str(cleaned.file_path)
       if (filePath) args.filePath = filePath
-      const content = str(cleaned.content) ?? str(cleaned.file_text) ?? str(cleaned.fileText)
+      const content = stringValue(cleaned.content) ?? stringValue(cleaned.file_text) ?? stringValue(cleaned.fileText)
       if (content !== undefined) args.content = content
       return { toolName: "write", args }
     }
@@ -308,9 +384,9 @@ export function mapCursorArgsToOpencode(
       const args: Record<string, unknown> = {}
       const filePath = str(cleaned.filePath) ?? str(cleaned.path) ?? str(cleaned.file_path)
       if (filePath) args.filePath = filePath
-      const oldString = str(cleaned.oldString) ?? str(cleaned.old_string)
+      const oldString = stringValue(cleaned.oldString) ?? stringValue(cleaned.old_string)
       if (oldString !== undefined) args.oldString = oldString
-      const newString = str(cleaned.newString) ?? str(cleaned.new_string)
+      const newString = stringValue(cleaned.newString) ?? stringValue(cleaned.new_string)
       if (newString !== undefined) args.newString = newString
       if (typeof cleaned.replaceAll === "boolean") args.replaceAll = cleaned.replaceAll
       return { toolName: "edit", args }
@@ -360,6 +436,10 @@ function str(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined
 }
 
+function stringValue(v: unknown): string | undefined {
+  return typeof v === "string" ? v : undefined
+}
+
 function num(v: unknown): number | undefined {
   if (typeof v === "number" && Number.isFinite(v)) return v
   if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v)
@@ -370,11 +450,39 @@ function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
-function mcpRealToolName(mcpArgs: Record<string, unknown>): string {
-  const toolName = mcpArgs.tool_name as string | undefined
-  if (toolName) return toolName
-  const name = (mcpArgs.name as string) ?? ""
-  return name.startsWith(MCP_PREFIX) ? name.slice(MCP_PREFIX.length) : name || "mcp"
+/**
+ * Map Cursor McpArgs back to the OpenCode tool id.
+ * Prefers provider_identifier + bare tool_name (github + create_pull_request
+ * → github_create_pull_request). Builtins under the default server stay bare.
+ */
+export function mcpRealToolName(
+  mcpArgs: Record<string, unknown>,
+  defaultServer = "opencode",
+): string {
+  const toolName = typeof mcpArgs.tool_name === "string" ? mcpArgs.tool_name : undefined
+  const provider =
+    typeof mcpArgs.provider_identifier === "string" ? mcpArgs.provider_identifier : undefined
+
+  if (toolName) {
+    if (provider && provider !== defaultServer) {
+      // Already a full OpenCode id (legacy ads or model echo).
+      if (toolName.startsWith(`${provider}_`)) return toolName
+      return `${provider}_${toolName}`
+    }
+    return toolName
+  }
+
+  const name = typeof mcpArgs.name === "string" ? mcpArgs.name : ""
+  const dash = name.indexOf("-")
+  if (dash > 0) {
+    const server = name.slice(0, dash)
+    const bare = name.slice(dash + 1)
+    if (server && bare) {
+      if (server === defaultServer) return bare
+      return `${server}_${bare}`
+    }
+  }
+  return name || "mcp"
 }
 
 function decodeMcpArgs(raw: unknown): Record<string, unknown> {

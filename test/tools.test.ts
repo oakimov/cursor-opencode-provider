@@ -8,6 +8,9 @@ import {
   buildToolCallPart,
   parseExecIdFromToolCallId,
   toolsToDescriptors,
+  toolsToMcpDescriptors,
+  resolveToolServerIdentity,
+  mcpRealToolName,
   detectExecVariantField,
   buildRawEmptyExecReply,
   buildRequestContextResult,
@@ -30,6 +33,42 @@ function mcpArgEntry(key: string, value: unknown): Uint8Array {
   return new Uint8Array(out)
 }
 
+describe("resolveToolServerIdentity", () => {
+  it("keeps builtins under the default server", () => {
+    expect(resolveToolServerIdentity("read")).toEqual({
+      server: "opencode",
+      toolName: "read",
+      opencodeName: "read",
+    })
+    expect(resolveToolServerIdentity("todowrite")).toEqual({
+      server: "opencode",
+      toolName: "todowrite",
+      opencodeName: "todowrite",
+    })
+  })
+
+  it("uses only configured MCP server ids and prefers the longest match", () => {
+    expect(resolveToolServerIdentity("github_create_pull_request", "opencode", ["github"])).toEqual({
+      server: "github",
+      toolName: "create_pull_request",
+      opencodeName: "github_create_pull_request",
+    })
+    expect(resolveToolServerIdentity("my_server_lookup", "opencode", ["my", "my_server"])).toEqual({
+      server: "my_server",
+      toolName: "lookup",
+      opencodeName: "my_server_lookup",
+    })
+  })
+
+  it("keeps unknown underscore-containing custom tools under opencode", () => {
+    expect(resolveToolServerIdentity("custom_helper")).toEqual({
+      server: "opencode",
+      toolName: "custom_helper",
+      opencodeName: "custom_helper",
+    })
+  })
+})
+
 describe("toolsToDescriptors", () => {
   it("builds request_context descriptors with composite names", () => {
     const d = toolsToDescriptors([
@@ -43,10 +82,83 @@ describe("toolsToDescriptors", () => {
     expect((d[0].input_schema as Uint8Array).length).toBeGreaterThan(0)
   })
 
+  it("preserves real MCP server identity on flat descriptors", () => {
+    const d = toolsToDescriptors([
+      { name: "read", description: "Read" },
+      { name: "github_create_pull_request", description: "Open a PR" },
+    ], "opencode", ["github"])
+    expect(d[0].provider_identifier).toBe("opencode")
+    expect(d[0].name).toBe("opencode-read")
+    expect(d[1].provider_identifier).toBe("github")
+    expect(d[1].tool_name).toBe("create_pull_request")
+    expect(d[1].name).toBe("github-create_pull_request")
+  })
+
   it("defaults a missing schema to an empty object schema", () => {
     const d = toolsToDescriptors([{ name: "x" }])
     expect((d[0].input_schema as Uint8Array).length).toBeGreaterThan(0)
     expect(d[0].description).toBe("")
+  })
+})
+
+describe("toolsToMcpDescriptors", () => {
+  it("splits mcp_descriptors by real server, builtins under opencode", () => {
+    const d = toolsToMcpDescriptors([
+      { name: "read", description: "Read" },
+      { name: "github_create_pull_request", description: "Open a PR" },
+      { name: "github_get_me", description: "Who am I" },
+      { name: "brave_web_search", description: "Search" },
+      { name: "bash", description: "Shell" },
+    ], "opencode", ["github", "brave"])
+    expect(d.map((x) => x.server_identifier)).toEqual(["opencode", "github", "brave"])
+    expect(d[0].server_name).toBe("opencode")
+    expect((d[0].tools as Array<{ tool_name: string }>).map((t) => t.tool_name)).toEqual([
+      "read",
+      "bash",
+    ])
+    expect((d[1].tools as Array<{ tool_name: string }>).map((t) => t.tool_name)).toEqual([
+      "create_pull_request",
+      "get_me",
+    ])
+    expect((d[2].tools as Array<{ tool_name: string }>).map((t) => t.tool_name)).toEqual([
+      "web_search",
+    ])
+  })
+
+  it("returns no descriptors for an empty tool list", () => {
+    expect(toolsToMcpDescriptors([])).toEqual([])
+  })
+})
+
+describe("mcpRealToolName", () => {
+  it("reconstructs OpenCode MCP ids from provider + bare tool", () => {
+    expect(
+      mcpRealToolName({
+        provider_identifier: "github",
+        tool_name: "create_pull_request",
+        name: "github-create_pull_request",
+      }),
+    ).toBe("github_create_pull_request")
+  })
+
+  it("keeps builtin tool_name bare under opencode", () => {
+    expect(mcpRealToolName({ provider_identifier: "opencode", tool_name: "read" })).toBe("read")
+  })
+
+  it("falls back from composite name when tool_name is missing", () => {
+    expect(mcpRealToolName({ name: "github-create_pull_request" })).toBe(
+      "github_create_pull_request",
+    )
+    expect(mcpRealToolName({ name: "opencode-read" })).toBe("read")
+  })
+
+  it("does not double-prefix when tool_name is already namespaced", () => {
+    expect(
+      mcpRealToolName({
+        provider_identifier: "github",
+        tool_name: "github_create_pull_request",
+      }),
+    ).toBe("github_create_pull_request")
   })
 })
 
@@ -94,6 +206,22 @@ describe("mapCursorArgsToOpencode", () => {
   it("remaps write path/file_text → filePath/content", () => {
     const r = mapCursorArgsToOpencode("write", { path: "/a.ts", file_text: "hi" })
     expect(r).toEqual({ toolName: "write", args: { filePath: "/a.ts", content: "hi" } })
+  })
+  it("preserves empty write and replacement content", () => {
+    expect(mapCursorArgsToOpencode("write", { path: "/empty.txt", content: "" })).toEqual({
+      toolName: "write",
+      args: { filePath: "/empty.txt", content: "" },
+    })
+    expect(
+      mapCursorArgsToOpencode("edit", {
+        path: "/a.ts",
+        old_string: "remove me",
+        new_string: "",
+      }),
+    ).toEqual({
+      toolName: "edit",
+      args: { filePath: "/a.ts", oldString: "remove me", newString: "" },
+    })
   })
   it("remaps shell working_directory → workdir", () => {
     const r = mapCursorArgsToOpencode("bash", {

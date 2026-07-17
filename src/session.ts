@@ -19,6 +19,12 @@ export type PendingExec = {
    * mcp_result can unwrap read envelopes even if the prompt omits toolName.
    */
   toolName?: string
+  /**
+   * True when this pending entry was synthesized from a Cursor display-only
+   * tool_call_* frame (no ExecServerMessage). Continuation must not write an
+   * exec result back to Cursor — just clear pending and keep pumping.
+   */
+  bridged?: boolean
 }
 
 export type CursorSession = {
@@ -36,6 +42,14 @@ export type CursorSession = {
   stream: BidiStream
   frames: AsyncIterator<Frame>
   pending: Map<number, PendingExec>
+  /**
+   * Cursor display tool calls (tool_call_started) awaiting either an exec or a
+   * tool_call_completed. Keyed by call_id. Cleared when exec handles the call
+   * or when we bridge the completed display call into an OpenCode tool-call.
+   */
+  displayToolCalls: Map<string, Record<string, unknown>>
+  /** Monotonic synthetic exec ids for bridged (display-only) OpenCode tool calls. */
+  nextBridgedExecId: number
   /** KV blob store: blob_id (hex) → data, for Cursor's out-of-band payload channel. */
   blobs: Map<string, Uint8Array>
   /** McpToolDefinition list advertised this turn — echoed into the request_context reply. */
@@ -48,6 +62,17 @@ export type CursorSession = {
    * stream instead of emitting tool-call parts OpenCode will reject.
    */
   allowTools: boolean
+  /**
+   * Best-effort token usage for this held-open Run. Updated from text/tool
+   * activity and replaced by TurnEnded when the turn completes. Emitted on
+   * tool-calls finishes so OpenCode does not store all-zero usage mid-loop.
+   */
+  usageEstimate: {
+    inputTokens: number
+    outputTokens: number
+    cacheRead: number
+    cacheWrite: number
+  }
   /**
    * True while a doStream pull() is actively reading this session's frames.
    * Prevents a late cancel/abort from a prior ReadableStream from destroying
@@ -80,8 +105,9 @@ export class SessionManager {
     session: CursorSession,
     resultField: string,
     toolName?: string,
+    bridged = false,
   ): void {
-    session.pending.set(execId, { resultField, toolName })
+    session.pending.set(execId, { resultField, toolName, bridged })
     this.byExecId.set(this.key(session.sessionId, execId), session)
     this.touch(session)
   }

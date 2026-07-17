@@ -23,7 +23,13 @@ describe("collectRules / buildRequestContext", () => {
     await writeFile(path.join(root, ".cursor", "rules", "extra.md"), "cursor instruction via opencode.json")
     await writeFile(
       path.join(root, "opencode.json"),
-      JSON.stringify({ instructions: [".cursor/rules/*.md"] }),
+      JSON.stringify({
+        instructions: [".cursor/rules/*.md"],
+        mcp: {
+          github: { type: "remote", url: "https://example.test/github" },
+          "my server": { type: "remote", url: "https://example.test/custom" },
+        },
+      }),
     )
   })
 
@@ -55,5 +61,22 @@ describe("collectRules / buildRequestContext", () => {
     expect(bytes.length).toBeGreaterThan(50)
     const decoded = decodeMessage("RequestContext", bytes) as Record<string, unknown>
     expect(Array.isArray(decoded.rules)).toBe(true)
+  })
+
+  it("splits only config-backed MCP tools and preserves custom underscore names", async () => {
+    const ctx = await buildRequestContext({
+      workspaceRoot: root,
+      tools: [
+        { name: "github_create_pull_request" },
+        { name: "my_server_lookup" },
+        { name: "custom_helper" },
+      ],
+    })
+    const tools = ctx.tools as Array<Record<string, unknown>>
+    expect(tools.map((tool) => [tool.provider_identifier, tool.tool_name])).toEqual([
+      ["github", "create_pull_request"],
+      ["my_server", "lookup"],
+      ["opencode", "custom_helper"],
+    ])
   })
 })

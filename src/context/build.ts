@@ -35,8 +35,9 @@ export async function buildRequestContext(
     collectProjectLayout(workspaceRoot),
   ])
 
-  const flat = toolsToDescriptors(tools, providerIdentifier)
-  const nested = toolsToMcpDescriptors(tools, providerIdentifier)
+  const mcpServerNames = Object.keys(config.mcp ?? {})
+  const flat = toolsToDescriptors(tools, providerIdentifier, mcpServerNames)
+  const nested = toolsToMcpDescriptors(tools, providerIdentifier, mcpServerNames)
 
   const permission = config.permission
   const autoRun =
