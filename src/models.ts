@@ -276,6 +276,10 @@ function variantContextTokens(v: ModelVariant | undefined): number | undefined {
   return parseCursorContextLimit(raw)
 }
 
+function isLongContextVariant(v: ModelVariant): boolean {
+  return variantContextTokens(v) === 1_000_000
+}
+
 function positiveNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? value
@@ -373,7 +377,7 @@ export function mapAvailableModelsResponse(
       variantContextTokens(variants.find((v) => v.isDefaultNonMax)) ??
       variantContextTokens(
         variants.find((v) =>
-          v.parameterValues.some((p) => p.id === "context" && p.value !== "1m"),
+          variantContextTokens(v) !== 1_000_000,
         ),
       ) ??
       variantContextTokens(variants.find((v) => v.parameterValues.some((p) => p.id === "context")))
@@ -434,10 +438,8 @@ export function resolveVariantParameters(
     v.parameterValues.find((p) => p.id === "effort" || p.id === "reasoning")?.value
   const isFast = (v: ModelVariant): boolean =>
     v.parameterValues.find((p) => p.id === "fast")?.value === "true"
-  const contextOf = (v: ModelVariant): string | undefined =>
-    v.parameterValues.find((p) => p.id === "context")?.value
   const isMaxVariant = (v: ModelVariant): boolean =>
-    v.isDefaultMax || contextOf(v) === "1m"
+    v.isDefaultMax || isLongContextVariant(v)
 
   const wantMax = opts.maxMode ?? false
   // Non-fast pool for hint-based resolution only. Exact `picked` matching
@@ -447,14 +449,12 @@ export function resolveVariantParameters(
 
   // 1. Variant explicitly picked by opencode (verbatim — preserves context, fast, …).
   if (picked !== undefined) {
+    const pickedById = new Map(picked.map((parameter) => [parameter.id, parameter.value]))
     const exact = model.variants.find(
       (v) =>
         v.parameterValues.length === picked.length &&
-        v.parameterValues.every(
-          (parameter, index) =>
-            parameter.id === picked[index]!.id &&
-            parameter.value === picked[index]!.value,
-        ),
+        pickedById.size === picked.length &&
+        v.parameterValues.every((parameter) => pickedById.get(parameter.id) === parameter.value),
     )
     if (exact) {
       return buildRequestedModelParams(exact.parameterValues, {
@@ -485,7 +485,7 @@ export function resolveVariantParameters(
 
   // 3. Max-mode hint → prefer the default max variant (1m context).
   if (wantMax) {
-    const max = scoped.find((v) => v.isDefaultMax) ?? scoped.find((v) => contextOf(v) === "1m")
+    const max = scoped.find((v) => v.isDefaultMax) ?? scoped.find(isLongContextVariant)
     if (max) return buildRequestedModelParams(max.parameterValues, { maxMode: true })
   }
 
