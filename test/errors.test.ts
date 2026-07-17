@@ -58,6 +58,16 @@ describe("Cursor provider errors", () => {
     expect(failure).toMatchObject({ transient: true, retryAfterMs: 30_000 })
   })
 
+  it("uses the shared gRPC retry classification for Connect envelopes", () => {
+    for (const code of ["resource_exhausted", "internal"]) {
+      expect(connectFrameError(JSON.stringify({ error: { code } }))).toMatchObject({
+        code,
+        transient: true,
+        replaySafe: true,
+      })
+    }
+  })
+
   it("preserves structured server diagnostics without exposing a cause message", () => {
     const failure = new CursorServerError("Cursor API error (code=unavailable)", {
       transient: true,

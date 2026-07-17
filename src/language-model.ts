@@ -54,6 +54,7 @@ import {
   CursorRetryExhaustedError,
   CursorServerError,
   CursorTransportError,
+  isTransientGrpcStatus,
   retrySuppressedError,
   toCursorProviderError,
 } from "./errors.js"
@@ -241,7 +242,7 @@ export function connectFrameError(payload: string): CursorProviderError {
       }
     }
     return new CursorServerError(`Cursor API error (code=${code})`, {
-      transient: code === "unavailable" || hasRetryInfo,
+      transient: isTransientGrpcStatus(code) || hasRetryInfo,
       replaySafe: true,
       code,
       retryAfterMs: retryAfterMs === undefined
@@ -304,32 +305,6 @@ export function createCursorLanguageModel(
   }
 }
 
-async function startSessionWithRetry(
-  factory: () => Promise<CursorSession>,
-  policy: CursorRetryPolicy,
-  signal?: AbortSignal,
-): Promise<CursorSession> {
-  let lastFailure: CursorProviderError | undefined
-  for (let attempt = 1; attempt <= policy.maxAttempts; attempt++) {
-    if (signal?.aborted) throw new CursorLocalCancellationError("Cursor session setup cancelled")
-    try {
-      return await factory()
-    } catch (error) {
-      const failure = toCursorProviderError(error, {
-        replaySafe: true,
-        fallback: "Cursor Run session setup failed",
-      })
-      lastFailure = failure
-      if (!failure.transient || !failure.replaySafe) throw failure
-      if (attempt >= policy.maxAttempts) break
-      const delayMs = retryDelayMs(failure, attempt, policy)
-      trace(`Run setup retry: attempt=${attempt}/${policy.maxAttempts} delayMs=${delayMs}`)
-      await sleepForRetry(delayMs, signal)
-    }
-  }
-  throw new CursorRetryExhaustedError(policy.maxAttempts, lastFailure!)
-}
-
 async function doStreamImpl(
   modelId: string,
   options: CreateCursorOptions,
@@ -350,12 +325,11 @@ async function doStreamImpl(
   const prompt = callOptions.prompt
   const promptTokens = estimatePromptTokens(prompt)
   const retryPolicy = resolveRetryPolicy(options.retry)
+  // pumpWithRecovery owns the complete per-turn attempt budget.  Opening a
+  // replacement session here must be a single attempt; otherwise setup retry
+  // loops nest inside recovery and `maxAttempts` no longer caps total Runs.
   const openSession = (startOptions?: { recovery?: boolean }) =>
-    startSessionWithRetry(
-      () => startSession(modelId, token, callOptions, options, startOptions),
-      retryPolicy,
-      callOptions.abortSignal,
-    )
+    startSession(modelId, token, callOptions, options, startOptions)
 
   // ── Continuation vs fresh turn ──
   // OpenCode embeds *all* historical tool results in every prompt. Only the

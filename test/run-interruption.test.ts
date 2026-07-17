@@ -119,6 +119,23 @@ describe("interrupted Cursor Run handling", () => {
     expect(recoveries).toBe(1)
   })
 
+  it("uses retry.maxAttempts as the total Run attempt budget", async () => {
+    let recoveries = 0
+    await expect(
+      pumpWithRecovery({
+        initialSession: fakeSession("first-eof", []),
+        controller: controller([]),
+        retryPolicy: { maxAttempts: 3, baseDelayMs: 0, maxDelayMs: 0 },
+        recover: async () => {
+          recoveries++
+          return fakeSession(`recovery-${recoveries}`, [])
+        },
+      }),
+    ).rejects.toBeInstanceOf(CursorRetryExhaustedError)
+    // One initial Run plus two replacements, never three replacements.
+    expect(recoveries).toBe(2)
+  })
+
   it("does not recover after visible output because replay could duplicate text", async () => {
     let recoveries = 0
     const parts: any[] = []
