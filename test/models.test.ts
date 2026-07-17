@@ -1,16 +1,41 @@
-import { describe, it, expect } from "bun:test"
+import { afterEach, describe, it, expect } from "bun:test"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 import {
   mapAvailableModelsResponse,
   isCacheFresh,
   cacheFilePath,
+  normalizeModelCache,
+  parseCursorContextLimit,
+  readCache,
+  refreshModelCache,
   resolveVariantParameters,
   paramsImplyMaxMode,
   extractCursorVariantParameters,
+  writeCache,
   CURSOR_VARIANT_PARAMETERS_KEY,
   CURSOR_WIRE_MODEL_ID_KEY,
   resolveCursorWireModelId,
+  type ModelCache,
 } from "../src/models.js"
 import { modelInfoToConfig, modelsToConfig } from "../src/plugin.js"
+
+const tempDirs: string[] = []
+
+async function tempDir(): Promise<string> {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-provider-models-"))
+  tempDirs.push(directory)
+  return directory
+}
+
+afterEach(async () => {
+  await Promise.all(
+    tempDirs.splice(0).map((directory) =>
+      fs.rm(directory, { recursive: true, force: true }),
+    ),
+  )
+})
 
 describe("mapAvailableModelsResponse", () => {
   it("returns empty array for empty models", () => {
@@ -49,6 +74,15 @@ describe("mapAvailableModelsResponse", () => {
     expect(models[0].variants).toHaveLength(1)
     expect(models[0].variants[0].parameterValues[0].id).toBe("effort")
     expect(models[0].variants[0].parameterValues[0].value).toBe("medium")
+  })
+
+  it("rejects non-string parameter values instead of coercing them", () => {
+    expect(() => mapAvailableModelsResponse({
+      models: [{
+        name: "invalid",
+        variants: [{ parameter_values: [{ id: "effort", value: true }] }],
+      }],
+    })).toThrow(/invalid parameter values/)
   })
 
   it("maps multiple model entries with multiple variants", () => {
@@ -355,6 +389,24 @@ describe("modelsToConfig (context-tier materialization)", () => {
     expect(paramsImplyMaxMode(resolved)).toBe(true)
   })
 
+  it("materializes an equivalent 1000k long-context label as the 1m tier", () => {
+    const equivalent = {
+      ...model,
+      variants: model.variants.map((variant) => ({
+        ...variant,
+        parameterValues: variant.parameterValues.map((parameter) =>
+          parameter.id === "context" && parameter.value === "1m"
+            ? { ...parameter, value: "1000k" }
+            : parameter,
+        ),
+      })),
+    }
+
+    const config = modelsToConfig([equivalent])
+    expect(Object.keys(config)).toEqual(["claude-opus-4-8", "claude-opus-4-8-1m"])
+    expect(Object.keys(config["claude-opus-4-8-1m"].variants)).toEqual(["Opus 4.8 1M High"])
+  })
+
   it("avoids collisions with a real model id ending in -1m", () => {
     const config = modelsToConfig([
       model,
@@ -486,12 +538,18 @@ describe("resolveVariantParameters (picked variant + max mode)", () => {
     expect(params.find((p) => p.id === "fast")?.value).toBe("false")
   })
 
-  it("forwards an unmatched picked paramMap instead of silently defaulting", () => {
+  it("rejects stale picked parameters without rejecting a reordered equivalent tuple", () => {
     const picked = [
       { id: "context", value: "999k" },
       { id: "effort", value: "ultra" },
     ]
-    expect(resolveVariantParameters(opus, { picked })).toEqual(picked)
+    expect(() => resolveVariantParameters(opus, { picked })).toThrow(/exact parameter tuple/)
+
+    const valid = opus.variants[0]!.parameterValues
+    expect(resolveVariantParameters(opus, { picked: [...valid].reverse() })).toEqual(valid)
+    expect(() => resolveVariantParameters(opus, { picked: [...valid, valid[0]!] })).toThrow(
+      /exact parameter tuple/,
+    )
   })
 })
 
@@ -518,10 +576,27 @@ describe("extractCursorVariantParameters", () => {
     })).toBeUndefined()
   })
 
-  it("rejects malformed dedicated payloads instead of stringifying objects", () => {
-    expect(extractCursorVariantParameters({
+  it("rejects malformed dedicated payloads instead of silently ignoring them", () => {
+    expect(() => extractCursorVariantParameters({
       [CURSOR_VARIANT_PARAMETERS_KEY]: [{ id: "thinking", value: { enabled: true } }],
-    })).toBeUndefined()
+    })).toThrow(/malformed/)
+  })
+
+  it("preserves an explicit empty tuple for a parameterless variant", () => {
+    const picked = extractCursorVariantParameters({
+      [CURSOR_VARIANT_PARAMETERS_KEY]: [],
+    })
+    expect(picked).toEqual([])
+    expect(resolveVariantParameters({
+      id: "parameterless",
+      variants: [{
+        key: "parameterless",
+        displayName: "Parameterless",
+        parameterValues: [],
+        isDefaultNonMax: true,
+        isDefaultMax: false,
+      }],
+    }, { picked })).toEqual([])
   })
 })
 
@@ -580,12 +655,118 @@ describe("mapAvailableModelsResponse (context tier edge cases)", () => {
     })
     expect(models[0].maxContext).toBeUndefined()
   })
+
+  it("treats zero-valued proto context defaults as absent", () => {
+    const models = mapAvailableModelsResponse({
+      models: [{
+        name: "zero-defaults",
+        context_token_limit: 0,
+        context_token_limit_for_max_mode: 0,
+        variants: [],
+      }],
+    })
+    expect(models[0].maxContext).toBeUndefined()
+    expect(models[0].maxContextForMaxMode).toBeUndefined()
+  })
 })
 
 describe("paramsImplyMaxMode", () => {
-  it("is true only for context=1m", () => {
+  it("recognizes equivalent one-million-token context labels", () => {
     expect(paramsImplyMaxMode([{ id: "context", value: "1m" }])).toBe(true)
+    expect(paramsImplyMaxMode([{ id: "context", value: "1000k" }])).toBe(true)
     expect(paramsImplyMaxMode([{ id: "context", value: "300k" }])).toBe(false)
     expect(paramsImplyMaxMode([])).toBe(false)
+  })
+})
+
+describe("parseCursorContextLimit", () => {
+  it("parses scalable context labels without a fixed tier table", () => {
+    expect(parseCursorContextLimit("200k")).toBe(200_000)
+    expect(parseCursorContextLimit("480K")).toBe(480_000)
+    expect(parseCursorContextLimit("2.5 M")).toBe(2_500_000)
+    expect(parseCursorContextLimit("1000000")).toBe(1_000_000)
+    expect(parseCursorContextLimit("auto")).toBeUndefined()
+    expect(parseCursorContextLimit("0m")).toBeUndefined()
+  })
+})
+
+function testCache(id = "cached"): ModelCache {
+  return {
+    fetchedAt: Date.now(),
+    schemaVersion: 2,
+    models: [{
+      id,
+      variants: [{
+        key: id,
+        displayName: id,
+        parameterValues: [{ id: "effort", value: "high" }],
+        isDefaultNonMax: true,
+        isDefaultMax: false,
+      }],
+    }],
+  }
+}
+
+describe("model cache integrity", () => {
+  it("rejects an entire malformed cache rather than exposing a partial catalog", async () => {
+    const directory = await tempDir()
+    const cache = testCache()
+    const malformed = {
+      ...cache,
+      models: [...cache.models, {
+        ...cache.models[0],
+        id: "bad",
+        variants: [{
+          ...cache.models[0]!.variants[0],
+          parameterValues: [{ id: "effort", value: true }],
+        }],
+      }],
+    }
+    await fs.writeFile(cacheFilePath(directory), JSON.stringify(malformed))
+
+    expect(normalizeModelCache(malformed)).toBeNull()
+    expect(await readCache(directory)).toBeNull()
+  })
+
+  it("writes atomically and preserves the previous cache after validation fails", async () => {
+    const directory = await tempDir()
+    const cache = testCache()
+    await writeCache(directory, cache)
+    const invalid = {
+      ...cache,
+      models: [{
+        ...cache.models[0],
+        variants: [{
+          ...cache.models[0]!.variants[0],
+          parameterValues: [{ id: "", value: "high" }],
+        }],
+      }],
+    } as unknown as ModelCache
+
+    await expect(writeCache(directory, invalid)).rejects.toThrow(/invalid Cursor model cache/)
+    expect(await readCache(directory)).toEqual(cache)
+    expect((await fs.readdir(directory)).filter((name) => name.includes(".tmp"))).toEqual([])
+  })
+
+  it("coalesces concurrent refreshes for the same cache directory", async () => {
+    const directory = await tempDir()
+    let fetches = 0
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const first = refreshModelCache(directory, async () => {
+      fetches++
+      await gate
+      return testCache("first").models
+    })
+    const second = refreshModelCache(directory, async () => {
+      fetches++
+      return testCache("second").models
+    })
+
+    expect(fetches).toBe(1)
+    release()
+    const [firstModels, secondModels] = await Promise.all([first, second])
+    expect(secondModels).toEqual(firstModels)
+    expect((await readCache(directory))?.models).toEqual(firstModels)
   })
 })
