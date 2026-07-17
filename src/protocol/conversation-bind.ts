@@ -11,6 +11,20 @@ import { clearConversationBlobs } from "./blob-store.js"
  * cached conversation against OpenCode's newly compacted prompt.
  */
 const activeBySession = new Map<string, string>()
+export const MAX_ACTIVE_CONVERSATION_BINDINGS = 256
+
+function rememberConversation(sessionKey: string, conversationId: string): void {
+  // Map insertion order is the LRU order. Refresh existing sessions on use.
+  activeBySession.delete(sessionKey)
+  activeBySession.set(sessionKey, conversationId)
+  while (activeBySession.size > MAX_ACTIVE_CONVERSATION_BINDINGS) {
+    const oldest = activeBySession.entries().next().value as [string, string] | undefined
+    if (!oldest) break
+    activeBySession.delete(oldest[0])
+    clearCheckpoint(oldest[1])
+    clearConversationBlobs(oldest[1])
+  }
+}
 
 export function resetConversationBindingsForTests(): void {
   activeBySession.clear()
@@ -31,8 +45,8 @@ export function peekConversationId(sessionKey: string): string {
   let id = activeBySession.get(sessionKey)
   if (!id) {
     id = sessionIdToUuid(sessionKey)
-    activeBySession.set(sessionKey, id)
   }
+  rememberConversation(sessionKey, id)
   return id
 }
 
@@ -54,7 +68,7 @@ export function bindConversationId(
     clearCheckpoint(previousId)
     clearConversationBlobs(previousId)
     const conversationId = crypto.randomUUID()
-    activeBySession.set(sessionKey, conversationId)
+    rememberConversation(sessionKey, conversationId)
     return { conversationId, reset: true, previousId }
   }
 

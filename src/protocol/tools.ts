@@ -181,7 +181,13 @@ export function buildLiveRequestContext(
 const cursorToolToOpencode: Record<string, string> = {
   read_args: "read",
   write_args: "write",
+  pi_read_args: "read",
+  pi_bash_args: "bash",
+  pi_edit_args: "edit",
   pi_write_args: "write",
+  pi_grep_args: "grep",
+  pi_find_args: "glob",
+  pi_ls_args: "read",
   grep_args: "grep",
   ls_args: "read",
   delete_args: "bash",
@@ -254,8 +260,13 @@ export function mapToolNameToExecField(toolName: string): string | undefined {
 const execVariantToResultField: Record<string, string> = {
   read_args: "read_result",
   write_args: "write_result",
-  // Pi write: args #48, result #49 (not the same field number).
+  pi_read_args: "pi_read_result",
+  pi_bash_args: "pi_bash_result",
+  pi_edit_args: "pi_edit_result",
   pi_write_args: "pi_write_result",
+  pi_grep_args: "pi_grep_result",
+  pi_find_args: "pi_find_result",
+  pi_ls_args: "pi_ls_result",
   grep_args: "grep_result",
   ls_args: "ls_result",
   delete_args: "delete_result",
@@ -273,6 +284,8 @@ export type ParsedExecRequest = {
   args: Record<string, unknown>
   /** ExecClientMessage result field to reply with (matches the request variant). */
   resultField: string
+  /** Typed error to return without asking OpenCode to execute invalid args. */
+  localError?: string
 }
 
 export function parseExecServerMessage(
@@ -283,7 +296,9 @@ export function parseExecServerMessage(
 
   // Find which args variant is set
   const execVariant = findOneOfVariant(msg, [
-    "read_args", "write_args", "pi_write_args",
+    "read_args", "write_args",
+    "pi_read_args", "pi_bash_args", "pi_edit_args", "pi_write_args",
+    "pi_grep_args", "pi_find_args", "pi_ls_args",
     "grep_args", "ls_args",
     "delete_args", "shell_stream_args", "mcp_args",
   ])
@@ -304,6 +319,32 @@ export function parseExecServerMessage(
       toolName: mapped.toolName,
       args: mapped.args,
       resultField,
+    }
+  }
+
+  if (execVariant === "pi_edit_args") {
+    const raw = (msg.pi_edit_args as Record<string, unknown>) ?? {}
+    const edits = Array.isArray(raw.edits) ? raw.edits : []
+    const replacement = edits.length === 1 && edits[0] && typeof edits[0] === "object"
+      ? edits[0] as Record<string, unknown>
+      : undefined
+    const path = str(raw.path)
+    const oldString = replacement ? stringValue(replacement.old_text) : undefined
+    const newString = replacement ? stringValue(replacement.new_text) : undefined
+    const args: Record<string, unknown> = {}
+    if (path) args.filePath = path
+    if (oldString !== undefined) args.oldString = oldString
+    if (newString !== undefined) args.newString = newString
+    return {
+      id,
+      execId,
+      toolName: "edit",
+      args,
+      resultField,
+      localError:
+        path && oldString && newString !== undefined
+          ? undefined
+          : "Cursor Pi edit cannot be represented safely: expected one non-empty replacement.",
     }
   }
 
@@ -707,6 +748,16 @@ export function buildTypedExecResult(
       // PiWriteExecSuccess is just { output }; error is { error }.
       if (error) return { error: { error } }
       return { success: { output: output || "Wrote file successfully." } }
+    case "pi_read_result":
+      if (error) return { error: { error } }
+      return { success: { output: unwrapReadOutput(output) } }
+    case "pi_bash_result":
+    case "pi_edit_result":
+    case "pi_grep_result":
+    case "pi_find_result":
+    case "pi_ls_result":
+      if (error) return { error: { error } }
+      return { success: { output } }
     case "delete_result":
       if (error) return { error: { path: "", error } }
       return { success: { path: "", deleted_file: "" } }
@@ -818,15 +869,11 @@ export function parseExecIdFromToolCallId(
   return { sessionId: match[1], execId }
 }
 
-// ── Safety net: reply to exec variants we don't map to an opencode tool ──
+// ── Unknown exec diagnostics ──
 //
-// Cursor's real server sends server-initiated exec probes (request_context #10,
-// and potentially diagnostics/smart-mode-classifier/etc.) that are NOT tool
-// calls. opencode owns the tool loop, so these have no opencode tool to route
-// to — but we MUST still reply on the Run stream or the server blocks forever
-// (endless heartbeats, no response). For any unmapped variant we emit an empty
-// result at the SAME field number (request/result field numbers are identical
-// for every exec variant: read #7→#7, mcp #11→#11, request_context #10→#10…).
+// Request/result field numbers are not universally identical (the Pi range is
+// offset by one), so unknown variants must never receive a guessed empty reply.
+// The pump uses this raw detector to report schema drift and fail the Run.
 
 /**
  * Find the exec variant field number from the raw (gunzipped) AgentServerMessage
@@ -843,30 +890,6 @@ export function detectExecVariantField(agentServerPayload: Uint8Array): number |
     return f.fn
   }
   return undefined
-}
-
-/** Build ExecClientMessage{1:id, <resultField>: empty} as raw bytes. */
-export function buildRawEmptyExecReply(execId: number, resultField: number): Uint8Array {
-  const inner: number[] = []
-  writeVarintRaw(inner, (1 << 3) | 0) // field 1 (id), wire 0 (varint)
-  writeVarintRaw(inner, execId >>> 0)
-  writeVarintRaw(inner, (resultField << 3) | 2) // field N, wire 2 (length-delimited)
-  writeVarintRaw(inner, 0) // empty submessage
-  // Wrap as AgentClientMessage.exec_client_message (field #2).
-  const acm: number[] = []
-  writeVarintRaw(acm, (2 << 3) | 2)
-  writeVarintRaw(acm, inner.length)
-  for (const b of inner) acm.push(b)
-  return new Uint8Array(acm)
-}
-
-function writeVarintRaw(out: number[], n: number): void {
-  let v = n >>> 0
-  while (v > 0x7f) {
-    out.push((v & 0x7f) | 0x80)
-    v >>>= 7
-  }
-  out.push(v)
 }
 
 /**

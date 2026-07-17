@@ -12,7 +12,6 @@ import {
   resolveToolServerIdentity,
   mcpRealToolName,
   detectExecVariantField,
-  buildRawEmptyExecReply,
   buildRequestContextResult,
   buildTypedExecResult,
   unwrapReadOutput,
@@ -308,6 +307,76 @@ describe("parseExecServerMessage", () => {
     expect(result!.resultField).toBe("pi_write_result")
   })
 
+  it("maps every canonical Pi exec request to its offset result field", () => {
+    const cases = [
+      {
+        request: "pi_read_args",
+        raw: { path: "/tmp/a.ts", offset: 2, limit: 10 },
+        toolName: "read",
+        args: { filePath: "/tmp/a.ts", offset: 2, limit: 10 },
+        result: "pi_read_result",
+      },
+      {
+        request: "pi_bash_args",
+        raw: { command: "echo hi", timeout: 1.5 },
+        toolName: "bash",
+        args: { command: "echo hi", timeout: 1.5 },
+        result: "pi_bash_result",
+      },
+      {
+        request: "pi_edit_args",
+        raw: { path: "/tmp/a.ts", edits: [{ old_text: "a", new_text: "b" }] },
+        toolName: "edit",
+        args: { filePath: "/tmp/a.ts", oldString: "a", newString: "b" },
+        result: "pi_edit_result",
+      },
+      {
+        request: "pi_grep_args",
+        raw: { pattern: "needle", path: "/tmp", glob: "*.ts" },
+        toolName: "grep",
+        args: { pattern: "needle", path: "/tmp", include: "*.ts" },
+        result: "pi_grep_result",
+      },
+      {
+        request: "pi_find_args",
+        raw: { pattern: "*.ts", path: "/tmp" },
+        toolName: "glob",
+        args: { pattern: "*.ts", path: "/tmp" },
+        result: "pi_find_result",
+      },
+      {
+        request: "pi_ls_args",
+        raw: { path: "/tmp", limit: 20 },
+        toolName: "read",
+        args: { filePath: "/tmp", limit: 20 },
+        result: "pi_ls_result",
+      },
+    ] as const
+
+    for (const c of cases) {
+      const parsed = parseExecServerMessage({ id: 45, [c.request]: c.raw })
+      expect(parsed?.toolName, c.request).toBe(c.toolName)
+      expect(parsed?.args, c.request).toEqual(c.args)
+      expect(parsed?.resultField, c.request).toBe(c.result)
+      expect(parsed?.localError, c.request).toBeUndefined()
+    }
+  })
+
+  it("returns a typed local error for an unrepresentable multi-edit Pi request", () => {
+    const parsed = parseExecServerMessage({
+      id: 47,
+      pi_edit_args: {
+        path: "/tmp/a.ts",
+        edits: [
+          { old_text: "a", new_text: "b" },
+          { old_text: "c", new_text: "d" },
+        ],
+      },
+    })
+    expect(parsed?.resultField).toBe("pi_edit_result")
+    expect(parsed?.localError).toContain("cannot be represented safely")
+  })
+
   it("parses ls_args as OpenCode read", () => {
     const result = parseExecServerMessage({
       id: 8,
@@ -491,6 +560,26 @@ describe("buildExecClientMessages", () => {
     expect(ec.id).toBe(49)
     expect(ec.pi_write_result?.success?.output).toBe("Wrote file successfully.")
     expect(ec.write_result).toBeUndefined()
+  })
+
+  it("encodes all Pi result fields and closes each exec stream", () => {
+    const fields = [
+      "pi_read_result",
+      "pi_bash_result",
+      "pi_edit_result",
+      "pi_grep_result",
+      "pi_find_result",
+      "pi_ls_result",
+    ]
+    for (const [index, resultField] of fields.entries()) {
+      const execId = 45 + index
+      const frames = buildExecClientMessages({ execId, resultField, output: `out-${resultField}` })
+      expect(frames).toHaveLength(2)
+      const ecm = decodeMessage<any>("AgentClientMessage", frames[0]).exec_client_message
+      expect(ecm[resultField]?.success?.output, resultField).toBe(`out-${resultField}`)
+      const close = decodeMessage<any>("AgentClientMessage", frames[1])
+      expect(close.exec_client_control_message?.stream_close?.id, resultField).toBe(execId)
+    }
   })
 
   it("uses shell_stream Start→Stdout→Exit then stream_close for bash", () => {
@@ -865,12 +954,24 @@ describe("exec safety net (unmapped variants)", () => {
     expect(detectExecVariantField(payload)).toBe(38)
   })
 
-  it("buildRawEmptyExecReply encodes id + empty result at the given field number", () => {
-    const bytes = buildRawEmptyExecReply(5, 11) // mcp_result (#11) is in our schema
-    const dec = decodeMessage<any>("AgentClientMessage", bytes)
-    const ecm = dec.exec_client_message
-    expect(ecm.id).toBe(5)
-    expect(ecm.mcp_result).toBeDefined()
+  it("decodes canonical raw Pi request fields to their offset result fields", () => {
+    const cases = [
+      [45, "pi_read_result"],
+      [46, "pi_bash_result"],
+      [47, "pi_edit_result"],
+      [48, "pi_write_result"],
+      [49, "pi_grep_result"],
+      [50, "pi_find_result"],
+      [51, "pi_ls_result"],
+    ] as const
+
+    for (const [requestField, resultField] of cases) {
+      const payload = asmWithExec(requestField)
+      const decoded = decodeMessage<any>("AgentServerMessage", payload)
+      const parsed = parseExecServerMessage(decoded.exec_server_message)
+      expect(detectExecVariantField(payload), `request field #${requestField}`).toBe(requestField)
+      expect(parsed?.resultField, `request field #${requestField}`).toBe(resultField)
+    }
   })
 
   it("buildRequestContextResult encodes a prebuilt request_context", () => {

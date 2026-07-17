@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "bun:test"
 import {
   bindConversationId,
+  MAX_ACTIVE_CONVERSATION_BINDINGS,
   peekConversationId,
   resetConversationBindingsForTests,
   sessionIdToUuid,
@@ -43,5 +44,18 @@ describe("conversation bind / compaction reset", () => {
 
   it("clearConversationBlobs is a no-op for unknown ids", () => {
     clearConversationBlobs("missing")
+  })
+
+  it("evicts the least-recently-used binding and its opaque state", () => {
+    const first = bindConversationId("oldest").conversationId
+    setCheckpoint(first, Uint8Array.from([1]))
+    setConversationBlob(first, Uint8Array.from([2]), Uint8Array.from([3]))
+
+    for (let i = 0; i < MAX_ACTIVE_CONVERSATION_BINDINGS; i++) {
+      bindConversationId(`new-${i}`)
+    }
+
+    expect(getCheckpoint(first)).toBeUndefined()
+    expect(getConversationBlob(first, Uint8Array.from([2]))).toBeUndefined()
   })
 })

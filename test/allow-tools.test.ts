@@ -1,6 +1,7 @@
 import { beforeEach, describe, it, expect } from "bun:test"
 import {
   computeAllowTools,
+  MAX_TURN_STATE_SESSIONS,
   resetTurnStateForTests,
   resolveTurnConversationReset,
   resolveTurnToolState,
@@ -95,6 +96,33 @@ describe("compaction tool catalog", () => {
 
   it("does not reset ordinary no-tool turns", () => {
     expect(resolveTurnConversationReset({ sessionKey: "ses_no_tools", isCompaction: false }))
+      .toEqual({ reset: false })
+  })
+
+  it("bounds cached tool catalogs and pending post-compaction rebases", () => {
+    resolveTurnToolState({
+      sessionKey: "oldest",
+      incomingTools: [{ name: "read" }],
+      isCompaction: false,
+    })
+    resolveTurnConversationReset({ sessionKey: "oldest", isCompaction: true })
+
+    for (let i = 0; i < MAX_TURN_STATE_SESSIONS; i++) {
+      const sessionKey = `new-${i}`
+      resolveTurnToolState({
+        sessionKey,
+        incomingTools: [{ name: "bash" }],
+        isCompaction: false,
+      })
+      resolveTurnConversationReset({ sessionKey, isCompaction: true })
+    }
+
+    expect(resolveTurnToolState({
+      sessionKey: "oldest",
+      incomingTools: [],
+      isCompaction: true,
+    })).toEqual({ advertisedTools: [], allowTools: false })
+    expect(resolveTurnConversationReset({ sessionKey: "oldest", isCompaction: false }))
       .toEqual({ reset: false })
   })
 })

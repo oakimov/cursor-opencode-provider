@@ -469,8 +469,12 @@ export function createMessageTypes(): protobuf.Root {
     [{ name: "result", fields: ["success", "error"] }],
   )
 
-  // agent.v1 PiWriteExecArgs / Result (exec #48 / #49) — alternate write path
-  // used by some Cursor models. Args are path+content; success is just output.
+  // agent.v1 Pi exec results. Cursor places Pi requests at ExecServerMessage
+  // fields #45..#51 and their corresponding ExecClientMessage results at
+  // #46..#52 (the result fields are deliberately offset by one).
+  //
+  // The success payloads contain additional optional truncation/diff metadata;
+  // OpenCode returns text, so the minimal output/error shapes are sufficient.
   addType(root, "PiWriteArgs", [
     { id: 1, name: "path", type: "string" },
     { id: 2, name: "content", type: "string" },
@@ -481,14 +485,48 @@ export function createMessageTypes(): protobuf.Root {
   addType(root, "PiWriteError", [
     { id: 1, name: "error", type: "string" },
   ])
+  addType(root, "PiWriteRejected", [
+    { id: 1, name: "reason", type: "string" },
+  ])
   addType(
     root,
     "PiWriteResult",
     [
       { id: 1, name: "success", type: "PiWriteSuccess" },
       { id: 2, name: "error", type: "PiWriteError" },
+      { id: 3, name: "rejected", type: "PiWriteRejected" },
     ],
-    [{ name: "result", fields: ["success", "error"] }],
+    [{ name: "result", fields: ["success", "error", "rejected"] }],
+  )
+  addType(root, "PiOutputSuccess", [{ id: 1, name: "output", type: "string" }])
+  addType(root, "PiExecError", [{ id: 1, name: "error", type: "string" }])
+  addType(root, "PiExecRejected", [{ id: 1, name: "reason", type: "string" }])
+  for (const resultType of [
+    "PiReadExecResult",
+    "PiBashExecResult",
+    "PiGrepExecResult",
+    "PiFindExecResult",
+    "PiLsExecResult",
+  ]) {
+    addType(
+      root,
+      resultType,
+      [
+        { id: 1, name: "success", type: "PiOutputSuccess" },
+        { id: 2, name: "error", type: "PiExecError" },
+      ],
+      [{ name: "result", fields: ["success", "error"] }],
+    )
+  }
+  addType(
+    root,
+    "PiEditExecResult",
+    [
+      { id: 1, name: "success", type: "PiOutputSuccess" },
+      { id: 2, name: "error", type: "PiExecError" },
+      { id: 3, name: "rejected", type: "PiExecRejected" },
+    ],
+    [{ name: "result", fields: ["success", "error", "rejected"] }],
   )
 
   addType(root, "DeleteArgs", [
@@ -776,10 +814,20 @@ export function createMessageTypes(): protobuf.Root {
       { id: 10, name: "request_context_args", type: "RequestContextArgs" },
       { id: 11, name: "mcp_args", type: "McpArgs" },
       { id: 14, name: "shell_stream_args", type: "ShellArgs" },
-      // Pi write (#48 args → #49 result). Field numbers differ from classic write (#3).
+      { id: 45, name: "pi_read_args", type: "PiReadToolArgs" },
+      { id: 46, name: "pi_bash_args", type: "PiBashToolArgs" },
+      { id: 47, name: "pi_edit_args", type: "PiEditToolArgs" },
       { id: 48, name: "pi_write_args", type: "PiWriteArgs" },
+      { id: 49, name: "pi_grep_args", type: "PiGrepToolArgs" },
+      { id: 50, name: "pi_find_args", type: "PiFindToolArgs" },
+      { id: 51, name: "pi_ls_args", type: "PiLsToolArgs" },
     ],
-    [{ name: "args", fields: ["write_args", "delete_args", "grep_args", "read_args", "ls_args", "request_context_args", "mcp_args", "shell_stream_args", "pi_write_args"] }],
+    [{ name: "args", fields: [
+      "write_args", "delete_args", "grep_args", "read_args", "ls_args",
+      "request_context_args", "mcp_args", "shell_stream_args",
+      "pi_read_args", "pi_bash_args", "pi_edit_args", "pi_write_args",
+      "pi_grep_args", "pi_find_args", "pi_ls_args",
+    ] }],
   )
 
   // ExecClientMessage — client sends tool result back
@@ -798,9 +846,20 @@ export function createMessageTypes(): protobuf.Root {
       { id: 10, name: "request_context_result", type: "RequestContextResult" },
       { id: 11, name: "mcp_result", type: "McpResult" },
       { id: 14, name: "shell_stream", type: "ShellStream" },
+      { id: 46, name: "pi_read_result", type: "PiReadExecResult" },
+      { id: 47, name: "pi_bash_result", type: "PiBashExecResult" },
+      { id: 48, name: "pi_edit_result", type: "PiEditExecResult" },
       { id: 49, name: "pi_write_result", type: "PiWriteResult" },
+      { id: 50, name: "pi_grep_result", type: "PiGrepExecResult" },
+      { id: 51, name: "pi_find_result", type: "PiFindExecResult" },
+      { id: 52, name: "pi_ls_result", type: "PiLsExecResult" },
     ],
-    [{ name: "result", fields: ["write_result", "delete_result", "grep_result", "read_result", "ls_result", "request_context_result", "mcp_result", "shell_stream", "pi_write_result"] }],
+    [{ name: "result", fields: [
+      "write_result", "delete_result", "grep_result", "read_result", "ls_result",
+      "request_context_result", "mcp_result", "shell_stream",
+      "pi_read_result", "pi_bash_result", "pi_edit_result", "pi_write_result",
+      "pi_grep_result", "pi_find_result", "pi_ls_result",
+    ] }],
   )
 
   addType(root, "ExecServerControlMessage", [

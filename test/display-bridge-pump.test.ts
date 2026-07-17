@@ -47,6 +47,20 @@ function rawToolCallWithFields(callId: string, fieldNums: number[]): Uint8Array 
   return Uint8Array.from(asm)
 }
 
+function rawExecPayload(execId: number, variantField: number): Uint8Array {
+  const exec: number[] = []
+  writeVarint(exec, (1 << 3) | 0)
+  writeVarint(exec, execId)
+  writeVarint(exec, (variantField << 3) | 2)
+  writeVarint(exec, 0)
+
+  const asm: number[] = []
+  writeVarint(asm, (2 << 3) | 2)
+  writeVarint(asm, exec.length)
+  asm.push(...exec)
+  return Uint8Array.from(asm)
+}
+
 function displayPayload(
   kind: "started" | "completed",
   callId: string,
@@ -117,7 +131,7 @@ function fakeSession(payloads: Uint8Array[], writes: Uint8Array[]): CursorSessio
 }
 
 describe("display-only ToolCall pump bridge", () => {
-  it("bridges ask_question_tool_call → question and finishes with tool-calls", async () => {
+  it("does not replay a completed ask_question_tool_call", async () => {
     const writes: Uint8Array[] = []
     const parts: any[] = []
     let streamError: Error | undefined
@@ -138,7 +152,11 @@ describe("display-only ToolCall pump bridge", () => {
       },
     }
     const session = fakeSession(
-      [displayPayload("started", callId, toolCall), displayPayload("completed", callId, toolCall)],
+      [
+        displayPayload("started", callId, toolCall),
+        displayPayload("completed", callId, toolCall),
+        turnEndedPayload(),
+      ],
       writes,
     )
     const controller = {
@@ -153,13 +171,10 @@ describe("display-only ToolCall pump bridge", () => {
     await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
 
     expect(streamError).toBeUndefined()
-    const toolPart = parts.find((p) => p.type === "tool-call")
-    expect(toolPart?.toolName).toBe("question")
-    expect(toolPart?.toolCallId).toContain("cursor_display-bridge-session_900000")
-    expect(parts.some((p) => p.type === "finish" && p.finishReason?.unified === "tool-calls")).toBe(true)
-    expect(sessionManager.pendingFor(session.sessionId, 900_000)?.bridged).toBe(true)
+    expect(parts.some((p) => p.type === "tool-call")).toBe(false)
+    expect(parts.some((p) => p.type === "finish" && p.finishReason?.unified === "stop")).toBe(true)
+    expect(sessionManager.pendingFor(session.sessionId, 900_000)).toBeUndefined()
     expect(session.displayToolCalls.size).toBe(0)
-    sessionManager.resolve(session.sessionId, 900_000)
   })
 
   it("bridges create_plan_tool_call → todowrite", async () => {
@@ -329,5 +344,26 @@ describe("display-only ToolCall pump bridge", () => {
 
     expect(parts.some((p) => p.type === "finish")).toBe(true)
     expect(parts.some((p) => p.type === "tool-call")).toBe(false)
+  })
+
+  it("fails promptly for an unknown exec variant instead of guessing a response", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    let streamError: Error | undefined
+    const session = fakeSession([rawExecPayload(42, 38)], writes)
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error(error: Error) {
+        streamError = error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    expect(streamError?.message).toContain("Unsupported Cursor exec variant field #38")
+    expect(writes).toHaveLength(0)
+    expect(parts.some((p) => p.type === "finish")).toBe(false)
   })
 })

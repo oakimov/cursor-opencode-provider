@@ -89,7 +89,7 @@ describe("tool-call-bridge", () => {
     expect(resolveBridgedOpenCodeToolCall(display!, ["todowrite"])?.toolName).toBe("todowrite")
   })
 
-  it("maps AskQuestionToolCall to question when advertised", () => {
+  it("decodes AskQuestionToolCall but does not replay a completed interaction", () => {
     const display = parseDisplayToolCall("tc_q", {
       ask_question_tool_call: {
         args: {
@@ -109,24 +109,10 @@ describe("tool-call-bridge", () => {
       },
     })
     expect(display?.preferredToolName).toBe("question")
-    const bridged = resolveBridgedOpenCodeToolCall(display!, ["question"])
-    expect(bridged?.toolName).toBe("question")
-    expect(bridged?.args).toEqual({
-      questions: [
-        {
-          question: "Continue bridging?",
-          header: "q1",
-          options: [
-            { label: "Yes", description: "" },
-            { label: "No", description: "" },
-          ],
-          multiple: false,
-        },
-      ],
-    })
+    expect(resolveBridgedOpenCodeToolCall(display!, ["question"])).toBeUndefined()
   })
 
-  it("maps switch_mode only to the matching OpenCode lifecycle tool", () => {
+  it("decodes switch_mode without replaying a completed lifecycle operation", () => {
     const display = parseDisplayToolCall("tc_mode", {
       switch_mode_tool_call: {
         args: {
@@ -137,8 +123,7 @@ describe("tool-call-bridge", () => {
     })
     expect(display?.preferredToolName).toBe("plan_enter")
     expect(resolveBridgedOpenCodeToolCall(display!, ["todowrite"])).toBeUndefined()
-    expect(resolveBridgedOpenCodeToolCall(display!, ["plan_enter"])?.toolName).toBe("plan_enter")
-    expect(resolveBridgedOpenCodeToolCall(display!, ["plan_enter"])?.args).toEqual({})
+    expect(resolveBridgedOpenCodeToolCall(display!, ["plan_enter"])).toBeUndefined()
   })
 
   it("declines state-destructive todo fallbacks", () => {
@@ -158,14 +143,11 @@ describe("tool-call-bridge", () => {
     expect(resolveBridgedOpenCodeToolCall(leavePlan!, ["todowrite"])).toBeUndefined()
   })
 
-  it("translates only schema-valid edit and task calls", () => {
+  it("decodes edit and task calls without replaying completed operations", () => {
     const fullEdit = parseDisplayToolCall("edit", {
       edit_tool_call: { args: { path: "/tmp/a.ts", stream_content: "const x = 1\n" } },
     })
-    expect(resolveBridgedOpenCodeToolCall(fullEdit!, ["write"])).toMatchObject({
-      toolName: "write",
-      args: { filePath: "/tmp/a.ts", content: "const x = 1\n" },
-    })
+    expect(resolveBridgedOpenCodeToolCall(fullEdit!, ["write"])).toBeUndefined()
     expect(resolveBridgedOpenCodeToolCall(fullEdit!, ["edit"])).toBeUndefined()
 
     const piEdit = parseDisplayToolCall("pi-edit", {
@@ -173,10 +155,7 @@ describe("tool-call-bridge", () => {
         args: { path: "/tmp/a.ts", edits: [{ old_text: "old", new_text: "" }] },
       },
     })
-    expect(resolveBridgedOpenCodeToolCall(piEdit!, ["edit"])).toMatchObject({
-      toolName: "edit",
-      args: { filePath: "/tmp/a.ts", oldString: "old", newString: "" },
-    })
+    expect(resolveBridgedOpenCodeToolCall(piEdit!, ["edit"])).toBeUndefined()
 
     const multiEdit = parseDisplayToolCall("pi-multi", {
       pi_edit_tool_call: {
@@ -196,10 +175,7 @@ describe("tool-call-bridge", () => {
         args: { description: "Inspect", prompt: "Find the bug", subagent_type: { explore: {} } },
       },
     })
-    expect(resolveBridgedOpenCodeToolCall(task!, ["task"])).toMatchObject({
-      toolName: "task",
-      args: { description: "Inspect", prompt: "Find the bug", subagent_type: "explore" },
-    })
+    expect(resolveBridgedOpenCodeToolCall(task!, ["task"])).toBeUndefined()
     const missingSubtype = parseDisplayToolCall("task-invalid", {
       task_tool_call: { args: { description: "Inspect", prompt: "Find the bug" } },
     })
@@ -211,7 +187,7 @@ describe("tool-call-bridge", () => {
       web_search_tool_call: { args: { search_term: "OpenCode" } },
     })
     expect(resolveBridgedOpenCodeToolCall(search!, ["webfetch"])).toBeUndefined()
-    expect(resolveBridgedOpenCodeToolCall(search!, ["websearch"])?.toolName).toBe("websearch")
+    expect(resolveBridgedOpenCodeToolCall(search!, ["websearch"])).toBeUndefined()
   })
 
   it("decodes canonical Pi wire fields and preserves their semantics", () => {
@@ -223,10 +199,7 @@ describe("tool-call-bridge", () => {
       }),
     )
     const bash = parseDisplayToolCall("pi-bash", piBash)
-    expect(resolveBridgedOpenCodeToolCall(bash!, ["bash"])?.args).toEqual({
-      command: "echo hi",
-      timeout: 1.5,
-    })
+    expect(resolveBridgedOpenCodeToolCall(bash!, ["bash"])).toBeUndefined()
 
     const piGrep = decodeMessage<Record<string, unknown>>(
       "ToolCall",
@@ -237,10 +210,7 @@ describe("tool-call-bridge", () => {
       }),
     )
     const grep = parseDisplayToolCall("pi-grep", piGrep)
-    expect(resolveBridgedOpenCodeToolCall(grep!, ["grep"])?.args).toEqual({
-      pattern: "needle",
-      path: "/tmp",
-    })
+    expect(resolveBridgedOpenCodeToolCall(grep!, ["grep"])).toBeUndefined()
 
     const piFind = decodeMessage<Record<string, unknown>>(
       "ToolCall",
@@ -250,13 +220,10 @@ describe("tool-call-bridge", () => {
       }),
     )
     const find = parseDisplayToolCall("pi-find", piFind)
-    expect(resolveBridgedOpenCodeToolCall(find!, ["glob"])?.args).toEqual({
-      pattern: "*.ts",
-      path: "/tmp",
-    })
+    expect(resolveBridgedOpenCodeToolCall(find!, ["glob"])).toBeUndefined()
   })
 
-  it("decodes canonical Task subagent_type and emits valid OpenCode args", () => {
+  it("decodes canonical Task subagent_type without replaying the completed task", () => {
     const taskCall = decodeMessage<Record<string, unknown>>(
       "ToolCall",
       encodeCanonicalToolCall(19, (writer) => {
@@ -268,11 +235,7 @@ describe("tool-call-bridge", () => {
       }),
     )
     const task = parseDisplayToolCall("task", taskCall)
-    expect(resolveBridgedOpenCodeToolCall(task!, ["task"])?.args).toEqual({
-      description: "Inspect",
-      prompt: "Find the bug",
-      subagent_type: "explore",
-    })
+    expect(resolveBridgedOpenCodeToolCall(task!, ["task"])).toBeUndefined()
   })
 
   it("extracts display call ids from exec args variants", () => {
@@ -552,10 +515,10 @@ describe("tool-call-bridge", () => {
       expect(display!.variant, c.variant).toBe(c.variant)
       expect(display!.preferredToolName, c.variant).toBe(c.preferred)
       const bridged = resolveBridgedOpenCodeToolCall(display!, c.advertised)
-      if (c.bridged === undefined) {
-        expect(bridged, c.variant).toBeUndefined()
+      if (c.variant === "update_todos_tool_call" || c.variant === "create_plan_tool_call") {
+        expect(bridged?.toolName, c.variant).toBe("todowrite")
       } else {
-        expect(bridged?.toolName, c.variant).toBe(c.bridged)
+        expect(bridged, c.variant).toBeUndefined()
       }
     }
   })

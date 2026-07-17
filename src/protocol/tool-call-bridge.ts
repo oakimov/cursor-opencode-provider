@@ -66,6 +66,16 @@ const VARIANT_TO_OPENCODE: Record<string, string> = {
 
 const TOOL_CALL_VARIANTS = Object.keys(VARIANT_TO_OPENCODE)
 
+// ToolCallCompleted is a notification, not an execution request. Only mirror
+// client-visible state whose authoritative final value is already present in
+// the completed payload. Data-returning, interactive, and side-effecting calls
+// must use an exec/interaction request channel where Cursor can receive their
+// actual result.
+const DISPLAY_STATE_MIRROR_VARIANTS = new Set([
+  "update_todos_tool_call",
+  "create_plan_tool_call",
+])
+
 function asRecord(v: unknown): Record<string, unknown> | undefined {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined
 }
@@ -298,6 +308,7 @@ export function resolveBridgedOpenCodeToolCall(
   display: DisplayToolCall,
   advertised: Iterable<string>,
 ): BridgedOpenCodeToolCall | undefined {
+  if (!DISPLAY_STATE_MIRROR_VARIANTS.has(display.variant)) return undefined
   if (display.bridgeable === false) return undefined
   const names = new Set([...advertised].filter(Boolean))
   if (names.size === 0) return undefined

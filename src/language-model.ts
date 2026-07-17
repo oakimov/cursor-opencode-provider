@@ -13,9 +13,7 @@ import {
   buildExecClientMessages,
   parseExecIdFromToolCallId,
   detectExecVariantField,
-  buildRawEmptyExecReply,
   buildRequestContextResult,
-  REQUEST_CONTEXT_RESULT_FIELD,
   type OpencodeToolDef,
 } from "./protocol/tools.js"
 import {
@@ -55,6 +53,27 @@ const toolCatalogBySession = new Map<string, OpencodeToolDef[]>()
 // suppresses OpenCode's compacted prompt/system seed and makes Cursor narrate
 // tool use instead of emitting exec requests. Rebase once on the next turn.
 const postCompactionRebaseBySession = new Set<string>()
+export const MAX_TURN_STATE_SESSIONS = 256
+
+function rememberToolCatalog(sessionKey: string, tools: OpencodeToolDef[]): void {
+  toolCatalogBySession.delete(sessionKey)
+  toolCatalogBySession.set(sessionKey, tools)
+  while (toolCatalogBySession.size > MAX_TURN_STATE_SESSIONS) {
+    const oldest = toolCatalogBySession.keys().next().value as string | undefined
+    if (!oldest) break
+    toolCatalogBySession.delete(oldest)
+  }
+}
+
+function rememberPostCompactionRebase(sessionKey: string): void {
+  postCompactionRebaseBySession.delete(sessionKey)
+  postCompactionRebaseBySession.add(sessionKey)
+  while (postCompactionRebaseBySession.size > MAX_TURN_STATE_SESSIONS) {
+    const oldest = postCompactionRebaseBySession.values().next().value as string | undefined
+    if (!oldest) break
+    postCompactionRebaseBySession.delete(oldest)
+  }
+}
 
 type V3Part = LanguageModelV3StreamPart
 
@@ -823,6 +842,29 @@ export async function pump(
         }
         trace(`exec: id=${parsed?.id} variant=${parsed ? Object.keys(parsed).join(",") : "none"} toolName=${parsed?.toolName} resultField=${parsed?.resultField}`)
         if (parsed) {
+          if (parsed.localError) {
+            trace(`exec: REFUSED invalid mapping toolName=${parsed.toolName} error=${parsed.localError}`)
+            try {
+              for (const frame of buildExecClientMessages({
+                execId: parsed.id,
+                resultField: parsed.resultField,
+                output: "",
+                error: parsed.localError,
+                toolName: parsed.toolName,
+              })) {
+                session.stream.write(frame)
+              }
+            } catch (e) {
+              const error = new Error(
+                `Failed to reject unsupported Cursor tool request: ${(e as Error).message}`,
+              )
+              trace(`exec: invalid-mapping reply FAILED ${error.message}`)
+              safeError(error)
+              sessionManager.close(session)
+              return
+            }
+            continue
+          }
           // OpenCode throws "Tool call not allowed while generating summary"
           // when assistantMessage.summary is set. Compaction/summary turns
           // advertise no tools — refuse on the Cursor channel and keep
@@ -861,10 +903,10 @@ export async function pump(
           emitFinish(undefined, { unified: "tool-calls", raw: undefined })
           return
         }
-        // Unmapped exec variant (diagnostics/smart-mode-classifier/etc.). We
-        // MUST still reply or the server blocks. Emit an empty result at the
-        // variant's field number (request/result share the number) and keep
-        // pumping. The hex dump records exactly which variant it was.
+        // Never guess a response type for an unknown exec variant. Request and
+        // result field numbers are not universally identical; a structurally
+        // wrong reply recreates the heartbeat-only deadlock. Fail promptly so
+        // schema drift is actionable.
         const variantField = detectExecVariantField(payload)
         const hex = Array.from(payload.subarray(0, 48))
           .map((x) => x.toString(16).padStart(2, "0"))
@@ -872,14 +914,12 @@ export async function pump(
         trace(
           `exec UNMAPPED: id=${esmId} variantField=${variantField} keys=[${Object.keys(esm).join(",")}] hex=${hex}`,
         )
-        if (variantField && variantField !== REQUEST_CONTEXT_RESULT_FIELD) {
-          try {
-            session.stream.write(buildRawEmptyExecReply(esmId, variantField))
-            trace(`exec UNMAPPED: replied empty result field=${variantField}`)
-          } catch (e) {
-            trace(`exec UNMAPPED: write FAILED field=${variantField} err=${(e as Error).message}`)
-          }
-        }
+        const err = new Error(
+          `Unsupported Cursor exec variant field #${variantField ?? "unknown"} (id=${esmId})`,
+        )
+        safeError(err)
+        sessionManager.close(session)
+        return
       }
     } else if (interactionQuery) {
       // InteractionQuery is a must-reply channel, just like exec and KV. AI
@@ -1224,9 +1264,12 @@ export function resolveTurnToolState(input: {
 }): { advertisedTools: OpencodeToolDef[]; allowTools: boolean } {
   const { sessionKey, incomingTools, isCompaction } = input
   if (sessionKey && incomingTools.length > 0) {
-    toolCatalogBySession.set(sessionKey, incomingTools.map((tool) => ({ ...tool })))
+    rememberToolCatalog(sessionKey, incomingTools.map((tool) => ({ ...tool })))
   }
   const cached = sessionKey ? toolCatalogBySession.get(sessionKey) : undefined
+  if (sessionKey && cached && incomingTools.length === 0) {
+    rememberToolCatalog(sessionKey, cached)
+  }
   const advertisedTools = isCompaction && incomingTools.length === 0
     ? (cached?.map((tool) => ({ ...tool })) ?? [])
     : incomingTools
@@ -1242,7 +1285,7 @@ export function resolveTurnConversationReset(input: {
 }): { reset: boolean; reason?: "compaction" | "post-compaction-rebase" } {
   const { sessionKey, isCompaction } = input
   if (isCompaction) {
-    if (sessionKey) postCompactionRebaseBySession.add(sessionKey)
+    if (sessionKey) rememberPostCompactionRebase(sessionKey)
     return { reset: true, reason: "compaction" }
   }
   if (sessionKey && postCompactionRebaseBySession.delete(sessionKey)) {
