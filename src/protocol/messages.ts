@@ -45,12 +45,169 @@ export function createMessageTypes(): protobuf.Root {
 
   addType(root, "Heartbeat", [])
 
-  // Tool call types
-  addType(root, "ToolCall", [
-    { id: 1, name: "call_id", type: "string" },
-    { id: 2, name: "tool_name", type: "string" },
-    { id: 3, name: "args", type: "string" },
+  // Display ToolCall (interaction_update.tool_call_*) — agent.v1 oneof, not
+  // {tool_name,args} strings. Args-only wrappers are enough to bridge into
+  // OpenCode; result payloads are ignored on decode.
+  addType(root, "TodoItem", [
+    { id: 1, name: "id", type: "string" },
+    { id: 2, name: "content", type: "string" },
+    { id: 3, name: "status", type: "int32" },
+    { id: 4, name: "created_at", type: "int64" },
+    { id: 5, name: "updated_at", type: "int64" },
+    { id: 6, name: "dependencies", type: "string", repeated: true },
   ])
+  addType(root, "UpdateTodosArgs", [
+    { id: 1, name: "todos", type: "TodoItem", repeated: true },
+    { id: 2, name: "merge", type: "bool" },
+  ])
+  addType(root, "UpdateTodosToolCall", [{ id: 1, name: "args", type: "UpdateTodosArgs" }])
+  addType(root, "ReadToolArgs", [
+    { id: 1, name: "path", type: "string" },
+    { id: 2, name: "offset", type: "int32" },
+    { id: 3, name: "limit", type: "int32" },
+  ])
+  addType(root, "ReadToolCall", [{ id: 1, name: "args", type: "ReadToolArgs" }])
+  addType(root, "ShellToolCall", [{ id: 1, name: "args", type: "ShellArgs" }])
+  addType(root, "DeleteToolCall", [{ id: 1, name: "args", type: "DeleteArgs" }])
+  addType(root, "GlobToolCall", [{ id: 1, name: "args", type: "GlobArgs" }])
+  addType(root, "GrepToolCall", [{ id: 1, name: "args", type: "GrepArgs" }])
+  addType(root, "EditToolArgs", [
+    { id: 1, name: "path", type: "string" },
+    { id: 6, name: "stream_content", type: "string" },
+  ])
+  addType(root, "EditToolCall", [{ id: 1, name: "args", type: "EditToolArgs" }])
+  addType(root, "LsToolCall", [{ id: 1, name: "args", type: "LsArgs" }])
+  addType(root, "McpToolCall", [{ id: 1, name: "args", type: "McpArgs" }])
+  addType(root, "CreatePlanArgs", [
+    { id: 1, name: "plan", type: "string" },
+    { id: 2, name: "todos", type: "TodoItem", repeated: true },
+    { id: 3, name: "overview", type: "string" },
+    { id: 4, name: "name", type: "string" },
+    { id: 5, name: "is_project", type: "bool" },
+  ])
+  addType(root, "CreatePlanToolCall", [{ id: 1, name: "args", type: "CreatePlanArgs" }])
+  addType(root, "WebSearchToolArgs", [
+    { id: 1, name: "search_term", type: "string" },
+    { id: 2, name: "tool_call_id", type: "string" },
+  ])
+  addType(root, "WebSearchToolCall", [{ id: 1, name: "args", type: "WebSearchToolArgs" }])
+  addType(root, "TaskToolArgs", [
+    { id: 1, name: "description", type: "string" },
+    { id: 2, name: "prompt", type: "string" },
+    { id: 4, name: "model", type: "string" },
+  ])
+  addType(root, "TaskToolCall", [{ id: 1, name: "args", type: "TaskToolArgs" }])
+  addType(root, "AskQuestionOption", [
+    { id: 1, name: "id", type: "string" },
+    { id: 2, name: "label", type: "string" },
+  ])
+  addType(root, "AskQuestionItem", [
+    { id: 1, name: "id", type: "string" },
+    { id: 2, name: "prompt", type: "string" },
+    { id: 3, name: "options", type: "AskQuestionOption", repeated: true },
+    { id: 4, name: "allow_multiple", type: "bool" },
+  ])
+  addType(root, "AskQuestionArgs", [
+    { id: 1, name: "title", type: "string" },
+    { id: 2, name: "questions", type: "AskQuestionItem", repeated: true },
+  ])
+  addType(root, "AskQuestionToolCall", [{ id: 1, name: "args", type: "AskQuestionArgs" }])
+  addType(root, "FetchToolArgs", [
+    { id: 1, name: "url", type: "string" },
+    { id: 2, name: "tool_call_id", type: "string" },
+  ])
+  addType(root, "FetchToolCall", [{ id: 1, name: "args", type: "FetchToolArgs" }])
+  addType(root, "WebFetchToolCall", [{ id: 1, name: "args", type: "FetchToolArgs" }])
+  addType(root, "SwitchModeToolArgs", [
+    { id: 1, name: "target_mode_id", type: "string" },
+    { id: 2, name: "explanation", type: "string" },
+    { id: 3, name: "tool_call_id", type: "string" },
+  ])
+  addType(root, "SwitchModeToolCall", [{ id: 1, name: "args", type: "SwitchModeToolArgs" }])
+  addType(root, "PiWriteToolArgs", [
+    { id: 1, name: "path", type: "string" },
+    { id: 2, name: "file_text", type: "string" },
+  ])
+  addType(root, "PiWriteToolCall", [{ id: 1, name: "args", type: "PiWriteToolArgs" }])
+  addType(root, "PiReadToolCall", [{ id: 1, name: "args", type: "ReadToolArgs" }])
+  addType(root, "PiBashToolCall", [{ id: 1, name: "args", type: "ShellArgs" }])
+  addType(root, "PiEditToolCall", [{ id: 1, name: "args", type: "EditToolArgs" }])
+  addType(root, "PiGrepToolCall", [{ id: 1, name: "args", type: "GrepArgs" }])
+  addType(root, "PiFindToolCall", [{ id: 1, name: "args", type: "GlobArgs" }])
+  addType(root, "PiLsToolCall", [{ id: 1, name: "args", type: "LsArgs" }])
+  // Display-only native tools Cursor may complete without an ExecServerMessage.
+  addType(root, "ReadTodosArgs", [
+    { id: 1, name: "todo_ids", type: "string", repeated: true },
+  ])
+  addType(root, "ReadTodosToolCall", [{ id: 1, name: "args", type: "ReadTodosArgs" }])
+  addType(root, "AwaitArgs", [
+    { id: 1, name: "task_id", type: "string" },
+    { id: 2, name: "block_until_ms", type: "uint32" },
+    { id: 3, name: "regex", type: "string" },
+  ])
+  addType(root, "AwaitToolCall", [{ id: 1, name: "args", type: "AwaitArgs" }])
+  addType(root, "GetMcpToolsArgs", [
+    { id: 1, name: "server", type: "string" },
+    { id: 2, name: "tool_name", type: "string" },
+    { id: 3, name: "pattern", type: "string" },
+    { id: 4, name: "tool_call_id", type: "string" },
+  ])
+  addType(root, "GetMcpToolsToolCall", [{ id: 1, name: "args", type: "GetMcpToolsArgs" }])
+
+  addType(root, "GenerateImageToolArgs", [
+    { id: 1, name: "description", type: "string" },
+    { id: 2, name: "filename", type: "string" },
+    { id: 3, name: "tool_call_id", type: "string" },
+  ])
+  addType(root, "GenerateImageToolCall", [{ id: 1, name: "args", type: "GenerateImageToolArgs" }])
+
+  addType(
+    root,
+    "ToolCall",
+    [
+      { id: 57, name: "tool_call_id", type: "string" },
+      { id: 1, name: "shell_tool_call", type: "ShellToolCall" },
+      { id: 3, name: "delete_tool_call", type: "DeleteToolCall" },
+      { id: 4, name: "glob_tool_call", type: "GlobToolCall" },
+      { id: 5, name: "grep_tool_call", type: "GrepToolCall" },
+      { id: 8, name: "read_tool_call", type: "ReadToolCall" },
+      { id: 9, name: "update_todos_tool_call", type: "UpdateTodosToolCall" },
+      { id: 10, name: "read_todos_tool_call", type: "ReadTodosToolCall" },
+      { id: 12, name: "edit_tool_call", type: "EditToolCall" },
+      { id: 13, name: "ls_tool_call", type: "LsToolCall" },
+      { id: 15, name: "mcp_tool_call", type: "McpToolCall" },
+      { id: 17, name: "create_plan_tool_call", type: "CreatePlanToolCall" },
+      { id: 18, name: "web_search_tool_call", type: "WebSearchToolCall" },
+      { id: 19, name: "task_tool_call", type: "TaskToolCall" },
+      { id: 23, name: "ask_question_tool_call", type: "AskQuestionToolCall" },
+      { id: 24, name: "fetch_tool_call", type: "FetchToolCall" },
+      { id: 25, name: "switch_mode_tool_call", type: "SwitchModeToolCall" },
+      { id: 28, name: "generate_image_tool_call", type: "GenerateImageToolCall" },
+      { id: 37, name: "web_fetch_tool_call", type: "WebFetchToolCall" },
+      { id: 42, name: "await_tool_call", type: "AwaitToolCall" },
+      { id: 44, name: "get_mcp_tools_tool_call", type: "GetMcpToolsToolCall" },
+      { id: 61, name: "pi_read_tool_call", type: "PiReadToolCall" },
+      { id: 62, name: "pi_bash_tool_call", type: "PiBashToolCall" },
+      { id: 63, name: "pi_edit_tool_call", type: "PiEditToolCall" },
+      { id: 64, name: "pi_write_tool_call", type: "PiWriteToolCall" },
+      { id: 65, name: "pi_grep_tool_call", type: "PiGrepToolCall" },
+      { id: 66, name: "pi_find_tool_call", type: "PiFindToolCall" },
+      { id: 67, name: "pi_ls_tool_call", type: "PiLsToolCall" },
+    ],
+    [{
+      name: "tool",
+      fields: [
+        "shell_tool_call", "delete_tool_call", "glob_tool_call", "grep_tool_call",
+        "read_tool_call", "update_todos_tool_call", "read_todos_tool_call",
+        "edit_tool_call", "ls_tool_call",
+        "mcp_tool_call", "create_plan_tool_call", "web_search_tool_call", "task_tool_call",
+        "ask_question_tool_call", "fetch_tool_call", "switch_mode_tool_call",
+        "generate_image_tool_call", "web_fetch_tool_call", "await_tool_call", "get_mcp_tools_tool_call",
+        "pi_read_tool_call", "pi_bash_tool_call", "pi_edit_tool_call",
+        "pi_write_tool_call", "pi_grep_tool_call", "pi_find_tool_call", "pi_ls_tool_call",
+      ],
+    }],
+  )
 
   addType(root, "ToolCallStarted", [
     { id: 1, name: "call_id", type: "string" },
@@ -58,11 +215,12 @@ export function createMessageTypes(): protobuf.Root {
     { id: 3, name: "model_call_id", type: "string" },
   ])
 
+  // agent.v1 ToolCallCompletedUpdate has no string result field — result lives
+  // inside the typed ToolCall variant.
   addType(root, "ToolCallCompleted", [
     { id: 1, name: "call_id", type: "string" },
     { id: 2, name: "tool_call", type: "ToolCall" },
     { id: 3, name: "model_call_id", type: "string" },
-    { id: 4, name: "result", type: "string" },
   ])
 
   addType(root, "PartialToolCall", [

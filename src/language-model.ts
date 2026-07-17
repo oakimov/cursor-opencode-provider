@@ -18,6 +18,14 @@ import {
   REQUEST_CONTEXT_RESULT_FIELD,
   type OpencodeToolDef,
 } from "./protocol/tools.js"
+import {
+  advertisedToolNamesFromDescriptors,
+  extractExecDisplayCallId,
+  extractProtobufSubmessage,
+  listProtobufFieldNumbers,
+  parseDisplayToolCall,
+  resolveBridgedOpenCodeToolCall,
+} from "./protocol/tool-call-bridge.js"
 import { handleKvServerMessage } from "./protocol/kv.js"
 import { handleInteractionQuery, inspectInteractionQueryWire } from "./protocol/interactions.js"
 import { getCheckpoint, setCheckpoint } from "./protocol/checkpoint.js"
@@ -120,6 +128,16 @@ async function doStreamImpl(
     for (const r of pendingResults) {
       const pending = session.pending.get(r.execId)
       if (!pending) continue
+      if (pending.bridged) {
+        // Display-only Cursor tool — OpenCode already ran it; nothing to write
+        // back on the Run stream.
+        session.usageEstimate.inputTokens += estimateTokens(r.output.length)
+        trace(
+          `continuation: bridged tool result execId=${r.execId} toolName=${pending.toolName ?? r.toolName} outLen=${r.output.length}`,
+        )
+        sessionManager.resolve(session.sessionId, r.execId)
+        continue
+      }
       try {
         for (const frame of buildExecClientMessages({
           execId: r.execId,
@@ -357,6 +375,8 @@ async function startSession(
     stream,
     frames: stream.frames()[Symbol.asyncIterator](),
     pending: new Map(),
+    displayToolCalls: new Map(),
+    nextBridgedExecId: 900_000,
     blobs: new Map(),
     toolDescriptors,
     requestContext,
@@ -689,6 +709,89 @@ export async function pump(
       emitFinish(iu.turn_ended as Record<string, unknown>, { unified: "stop", raw: undefined })
       sessionManager.close(session)
       return
+    } else if (iu?.tool_call_started) {
+      // Stash Cursor display ToolCall until exec claims it, or completed bridges it.
+      const started = iu.tool_call_started as Record<string, unknown>
+      const callId = typeof started.call_id === "string" ? started.call_id : ""
+      const toolCall = started.tool_call as Record<string, unknown> | undefined
+      if (callId && toolCall) {
+        session.displayToolCalls.set(callId, toolCall)
+        const variant = Object.keys(toolCall).find((k) => k.endsWith("_tool_call")) ?? "?"
+        const callIdLog = callId.replace(/\r?\n/g, "\\n")
+        let wireFields = ""
+        if (variant === "?") {
+          const toolBytes = extractProtobufSubmessage(payload, [1, 2, 2])
+          if (toolBytes) {
+            wireFields = ` wireFields=[${listProtobufFieldNumbers(toolBytes).join(",")}]`
+          }
+        }
+        trace(`display tool_call_started: callId=${callIdLog} variant=${variant}${wireFields}`)
+      }
+    } else if (iu?.tool_call_completed) {
+      const completed = iu.tool_call_completed as Record<string, unknown>
+      const callId = typeof completed.call_id === "string" ? completed.call_id : ""
+      // If exec already claimed this call_id, display map entry is gone — skip.
+      if (!callId || !session.displayToolCalls.has(callId)) {
+        if (callId) {
+          trace(`display tool_call_completed: ignore (exec-handled or unknown) callId=${callId}`)
+        }
+      } else {
+        const stored = session.displayToolCalls.get(callId)!
+        session.displayToolCalls.delete(callId)
+        const toolCall =
+          (completed.tool_call as Record<string, unknown> | undefined) ?? stored
+        if (!session.allowTools) {
+          trace(`display tool_call_completed: SKIPPED (allowTools=false) callId=${callId}`)
+        } else {
+          const display = parseDisplayToolCall(callId, toolCall)
+          const advertised = advertisedToolNamesFromDescriptors(session.toolDescriptors)
+          const bridged = display
+            ? resolveBridgedOpenCodeToolCall(display, advertised)
+            : undefined
+          if (!display) {
+            const callIdLog = callId.replace(/\r?\n/g, "\\n")
+            // AgentServerMessage.interaction_update(1).tool_call_completed(3).tool_call(2)
+            const toolBytes = extractProtobufSubmessage(payload, [1, 3, 2])
+            const wire = toolBytes
+              ? ` wireFields=[${listProtobufFieldNumbers(toolBytes).join(",")}]`
+              : ""
+            trace(
+              `display tool_call_completed: unparsed callId=${callIdLog} ` +
+                `keys=[${Object.keys(toolCall).join(",")}]${wire}`,
+            )
+          } else if (!bridged) {
+            trace(
+              `display tool_call_completed: no advertised OpenCode tool ` +
+                `callId=${callId} variant=${display.variant} preferred=${display.preferredToolName} ` +
+                `advertised=[${advertised.join(",")}]`,
+            )
+          } else {
+            const execId = session.nextBridgedExecId++
+            sessionManager.registerPending(
+              execId,
+              session,
+              "bridged",
+              bridged.toolName,
+              true,
+            )
+            const toolCallId = `cursor_${session.sessionId}_${execId}`
+            const input = JSON.stringify(bridged.args ?? {})
+            trace(
+              `display BRIDGED tool-call toolCallId=${toolCallId} toolName=${bridged.toolName} ` +
+                `variant=${bridged.variant} callId=${callId} inputLen=${input.length}`,
+            )
+            closeOpenSpans()
+            safeEnqueue({
+              type: "tool-call",
+              toolCallId,
+              toolName: bridged.toolName,
+              input,
+            } as V3Part)
+            emitFinish(undefined, { unified: "tool-calls", raw: undefined })
+            return
+          }
+        }
+      }
     } else if (esm) {
       const esmId = (esm.id as number) ?? 0
       if (esm.request_context_args) {
@@ -713,6 +816,11 @@ export async function pump(
         }
       } else {
         const parsed = parseExecServerMessage(esm)
+        const displayCallId = extractExecDisplayCallId(esm)
+        if (displayCallId) {
+          session.displayToolCalls.delete(displayCallId)
+          trace(`exec: claimed display callId=${displayCallId}`)
+        }
         trace(`exec: id=${parsed?.id} variant=${parsed ? Object.keys(parsed).join(",") : "none"} toolName=${parsed?.toolName} resultField=${parsed?.resultField}`)
         if (parsed) {
           // OpenCode throws "Tool call not allowed while generating summary"

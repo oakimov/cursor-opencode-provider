@@ -18,7 +18,7 @@ OpenCode driving a Cursor-routed Grok model through this provider:
 - **Authentication** — browser OAuth (PKCE), or API key from [cursor.com/settings](https://cursor.com/settings)
 - **Model discovery** — fetches available models from Cursor's API and caches them locally
 - **Streaming** — bidirectional Connect-RPC stream for agent runs
-- **Tool calls** — maps Cursor exec-server messages to AI SDK tool-call parts; strips OpenCode's `read` XML envelope (`<path>`/`<content>` + `N:` prefixes) before returning content to Cursor so the model cannot echo the wrapper into writes
+- **Tool calls** — maps Cursor exec-server messages and display-only `ToolCall` oneof frames to AI SDK / OpenCode tool-call parts (for example `update_todos_tool_call` → `todowrite`); strips OpenCode's `read` XML envelope (`<path>`/`<content>` + `N:` prefixes) before returning content to Cursor so the model cannot echo the wrapper into writes
 - **Thinking / reasoning** — surfaces extended-thinking deltas where the model supports it
 
 ## Requirements
@@ -212,7 +212,7 @@ OpenCode
 | `src/models.ts` | `AvailableModels` fetch and `cursor-models.json` cache |
 | `src/agent-url.ts` | `GetServerConfig` fetch + in-process memo (region-specific Run host) |
 | `src/transport/connect.ts` | HTTP/2 bidi stream and unary RPC calls |
-| `src/protocol/` | Protobuf encode/decode, checksum/device ids, tool-call mapping |
+| `src/protocol/` | Protobuf encode/decode, checksum/device ids, exec + display tool-call mapping (`tool-call-bridge.ts`) |
 
 ## Package exports
 
@@ -241,8 +241,8 @@ OpenCode
 - **Personal use / ToS** — this provider speaks Cursor’s private agent protocol (CLI-shaped client identity). Use only with an account you own; Cursor may change or restrict the API without notice.
 - **`request_context` from OpenCode** — each Run sends Cursor `RequestContext` built from OpenCode project context (workspace env, `AGENTS.md` / `instructions`, `.opencode` agents/skills/plugins, git, layout, plus `.claude`/`.agents` skill fallbacks). Same discovery as OpenCode — including `.cursor/` paths only when listed in `instructions`. Cursor-only cloud/sandbox marketplace surfaces are omitted.
 - **Configured MCP tools keep their upstream server id** — OpenCode builtins and plugin/custom tools are advertised under a synthetic `opencode` MCP server. Tools whose flattened name matches an MCP server in merged `opencode.json` configuration (`github_create_pull_request`, …) are grouped into that server's `mcp_descriptors` / `provider_identifier` (`github`, …). Unknown underscore-containing names stay under `opencode` rather than being guessed incorrectly. Exec still reconstructs the full OpenCode tool id.
-- **Tool-call display stub** — semantic `tool_call_started` frames are only partially decoded. Tool execution itself goes through the exec channel and works; UI that relied solely on the display type would be incomplete.
-- **Cursor-native interactions are headless** — Cursor UI/approval requests cannot be surfaced through the AI SDK provider interface. The normal system prompt redirects questions, planning, plan-mode transitions, and known-URL fetching to equivalent OpenCode tools only when they are advertised (`question`, `todowrite`, `plan_enter` / `plan_exit`, `webfetch`); native web/PR/MCP/image/SCM requests are declined so they remain behind OpenCode's tools and permissions. Compaction prompts are unchanged. Unknown future interaction variants fail the turn explicitly instead of hanging the Run stream.
+- **Display-only Cursor tools are bridged when possible** — Cursor `tool_call_*` frames use a typed `ToolCall` oneof. Exec-backed tools (shell/read/grep/…) are claimed by the exec channel; display-only completions such as `update_todos_tool_call` are mapped into advertised OpenCode tools (for example `todowrite`). Variants with no advertised OpenCode counterpart (commonly `await`, `get_mcp_tools`) are decoded and ignored instead of hanging the stream. Unknown future oneof fields log raw protobuf field numbers for diagnosis.
+- **Cursor-native interaction queries remain headless** — Cursor UI/approval *queries* (as distinct from display tool calls) still cannot be surfaced through the AI SDK provider interface. The normal system prompt redirects questions, planning, plan-mode transitions, and known-URL fetching to equivalent OpenCode tools only when they are advertised (`question`, `todowrite`, `plan_enter` / `plan_exit`, `webfetch`); native web/PR/MCP/image/SCM requests are declined so they remain behind OpenCode's tools and permissions. Compaction prompts are unchanged. Unknown future interaction variants fail the turn explicitly instead of hanging the Run stream.
 - **Compaction resets Cursor conversation state** — the classic plugin marks OpenCode's `compaction` agent explicitly. On those turns the provider mints an isolated Cursor `conversation_id`, drops the prior checkpoint + KV blobs, preserves real tool-result text in the seed history, and re-advertises the session's last tool catalog while refusing execution during the summary itself. The first normal turn then rebases once more onto a fresh conversation seeded with OpenCode's compacted prompt and normal system instructions, so the summary-agent checkpoint cannot suppress later tool calls. Ordinary no-tool / `toolChoice:none` calls do not reset conversation state.
 - **No fallback models** — if Cursor’s `AvailableModels` API is unreachable and there is no local cache, the provider exposes no models.
 

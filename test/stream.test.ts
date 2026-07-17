@@ -54,7 +54,10 @@ describe("parseInteractionUpdate", () => {
       interaction_update: {
         tool_call_started: {
           call_id: "tool_abc",
-          tool_call: { call_id: "tool_abc", tool_name: "read", args: '{"path":"/test.txt"}' },
+          tool_call: {
+            tool_call_id: "tool_abc",
+            read_tool_call: { args: { path: "/test.txt" } },
+          },
           model_call_id: "model_call_1",
         },
       },
@@ -62,6 +65,11 @@ describe("parseInteractionUpdate", () => {
     const event = parseInteractionUpdate(payload)
     expect(event).not.toBeNull()
     expect(event!.type).toBe("tool-call-started")
+    if (event!.type === "tool-call-started") {
+      expect(event.callId).toBe("tool_abc")
+      expect(event.toolName).toBe("read_tool_call")
+      expect(JSON.parse(event.args)).toMatchObject({ path: "/test.txt" })
+    }
   })
 
   it("returns null for non-interaction_update frames", () => {
@@ -72,5 +80,3 @@ describe("parseInteractionUpdate", () => {
     expect(event).toBeNull()
   })
 })
-
-
