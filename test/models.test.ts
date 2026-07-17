@@ -389,6 +389,24 @@ describe("modelsToConfig (context-tier materialization)", () => {
     expect(paramsImplyMaxMode(resolved)).toBe(true)
   })
 
+  it("materializes an equivalent 1000k long-context label as the 1m tier", () => {
+    const equivalent = {
+      ...model,
+      variants: model.variants.map((variant) => ({
+        ...variant,
+        parameterValues: variant.parameterValues.map((parameter) =>
+          parameter.id === "context" && parameter.value === "1m"
+            ? { ...parameter, value: "1000k" }
+            : parameter,
+        ),
+      })),
+    }
+
+    const config = modelsToConfig([equivalent])
+    expect(Object.keys(config)).toEqual(["claude-opus-4-8", "claude-opus-4-8-1m"])
+    expect(Object.keys(config["claude-opus-4-8-1m"].variants)).toEqual(["Opus 4.8 1M High"])
+  })
+
   it("avoids collisions with a real model id ending in -1m", () => {
     const config = modelsToConfig([
       model,
@@ -520,7 +538,7 @@ describe("resolveVariantParameters (picked variant + max mode)", () => {
     expect(params.find((p) => p.id === "fast")?.value).toBe("false")
   })
 
-  it("rejects stale or reordered picked parameters instead of silently defaulting", () => {
+  it("rejects stale picked parameters without rejecting a reordered equivalent tuple", () => {
     const picked = [
       { id: "context", value: "999k" },
       { id: "effort", value: "ultra" },
@@ -528,7 +546,8 @@ describe("resolveVariantParameters (picked variant + max mode)", () => {
     expect(() => resolveVariantParameters(opus, { picked })).toThrow(/exact parameter tuple/)
 
     const valid = opus.variants[0]!.parameterValues
-    expect(() => resolveVariantParameters(opus, { picked: [...valid].reverse() })).toThrow(
+    expect(resolveVariantParameters(opus, { picked: [...valid].reverse() })).toEqual(valid)
+    expect(() => resolveVariantParameters(opus, { picked: [...valid, valid[0]!] })).toThrow(
       /exact parameter tuple/,
     )
   })
