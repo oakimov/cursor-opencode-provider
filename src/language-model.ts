@@ -1,4 +1,5 @@
 import fs from "node:fs"
+import path from "node:path"
 import { createHash } from "node:crypto"
 import type { LanguageModelV3, LanguageModelV3CallOptions, LanguageModelV3StreamResult, LanguageModelV3GenerateResult, LanguageModelV3StreamPart, LanguageModelV3Usage, LanguageModelV3FinishReason } from "@ai-sdk/provider"
 import type { CreateCursorOptions } from "./index.js"
@@ -301,8 +302,9 @@ async function startSession(
   const userText = recovery
     ? "Continue the interrupted turn from the conversation history above. Do not repeat completed work."
     : (extractUserText([...prompt].reverse().find((m) => m.role === "user")) || ".")
+  const workspaceRoot = path.resolve(options.workspaceRoot || process.cwd())
   const baseSystemPrompt = extractSystemPrompt(prompt)
-  const interactionGuidance = buildOpenCodeInteractionGuidance(tools, isCompaction)
+  const interactionGuidance = buildOpenCodeInteractionGuidance(tools, isCompaction, workspaceRoot)
   const systemPrompt = interactionGuidance
     ? [baseSystemPrompt, interactionGuidance].filter(Boolean).join("\n\n")
     : baseSystemPrompt
@@ -347,7 +349,6 @@ async function startSession(
     baseURL: agentBaseUrl,
     headers: options.headers,
   })
-  const workspaceRoot = options.workspaceRoot || process.cwd()
   const requestContext = await buildRequestContext({ workspaceRoot, tools })
   // Resolve descriptors once from the merged OpenCode config so MCP identity is
   // consistent across AgentRunRequest and both request_context reply paths.
@@ -1185,6 +1186,7 @@ function extractSystemPrompt(prompt: LanguageModelV3CallOptions["prompt"]): stri
 export function buildOpenCodeInteractionGuidance(
   tools: OpencodeToolDef[],
   isCompaction: boolean,
+  workspaceRoot: string,
 ): string | undefined {
   if (isCompaction) return undefined
   const names = new Set(tools.map((tool) => tool.name))
@@ -1215,6 +1217,7 @@ export function buildOpenCodeInteractionGuidance(
   }
   return [
     `OpenCode exposes exactly these executable tools for this turn: ${[...names].map((name) => `\`${name}\``).join(", ")}.`,
+    `Workspace root: ${JSON.stringify(workspaceRoot)}. Resolve workspace paths against exactly this root; never invent an absolute prefix, and verify uncertain paths with an available tool before using them.`,
     "Call only tools in that exact list. Cursor-native tools that are not listed—including Task/subagents—are unavailable; do not invoke them. If a capability is absent, complete the work directly with the listed tools or explain the limitation.",
     ...(instructions.length > 0
       ? ["Use these OpenCode tools instead of equivalent Cursor-native UI interactions:"]
