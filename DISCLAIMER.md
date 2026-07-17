@@ -1,0 +1,9 @@
+# EU Interoperability Disclaimer
+
+This project is expressly designed to comply with European Union law on the legal protection of computer programs, in particular Directive 2009/24/EC of the European Parliament and of the Council of 23 April 2009 (“EU Software Directive”), as implemented in the relevant EU Member States.
+
+The project is architected on the basis that its reverse-engineering and interface-analysis activities are strictly limited to what EU law expressly permits: acts necessary to use a lawfully acquired program for its intended purpose, including error correction, and acts strictly necessary to obtain the information required to achieve interoperability between an independently created computer program and other programs, under Articles 5 and 6 of Directive 2009/24/EC and corresponding national provisions. It is not designed to copy or reproduce proprietary source code or non-essential implementation details of any third-party software, but to access and use only the minimum interface information objectively required to enable technical interoperability where such information is not otherwise readily available through official or documented means.
+
+When used as intended—namely, to enable lawful interoperability between independently created software components in accordance with Directive 2009/24/EC and applicable national law - this project is meant to operate in full compliance with those legal provisions. Any use that departs from this intended, interoperability-focused purpose (for example, to circumvent technical protections, replicate proprietary implementations, or violate third-party service terms) falls outside the scope of the project’s design and may not comply with applicable law; responsibility for such misuse lies solely with the user.
+
+This statement reflects the legal and compliance orientation of the project but does not replace tailored legal advice.
