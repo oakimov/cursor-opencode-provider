@@ -42,6 +42,11 @@ let _availableModelsMtimeMs = -1
 // session so the new Cursor conversation is still born with tool definitions;
 // execution remains disabled for the summary turn itself.
 const toolCatalogBySession = new Map<string, OpencodeToolDef[]>()
+// A compaction Run uses its own summary-agent system prompt. Its opaque Cursor
+// checkpoint must never become the base for the resumed normal agent: doing so
+// suppresses OpenCode's compacted prompt/system seed and makes Cursor narrate
+// tool use instead of emitting exec requests. Rebase once on the next turn.
+const postCompactionRebaseBySession = new Set<string>()
 
 type V3Part = LanguageModelV3StreamPart
 
@@ -224,14 +229,16 @@ async function startSession(
   })
   const tools = toolState.advertisedTools
   const allowTools = toolState.allowTools
-  // Compaction/summary must not reuse the prior Cursor conversation: OpenCode
-  // has already pruned locally, but echoing the old checkpoint keeps
-  // TurnEnded.cache_read huge and overflow/UI stuck above 100%.
-  const bound = bindConversationId(sessionKey, { reset: isCompaction })
+  const resetState = resolveTurnConversationReset({ sessionKey, isCompaction })
+  // Compaction must not reuse the prior conversation; its first normal turn
+  // must also rebase so the summary-agent checkpoint cannot replace the normal
+  // system prompt and OpenCode's newly compacted history.
+  const bound = bindConversationId(sessionKey, { reset: resetState.reset })
   const conversationId = bound.conversationId
   if (bound.reset) {
     trace(
-      `conversation reset: sessionKey=${sessionKey ?? "(none)"} ` +
+      `conversation reset: reason=${resetState.reason ?? "unknown"} ` +
+        `sessionKey=${sessionKey ?? "(none)"} ` +
         `previousId=${bound.previousId ?? "-"} → conversationId=${conversationId}`,
     )
   }
@@ -1073,8 +1080,24 @@ export function resolveTurnToolState(input: {
   }
 }
 
-export function resetTurnToolStateForTests(): void {
+export function resolveTurnConversationReset(input: {
+  sessionKey?: string
+  isCompaction: boolean
+}): { reset: boolean; reason?: "compaction" | "post-compaction-rebase" } {
+  const { sessionKey, isCompaction } = input
+  if (isCompaction) {
+    if (sessionKey) postCompactionRebaseBySession.add(sessionKey)
+    return { reset: true, reason: "compaction" }
+  }
+  if (sessionKey && postCompactionRebaseBySession.delete(sessionKey)) {
+    return { reset: true, reason: "post-compaction-rebase" }
+  }
+  return { reset: false }
+}
+
+export function resetTurnStateForTests(): void {
   toolCatalogBySession.clear()
+  postCompactionRebaseBySession.clear()
 }
 
 function extractUserText(lastUser: Record<string, unknown> | undefined): string {

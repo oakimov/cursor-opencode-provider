@@ -1,7 +1,8 @@
 import { beforeEach, describe, it, expect } from "bun:test"
 import {
   computeAllowTools,
-  resetTurnToolStateForTests,
+  resetTurnStateForTests,
+  resolveTurnConversationReset,
   resolveTurnToolState,
 } from "../src/language-model.js"
 import {
@@ -30,7 +31,7 @@ describe("computeAllowTools", () => {
 
 describe("compaction tool catalog", () => {
   beforeEach(() => {
-    resetTurnToolStateForTests()
+    resetTurnStateForTests()
     resetConversationBindingsForTests()
   })
 
@@ -58,29 +59,43 @@ describe("compaction tool catalog", () => {
     })).toEqual({ advertisedTools: [], allowTools: false })
   })
 
-  it("keeps the reset conversation and restores execution on the next normal turn", () => {
+  it("rebases after the summary checkpoint, restores execution, then stays stable", () => {
     const sessionKey = "ses_transition"
     const tools = [{ name: "bash" }, { name: "grep" }]
 
     resolveTurnToolState({ sessionKey, incomingTools: tools, isCompaction: false })
     const beforeCompaction = bindConversationId(sessionKey).conversationId
 
+    const compactionReset = resolveTurnConversationReset({ sessionKey, isCompaction: true })
     const compacted = resolveTurnToolState({
       sessionKey,
       incomingTools: [],
       isCompaction: true,
     })
-    const afterCompaction = bindConversationId(sessionKey, { reset: true }).conversationId
+    const afterCompaction = bindConversationId(sessionKey, compactionReset).conversationId
     expect(afterCompaction).not.toBe(beforeCompaction)
+    expect(compactionReset).toEqual({ reset: true, reason: "compaction" })
     expect(compacted).toEqual({ advertisedTools: tools, allowTools: false })
 
+    const resumedReset = resolveTurnConversationReset({ sessionKey, isCompaction: false })
     const resumed = resolveTurnToolState({
       sessionKey,
       incomingTools: tools,
       isCompaction: false,
     })
-    expect(bindConversationId(sessionKey).conversationId).toBe(afterCompaction)
+    const afterRebase = bindConversationId(sessionKey, resumedReset).conversationId
+    expect(resumedReset).toEqual({ reset: true, reason: "post-compaction-rebase" })
+    expect(afterRebase).not.toBe(afterCompaction)
     expect(resumed).toEqual({ advertisedTools: tools, allowTools: true })
+
+    expect(resolveTurnConversationReset({ sessionKey, isCompaction: false }))
+      .toEqual({ reset: false })
+    expect(bindConversationId(sessionKey).conversationId).toBe(afterRebase)
+  })
+
+  it("does not reset ordinary no-tool turns", () => {
+    expect(resolveTurnConversationReset({ sessionKey: "ses_no_tools", isCompaction: false }))
+      .toEqual({ reset: false })
   })
 })
 
