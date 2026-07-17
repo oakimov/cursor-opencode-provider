@@ -244,7 +244,11 @@ async function startSession(
   }
 
   const userText = extractUserText([...prompt].reverse().find((m) => m.role === "user")) || "."
-  const systemPrompt = extractSystemPrompt(prompt)
+  const baseSystemPrompt = extractSystemPrompt(prompt)
+  const interactionGuidance = buildOpenCodeInteractionGuidance(tools, isCompaction)
+  const systemPrompt = interactionGuidance
+    ? [baseSystemPrompt, interactionGuidance].filter(Boolean).join("\n\n")
+    : baseSystemPrompt
   const history = extractPromptHistory(prompt)
 
   await loadAvailableModels()
@@ -916,6 +920,50 @@ function extractSystemPrompt(prompt: LanguageModelV3CallOptions["prompt"]): stri
     if (m.role === "system" && typeof m.content === "string") parts.push(m.content)
   }
   return parts.length > 0 ? parts.join("\n\n") : undefined
+}
+
+/**
+ * Cursor's native UI interactions cannot be surfaced through the AI SDK.
+ * Redirect only to OpenCode tools that are genuinely advertised this turn;
+ * compaction keeps its dedicated summary prompt unchanged.
+ */
+export function buildOpenCodeInteractionGuidance(
+  tools: OpencodeToolDef[],
+  isCompaction: boolean,
+): string | undefined {
+  if (isCompaction) return undefined
+  const names = new Set(tools.map((tool) => tool.name))
+  const instructions: string[] = []
+
+  if (names.has("question")) {
+    instructions.push(
+      "- When user input is required, call the OpenCode `question` tool; do not use Cursor's native AskQuestion interaction.",
+    )
+  }
+  if (names.has("plan_enter")) {
+    instructions.push(
+      "- To enter plan mode, call the OpenCode `plan_enter` tool; do not use Cursor's native SwitchMode or CreatePlan interactions.",
+    )
+  } else if (names.has("todowrite")) {
+    instructions.push(
+      "- For planning, call the OpenCode `todowrite` tool and explain the plan in normal text; do not use Cursor's native SwitchMode or CreatePlan interactions.",
+    )
+  }
+  if (names.has("plan_exit")) {
+    instructions.push("- To leave plan mode, call the OpenCode `plan_exit` tool.")
+  }
+  if (names.has("webfetch")) {
+    instructions.push(
+      "- To fetch a known URL, call the OpenCode `webfetch` tool; do not use Cursor's native WebFetch interaction.",
+    )
+  }
+  if (instructions.length === 0) return undefined
+
+  return [
+    "OpenCode owns interactive workflows and tool execution for this session. Use the advertised OpenCode tools below instead of equivalent Cursor-native UI interactions:",
+    ...instructions,
+    "Emit the actual tool call and wait for its result; never merely claim or summarize that a tool was used.",
+  ].join("\n")
 }
 
 /** Rough char→token estimate for mid-turn usage before TurnEnded arrives. */

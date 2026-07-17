@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test"
 import type { LanguageModelV3CallOptions } from "@ai-sdk/provider"
 import {
+  buildOpenCodeInteractionGuidance,
   estimateTokens,
   extractPromptHistory,
 } from "../src/language-model.js"
@@ -13,6 +14,38 @@ describe("estimateTokens", () => {
     expect(estimateTokens(1)).toBe(1)
     expect(estimateTokens(4)).toBe(1)
     expect(estimateTokens(5)).toBe(2)
+  })
+})
+
+describe("buildOpenCodeInteractionGuidance", () => {
+  it("redirects questions and planning only to tools advertised this turn", () => {
+    const guidance = buildOpenCodeInteractionGuidance([
+      { name: "question" },
+      { name: "todowrite" },
+    ], false)
+    expect(guidance).toContain("OpenCode `question` tool")
+    expect(guidance).toContain("OpenCode `todowrite` tool")
+    expect(guidance).toContain("Emit the actual tool call")
+    expect(guidance).not.toContain("`plan_enter`")
+    expect(guidance).not.toContain("`webfetch`")
+  })
+
+  it("uses native OpenCode plan and fetch tools when they are advertised", () => {
+    const guidance = buildOpenCodeInteractionGuidance([
+      { name: "plan_enter" },
+      { name: "plan_exit" },
+      { name: "webfetch" },
+    ], false)
+    expect(guidance).toContain("OpenCode `plan_enter` tool")
+    expect(guidance).toContain("OpenCode `plan_exit` tool")
+    expect(guidance).toContain("OpenCode `webfetch` tool")
+    expect(guidance).not.toContain("`todowrite`")
+    expect(guidance).not.toContain("AskQuestion")
+  })
+
+  it("does not alter compaction or advertise unavailable equivalents", () => {
+    expect(buildOpenCodeInteractionGuidance([{ name: "question" }], true)).toBeUndefined()
+    expect(buildOpenCodeInteractionGuidance([{ name: "bash" }], false)).toBeUndefined()
   })
 })
 
