@@ -148,6 +148,23 @@ describe("interaction query headless responses", () => {
     })
   }
 
+  it("treats an omitted proto3 default id as zero (live switch-mode shape)", () => {
+    const payload = queryPayload("switch_mode_request_query", 0)
+    expect(inspectInteractionQueryWire(payload)).toEqual({
+      id: 0,
+      variantField: 4,
+      variantName: "switch_mode_request_query",
+    })
+
+    const query = decodeMessage<any>("AgentServerMessage", payload).interaction_query
+    const handled = handleInteractionQuery(query, payload)
+    expect(handled.id).toBe(0)
+    const response = decodeMessage<any>("AgentClientMessage", handled.reply)
+      .interaction_response
+    expect(response.id).toBe(0)
+    expect(response.switch_mode_request_response?.rejected).toBeDefined()
+  })
+
   it("detects a future unknown variant from raw bytes", () => {
     const payload = unknownQueryPayload(17, 99)
     expect(inspectInteractionQueryWire(payload)).toEqual({
@@ -195,7 +212,7 @@ describe("interaction query pump regression", () => {
     const parts: any[] = []
     let streamError: Error | undefined
     const session = fakeSession([
-      queryPayload("ask_question_interaction_query", 81),
+      queryPayload("switch_mode_request_query", 0),
       encodeMessage("AgentServerMessage", {
         interaction_update: { turn_ended: { input_tokens: 5, output_tokens: 2 } },
       }),
@@ -210,8 +227,8 @@ describe("interaction query pump regression", () => {
     expect(streamError).toBeUndefined()
     expect(writes).toHaveLength(1)
     const response = decodeMessage<any>("AgentClientMessage", writes[0]).interaction_response
-    expect(response.id).toBe(81)
-    expect(response.ask_question_interaction_response?.result?.rejected).toBeDefined()
+    expect(response.id).toBe(0)
+    expect(response.switch_mode_request_response?.rejected).toBeDefined()
     expect(parts.some((part) => part.type === "finish")).toBe(true)
   })
 

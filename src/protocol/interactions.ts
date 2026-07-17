@@ -55,7 +55,10 @@ export function inspectInteractionQueryWire(
     .find((field) => field.fn === 7 && field.wt === 2)?.bytes
   if (!queryBytes) return {}
 
-  let id: number | undefined
+  // InteractionQuery.id is a proto3 uint32. Cursor commonly uses id=0, whose
+  // default scalar value is omitted from the wire; absence therefore means
+  // zero, not a malformed/missing correlation id.
+  let id = 0
   let variantField: number | undefined
   for (const field of readAllFields(queryBytes)) {
     if (field.fn === 1 && field.wt === 0) id = field.varint
