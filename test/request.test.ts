@@ -4,6 +4,7 @@ import { buildLiveRequestContext } from "../src/protocol/tools.js"
 import { decodeMessage } from "../src/protocol/messages.js"
 import { decodeFramePayload, streamFrames } from "../src/protocol/framing.js"
 import { gunzipSync } from "node:zlib"
+import { readAllFields } from "../src/protocol/struct.js"
 
 describe("buildRunRequest", () => {
   it("produces a valid protobuf message", () => {
@@ -24,6 +25,33 @@ describe("buildRunRequest", () => {
     expect(rr.action?.user_message_action?.user_message?.text).toBe("Hello")
     // The provider sends the concrete model id, never Cursor's "default" Auto.
     expect(rr.requested_model?.model_id).toBe("test-model")
+  })
+
+  it("does not populate selected_subagent_models from the available-model catalog", () => {
+    const data = buildRunRequest({
+      text: "Hello",
+      modelId: "test-model",
+      conversationId: "conv-no-subagent-selection",
+    })
+    const runRequest = readAllFields(data).find((field) => field.fn === 1)?.bytes
+    expect(runRequest).toBeDefined()
+    expect(readAllFields(runRequest!).some((field) => field.fn === 14)).toBe(false)
+    const decoded = decodeMessage<any>("AgentClientMessage", data)
+    expect(decoded.run_request.selected_subagent_models ?? []).toHaveLength(0)
+  })
+
+  it("does not fabricate a conversation_group_id from the conversation id", () => {
+    const data = buildRunRequest({
+      text: "Hello",
+      modelId: "test-model",
+      conversationId: "conv-not-a-group",
+    })
+    const runRequest = readAllFields(data).find((field) => field.fn === 1)?.bytes
+    expect(runRequest).toBeDefined()
+    expect(readAllFields(runRequest!).some((field) => field.fn === 16)).toBe(false)
+    const decoded = decodeMessage<any>("AgentClientMessage", data)
+    expect(decoded.run_request.conversation_id).toBe("conv-not-a-group")
+    expect(decoded.run_request.conversation_group_id ?? "").toBe("")
   })
 
   it("injects opencode tools into AgentRunRequest #4 mcp_tools", () => {

@@ -290,6 +290,16 @@ describe("tool-call-bridge", () => {
     expect(resolveBridgedOpenCodeToolCall(display!, ["bash", "todowrite"])).toBeUndefined()
   })
 
+  it("decodes canonical read-todos status and id filters", () => {
+    const encoded = encodeCanonicalToolCall(10, (writer) => {
+      writer.uint32((1 << 3) | 2).fork().int32(1).int32(3).ldelim()
+      writer.uint32((2 << 3) | 2).string("todo-7")
+    })
+    const decoded = decodeMessage<any>("ToolCall", encoded)
+    expect(decoded.read_todos_tool_call.args.status_filter).toEqual([1, 3])
+    expect(decoded.read_todos_tool_call.args.id_filter).toEqual(["todo-7"])
+  })
+
   it("lists protobuf field numbers for unknown-variant diagnosis", () => {
     const encoded = encodeMessage("ToolCall", {
       tool_call_id: "x",

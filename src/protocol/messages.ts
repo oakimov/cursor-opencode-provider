@@ -48,10 +48,17 @@ export function createMessageTypes(): protobuf.Root {
   // Display ToolCall (interaction_update.tool_call_*) — agent.v1 oneof, not
   // {tool_name,args} strings. Args-only wrappers are enough to bridge into
   // OpenCode; result payloads are ignored on decode.
+  root.add(new protobuf.Enum("TodoStatus", {
+    TODO_STATUS_UNSPECIFIED: 0,
+    TODO_STATUS_PENDING: 1,
+    TODO_STATUS_IN_PROGRESS: 2,
+    TODO_STATUS_COMPLETED: 3,
+    TODO_STATUS_CANCELLED: 4,
+  }))
   addType(root, "TodoItem", [
     { id: 1, name: "id", type: "string" },
     { id: 2, name: "content", type: "string" },
-    { id: 3, name: "status", type: "int32" },
+    { id: 3, name: "status", type: "TodoStatus" },
     { id: 4, name: "created_at", type: "int64" },
     { id: 5, name: "updated_at", type: "int64" },
     { id: 6, name: "dependencies", type: "string", repeated: true },
@@ -263,7 +270,8 @@ export function createMessageTypes(): protobuf.Root {
   addType(root, "PiLsToolCall", [{ id: 1, name: "args", type: "PiLsToolArgs" }])
   // Display-only native tools Cursor may complete without an ExecServerMessage.
   addType(root, "ReadTodosArgs", [
-    { id: 1, name: "todo_ids", type: "string", repeated: true },
+    { id: 1, name: "status_filter", type: "TodoStatus", repeated: true },
+    { id: 2, name: "id_filter", type: "string", repeated: true },
   ])
   addType(root, "ReadTodosToolCall", [{ id: 1, name: "args", type: "ReadTodosArgs" }])
   addType(root, "AwaitArgs", [
@@ -620,6 +628,10 @@ export function createMessageTypes(): protobuf.Root {
     { id: 2, name: "working_directory", type: "string" },
     { id: 3, name: "timeout", type: "uint32" },
     { id: 4, name: "tool_call_id", type: "string" },
+    // Canonical agent.v1 fields used by the native CLI to distinguish a
+    // foreground cancellation deadline from a soft background handoff.
+    { id: 13, name: "timeout_behavior", type: "uint32" },
+    { id: 14, name: "hard_timeout", type: "uint32" },
   ])
 
   addType(root, "ShellStreamStart", []) // optional SandboxPolicy only; empty is valid
@@ -628,7 +640,18 @@ export function createMessageTypes(): protobuf.Root {
   // agent.v1: code is uint32; protobufjs must emit code=0 (defaults are load-bearing).
   addType(root, "ShellStreamExit", [
     { id: 1, name: "code", type: "uint32" },
+    { id: 2, name: "cwd", type: "string" },
     { id: 4, name: "aborted", type: "bool" },
+    { id: 5, name: "abort_reason", type: "uint32" },
+    { id: 6, name: "local_execution_time_ms", type: "uint32" },
+  ])
+  addType(root, "ShellStreamBackgrounded", [
+    { id: 1, name: "shell_id", type: "uint32" },
+    { id: 2, name: "command", type: "string" },
+    { id: 3, name: "working_directory", type: "string" },
+    { id: 4, name: "pid", type: "uint32" },
+    { id: 5, name: "ms_to_wait", type: "uint32" },
+    { id: 6, name: "reason", type: "uint32" },
   ])
   // ShellRejected / ShellPermissionDenied (shared with ShellResult) — reason/error at #3.
   addType(root, "ShellRejected", [
@@ -642,6 +665,42 @@ export function createMessageTypes(): protobuf.Root {
     { id: 3, name: "error", type: "string" },
   ])
 
+  // Cursor's non-blocking shell path is a separate exec variant from the
+  // foreground ShellStream above. The host only needs the fields used at the
+  // OpenCode boundary; protobufjs safely skips the richer classifier/approval
+  // messages that are private to Cursor's native client.
+  addType(root, "BackgroundShellSpawnArgs", [
+    { id: 1, name: "command", type: "string" },
+    { id: 2, name: "working_directory", type: "string" },
+    { id: 3, name: "tool_call_id", type: "string" },
+    { id: 6, name: "enable_write_shell_stdin_tool", type: "bool" },
+    { id: 7, name: "description", type: "string" },
+    { id: 12, name: "skip_approval", type: "bool" },
+    { id: 13, name: "conversation_id", type: "string" },
+  ])
+  addType(root, "BackgroundShellSpawnSuccess", [
+    { id: 1, name: "shell_id", type: "uint32" },
+    { id: 2, name: "command", type: "string" },
+    { id: 3, name: "working_directory", type: "string" },
+    { id: 4, name: "pid", type: "uint32" },
+  ])
+  addType(root, "BackgroundShellSpawnError", [
+    { id: 1, name: "command", type: "string" },
+    { id: 2, name: "working_directory", type: "string" },
+    { id: 3, name: "error", type: "string" },
+  ])
+  addType(
+    root,
+    "BackgroundShellSpawnResult",
+    [
+      { id: 1, name: "success", type: "BackgroundShellSpawnSuccess" },
+      { id: 2, name: "error", type: "BackgroundShellSpawnError" },
+      { id: 3, name: "rejected", type: "ShellRejected" },
+      { id: 4, name: "permission_denied", type: "ShellPermissionDenied" },
+    ],
+    [{ name: "result", fields: ["success", "error", "rejected", "permission_denied"] }],
+  )
+
   addType(
     root,
     "ShellStream",
@@ -652,8 +711,9 @@ export function createMessageTypes(): protobuf.Root {
       { id: 4, name: "start", type: "ShellStreamStart" },
       { id: 5, name: "rejected", type: "ShellRejected" },
       { id: 6, name: "permission_denied", type: "ShellPermissionDenied" },
+      { id: 7, name: "backgrounded", type: "ShellStreamBackgrounded" },
     ],
-    [{ name: "event", fields: ["stdout", "stderr", "exit", "start", "rejected", "permission_denied"] }],
+    [{ name: "event", fields: ["stdout", "stderr", "exit", "start", "rejected", "permission_denied", "backgrounded"] }],
   )
 
   addType(root, "GlobArgs", [
@@ -798,6 +858,11 @@ export function createMessageTypes(): protobuf.Root {
     { id: 2, name: "mcp_descriptors", type: "McpDescriptor", repeated: true },
   ])
 
+  addType(root, "PermissionsAutoRunInstructions", [
+    { id: 1, name: "allow_instructions", type: "string", repeated: true },
+    { id: 2, name: "block_instructions", type: "string", repeated: true },
+  ])
+
   addType(root, "RequestContextPayload", [
     { id: 2, name: "rules", type: "CursorRule", repeated: true },
     { id: 4, name: "env", type: "RequestContextEnv" },
@@ -819,8 +884,8 @@ export function createMessageTypes(): protobuf.Root {
     { id: 43, name: "agent_skills_info_complete", type: "bool" },
     { id: 44, name: "mcp_file_system_info_complete", type: "bool" },
     { id: 45, name: "git_status_info_complete", type: "bool" },
-    { id: 46, name: "user_permissions_auto_run", type: "bool" },
-    { id: 47, name: "project_permissions_auto_run", type: "bool" },
+    { id: 46, name: "user_permissions_auto_run", type: "PermissionsAutoRunInstructions" },
+    { id: 47, name: "project_permissions_auto_run", type: "PermissionsAutoRunInstructions" },
   ])
 
   addType(root, "RequestContextSuccess", [
@@ -848,7 +913,9 @@ export function createMessageTypes(): protobuf.Root {
     { id: 2, name: "server_identifier", type: "string" },
     { id: 3, name: "plugin", type: "string" },
     { id: 4, name: "marketplace", type: "string" },
-    { id: 5, name: "tools", type: "McpFsToolDescriptor", repeated: true },
+    // Unlike McpDescriptor (#23/#34), exec #36 returns the full canonical
+    // McpToolDefinition shape, including composite name and provider identity.
+    { id: 5, name: "tools", type: "McpToolDefinition", repeated: true },
     { id: 6, name: "instructions", type: "McpInstructions", repeated: true },
     { id: 7, name: "status", type: "string" },
   ])
@@ -884,6 +951,7 @@ export function createMessageTypes(): protobuf.Root {
       { id: 10, name: "request_context_args", type: "RequestContextArgs" },
       { id: 11, name: "mcp_args", type: "McpArgs" },
       { id: 14, name: "shell_stream_args", type: "ShellArgs" },
+      { id: 16, name: "background_shell_spawn_args", type: "BackgroundShellSpawnArgs" },
       { id: 28, name: "subagent_args", type: "SubagentArgs" },
       { id: 36, name: "mcp_state_exec_args", type: "McpStateExecArgs" },
       { id: 45, name: "pi_read_args", type: "PiReadToolArgs" },
@@ -896,7 +964,7 @@ export function createMessageTypes(): protobuf.Root {
     ],
     [{ name: "args", fields: [
       "write_args", "delete_args", "grep_args", "read_args", "ls_args",
-      "request_context_args", "mcp_args", "shell_stream_args", "mcp_state_exec_args",
+      "request_context_args", "mcp_args", "shell_stream_args", "background_shell_spawn_args", "mcp_state_exec_args",
       "subagent_args",
       "pi_read_args", "pi_bash_args", "pi_edit_args", "pi_write_args",
       "pi_grep_args", "pi_find_args", "pi_ls_args",
@@ -919,6 +987,7 @@ export function createMessageTypes(): protobuf.Root {
       { id: 10, name: "request_context_result", type: "RequestContextResult" },
       { id: 11, name: "mcp_result", type: "McpResult" },
       { id: 14, name: "shell_stream", type: "ShellStream" },
+      { id: 16, name: "background_shell_spawn_result", type: "BackgroundShellSpawnResult" },
       { id: 28, name: "subagent_result", type: "SubagentResult" },
       { id: 36, name: "mcp_state_exec_result", type: "McpStateExecResult" },
       { id: 46, name: "pi_read_result", type: "PiReadExecResult" },
@@ -931,7 +1000,7 @@ export function createMessageTypes(): protobuf.Root {
     ],
     [{ name: "result", fields: [
       "write_result", "delete_result", "grep_result", "read_result", "ls_result",
-      "request_context_result", "mcp_result", "shell_stream", "mcp_state_exec_result",
+      "request_context_result", "mcp_result", "shell_stream", "background_shell_spawn_result", "mcp_state_exec_result",
       "subagent_result",
       "pi_read_result", "pi_bash_result", "pi_edit_result", "pi_write_result",
       "pi_grep_result", "pi_find_result", "pi_ls_result",
@@ -984,20 +1053,6 @@ export function createMessageTypes(): protobuf.Root {
     { id: 2, name: "message_id", type: "string" },
   ])
 
-  // McpToolDefinition — agent.v1 shape used by RequestContext.tools (#7) and
-  // AgentRunRequest.mcp_tools (#4). Capture 00074 / CLI: { #1 name (composite
-  // <server>-<tool>), #2 description, #3 input_schema (Value bytes),
-  // #4 provider_identifier, #5 tool_name }.
-  // (Defined later as McpToolDefinition; keep a legacy alias type name for
-  // any older encode paths that still look up "McpToolDescriptor".)
-  addType(root, "McpToolDescriptor", [
-    { id: 1, name: "name", type: "string" },
-    { id: 2, name: "description", type: "string" },
-    { id: 3, name: "input_schema", type: "bytes" },
-    { id: 4, name: "provider_identifier", type: "string" },
-    { id: 5, name: "tool_name", type: "string" },
-  ])
-
   // RequestContext — UserMessageAction #2. Live per-turn tools go here
   // (AgentRunRequest.mcp_tools #4 is prewarm-only / empty on real turns).
   addType(root, "RequestContext", [
@@ -1021,8 +1076,8 @@ export function createMessageTypes(): protobuf.Root {
     { id: 43, name: "agent_skills_info_complete", type: "bool" },
     { id: 44, name: "mcp_file_system_info_complete", type: "bool" },
     { id: 45, name: "git_status_info_complete", type: "bool" },
-    { id: 46, name: "user_permissions_auto_run", type: "bool" },
-    { id: 47, name: "project_permissions_auto_run", type: "bool" },
+    { id: 46, name: "user_permissions_auto_run", type: "PermissionsAutoRunInstructions" },
+    { id: 47, name: "project_permissions_auto_run", type: "PermissionsAutoRunInstructions" },
   ])
 
   addType(root, "UserMessageAction", [
@@ -1103,8 +1158,8 @@ export function createMessageTypes(): protobuf.Root {
     { id: 9, name: "requested_model", type: "RequestedModel" },
     { id: 10, name: "unknown_flag", type: "uint32" },
     { id: 12, name: "field_12", type: "uint32" },
-    { id: 14, name: "available_models", type: "RequestedModel", repeated: true },
-    { id: 16, name: "conversation_id_dup", type: "string" },
+    { id: 14, name: "selected_subagent_models", type: "RequestedModel", repeated: true },
+    { id: 16, name: "conversation_group_id", type: "string" },
   ])
 
   // ── Client heartbeat ──

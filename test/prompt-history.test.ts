@@ -22,7 +22,7 @@ describe("buildOpenCodeInteractionGuidance", () => {
     const guidance = buildOpenCodeInteractionGuidance([
       { name: "question" },
       { name: "todowrite" },
-    ], false)
+    ], false, "/workspace/project")
     expect(guidance).toContain("OpenCode `question` tool")
     expect(guidance).toContain("OpenCode `todowrite` tool")
     expect(guidance).toContain("Emit the actual tool call")
@@ -35,7 +35,7 @@ describe("buildOpenCodeInteractionGuidance", () => {
       { name: "plan_enter" },
       { name: "plan_exit" },
       { name: "webfetch" },
-    ], false)
+    ], false, "/workspace/project")
     expect(guidance).toContain("OpenCode `plan_enter` tool")
     expect(guidance).toContain("OpenCode `plan_exit` tool")
     expect(guidance).toContain("OpenCode `webfetch` tool")
@@ -43,9 +43,30 @@ describe("buildOpenCodeInteractionGuidance", () => {
     expect(guidance).not.toContain("AskQuestion")
   })
 
-  it("does not alter compaction or advertise unavailable equivalents", () => {
-    expect(buildOpenCodeInteractionGuidance([{ name: "question" }], true)).toBeUndefined()
-    expect(buildOpenCodeInteractionGuidance([{ name: "bash" }], false)).toBeUndefined()
+  it("does not alter compaction and forbids native tools outside the exact catalog", () => {
+    expect(buildOpenCodeInteractionGuidance([
+      { name: "question" },
+    ], true, "/workspace/project")).toBeUndefined()
+    const guidance = buildOpenCodeInteractionGuidance([
+      { name: "bash" },
+      { name: "read" },
+    ], false, "/workspace/project")
+    expect(guidance).toContain("exactly these executable tools for this turn: `bash`, `read`")
+    expect(guidance).toContain("Task/subagents")
+    expect(guidance).toContain("are unavailable; do not invoke them")
+    expect(guidance).not.toContain("OpenCode `question` tool")
+    expect(buildOpenCodeInteractionGuidance([], false, "/workspace/project")).toBeUndefined()
+  })
+
+  it("anchors paths to the exact workspace root", () => {
+    const workspaceRoot = "/workspace/project “quoted”\nline"
+    const guidance = buildOpenCodeInteractionGuidance([
+      { name: "bash" },
+    ], false, workspaceRoot)
+
+    expect(guidance).toContain(`Workspace root: ${JSON.stringify(workspaceRoot)}.`)
+    expect(guidance).toContain("never invent an absolute prefix")
+    expect(guidance).toContain("verify uncertain paths")
   })
 })
 

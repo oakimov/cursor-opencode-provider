@@ -19,6 +19,8 @@ export type PendingExec = {
    * mcp_result can unwrap read envelopes even if the prompt omits toolName.
    */
   toolName?: string
+  /** Original request fields required by a typed result message. */
+  resultMetadata?: Record<string, unknown>
   /**
    * True when this pending entry was synthesized from a Cursor display-only
    * tool_call_* frame (no ExecServerMessage). Continuation must not write an
@@ -106,8 +108,9 @@ export class SessionManager {
     resultField: string,
     toolName?: string,
     bridged = false,
+    resultMetadata?: Record<string, unknown>,
   ): void {
-    session.pending.set(execId, { resultField, toolName, bridged })
+    session.pending.set(execId, { resultField, toolName, bridged, resultMetadata })
     this.byExecId.set(this.key(session.sessionId, execId), session)
     this.touch(session)
   }

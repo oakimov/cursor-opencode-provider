@@ -3,7 +3,7 @@
 // Cursor's per-turn tool descriptors carry the tool `input_schema` (a JSON
 // Schema object) as a `google.protobuf.Value` whose `struct_value` holds the
 // schema — NOT a JSON string. Verified against a live capture
-// (request_context #7 → McpToolDescriptor #3):
+// (request_context #7 → McpToolDefinition #3):
 //   2a 9a07  0a10 0a04 74797065 1208 1a06 6f626a656374 ...
 //   = Value{#5 struct_value: Struct{#1 fields: {"type": Value{#3 string "object"}}}}
 //

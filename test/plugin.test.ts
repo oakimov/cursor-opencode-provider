@@ -7,6 +7,12 @@ import { CURSOR_VARIANT_PARAMETERS_KEY, readCache, writeCache, type ModelInfo } 
 import { resetClientVersionCache } from "../src/protocol/client-version.js"
 import { resetAgentUrlCache } from "../src/agent-url.js"
 import { CURSOR_COMPACTION_OPTION } from "../src/shared.js"
+import {
+  CURSOR_TIMEOUT_BACKGROUND,
+  consumeCursorShellResult,
+  registerCursorShellCall,
+  resetCursorShellCalls,
+} from "../src/shell-timeout.js"
 
 // Characters safeLabel must remove from emitted names/keys (issue #2).
 const INVALID = new RegExp("[()<>&\"'`]")
@@ -212,6 +218,67 @@ describe("CursorPlugin compaction marker", () => {
   })
 })
 
+describe("CursorPlugin shell result hooks", () => {
+  it("removes OpenCode timeout metadata before rendering and records a typed timeout", async () => {
+    const plugin = await CursorPlugin({ directory: process.cwd() } as never)
+    const callID = "cursor_hook_1"
+    registerCursorShellCall(callID, {
+      shell_stream: true,
+      command: "bun test",
+      working_directory: process.cwd(),
+      timeout_ms: 30_000,
+      timeout_behavior: 1,
+    })
+    const output = {
+      title: "wrapped command",
+      output:
+        "partial\n\n<shell_metadata>\nshell tool terminated command after exceeding timeout 30000 ms. Retry.\n</shell_metadata>",
+      metadata: { exit: null },
+    }
+    await plugin["tool.execute.after"]?.({
+      tool: "bash",
+      sessionID: "ses_1",
+      callID,
+      args: {},
+    } as never, output as never)
+
+    expect(output.title).toBe("bun test")
+    expect(output.output).toBe("partial\n")
+    expect(consumeCursorShellResult(callID, output.output).outcome).toEqual({
+      kind: "timeout",
+      timeoutMs: 30_000,
+    })
+  })
+
+  it("rewrites only Cursor soft-background Bash calls before execution", async () => {
+    const plugin = await CursorPlugin({ directory: process.cwd() } as never)
+    const callID = "cursor_hook_2"
+    registerCursorShellCall(callID, {
+      shell_stream: true,
+      command: "sleep 60",
+      working_directory: process.cwd(),
+      timeout_ms: 5_000,
+      timeout_behavior: CURSOR_TIMEOUT_BACKGROUND,
+    })
+    const output = { args: { command: "sleep 60", timeout: 5_000 } }
+    await plugin["tool.execute.before"]?.({
+      tool: "bash",
+      sessionID: "ses_1",
+      callID,
+    } as never, output as never)
+    expect(output.args.command).toContain("__CURSOR_SHELL_BACKGROUND__")
+    expect(output.args.timeout).toBe(20_000)
+
+    const ordinary = { args: { command: "pwd" } }
+    await plugin["tool.execute.before"]?.({
+      tool: "bash",
+      sessionID: "ses_1",
+      callID: "ordinary-call",
+    } as never, ordinary as never)
+    expect(ordinary.args.command).toBe("pwd")
+  })
+})
+
 const originalHome = process.env.HOME
 const originalXdgCache = process.env.XDG_CACHE_HOME
 const originalXdgData = process.env.XDG_DATA_HOME
@@ -219,6 +286,7 @@ const originalAuthContent = process.env.OPENCODE_AUTH_CONTENT
 const originalTelemetry = process.env.CURSOR_GET_SERVER_CONFIG_TELEMETRY
 
 afterEach(() => {
+  resetCursorShellCalls()
   if (originalHome === undefined) delete process.env.HOME
   else process.env.HOME = originalHome
   if (originalXdgCache === undefined) delete process.env.XDG_CACHE_HOME

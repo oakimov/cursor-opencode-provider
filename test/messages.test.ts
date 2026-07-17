@@ -4,6 +4,7 @@ import {
   decodeMessage,
   getMessageTypes,
 } from "../src/protocol/messages.js"
+import { readAllFields } from "../src/protocol/struct.js"
 
 describe("message round-trip", () => {
   it("ParameterValue", () => {
@@ -228,14 +229,47 @@ describe("message schema accuracy", () => {
     expect(fields).toContain("mcp_state_exec_args")
     expect(fields).toContain("subagent_args")
     expect(fields).toContain("shell_stream_args")
+    expect(fields).toContain("background_shell_spawn_args")
     expect(fields).toContain("pi_write_args")
     expect(root.lookupType("ExecClientMessage").fields.mcp_state_exec_result.id).toBe(36)
     expect(root.lookupType("ExecClientMessage").fields.subagent_result.id).toBe(28)
+    expect(root.lookupType("ExecClientMessage").fields.background_shell_spawn_result.id).toBe(16)
+    expect(root.lookupType("ShellArgs").fields.timeout_behavior.id).toBe(13)
+    expect(root.lookupType("ShellArgs").fields.hard_timeout.id).toBe(14)
+    expect(root.lookupType("ShellStream").fields.backgrounded.id).toBe(7)
+    expect(root.lookupType("ShellStreamExit").fields.abort_reason.id).toBe(5)
   })
 
   it("Agent messages expose the interaction request/reply fields", () => {
     const root = getMessageTypes()
     expect(root.lookupType("AgentServerMessage").fields.interaction_query.id).toBe(7)
     expect(root.lookupType("AgentClientMessage").fields.interaction_response.id).toBe(6)
+  })
+
+  it("uses the canonical read-todos filters and has no misleading MCP alias", () => {
+    const root = getMessageTypes()
+    const args = root.lookupType("ReadTodosArgs")
+    expect(args.fields.status_filter).toMatchObject({ id: 1, type: "TodoStatus", repeated: true })
+    expect(args.fields.id_filter).toMatchObject({ id: 2, type: "string", repeated: true })
+    expect(root.lookupEnum("TodoStatus").values).toEqual({
+      TODO_STATUS_UNSPECIFIED: 0,
+      TODO_STATUS_PENDING: 1,
+      TODO_STATUS_IN_PROGRESS: 2,
+      TODO_STATUS_COMPLETED: 3,
+      TODO_STATUS_CANCELLED: 4,
+    })
+    expect(root.get("McpToolDescriptor")).toBeNull()
+  })
+
+  it("encodes permission auto-run instructions as canonical messages", () => {
+    const bytes = encodeMessage("RequestContext", {
+      user_permissions_auto_run: { allow_instructions: ["safe command"] },
+      project_permissions_auto_run: { block_instructions: ["destructive command"] },
+    })
+    const fields = readAllFields(bytes).filter((field) => field.fn === 46 || field.fn === 47)
+    expect(fields.map((field) => [field.fn, field.wt])).toEqual([[46, 2], [47, 2]])
+    const decoded = decodeMessage<any>("RequestContext", bytes)
+    expect(decoded.user_permissions_auto_run.allow_instructions).toEqual(["safe command"])
+    expect(decoded.project_permissions_auto_run.block_instructions).toEqual(["destructive command"])
   })
 })
