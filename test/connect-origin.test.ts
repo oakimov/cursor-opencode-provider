@@ -3,11 +3,13 @@ import type { LanguageModelV3CallOptions } from "@ai-sdk/provider"
 import {
   buildBaseHeaders,
   cursorRunTerminationError,
+  fetchAgentUrl,
   HTTP2_SESSION_MAX_AGE_MS,
   isAllowedAgentHost,
   normalizeAgentRunOrigin,
   resolveAgentOrigin,
   shouldReuseHttp2Session,
+  unaryAvailableModels,
 } from "../src/transport/connect.js"
 import { createCursor } from "../src/index.js"
 import { resetClientVersionCache } from "../src/protocol/client-version.js"
@@ -108,6 +110,15 @@ describe("Run transport lifecycle", () => {
       responseTrailers: { "grpc-status": "14", "grpc-message": "upstream unavailable" },
     })
     expect(error.message).toContain("gRPC status 14")
+    expect(error.message).toContain("upstream unavailable")
+  })
+
+  it("retains HTTP response diagnostics when a Run ends remotely", () => {
+    const error = cursorRunTerminationError({
+      responseStatus: 503,
+      responseHeaders: { ":status": 503, "x-cursor-error": "overloaded" },
+    })
+    expect(error.message).toContain('"x-cursor-error":"overloaded"')
   })
 
   it("does not classify bare HTTP 200 EOF as successful completion", () => {
@@ -158,6 +169,42 @@ describe("explicit agent Run host overrides", () => {
           prompt: [{ role: "user", content: "hello" }],
         } as LanguageModelV3CallOptions),
       ).rejects.toThrow("GetServerConfig network request failed")
+    } finally {
+      globalThis.fetch = realFetch
+      resetClientVersionCache()
+    }
+  })
+
+  it("retains unary HTTP status text and response bodies", async () => {
+    const realFetch = globalThis.fetch
+    const responseBody = `${"x".repeat(200)}-truncated`
+    resetClientVersionCache()
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes("cursor.com/install")) {
+        return new Response(INSTALLER_FIXTURE, { status: 200 })
+      }
+      if (url.includes("AvailableModels") || url.includes("GetServerConfig")) {
+        return new Response(responseBody, { status: 503, statusText: "Service Unavailable" })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }) as typeof fetch
+
+    try {
+      const expectHttpDiagnostics = async (request: Promise<unknown>) => {
+        try {
+          await request
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          expect(message).toContain(`Service Unavailable - ${responseBody.slice(0, 200)}`)
+          expect(message).not.toContain(responseBody.slice(200))
+          return
+        }
+        throw new Error("expected request to fail")
+      }
+
+      await expectHttpDiagnostics(unaryAvailableModels("token"))
+      await expectHttpDiagnostics(fetchAgentUrl("token"))
     } finally {
       globalThis.fetch = realFetch
       resetClientVersionCache()

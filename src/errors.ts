@@ -20,7 +20,7 @@ export type CursorProviderErrorOptions = CursorErrorDiagnostics & {
   cause?: unknown
 }
 
-/** Safe, structured provider failure. Messages never include headers or auth state. */
+/** Structured provider failure with retry and transport diagnostics. */
 export class CursorProviderError extends Error {
   readonly origin: CursorErrorOrigin
   readonly transient: boolean

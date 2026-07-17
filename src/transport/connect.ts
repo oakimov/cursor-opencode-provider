@@ -82,7 +82,7 @@ export async function unaryAvailableModels(
   }
 
   if (!res.ok) {
-    throw cursorHttpError("AvailableModels failed:", res.status)
+    throw await cursorHttpResponseError("AvailableModels failed:", res)
   }
 
   try {
@@ -165,7 +165,7 @@ export async function fetchAgentUrl(
   }
 
   if (!res.ok) {
-    throw cursorHttpError("GetServerConfig failed:", res.status)
+    throw await cursorHttpResponseError("GetServerConfig failed:", res)
   }
 
   let body: Record<string, unknown>
@@ -234,13 +234,48 @@ export function cursorRunTerminationError(input: {
     )
   }
   if (input.responseStatus !== 0 && input.responseStatus !== 200) {
-    return cursorHttpError("Cursor Run failed by remote:", input.responseStatus)
+    return cursorRunHttpError(input.responseStatus, headers)
   }
   const grpcStatus = trailers["grpc-status"] ?? headers["grpc-status"]
   if (grpcStatus !== undefined && String(grpcStatus) !== "0") {
-    return cursorGrpcError("Cursor Run failed by remote:", String(grpcStatus))
+    return cursorRunGrpcError(String(grpcStatus), headers, trailers)
   }
   return new CursorRunInterruptedError()
+}
+
+function withErrorMessageSuffix(error: CursorProviderError, suffix: string): CursorProviderError {
+  if (suffix) error.message += suffix
+  return error
+}
+
+async function cursorHttpResponseError(operation: string, res: Response): Promise<CursorProviderError> {
+  const text = await res.text().catch(() => "")
+  return withErrorMessageSuffix(
+    cursorHttpError(operation, res.status),
+    `${res.statusText ? ` ${res.statusText}` : ""}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+  )
+}
+
+function cursorRunHttpError(
+  statusCode: number,
+  headers: Record<string, unknown>,
+): CursorProviderError {
+  return withErrorMessageSuffix(
+    cursorHttpError("Cursor Run failed by remote:", statusCode),
+    ` ${JSON.stringify(stripPseudo(headers))}`,
+  )
+}
+
+function cursorRunGrpcError(
+  grpcStatus: string,
+  headers: Record<string, unknown>,
+  trailers: Record<string, unknown>,
+): CursorProviderError {
+  const message = trailers["grpc-message"] ?? headers["grpc-message"]
+  return withErrorMessageSuffix(
+    cursorGrpcError("Cursor Run failed by remote:", grpcStatus),
+    message === undefined ? "" : `: ${message}`,
+  )
 }
 
 // Cache http2 sessions keyed by origin so a custom baseURL never reuses a
@@ -585,12 +620,12 @@ export async function bidiRunStream(
   const observedFailure = (): CursorProviderError | undefined => {
     if (streamFailure) return streamFailure
     if (responseStatus !== 0 && responseStatus !== 200) {
-      streamFailure = cursorHttpError("Cursor Run failed by remote:", responseStatus)
+      streamFailure = cursorRunHttpError(responseStatus, responseHeaders)
       return streamFailure
     }
     const grpcStatus = responseTrailers["grpc-status"] ?? responseHeaders["grpc-status"]
     if (grpcStatus !== undefined && String(grpcStatus) !== "0") {
-      streamFailure = cursorGrpcError("Cursor Run failed by remote:", String(grpcStatus))
+      streamFailure = cursorRunGrpcError(String(grpcStatus), responseHeaders, responseTrailers)
       return streamFailure
     }
     if (rawStreamError) {
@@ -882,7 +917,10 @@ export async function bidiRunStream(
       } catch (error) {
         if (locallyClosed) return
         if (error instanceof CursorProviderError) throw error
-        throw toTransportError(error, "Cursor Run transport interrupted")
+        throw toTransportError(
+          error,
+          `Cursor Run transport interrupted: ${error instanceof Error ? error.message : "unknown error"}`,
+        )
       } finally {
         stopInboundReader()
       }
