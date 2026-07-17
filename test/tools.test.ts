@@ -13,6 +13,7 @@ import {
   mcpRealToolName,
   detectExecVariantField,
   buildRequestContextResult,
+  buildMcpStateResult,
   buildTypedExecResult,
   unwrapReadOutput,
   REQUEST_CONTEXT_RESULT_FIELD,
@@ -972,6 +973,50 @@ describe("exec safety net (unmapped variants)", () => {
       expect(detectExecVariantField(payload), `request field #${requestField}`).toBe(requestField)
       expect(parsed?.resultField, `request field #${requestField}`).toBe(resultField)
     }
+  })
+
+  it("decodes field #36 as mcp_state and replies from advertised descriptors", () => {
+    const args: number[] = []
+    const server = new TextEncoder().encode("github")
+    const writeVarint = (n: number) => {
+      let v = n >>> 0
+      while (v > 0x7f) { args.push((v & 0x7f) | 0x80); v >>>= 7 }
+      args.push(v)
+    }
+    writeVarint((1 << 3) | 2)
+    writeVarint(server.length)
+    args.push(...server)
+
+    const payload = asmWithExec(36, Uint8Array.from(args))
+    const decoded = decodeMessage<any>("AgentServerMessage", payload)
+    expect(detectExecVariantField(payload)).toBe(36)
+    expect(decoded.exec_server_message.mcp_state_exec_args.server_identifiers).toEqual(["github"])
+
+    const response = buildMcpStateResult(
+      decoded.exec_server_message.id,
+      decoded.exec_server_message.mcp_state_exec_args,
+      {
+        mcp_file_system_options: {
+          mcp_descriptors: [
+            {
+              server_name: "opencode",
+              server_identifier: "opencode",
+              tools: [{ tool_name: "write", description: "Write" }],
+            },
+            {
+              server_name: "github",
+              server_identifier: "github",
+              tools: [{ tool_name: "get_me", description: "Who am I" }],
+            },
+          ],
+        },
+      },
+    )
+    const result = decodeMessage<any>("AgentClientMessage", response)
+      .exec_client_message.mcp_state_exec_result.success
+    expect(result.servers).toHaveLength(1)
+    expect(result.servers[0].server_identifier).toBe("github")
+    expect(result.servers[0].tools[0].tool_name).toBe("get_me")
   })
 
   it("buildRequestContextResult encodes a prebuilt request_context", () => {

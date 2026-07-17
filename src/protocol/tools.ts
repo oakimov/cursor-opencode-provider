@@ -910,3 +910,72 @@ export function buildRequestContextResult(
     },
   })
 }
+
+/**
+ * Answer Cursor's exec #36 MCP-state probe from the same descriptors advertised
+ * in RequestContext. OpenCode remains the executor; this only confirms that the
+ * provider's virtual MCP servers and their tools are available.
+ */
+export function buildMcpStateResult(
+  execId: number,
+  args: Record<string, unknown>,
+  requestContext: Record<string, unknown>,
+): Uint8Array {
+  const requested = new Set(
+    Array.isArray(args.server_identifiers)
+      ? args.server_identifiers.filter((id): id is string => typeof id === "string" && id.length > 0)
+      : [],
+  )
+  const fsOptions = recordValue(requestContext.mcp_file_system_options)
+  const nested = Array.isArray(fsOptions?.mcp_descriptors)
+    ? fsOptions.mcp_descriptors.map(recordValue).filter((d): d is Record<string, unknown> => !!d)
+    : []
+  const descriptors = nested.length > 0 ? nested : descriptorsFromFlatTools(requestContext.tools)
+  const servers = descriptors
+    .filter((descriptor) => {
+      const id = stringValue(descriptor.server_identifier)
+      return requested.size === 0 || (id !== undefined && requested.has(id))
+    })
+    .map((descriptor) => ({
+      server_name:
+        stringValue(descriptor.server_name) ?? stringValue(descriptor.server_identifier) ?? "",
+      server_identifier:
+        stringValue(descriptor.server_identifier) ?? stringValue(descriptor.server_name) ?? "",
+      tools: Array.isArray(descriptor.tools) ? descriptor.tools : [],
+    }))
+
+  return encodeMessage("AgentClientMessage", {
+    exec_client_message: {
+      id: execId,
+      mcp_state_exec_result: { success: { servers } },
+    },
+  })
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+function descriptorsFromFlatTools(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return []
+  const byServer = new Map<string, Array<Record<string, unknown>>>()
+  for (const raw of value) {
+    const tool = recordValue(raw)
+    if (!tool) continue
+    const server = stringValue(tool.provider_identifier) ?? "opencode"
+    const tools = byServer.get(server) ?? []
+    tools.push({
+      tool_name: stringValue(tool.tool_name) ?? stringValue(tool.name) ?? "",
+      description: stringValue(tool.description) ?? "",
+      input_schema: tool.input_schema,
+    })
+    byServer.set(server, tools)
+  }
+  return [...byServer].map(([server, tools]) => ({
+    server_name: server,
+    server_identifier: server,
+    tools,
+  }))
+}

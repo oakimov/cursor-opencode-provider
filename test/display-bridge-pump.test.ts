@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test"
-import { encodeMessage } from "../src/protocol/messages.js"
-import { toolsToDescriptors } from "../src/protocol/tools.js"
+import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
+import { toolsToDescriptors, toolsToMcpDescriptors } from "../src/protocol/tools.js"
 import { pump } from "../src/language-model.js"
 import { sessionManager, type CursorSession, type Frame } from "../src/session.js"
 
@@ -91,19 +91,17 @@ function fakeSession(payloads: Uint8Array[], writes: Uint8Array[]): CursorSessio
         ? { done: false, value: { flags: 0, payload: payloads[index++] } }
         : { done: true, value: undefined },
   }
-  const tools = toolsToDescriptors(
-    [
-      { name: "question", description: "Ask" },
-      { name: "todowrite", description: "Todos" },
-      { name: "plan_enter", description: "Enter plan" },
-      { name: "bash", description: "Shell" },
-      { name: "write", description: "Write" },
-      { name: "task", description: "Delegate" },
-      { name: "github_get_me", description: "Who am I" },
-    ],
-    "opencode",
-    ["github"],
-  )
+  const definitions = [
+    { name: "question", description: "Ask" },
+    { name: "todowrite", description: "Todos" },
+    { name: "plan_enter", description: "Enter plan" },
+    { name: "bash", description: "Shell" },
+    { name: "write", description: "Write" },
+    { name: "task", description: "Delegate" },
+    { name: "github_get_me", description: "Who am I" },
+  ]
+  const tools = toolsToDescriptors(definitions, "opencode", ["github"])
+  const mcpDescriptors = toolsToMcpDescriptors(definitions, "opencode", ["github"])
   return {
     sessionId: "display-bridge-session",
     conversationId: "display-bridge-conversation",
@@ -121,7 +119,10 @@ function fakeSession(payloads: Uint8Array[], writes: Uint8Array[]): CursorSessio
     nextBridgedExecId: 900_000,
     blobs: new Map(),
     toolDescriptors: tools,
-    requestContext: { tools },
+    requestContext: {
+      tools,
+      mcp_file_system_options: { enabled: true, mcp_descriptors: mcpDescriptors },
+    },
     usageEstimate: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0 },
     allowTools: true,
     pumpActive: true,
@@ -365,5 +366,49 @@ describe("display-only ToolCall pump bridge", () => {
     expect(streamError?.message).toContain("Unsupported Cursor exec variant field #38")
     expect(writes).toHaveLength(0)
     expect(parts.some((p) => p.type === "finish")).toBe(false)
+  })
+
+  it("answers MCP state field #36 before emitting the requested write", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    let streamError: Error | undefined
+    const session = fakeSession(
+      [
+        encodeMessage("AgentServerMessage", {
+          exec_server_message: {
+            id: 0,
+            mcp_state_exec_args: { server_identifiers: ["opencode"] },
+          },
+        }),
+        encodeMessage("AgentServerMessage", {
+          exec_server_message: {
+            id: 1,
+            write_args: { path: "/tmp/result.txt", file_text: "done" },
+          },
+        }),
+      ],
+      writes,
+    )
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error(error: Error) {
+        streamError = error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    expect(streamError).toBeUndefined()
+    expect(writes).toHaveLength(1)
+    const state = decodeMessage<any>("AgentClientMessage", writes[0]!)
+      .exec_client_message.mcp_state_exec_result.success
+    expect(state.servers.map((server: any) => server.server_identifier)).toEqual(["opencode"])
+    expect(state.servers[0].tools.some((tool: any) => tool.tool_name === "write")).toBe(true)
+    const toolCall = parts.find((part) => part.type === "tool-call")
+    expect(toolCall?.toolName).toBe("write")
+    expect(JSON.parse(toolCall.input)).toEqual({ filePath: "/tmp/result.txt", content: "done" })
+    sessionManager.resolve(session.sessionId, 1)
   })
 })

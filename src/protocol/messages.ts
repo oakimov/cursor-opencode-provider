@@ -798,6 +798,43 @@ export function createMessageTypes(): protobuf.Root {
     { id: 1, name: "success", type: "RequestContextSuccess" },
   ])
 
+  // Cursor probes MCP server availability before emitting an MCP-backed tool
+  // call. OpenCode owns those servers, so answer from the descriptors already
+  // advertised in RequestContext rather than surfacing this as a user tool.
+  addType(root, "McpStateExecArgs", [
+    { id: 1, name: "server_identifiers", type: "string", repeated: true },
+    { id: 2, name: "kick_only", type: "bool" },
+  ])
+  addType(root, "McpInstructions", [
+    { id: 1, name: "server_name", type: "string" },
+    { id: 2, name: "instructions", type: "string" },
+    { id: 3, name: "server_identifier", type: "string" },
+  ])
+  addType(root, "McpStateServer", [
+    { id: 1, name: "server_name", type: "string" },
+    { id: 2, name: "server_identifier", type: "string" },
+    { id: 3, name: "plugin", type: "string" },
+    { id: 4, name: "marketplace", type: "string" },
+    { id: 5, name: "tools", type: "McpFsToolDescriptor", repeated: true },
+    { id: 6, name: "instructions", type: "McpInstructions", repeated: true },
+    { id: 7, name: "status", type: "string" },
+  ])
+  addType(root, "McpStateSuccess", [
+    { id: 1, name: "servers", type: "McpStateServer", repeated: true },
+  ])
+  addType(root, "McpStateError", [{ id: 1, name: "error", type: "string" }])
+  addType(root, "McpStateRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(
+    root,
+    "McpStateExecResult",
+    [
+      { id: 1, name: "success", type: "McpStateSuccess" },
+      { id: 2, name: "error", type: "McpStateError" },
+      { id: 3, name: "rejected", type: "McpStateRejected" },
+    ],
+    [{ name: "result", fields: ["success", "error", "rejected"] }],
+  )
+
   // ExecServerMessage — server asks us to execute a tool
   addType(
     root,
@@ -814,6 +851,7 @@ export function createMessageTypes(): protobuf.Root {
       { id: 10, name: "request_context_args", type: "RequestContextArgs" },
       { id: 11, name: "mcp_args", type: "McpArgs" },
       { id: 14, name: "shell_stream_args", type: "ShellArgs" },
+      { id: 36, name: "mcp_state_exec_args", type: "McpStateExecArgs" },
       { id: 45, name: "pi_read_args", type: "PiReadToolArgs" },
       { id: 46, name: "pi_bash_args", type: "PiBashToolArgs" },
       { id: 47, name: "pi_edit_args", type: "PiEditToolArgs" },
@@ -824,7 +862,7 @@ export function createMessageTypes(): protobuf.Root {
     ],
     [{ name: "args", fields: [
       "write_args", "delete_args", "grep_args", "read_args", "ls_args",
-      "request_context_args", "mcp_args", "shell_stream_args",
+      "request_context_args", "mcp_args", "shell_stream_args", "mcp_state_exec_args",
       "pi_read_args", "pi_bash_args", "pi_edit_args", "pi_write_args",
       "pi_grep_args", "pi_find_args", "pi_ls_args",
     ] }],
@@ -846,6 +884,7 @@ export function createMessageTypes(): protobuf.Root {
       { id: 10, name: "request_context_result", type: "RequestContextResult" },
       { id: 11, name: "mcp_result", type: "McpResult" },
       { id: 14, name: "shell_stream", type: "ShellStream" },
+      { id: 36, name: "mcp_state_exec_result", type: "McpStateExecResult" },
       { id: 46, name: "pi_read_result", type: "PiReadExecResult" },
       { id: 47, name: "pi_bash_result", type: "PiBashExecResult" },
       { id: 48, name: "pi_edit_result", type: "PiEditExecResult" },
@@ -856,7 +895,7 @@ export function createMessageTypes(): protobuf.Root {
     ],
     [{ name: "result", fields: [
       "write_result", "delete_result", "grep_result", "read_result", "ls_result",
-      "request_context_result", "mcp_result", "shell_stream",
+      "request_context_result", "mcp_result", "shell_stream", "mcp_state_exec_result",
       "pi_read_result", "pi_bash_result", "pi_edit_result", "pi_write_result",
       "pi_grep_result", "pi_find_result", "pi_ls_result",
     ] }],

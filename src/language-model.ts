@@ -14,6 +14,7 @@ import {
   parseExecIdFromToolCallId,
   detectExecVariantField,
   buildRequestContextResult,
+  buildMcpStateResult,
   type OpencodeToolDef,
 } from "./protocol/tools.js"
 import {
@@ -832,6 +833,24 @@ export async function pump(
           trace(`exec request_context: replied`)
         } catch (e) {
           trace(`exec request_context: write FAILED ${(e as Error).message}`)
+        }
+      } else if (esm.mcp_state_exec_args) {
+        // MCP-backed writes/reads can be preceded by this control-plane probe.
+        // Confirm the virtual servers from the already-advertised context, then
+        // keep pumping until Cursor emits the actual mcp_args tool request.
+        const stateArgs = esm.mcp_state_exec_args as Record<string, unknown>
+        const requested = Array.isArray(stateArgs.server_identifiers)
+          ? stateArgs.server_identifiers.join(",")
+          : ""
+        try {
+          session.stream.write(buildMcpStateResult(esmId, stateArgs, session.requestContext))
+          trace(`exec mcp_state: replied id=${esmId} requested=[${requested}]`)
+        } catch (e) {
+          const error = new Error(`Failed to answer Cursor MCP state probe: ${(e as Error).message}`)
+          trace(`exec mcp_state: write FAILED ${error.message}`)
+          safeError(error)
+          sessionManager.close(session)
+          return
         }
       } else {
         const parsed = parseExecServerMessage(esm)
