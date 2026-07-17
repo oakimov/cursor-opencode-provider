@@ -33,6 +33,33 @@ function mcpArgEntry(key: string, value: unknown): Uint8Array {
   return new Uint8Array(out)
 }
 
+/** Independent canonical agent.v1 ExecServerMessage #28 fixture. */
+function canonicalSubagentExecMessage(): Uint8Array {
+  const text = new TextEncoder()
+  const args: number[] = []
+  const exec: number[] = []
+  const writeVarint = (out: number[], n: number) => {
+    let v = n >>> 0
+    while (v > 0x7f) { out.push((v & 0x7f) | 0x80); v >>>= 7 }
+    out.push(v)
+  }
+  const writeString = (out: number[], field: number, value: string) => {
+    const bytes = text.encode(value)
+    writeVarint(out, (field << 3) | 2)
+    writeVarint(out, bytes.length)
+    out.push(...bytes)
+  }
+  writeString(args, 1, "task-call-34")
+  writeString(args, 2, "explore")
+  writeString(args, 3, "cursor-model")
+  writeString(args, 4, "Inspect recent logs and identify the root cause")
+  writeString(args, 6, "ses_previous")
+  writeVarint(args, (7 << 3) | 0); writeVarint(args, 1)
+  writeVarint(exec, (1 << 3) | 0); writeVarint(exec, 34)
+  writeVarint(exec, (28 << 3) | 2); writeVarint(exec, args.length); exec.push(...args)
+  return Uint8Array.from(exec)
+}
+
 describe("resolveToolServerIdentity", () => {
   it("keeps builtins under the default server", () => {
     expect(resolveToolServerIdentity("read")).toEqual({
@@ -184,6 +211,9 @@ describe("mapExecServerToToolName", () => {
   it("maps mcp_args → mcp", () => {
     expect(mapExecServerToToolName("mcp_args")).toBe("mcp")
   })
+  it("maps subagent_args → task", () => {
+    expect(mapExecServerToToolName("subagent_args")).toBe("task")
+  })
   it("returns undefined for unknown", () => {
     expect(mapExecServerToToolName("unknown")).toBeUndefined()
   })
@@ -195,6 +225,9 @@ describe("mapToolNameToExecField", () => {
   })
   it("maps bash → shell_stream_args", () => {
     expect(mapToolNameToExecField("bash")).toBe("shell_stream_args")
+  })
+  it("maps task → subagent_args", () => {
+    expect(mapToolNameToExecField("task")).toBe("subagent_args")
   })
 })
 
@@ -306,6 +339,31 @@ describe("parseExecServerMessage", () => {
     expect(result!.toolName).toBe("write")
     expect(result!.args).toEqual({ filePath: "/out.txt", content: "hello pi" })
     expect(result!.resultField).toBe("pi_write_result")
+  })
+
+  it("decodes canonical field #28 and maps it to OpenCode task", () => {
+    const esm = decodeMessage<any>("ExecServerMessage", canonicalSubagentExecMessage())
+    const result = parseExecServerMessage(esm)
+    expect(result).toMatchObject({
+      id: 34,
+      toolName: "task",
+      resultField: "subagent_result",
+      args: {
+        description: "Inspect recent logs and identify",
+        prompt: "Inspect recent logs and identify the root cause",
+        subagent_type: "explore",
+        task_id: "ses_previous",
+        background: true,
+      },
+    })
+    expect(result?.localError).toBeUndefined()
+  })
+
+  it("rejects a subagent exec missing required OpenCode task fields", () => {
+    const result = parseExecServerMessage({ id: 34, subagent_args: { prompt: "Inspect" } })
+    expect(result?.toolName).toBe("task")
+    expect(result?.resultField).toBe("subagent_result")
+    expect(result?.localError).toContain("missing a required prompt or subagent type")
   })
 
   it("maps every canonical Pi exec request to its offset result field", () => {
@@ -522,6 +580,68 @@ describe("parseExecServerMessage", () => {
 })
 
 describe("buildExecClientMessages", () => {
+  it("returns canonical SubagentSuccess from OpenCode task output", () => {
+    const frames = buildExecClientMessages({
+      execId: 34,
+      resultField: "subagent_result",
+      output: '<task id="ses_child" state="completed">\n<task_result>\nFound the cause.\n</task_result>\n</task>',
+      toolName: "task",
+    })
+    const ec = decodeMessage<any>("AgentClientMessage", frames[0]).exec_client_message
+    expect(ec.id).toBe(34)
+    expect(ec.subagent_result.success).toMatchObject({
+      agent_id: "ses_child",
+      final_message: "Found the cause.",
+      tool_call_count: 0,
+      background_reason: 0,
+    })
+    expect(frames).toHaveLength(2)
+  })
+
+  it("returns canonical SubagentError from OpenCode task failure output", () => {
+    const frames = buildExecClientMessages({
+      execId: 35,
+      resultField: "subagent_result",
+      output: '<task id="ses_child" state="error">\n<task_error>\nAgent failed.\n</task_error>\n</task>',
+      toolName: "task",
+    })
+    const result = decodeMessage<any>("AgentClientMessage", frames[0])
+      .exec_client_message.subagent_result
+    expect(result.error).toEqual({ agent_id: "ses_child", error: "Agent failed." })
+    expect(result.success).toBeUndefined()
+  })
+
+  it("parses OpenCode task output when state precedes id", () => {
+    const frames = buildExecClientMessages({
+      execId: 36,
+      resultField: "subagent_result",
+      output: '<task state="completed" id="ses_child">\n<task_result>\nDone.\n</task_result>\n</task>',
+      toolName: "task",
+    })
+    const success = decodeMessage<any>("AgentClientMessage", frames[0])
+      .exec_client_message.subagent_result.success
+    expect(success).toMatchObject({
+      agent_id: "ses_child",
+      final_message: "Done.",
+      background_reason: 0,
+    })
+  })
+
+  it("marks asynchronous OpenCode task launch as background USER_REQUEST", () => {
+    const frames = buildExecClientMessages({
+      execId: 37,
+      resultField: "subagent_result",
+      output: '<task id="ses_bg" name="explore" state="running">',
+      toolName: "task",
+    })
+    const success = decodeMessage<any>("AgentClientMessage", frames[0])
+      .exec_client_message.subagent_result.success
+    expect(success).toMatchObject({
+      agent_id: "ses_bg",
+      background_reason: 2,
+    })
+  })
+
   it("uses read_result success oneof (agent.v1), not flat content", () => {
     const frames = buildExecClientMessages({
       execId: 1,

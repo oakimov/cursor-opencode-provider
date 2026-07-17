@@ -251,6 +251,12 @@ describe("tool-call-bridge", () => {
         read_args: { path: "/x", tool_call_id: "read_1" },
       }),
     ).toBe("read_1")
+    expect(
+      extractExecDisplayCallId({
+        id: 34,
+        subagent_args: { prompt: "Investigate", tool_call_id: "task_1" },
+      }),
+    ).toBe("task_1")
     expect(extractExecDisplayCallId({ id: 5, request_context_args: {} })).toBeUndefined()
   })
 

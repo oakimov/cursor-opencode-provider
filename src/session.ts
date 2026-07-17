@@ -121,7 +121,7 @@ export class SessionManager {
   findByExecIds(sessionId: string, execIds: number[]): CursorSession | undefined {
     for (const id of execIds) {
       const s = this.byExecId.get(this.key(sessionId, id))
-      if (s && Date.now() < s.expiresAt) return s
+      if (s && Date.now() < s.expiresAt && !s.stream.isClosed()) return s
       if (s) this.close(s)
     }
     return undefined

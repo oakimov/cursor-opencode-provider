@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach } from "bun:test"
 import type { LanguageModelV3CallOptions } from "@ai-sdk/provider"
 import { sessionManager, type CursorSession } from "../src/session.js"
-import { findContinuationSession, extractTrailingToolResults } from "../src/language-model.js"
+import { findContinuationSession, deliverContinuationResults, extractTrailingToolResults } from "../src/language-model.js"
+import { CursorRunInterruptedError } from "../src/transport/connect.js"
 
 let _seq = 0
 function fakeSession(id?: string): CursorSession {
@@ -13,6 +14,7 @@ function fakeSession(id?: string): CursorSession {
       end() {},
       frames: () => ({ [Symbol.asyncIterator]: () => ({ next: async () => ({ done: true, value: undefined }) }) }),
       destroy() {},
+      isClosed: () => false,
     } as any,
     frames: { next: async () => ({ done: true, value: undefined }) } as any,
     pending: new Map(),
@@ -111,5 +113,57 @@ describe("extractTrailingToolResults", () => {
 
   it("returns empty for an empty prompt", () => {
     expect(extractTrailingToolResults([])).toEqual([])
+  })
+})
+
+describe("deliverContinuationResults", () => {
+  it("writes pending exec results and keeps the live session", () => {
+    const writes: Uint8Array[] = []
+    const live = fakeSession("live-write")
+    live.stream.write = (frame: Uint8Array) => { writes.push(frame) }
+    sessionManager.registerPending(7, live, "grep_result", "glob")
+
+    const kept = deliverContinuationResults(live, [
+      { sessionId: "live-write", execId: 7, toolName: "glob", output: "a.ts" },
+    ])
+
+    expect(kept).toBe(live)
+    expect(writes.length).toBeGreaterThan(0)
+    expect(live.pending.has(7)).toBe(false)
+  })
+
+  it("closes and returns undefined when continuation write fails", () => {
+    const live = fakeSession("dead-write")
+    live.stream.write = () => {
+      throw new CursorRunInterruptedError("Cursor Run stream is no longer writable")
+    }
+    live.stream.isClosed = () => true
+    sessionManager.registerPending(3, live, "read_result", "read")
+
+    const kept = deliverContinuationResults(live, [
+      { sessionId: "dead-write", execId: 3, toolName: "read", output: "content" },
+    ])
+
+    expect(kept).toBeUndefined()
+    expect(live.pending.size).toBe(0)
+    // Closed sessions must not be selected for continuation anymore.
+    expect(findContinuationSession([
+      { sessionId: "dead-write", execId: 3 },
+    ])).toBeUndefined()
+  })
+
+  it("clears bridged pending entries without writing exec frames", () => {
+    const writes: Uint8Array[] = []
+    const live = fakeSession("bridged")
+    live.stream.write = (frame: Uint8Array) => { writes.push(frame) }
+    sessionManager.registerPending(900_001, live, "todowrite", "todowrite", true)
+
+    const kept = deliverContinuationResults(live, [
+      { sessionId: "bridged", execId: 900_001, toolName: "todowrite", output: "ok" },
+    ])
+
+    expect(kept).toBe(live)
+    expect(writes).toHaveLength(0)
+    expect(live.pending.has(900_001)).toBe(false)
   })
 })

@@ -155,6 +155,39 @@ export function createMessageTypes(): protobuf.Root {
     { id: 6, name: "agent_id", type: "string" },
   ])
   addType(root, "TaskToolCall", [{ id: 1, name: "args", type: "TaskToolArgs" }])
+
+  // Native subagent execution is separate from the display-only TaskToolCall.
+  // Cursor asks the local client to run the task through ExecServerMessage #28
+  // and waits for the correlated SubagentResult at ExecClientMessage #28.
+  addType(root, "SubagentArgs", [
+    { id: 1, name: "tool_call_id", type: "string" },
+    { id: 2, name: "subagent_type", type: "string" },
+    { id: 3, name: "model_id", type: "string" },
+    { id: 4, name: "prompt", type: "string" },
+    { id: 5, name: "readonly", type: "bool" },
+    { id: 6, name: "resume_agent_id", type: "string" },
+    { id: 7, name: "run_in_background", type: "bool" },
+  ])
+  addType(root, "SubagentSuccess", [
+    { id: 1, name: "agent_id", type: "string" },
+    { id: 2, name: "final_message", type: "string" },
+    { id: 3, name: "tool_call_count", type: "int32" },
+    { id: 4, name: "background_reason", type: "int32" },
+    { id: 5, name: "transcript_path", type: "string" },
+  ])
+  addType(root, "SubagentError", [
+    { id: 1, name: "agent_id", type: "string" },
+    { id: 2, name: "error", type: "string" },
+  ])
+  addType(
+    root,
+    "SubagentResult",
+    [
+      { id: 1, name: "success", type: "SubagentSuccess" },
+      { id: 2, name: "error", type: "SubagentError" },
+    ],
+    [{ name: "result", fields: ["success", "error"] }],
+  )
   addType(root, "AskQuestionOption", [
     { id: 1, name: "id", type: "string" },
     { id: 2, name: "label", type: "string" },
@@ -851,6 +884,7 @@ export function createMessageTypes(): protobuf.Root {
       { id: 10, name: "request_context_args", type: "RequestContextArgs" },
       { id: 11, name: "mcp_args", type: "McpArgs" },
       { id: 14, name: "shell_stream_args", type: "ShellArgs" },
+      { id: 28, name: "subagent_args", type: "SubagentArgs" },
       { id: 36, name: "mcp_state_exec_args", type: "McpStateExecArgs" },
       { id: 45, name: "pi_read_args", type: "PiReadToolArgs" },
       { id: 46, name: "pi_bash_args", type: "PiBashToolArgs" },
@@ -863,6 +897,7 @@ export function createMessageTypes(): protobuf.Root {
     [{ name: "args", fields: [
       "write_args", "delete_args", "grep_args", "read_args", "ls_args",
       "request_context_args", "mcp_args", "shell_stream_args", "mcp_state_exec_args",
+      "subagent_args",
       "pi_read_args", "pi_bash_args", "pi_edit_args", "pi_write_args",
       "pi_grep_args", "pi_find_args", "pi_ls_args",
     ] }],
@@ -884,6 +919,7 @@ export function createMessageTypes(): protobuf.Root {
       { id: 10, name: "request_context_result", type: "RequestContextResult" },
       { id: 11, name: "mcp_result", type: "McpResult" },
       { id: 14, name: "shell_stream", type: "ShellStream" },
+      { id: 28, name: "subagent_result", type: "SubagentResult" },
       { id: 36, name: "mcp_state_exec_result", type: "McpStateExecResult" },
       { id: 46, name: "pi_read_result", type: "PiReadExecResult" },
       { id: 47, name: "pi_bash_result", type: "PiBashExecResult" },
@@ -896,6 +932,7 @@ export function createMessageTypes(): protobuf.Root {
     [{ name: "result", fields: [
       "write_result", "delete_result", "grep_result", "read_result", "ls_result",
       "request_context_result", "mcp_result", "shell_stream", "mcp_state_exec_result",
+      "subagent_result",
       "pi_read_result", "pi_bash_result", "pi_edit_result", "pi_write_result",
       "pi_grep_result", "pi_find_result", "pi_ls_result",
     ] }],

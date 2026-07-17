@@ -47,18 +47,38 @@ function rawToolCallWithFields(callId: string, fieldNums: number[]): Uint8Array 
   return Uint8Array.from(asm)
 }
 
-function rawExecPayload(execId: number, variantField: number): Uint8Array {
+function rawExecPayload(
+  execId: number,
+  variantField: number,
+  argsBytes = new Uint8Array(0),
+): Uint8Array {
   const exec: number[] = []
   writeVarint(exec, (1 << 3) | 0)
   writeVarint(exec, execId)
   writeVarint(exec, (variantField << 3) | 2)
-  writeVarint(exec, 0)
+  writeVarint(exec, argsBytes.length)
+  exec.push(...argsBytes)
 
   const asm: number[] = []
   writeVarint(asm, (2 << 3) | 2)
   writeVarint(asm, exec.length)
   asm.push(...exec)
   return Uint8Array.from(asm)
+}
+
+function rawSubagentArgs(): Uint8Array {
+  const out: number[] = []
+  const text = new TextEncoder()
+  const writeString = (field: number, value: string) => {
+    const bytes = text.encode(value)
+    writeVarint(out, (field << 3) | 2)
+    writeVarint(out, bytes.length)
+    out.push(...bytes)
+  }
+  writeString(1, "task-call-34")
+  writeString(2, "explore")
+  writeString(4, "Investigate why the conversation stopped")
+  return Uint8Array.from(out)
 }
 
 function displayPayload(
@@ -366,6 +386,37 @@ describe("display-only ToolCall pump bridge", () => {
     expect(streamError?.message).toContain("Unsupported Cursor exec variant field #38")
     expect(writes).toHaveLength(0)
     expect(parts.some((p) => p.type === "finish")).toBe(false)
+  })
+
+  it("emits canonical subagent field #28 as an OpenCode task call", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    let streamError: Error | undefined
+    const session = fakeSession([rawExecPayload(34, 28, rawSubagentArgs())], writes)
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error(error: Error) {
+        streamError = error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    expect(streamError).toBeUndefined()
+    const toolCall = parts.find((part) => part.type === "tool-call")
+    expect(toolCall?.toolName).toBe("task")
+    expect(JSON.parse(toolCall.input)).toEqual({
+      description: "Investigate why the conversation stopped",
+      prompt: "Investigate why the conversation stopped",
+      subagent_type: "explore",
+    })
+    expect(parts.some((part) =>
+      part.type === "finish" && part.finishReason?.unified === "tool-calls"
+    )).toBe(true)
+    expect(sessionManager.pendingFor(session.sessionId, 34)?.resultField).toBe("subagent_result")
+    sessionManager.resolve(session.sessionId, 34)
   })
 
   it("answers MCP state field #36 before emitting the requested write", async () => {

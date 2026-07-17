@@ -226,9 +226,11 @@ describe("message schema accuracy", () => {
     expect(fields).toContain("delete_args")
     expect(fields).toContain("mcp_args")
     expect(fields).toContain("mcp_state_exec_args")
+    expect(fields).toContain("subagent_args")
     expect(fields).toContain("shell_stream_args")
     expect(fields).toContain("pi_write_args")
     expect(root.lookupType("ExecClientMessage").fields.mcp_state_exec_result.id).toBe(36)
+    expect(root.lookupType("ExecClientMessage").fields.subagent_result.id).toBe(28)
   })
 
   it("Agent messages expose the interaction request/reply fields", () => {

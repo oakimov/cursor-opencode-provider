@@ -1,6 +1,14 @@
 import { describe, it, expect } from "bun:test"
 import type { LanguageModelV3CallOptions } from "@ai-sdk/provider"
-import { buildBaseHeaders, resolveAgentOrigin, normalizeAgentRunOrigin, isAllowedAgentHost } from "../src/transport/connect.js"
+import {
+  buildBaseHeaders,
+  cursorRunTerminationError,
+  HTTP2_SESSION_MAX_AGE_MS,
+  isAllowedAgentHost,
+  normalizeAgentRunOrigin,
+  resolveAgentOrigin,
+  shouldReuseHttp2Session,
+} from "../src/transport/connect.js"
 import { createCursor } from "../src/index.js"
 import { resetClientVersionCache } from "../src/protocol/client-version.js"
 
@@ -82,6 +90,30 @@ describe("buildBaseHeaders", () => {
   it("uses the supplied client version", () => {
     const headers = buildBaseHeaders("token", "cli-test-123")
     expect(headers["x-cursor-client-version"]).toBe("cli-test-123")
+  })
+})
+
+describe("Run transport lifecycle", () => {
+  it("rotates an otherwise-open shared HTTP/2 session before its maximum age", () => {
+    const state = { destroyed: false, closed: false }
+    expect(shouldReuseHttp2Session(state, 1_000, 1_000 + HTTP2_SESSION_MAX_AGE_MS - 1)).toBe(true)
+    expect(shouldReuseHttp2Session(state, 1_000, 1_000 + HTTP2_SESSION_MAX_AGE_MS)).toBe(false)
+    expect(shouldReuseHttp2Session({ destroyed: true, closed: false }, 1_000, 1_001)).toBe(false)
+  })
+
+  it("uses response trailers when reporting a remotely ended Run", () => {
+    const error = cursorRunTerminationError({
+      responseStatus: 200,
+      responseHeaders: { "grpc-status": "0" },
+      responseTrailers: { "grpc-status": "14", "grpc-message": "upstream unavailable" },
+    })
+    expect(error.message).toContain("gRPC status 14: upstream unavailable")
+  })
+
+  it("does not classify bare HTTP 200 EOF as successful completion", () => {
+    expect(cursorRunTerminationError({ responseStatus: 200 }).message).toContain(
+      "ended before turn_ended",
+    )
   })
 })
 

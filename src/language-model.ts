@@ -2,7 +2,11 @@ import fs from "node:fs"
 import { createHash } from "node:crypto"
 import type { LanguageModelV3, LanguageModelV3CallOptions, LanguageModelV3StreamResult, LanguageModelV3GenerateResult, LanguageModelV3StreamPart, LanguageModelV3Usage, LanguageModelV3FinishReason } from "@ai-sdk/provider"
 import type { CreateCursorOptions } from "./index.js"
-import { bidiRunStream, normalizeAgentRunOrigin } from "./transport/connect.js"
+import {
+  bidiRunStream,
+  CursorRunInterruptedError,
+  normalizeAgentRunOrigin,
+} from "./transport/connect.js"
 import { trace } from "./debug.js"
 import { buildRunRequest, buildHeartbeat } from "./protocol/request.js"
 import { decodeFramePayload } from "./protocol/framing.js"
@@ -136,68 +140,34 @@ async function doStreamImpl(
   let session = findContinuationSession(trailingToolResults)
 
   if (session) {
-    // Deliver only results that this live session is still awaiting.
-    const pendingResults = trailingToolResults.filter(
-      (r) => r.sessionId === session!.sessionId && session!.pending.has(r.execId),
-    )
-    trace(
-      `continuation: ${trailingToolResults.length} trailing tool result(s), ` +
-        `${pendingResults.length} pending for sessionId=${session.sessionId} ` +
-        `pending={${[...session.pending.keys()].join(",")}}`,
-    )
-    for (const r of pendingResults) {
-      const pending = session.pending.get(r.execId)
-      if (!pending) continue
-      if (pending.bridged) {
-        // Display-only Cursor tool — OpenCode already ran it; nothing to write
-        // back on the Run stream.
-        session.usageEstimate.inputTokens += estimateTokens(r.output.length)
-        trace(
-          `continuation: bridged tool result execId=${r.execId} toolName=${pending.toolName ?? r.toolName} outLen=${r.output.length}`,
-        )
-        sessionManager.resolve(session.sessionId, r.execId)
-        continue
-      }
-      try {
-        for (const frame of buildExecClientMessages({
-          execId: r.execId,
-          resultField: pending.resultField,
-          output: r.output,
-          error: r.error,
-          toolName: pending.toolName ?? r.toolName,
-        })) {
-          session.stream.write(frame)
-        }
-        // Tool results enlarge Cursor's context for the rest of this Run.
-        session.usageEstimate.inputTokens += estimateTokens(r.output.length)
-        trace(`continuation: wrote exec result execId=${r.execId} field=${pending.resultField} outLen=${r.output.length}`)
-        // Only resolve after the write succeeded — if it threw, the server never
-        // got the result and would block on heartbeats forever otherwise.
-        sessionManager.resolve(session.sessionId, r.execId)
-      } catch (e) {
-        trace(`continuation: write FAILED execId=${r.execId} err=${(e as Error).message} — leaving pending`)
-      }
-    }
-    sessionManager.touch(session)
-  } else if (trailingToolResults.length > 0) {
-    // True continuation (prompt ends with tool results) but the Cursor Run is
-    // gone. Soft-stop instead of re-prompting (doom loop) or hard-erroring.
-    const ids = trailingToolResults.map((r) => `${r.sessionId}:${r.execId}`).join(",")
-    trace(`continuation: ${trailingToolResults.length} orphaned trailing tool result(s) [${ids}] — soft-stop`)
-    return orphanedToolResultsStream(ids)
-  } else {
-    // Fresh turn (prompt ends with user/assistant text). Historical tool
-    // results may exist mid-prompt; they are not live exec replies.
-    const historical = extractToolResults(prompt).length
-    if (historical > 0) {
-      trace(`fresh turn: ignoring ${historical} historical tool result(s) (not trailing)`)
-    }
-    session = await startSession(modelId, token, callOptions, options)
+    // Write pending results onto the held-open Run. A dead stream closes the
+    // session and returns undefined so we fall through to history rebase
+    // instead of pumping a connection that can no longer accept writes.
+    session = deliverContinuationResults(session, trailingToolResults)
   }
 
-  const boundSession = session
-  const textId = crypto.randomUUID()
-  const reasoningId = crypto.randomUUID()
+  if (!session) {
+    if (trailingToolResults.length > 0) {
+      // True continuation (prompt ends with tool results) but the held-open Run
+      // is gone (or its write path just failed). Rebase the complete OpenCode
+      // prompt onto a fresh conversation: its seed history includes the
+      // completed tool result, so no result or advertised tool is lost and
+      // Cursor can continue instead of deadlocking.
+      const ids = trailingToolResults.map((r) => `${r.sessionId}:${r.execId}`).join(",")
+      trace(`continuation: ${trailingToolResults.length} interrupted trailing tool result(s) [${ids}] — rebasing fresh Run`)
+      session = await startSession(modelId, token, callOptions, options, { recovery: true })
+    } else {
+      // Fresh turn (prompt ends with user/assistant text). Historical tool
+      // results may exist mid-prompt; they are not live exec replies.
+      const historical = extractToolResults(prompt).length
+      if (historical > 0) {
+        trace(`fresh turn: ignoring ${historical} historical tool result(s) (not trailing)`)
+      }
+      session = await startSession(modelId, token, callOptions, options)
+    }
+  }
+
+  let activeSession = session
 
   return {
     stream: new ReadableStream<V3Part>({
@@ -214,21 +184,22 @@ async function doStreamImpl(
             trace(`pull: stream-start enqueue failed (cancelled) err=${(e as Error).message}`)
             return
           }
-          boundSession.pumpActive = true
-          try {
-            await pump(boundSession, controller, { textId, reasoningId }, callOptions.abortSignal)
-          } finally {
-            boundSession.pumpActive = false
-          }
+          activeSession = await pumpWithRecovery({
+            initialSession: activeSession,
+            controller,
+            abortSignal: callOptions.abortSignal,
+            recover: () => startSession(modelId, token, callOptions, options, { recovery: true }),
+            onSession: (next) => { activeSession = next },
+          })
           try {
             controller.close()
           } catch (e) {
             trace(`pull: close failed (already closed/cancelled) err=${(e as Error).message}`)
           }
         } catch (e) {
-          boundSession.pumpActive = false
+          activeSession.pumpActive = false
           trace(`pull: pump threw (cleaning up): ${(e as Error).message}`)
-          sessionManager.closeUnlessPending(boundSession)
+          sessionManager.close(activeSession)
           try {
             controller.error(e instanceof Error ? e : new Error(String(e)))
           } catch {
@@ -240,9 +211,47 @@ async function doStreamImpl(
         // OpenCode cancels the ReadableStream after "tool-calls"; keep the
         // Cursor Run stream alive so the next doStream can write results.
         trace("ReadableStream cancel() → closeUnlessPending")
-        sessionManager.closeUnlessPending(boundSession)
+        sessionManager.closeUnlessPending(activeSession)
       },
     }),
+  }
+}
+
+export async function pumpWithRecovery(input: {
+  initialSession: CursorSession
+  controller: ReadableStreamDefaultController<V3Part>
+  abortSignal?: AbortSignal
+  recover: () => Promise<CursorSession>
+  onSession?: (session: CursorSession) => void
+  maxRecoveries?: number
+}): Promise<CursorSession> {
+  let session = input.initialSession
+  const maxRecoveries = input.maxRecoveries ?? 1
+  input.onSession?.(session)
+
+  for (let attempt = 0; ; attempt++) {
+    const pumpedSession = session
+    pumpedSession.pumpActive = true
+    try {
+      await pump(
+        pumpedSession,
+        input.controller,
+        { textId: crypto.randomUUID(), reasoningId: crypto.randomUUID() },
+        input.abortSignal,
+      )
+      return session
+    } catch (error) {
+      if (!(error instanceof CursorRunInterruptedError) || attempt >= maxRecoveries) throw error
+      trace(
+        `Run interrupted: sessionId=${pumpedSession.sessionId} attempt=${attempt + 1}/${maxRecoveries} ` +
+          `err=${error.message} — rebasing fresh Run`,
+      )
+      sessionManager.close(pumpedSession)
+      session = await input.recover()
+      input.onSession?.(session)
+    } finally {
+      pumpedSession.pumpActive = false
+    }
   }
 }
 
@@ -251,6 +260,7 @@ async function startSession(
   token: string,
   callOptions: LanguageModelV3CallOptions,
   options: CreateCursorOptions,
+  startOptions?: { recovery?: boolean },
 ): Promise<CursorSession> {
   const prompt = callOptions.prompt
   const incomingTools = extractTools(callOptions)
@@ -268,26 +278,29 @@ async function startSession(
   const tools = toolState.advertisedTools
   const allowTools = toolState.allowTools
   const resetState = resolveTurnConversationReset({ sessionKey, isCompaction })
+  const recovery = startOptions?.recovery === true
   // Compaction must not reuse the prior conversation; its first normal turn
   // must also rebase so the summary-agent checkpoint cannot replace the normal
   // system prompt and OpenCode's newly compacted history.
-  const bound = bindConversationId(sessionKey, { reset: resetState.reset })
+  const bound = bindConversationId(sessionKey, { reset: resetState.reset || recovery })
   const conversationId = bound.conversationId
   if (bound.reset) {
     trace(
-      `conversation reset: reason=${resetState.reason ?? "unknown"} ` +
+      `conversation reset: reason=${recovery ? "interrupted-run" : (resetState.reason ?? "unknown")} ` +
         `sessionKey=${sessionKey ?? "(none)"} ` +
         `previousId=${bound.previousId ?? "-"} → conversationId=${conversationId}`,
     )
   }
 
-  const userText = extractUserText([...prompt].reverse().find((m) => m.role === "user")) || "."
+  const userText = recovery
+    ? "Continue the interrupted turn from the conversation history above. Do not repeat completed work."
+    : (extractUserText([...prompt].reverse().find((m) => m.role === "user")) || ".")
   const baseSystemPrompt = extractSystemPrompt(prompt)
   const interactionGuidance = buildOpenCodeInteractionGuidance(tools, isCompaction)
   const systemPrompt = interactionGuidance
     ? [baseSystemPrompt, interactionGuidance].filter(Boolean).join("\n\n")
     : baseSystemPrompt
-  const history = extractPromptHistory(prompt)
+  const history = extractPromptHistory(prompt, { preserveTrailingUser: recovery })
 
   await loadAvailableModels()
 
@@ -418,38 +431,6 @@ async function startSession(
   return session
 }
 
-/** Emit a soft-stop stream when trailing tool results have no live Cursor Run. */
-function orphanedToolResultsStream(ids: string): LanguageModelV3StreamResult {
-  const textId = crypto.randomUUID()
-  const message =
-    `The Cursor agent stream ended before tool results could be delivered ` +
-    `(${ids.split(",").length} result(s)). Please retry your request.`
-  trace(`orphanedToolResultsStream: soft-stop for [${ids}]`)
-  return {
-    stream: new ReadableStream<V3Part>({
-      pull(controller) {
-        try {
-          controller.enqueue({ type: "stream-start", warnings: [] } as V3Part)
-          controller.enqueue({ type: "text-start", id: textId } as V3Part)
-          controller.enqueue({ type: "text-delta", id: textId, delta: message } as V3Part)
-          controller.enqueue({ type: "text-end", id: textId } as V3Part)
-          controller.enqueue({
-            type: "finish",
-            finishReason: { unified: "stop", raw: undefined },
-            usage: {
-              inputTokens: { total: 0, noCache: undefined, cacheRead: 0, cacheWrite: 0 },
-              outputTokens: { total: 0, text: undefined, reasoning: undefined },
-            },
-          } as V3Part)
-          controller.close()
-        } catch (e) {
-          trace(`orphanedToolResultsStream: enqueue failed err=${(e as Error).message}`)
-        }
-      },
-    }),
-  }
-}
-
 /**
  * OpenCode re-sends the full tool-result history on every continuation. Prefer
  * the newest result that still has a live pending exec on its tagged session.
@@ -463,6 +444,65 @@ export function findContinuationSession(
     if (s) return s
   }
   return undefined
+}
+
+/**
+ * Deliver trailing tool results onto a live continuation session.
+ * Returns the same session when writes succeed (or only bridged results were
+ * cleared). Returns undefined after closing the session when a write fails, so
+ * the caller can rebase onto a fresh Run instead of pumping a dead stream.
+ */
+export function deliverContinuationResults(
+  session: CursorSession,
+  trailingToolResults: ExtractedToolResult[],
+): CursorSession | undefined {
+  const pendingResults = trailingToolResults.filter(
+    (r) => r.sessionId === session.sessionId && session.pending.has(r.execId),
+  )
+  trace(
+    `continuation: ${trailingToolResults.length} trailing tool result(s), ` +
+      `${pendingResults.length} pending for sessionId=${session.sessionId} ` +
+      `pending={${[...session.pending.keys()].join(",")}}`,
+  )
+  for (const r of pendingResults) {
+    const pending = session.pending.get(r.execId)
+    if (!pending) continue
+    if (pending.bridged) {
+      // Display-only Cursor tool — OpenCode already ran it; nothing to write
+      // back on the Run stream.
+      session.usageEstimate.inputTokens += estimateTokens(r.output.length)
+      trace(
+        `continuation: bridged tool result execId=${r.execId} toolName=${pending.toolName ?? r.toolName} outLen=${r.output.length}`,
+      )
+      sessionManager.resolve(session.sessionId, r.execId)
+      continue
+    }
+    try {
+      for (const frame of buildExecClientMessages({
+        execId: r.execId,
+        resultField: pending.resultField,
+        output: r.output,
+        error: r.error,
+        toolName: pending.toolName ?? r.toolName,
+      })) {
+        session.stream.write(frame)
+      }
+      // Tool results enlarge Cursor's context for the rest of this Run.
+      session.usageEstimate.inputTokens += estimateTokens(r.output.length)
+      trace(`continuation: wrote exec result execId=${r.execId} field=${pending.resultField} outLen=${r.output.length}`)
+      // Only resolve after the write succeeded — if it threw, the server never
+      // got the result and would block on heartbeats forever otherwise.
+      sessionManager.resolve(session.sessionId, r.execId)
+    } catch (e) {
+      trace(
+        `continuation: write FAILED execId=${r.execId} err=${(e as Error).message} — closing for rebase`,
+      )
+      sessionManager.close(session)
+      return undefined
+    }
+  }
+  sessionManager.touch(session)
+  return session
 }
 
 async function loadAvailableModels(): Promise<void> {
@@ -513,7 +553,8 @@ function isTruthyEnv(value: string | undefined): boolean {
  * Read the held-open stream, emitting stream parts, until the turn boundary:
  *  - a tool call (exec_server_message) → emit tool-call, finish "tool-calls",
  *    and KEEP the session open for the result on the next doStream call;
- *  - turn_ended / stream end → finish "stop" and close the session.
+ *  - turn_ended → finish "stop" and close the session;
+ *  - transport EOF before turn_ended → throw for one fresh-Run recovery.
  */
 export async function pump(
   session: CursorSession,
@@ -639,31 +680,37 @@ export async function pump(
       return
     }
 
-    const next = await session.frames.next()
+    let next: IteratorResult<Frame>
+    try {
+      next = await session.frames.next()
+    } catch (error) {
+      closeOpenSpans()
+      if (error instanceof CursorRunInterruptedError) throw error
+      throw new CursorRunInterruptedError(
+        `Cursor Run frame stream interrupted: ${(error as Error).message}`,
+        { cause: error },
+      )
+    }
     if (next.done) {
-      trace("pump: frames iterator ended with NO frames received (silent end)")
-      emitFinish(undefined, { unified: "stop", raw: undefined })
-      sessionManager.close(session)
-      return
+      closeOpenSpans()
+      trace("pump: frames iterator ended before turn_ended")
+      throw new CursorRunInterruptedError()
     }
     const frame = next.value as Frame
 
     if (frame.flags & 0x02) {
-      // End-stream: the real server half-closes without a trailer, but surface
-      // any Connect error payload if present.
+      // A successful agent turn has an explicit turn_ended update before the
+      // Connect envelope closes. Reaching end-stream here means the Run was
+      // interrupted, even if the HTTP status itself was 200.
+      let detail = ""
       if (frame.payload.length > 0) {
         try {
           const text = new TextDecoder().decode(decodeFramePayload(frame))
-          if (text.includes('"error"')) {
-            safeError(new Error(`Cursor API error: ${text.slice(0, 500)}`))
-            sessionManager.close(session)
-            return
-          }
+          if (text.includes('"error"')) detail = `: ${text.slice(0, 500)}`
         } catch { /* not decodable */ }
       }
-      emitFinish(undefined, { unified: "stop", raw: undefined })
-      sessionManager.close(session)
-      return
+      closeOpenSpans()
+      throw new CursorRunInterruptedError(`Cursor Run ended before turn_ended${detail}`)
     }
 
     // decodeFramePayload can throw on a corrupt gzip payload (gunzipSync).
@@ -1146,6 +1193,7 @@ export function estimateTokens(chars: number): number {
  */
 export function extractPromptHistory(
   prompt: LanguageModelV3CallOptions["prompt"],
+  options?: { preserveTrailingUser?: boolean },
 ): SeedHistoryMessage[] {
   const out: SeedHistoryMessage[] = []
   for (const m of prompt) {
@@ -1179,7 +1227,9 @@ export function extractPromptHistory(
     }
   }
   // Live user message is the Run action, not seed history.
-  if (out.length > 0 && out[out.length - 1]!.role === "user") out.pop()
+  if (!options?.preserveTrailingUser && out.length > 0 && out[out.length - 1]!.role === "user") {
+    out.pop()
+  }
   return out
 }
 

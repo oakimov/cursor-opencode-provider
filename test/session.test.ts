@@ -6,7 +6,7 @@ function fakeSession(): CursorSession {
   return {
     sessionId: `sess_test_${++_seq}`,
     conversationId: `conv_test_${_seq}`,
-    stream: { write() {}, end() {}, frames: () => ({ [Symbol.asyncIterator]: () => ({ next: async () => ({ done: true, value: undefined }) }) }) as any, destroy() {} },
+    stream: { write() {}, end() {}, frames: () => ({ [Symbol.asyncIterator]: () => ({ next: async () => ({ done: true, value: undefined }) }) }) as any, destroy() {}, isClosed: () => false },
     frames: { next: async () => ({ done: true, value: undefined }) } as any,
     pending: new Map(),
     displayToolCalls: new Map(),
@@ -81,6 +81,15 @@ describe("SessionManager", () => {
     mgr.registerPending(5, s, "read_result")
     s.expiresAt = Date.now() - 1 // registerPending touched it; force-expire
     expect(mgr.findByExecIds(s.sessionId, [5])).toBeUndefined()
+  })
+
+  it("does not return a remotely closed session", () => {
+    const mgr = new SessionManager()
+    const s = fakeSession()
+    mgr.registerPending(5, s, "read_result")
+    s.stream.isClosed = () => true
+    expect(mgr.findByExecIds(s.sessionId, [5])).toBeUndefined()
+    expect(s.pending.size).toBe(0)
   })
 
   it("two sessions with the same execId are not conflated", () => {

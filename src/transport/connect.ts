@@ -163,11 +163,48 @@ export type BidiStream = {
   end(): void
   frames(): AsyncIterable<{ flags: number; payload: Uint8Array }>
   destroy(): void
+  isClosed(): boolean
+}
+
+export class CursorRunInterruptedError extends Error {
+  constructor(message = "Cursor Run ended before turn_ended", options?: ErrorOptions) {
+    super(message, options)
+    this.name = "CursorRunInterruptedError"
+  }
+}
+
+export function cursorRunTerminationError(input: {
+  responseStatus: number
+  responseHeaders?: Record<string, unknown>
+  responseTrailers?: Record<string, unknown>
+  streamError?: Error | null
+}): CursorRunInterruptedError {
+  const headers = input.responseHeaders ?? {}
+  const trailers = input.responseTrailers ?? {}
+  if (input.streamError) {
+    return new CursorRunInterruptedError(
+      `Cursor Run transport interrupted: ${input.streamError.message}`,
+      { cause: input.streamError },
+    )
+  }
+  if (input.responseStatus !== 0 && input.responseStatus !== 200) {
+    return new CursorRunInterruptedError(
+      `Cursor Run HTTP ${input.responseStatus} ${JSON.stringify(stripPseudo(headers))}`,
+    )
+  }
+  const grpcStatus = trailers["grpc-status"] ?? headers["grpc-status"]
+  if (grpcStatus !== undefined && String(grpcStatus) !== "0") {
+    return new CursorRunInterruptedError(
+      `Cursor Run gRPC status ${grpcStatus}: ${trailers["grpc-message"] ?? headers["grpc-message"] ?? ""}`.trim(),
+    )
+  }
+  return new CursorRunInterruptedError()
 }
 
 // Cache http2 sessions keyed by origin so a custom baseURL never reuses a
 // connection opened to the default agent host — and vice versa.
 const _http2Sessions = new Map<string, http2.ClientHttp2Session>()
+const _http2SessionCreatedAt = new WeakMap<http2.ClientHttp2Session, number>()
 // In-flight connects for the same origin share one Promise (avoid parallel races).
 const _http2Connecting = new Map<string, Promise<http2.ClientHttp2Session>>()
 
@@ -175,6 +212,15 @@ const _http2Connecting = new Map<string, Promise<http2.ClientHttp2Session>>()
 // unreachable host (DNS failure, network partition) hangs the provider forever
 // because the 'connect' / 'error' event may never fire.
 const CONNECT_TIMEOUT_MS = 15_000
+export const HTTP2_SESSION_MAX_AGE_MS = 15 * 60_000
+
+export function shouldReuseHttp2Session(
+  state: { destroyed: boolean; closed: boolean },
+  createdAt: number,
+  now = Date.now(),
+): boolean {
+  return !state.destroyed && !state.closed && now - createdAt < HTTP2_SESSION_MAX_AGE_MS
+}
 
 /** Resolve the HTTP/2 connect origin for a Run stream (exported for tests). */
 export function resolveAgentOrigin(baseURL: string): string {
@@ -192,8 +238,14 @@ function dropSession(origin: string, session: http2.ClientHttp2Session): void {
 function getSession(baseURL: string): Promise<http2.ClientHttp2Session> {
   const origin = resolveAgentOrigin(baseURL)
   const existing = _http2Sessions.get(origin)
-  if (existing && !existing.destroyed && !existing.closed) {
-    return Promise.resolve(existing)
+  if (existing) {
+    const createdAt = _http2SessionCreatedAt.get(existing) ?? 0
+    if (shouldReuseHttp2Session(existing, createdAt)) return Promise.resolve(existing)
+    trace(`h2 session rotate: origin=${origin} ageMs=${Math.max(0, Date.now() - createdAt)}`)
+    dropSession(origin, existing)
+    // Graceful GOAWAY: existing streams may finish, but new Runs use a fresh
+    // connection instead of inheriting a server-aged shared session.
+    try { existing.close() } catch { /* already closed */ }
   }
   const inflight = _http2Connecting.get(origin)
   if (inflight) return inflight
@@ -218,8 +270,19 @@ function getSession(baseURL: string): Promise<http2.ClientHttp2Session> {
       // Future post-connect errors (GOAWAY, RST_STREAM) must invalidate the
       // cache; otherwise subsequent getSession() calls reuse a degraded session.
       const onCloseOrError = () => dropSession(origin, session)
-      session.once("close", onCloseOrError)
-      session.on("error", onCloseOrError)
+      session.once("close", () => {
+        trace(`h2 session closed: origin=${origin}`)
+        onCloseOrError()
+      })
+      session.on("error", (err: Error) => {
+        trace(`h2 session error: origin=${origin} err=${err.message}`)
+        onCloseOrError()
+      })
+      session.on("goaway", (errorCode: number, lastStreamID: number) => {
+        trace(`h2 session GOAWAY: origin=${origin} errorCode=${errorCode} lastStreamID=${lastStreamID}`)
+        dropSession(origin, session)
+      })
+      _http2SessionCreatedAt.set(session, Date.now())
       _http2Sessions.set(origin, session)
       resolve(session)
     }
@@ -241,6 +304,7 @@ export async function bidiRunStream(
   token: string,
   options: { signal?: AbortSignal; baseURL: string; headers?: Record<string, string> },
 ): Promise<BidiStream> {
+  const origin = resolveAgentOrigin(options.baseURL)
   const [session, clientVersion] = await Promise.all([
     getSession(options.baseURL),
     resolveClientVersion(),
@@ -263,9 +327,11 @@ export async function bidiRunStream(
   })
 
   let writable = true
-  let closed = false
+  let locallyClosed = false
+  let remotelyClosed = false
   let responseStatus = 0
   let responseHeaders: Record<string, unknown> = {}
+  let responseTrailers: Record<string, unknown> = {}
   let streamError: Error | null = null
 
   // Capture the HTTP/2 response status/headers and any stream-level error.
@@ -276,16 +342,34 @@ export async function bidiRunStream(
     responseStatus = h[":status"] !== undefined ? Number(h[":status"]) : 0
     trace(`h2 response: status=${responseStatus} headers=${JSON.stringify(stripPseudo(h))}`)
   })
+  stream.on("trailers", (h: Record<string, unknown>) => {
+    responseTrailers = h
+    trace(`h2 trailers: ${JSON.stringify(stripPseudo(h))}`)
+  })
   stream.on("error", (err: Error) => {
     streamError = err
     trace(`h2 stream error: ${err?.name}: ${err?.message}`)
   })
-  stream.on("close", () => trace(`h2 stream closed (status=${responseStatus}, err=${streamError?.message ?? "none"})`))
+  stream.on("close", () => {
+    writable = false
+    remotelyClosed = !locallyClosed
+    if (remotelyClosed) {
+      dropSession(origin, session)
+      // Stop assigning sibling Runs to a connection that remotely lost one
+      // of its streams. close() drains existing streams without destroying
+      // them; the next Run opens a fresh HTTP/2 session.
+      try { session.close() } catch { /* already closed */ }
+    }
+    trace(
+      `h2 stream closed (status=${responseStatus}, local=${locallyClosed}, ` +
+        `err=${streamError?.message ?? "none"})`,
+    )
+  })
 
   if (options.signal) {
     options.signal.addEventListener("abort", () => {
-      if (!closed) {
-        closed = true
+      if (!locallyClosed) {
+        locallyClosed = true
         writable = false
         stream.close()
       }
@@ -294,7 +378,9 @@ export async function bidiRunStream(
 
   return {
     write(msg: Uint8Array) {
-      if (!writable) throw new Error("Stream not writable")
+      if (!writable || remotelyClosed || stream.closed || stream.destroyed) {
+        throw new CursorRunInterruptedError("Cursor Run stream is no longer writable")
+      }
       const frame = encodeFrame(0x00, msg)
       stream.write(frame)
     },
@@ -304,59 +390,65 @@ export async function bidiRunStream(
     },
     async *frames() {
       const buffer: Uint8Array[] = []
+      try {
+        for await (const chunk of stream) {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+          if (locallyClosed) return
 
-      for await (const chunk of stream) {
-        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-        if (closed) return
+          buffer.push(new Uint8Array(buf))
 
-        buffer.push(new Uint8Array(buf))
+          // Try to parse frames from accumulated data
+          const merged = mergeBuffers(buffer)
+          const parsed = Array.from(streamFrames(merged))
 
-        // Try to parse frames from accumulated data
-        const merged = mergeBuffers(buffer)
-        const parsed = Array.from(streamFrames(merged))
+          if (parsed.length > 0) {
+            const consumed = parsed.reduce((sum, f) => sum + 5 + f.payload.length, 0)
 
-        if (parsed.length > 0) {
-          const consumed = parsed.reduce((sum, f) => sum + 5 + f.payload.length, 0)
+            // Only clear if we fully consumed all pending data
+            if (consumed === merged.length) {
+              buffer.length = 0
+            } else {
+              buffer.length = 0
+              buffer.push(merged.subarray(consumed))
+            }
 
-          // Only clear if we fully consumed all pending data
-          if (consumed === merged.length) {
-            buffer.length = 0
-          } else {
-            buffer.length = 0
-            buffer.push(merged.subarray(consumed))
-          }
-
-          for (const frame of parsed) {
-            trace(`frame yield: flags=0x${frame.flags.toString(16)} payload=${frame.payload.length}B`)
-            yield frame
+            for (const frame of parsed) {
+              trace(`frame yield: flags=0x${frame.flags.toString(16)} payload=${frame.payload.length}B`)
+              yield frame
+            }
           }
         }
+      } catch (error) {
+        if (locallyClosed) return
+        throw new CursorRunInterruptedError(
+          `Cursor Run transport interrupted: ${(error as Error).message}`,
+          { cause: error },
+        )
       }
 
-      closed = true
+      writable = false
+      remotelyClosed = !locallyClosed
+      if (locallyClosed) return
 
       // Surface connection-level failures instead of ending silently. A
       // non-200, a Connect error in the trailers, or an RST_STREAM would
       // otherwise look like an empty successful response.
-      if (streamError) throw streamError
-      if (responseStatus !== 0 && responseStatus !== 200) {
-        throw new Error(
-          `Cursor Run HTTP ${responseStatus} ${JSON.stringify(stripPseudo(responseHeaders))}`,
-        )
-      }
-      const grpcStatus = responseHeaders["grpc-status"]
-      if (grpcStatus !== undefined && String(grpcStatus) !== "0") {
-        throw new Error(
-          `Cursor Run gRPC status ${grpcStatus}: ${responseHeaders["grpc-message"] ?? ""}`.trim(),
-        )
-      }
+      throw cursorRunTerminationError({
+        responseStatus,
+        responseHeaders,
+        responseTrailers,
+        streamError,
+      })
     },
     destroy() {
-      if (!closed) {
-        closed = true
+      if (!locallyClosed) {
+        locallyClosed = true
         writable = false
         stream.close()
       }
+    },
+    isClosed() {
+      return remotelyClosed || locallyClosed || stream.closed || stream.destroyed
     },
   }
 }

@@ -192,6 +192,7 @@ const cursorToolToOpencode: Record<string, string> = {
   ls_args: "read",
   delete_args: "bash",
   shell_stream_args: "bash",
+  subagent_args: "task",
   mcp_args: "mcp",
 }
 
@@ -200,6 +201,7 @@ const opencodeToolToCursor: Record<string, string> = {
   write: "write_args",
   grep: "grep_args",
   bash: "shell_stream_args",
+  task: "subagent_args",
   mcp: "mcp_args",
 }
 
@@ -271,6 +273,7 @@ const execVariantToResultField: Record<string, string> = {
   ls_args: "ls_result",
   delete_args: "delete_result",
   shell_stream_args: "shell_stream",
+  subagent_args: "subagent_result",
   mcp_args: "mcp_result",
 }
 
@@ -301,11 +304,40 @@ export function parseExecServerMessage(
     "pi_grep_args", "pi_find_args", "pi_ls_args",
     "grep_args", "ls_args",
     "delete_args", "shell_stream_args", "mcp_args",
+    "subagent_args",
   ])
   if (!execVariant) return undefined
 
   const resultField = execVariantToResultField[execVariant]
   const execId = (msg.exec_id as string) ?? ""
+
+  if (execVariant === "subagent_args") {
+    const raw = (msg.subagent_args as Record<string, unknown>) ?? {}
+    const prompt = str(raw.prompt)
+    const subagentType = str(raw.subagent_type)
+    const args: Record<string, unknown> = {
+      description: describeSubagentTask(prompt, subagentType),
+      prompt: prompt ?? "",
+      subagent_type: subagentType ?? "",
+    }
+    const resumeAgentId = str(raw.resume_agent_id)
+    if (resumeAgentId) args.task_id = resumeAgentId
+    // protobufjs materializes an absent proto3 optional bool as false in this
+    // reflection schema. OpenCode's foreground default is already false, so
+    // only forward the meaningful opt-in value.
+    if (raw.run_in_background === true) args.background = true
+    return {
+      id,
+      execId,
+      toolName: "task",
+      args,
+      resultField,
+      localError:
+        prompt && subagentType
+          ? undefined
+          : "Cursor subagent request is missing a required prompt or subagent type.",
+    }
+  }
 
   if (execVariant === "mcp_args") {
     // An MCP call to one of the tools we advertised. Resolve the real opencode
@@ -485,6 +517,12 @@ function num(v: unknown): number | undefined {
   if (typeof v === "number" && Number.isFinite(v)) return v
   if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v)
   return undefined
+}
+
+function describeSubagentTask(prompt?: string, subagentType?: string): string {
+  const words = prompt?.replace(/\s+/g, " ").trim().split(" ").filter(Boolean).slice(0, 5)
+  if (words?.length) return words.join(" ")
+  return `${subagentType || "Delegated"} task`
 }
 
 function shellQuote(s: string): string {
@@ -792,10 +830,57 @@ export function buildTypedExecResult(
           is_error: false,
         },
       }
+    case "subagent_result": {
+      const task = parseOpenCodeTaskOutput(output)
+      if (error || task.state === "error") {
+        return {
+          error: {
+            ...(task.agentId ? { agent_id: task.agentId } : {}),
+            error: error ?? task.message ?? output,
+          },
+        }
+      }
+      return {
+        success: {
+          agent_id: task.agentId ?? "",
+          ...(task.message !== undefined ? { final_message: task.message } : {}),
+          tool_call_count: 0,
+          // OpenCode marks an asynchronous launch as state="running". Cursor's
+          // canonical USER_REQUEST enum value is 2; foreground/default is 0.
+          background_reason: task.state === "running" ? 2 : 0,
+        },
+      }
+    }
     default:
       // Unknown variant: best-effort success wrapper so the server sees a oneof.
       if (error) return { error: { error } }
       return { success: { content: output } }
+  }
+}
+
+function parseOpenCodeTaskOutput(output: string): {
+  agentId?: string
+  state?: "running" | "completed" | "error"
+  message?: string
+} {
+  // Attribute order is not guaranteed; accept id/state in either order and
+  // ignore additional attributes OpenCode may emit on the <task> open tag.
+  const open = /<task\b([^>]*)>/i.exec(output)
+  if (!open) return { message: output }
+  const attrs = open[1]
+  const agentId = /\bid="([^"]+)"/i.exec(attrs)?.[1]
+  const state = /\bstate="(running|completed|error)"/i.exec(attrs)?.[1] as
+    | "running"
+    | "completed"
+    | "error"
+    | undefined
+  if (!agentId || !state) return { message: output }
+  const tag = state === "error" ? "task_error" : "task_result"
+  const body = new RegExp(`<${tag}>\\n?([\\s\\S]*?)\\n?</${tag}>`, "i").exec(output)
+  return {
+    agentId,
+    state,
+    message: body?.[1] ?? output,
   }
 }
 

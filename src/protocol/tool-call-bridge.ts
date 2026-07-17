@@ -492,6 +492,7 @@ export function extractExecDisplayCallId(execMsg: Record<string, unknown>): stri
     "delete_args",
     "shell_stream_args",
     "mcp_args",
+    "subagent_args",
   ]) {
     const args = asRecord(execMsg[key])
     if (!args) continue
