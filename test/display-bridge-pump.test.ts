@@ -83,6 +83,8 @@ function fakeSession(payloads: Uint8Array[], writes: Uint8Array[]): CursorSessio
       { name: "todowrite", description: "Todos" },
       { name: "plan_enter", description: "Enter plan" },
       { name: "bash", description: "Shell" },
+      { name: "write", description: "Write" },
+      { name: "task", description: "Delegate" },
       { name: "github_get_me", description: "Who am I" },
     ],
     "opencode",
@@ -194,6 +196,89 @@ describe("display-only ToolCall pump bridge", () => {
     expect(Array.isArray(input.todos)).toBe(true)
     expect(input.todos.length).toBeGreaterThan(0)
     sessionManager.resolve(session.sessionId, 900_010)
+  })
+
+  it("bridges a todo merge only from the completed final list", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    const callId = "todos-merge"
+    const started = {
+      update_todos_tool_call: {
+        args: {
+          merge: true,
+          todos: [{ id: "changed", content: "Changed", status: 3 }],
+        },
+      },
+    }
+    const completed = {
+      update_todos_tool_call: {
+        args: started.update_todos_tool_call.args,
+        result: {
+          success: {
+            was_merge: true,
+            todos: [
+              { id: "kept", content: "Kept", status: 1 },
+              { id: "changed", content: "Changed", status: 3 },
+            ],
+          },
+        },
+      },
+    }
+    const session = fakeSession(
+      [displayPayload("started", callId, started), displayPayload("completed", callId, completed)],
+      writes,
+    )
+    session.nextBridgedExecId = 900_020
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error() {},
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    const toolPart = parts.find((p) => p.type === "tool-call")
+    expect(toolPart?.toolName).toBe("todowrite")
+    expect(JSON.parse(toolPart.input).todos.map((todo: { id: string }) => todo.id)).toEqual([
+      "kept",
+      "changed",
+    ])
+    sessionManager.resolve(session.sessionId, 900_020)
+  })
+
+  it("continues without a tool call when a todo merge lacks final state", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    const callId = "todos-unsafe-merge"
+    const toolCall = {
+      update_todos_tool_call: {
+        args: {
+          merge: true,
+          todos: [{ id: "changed", content: "Changed", status: 3 }],
+        },
+      },
+    }
+    const session = fakeSession(
+      [
+        displayPayload("started", callId, toolCall),
+        displayPayload("completed", callId, toolCall),
+        turnEndedPayload(),
+      ],
+      writes,
+    )
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error() {},
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    expect(parts.some((p) => p.type === "tool-call")).toBe(false)
+    expect(parts.some((p) => p.type === "finish")).toBe(true)
+    expect(session.pending.size).toBe(0)
   })
 
   it("decodes await_tool_call without bridging when await is not advertised", async () => {

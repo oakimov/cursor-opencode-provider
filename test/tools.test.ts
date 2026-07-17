@@ -207,6 +207,22 @@ describe("mapCursorArgsToOpencode", () => {
     const r = mapCursorArgsToOpencode("write", { path: "/a.ts", file_text: "hi" })
     expect(r).toEqual({ toolName: "write", args: { filePath: "/a.ts", content: "hi" } })
   })
+  it("preserves empty write and replacement content", () => {
+    expect(mapCursorArgsToOpencode("write", { path: "/empty.txt", content: "" })).toEqual({
+      toolName: "write",
+      args: { filePath: "/empty.txt", content: "" },
+    })
+    expect(
+      mapCursorArgsToOpencode("edit", {
+        path: "/a.ts",
+        old_string: "remove me",
+        new_string: "",
+      }),
+    ).toEqual({
+      toolName: "edit",
+      args: { filePath: "/a.ts", oldString: "remove me", newString: "" },
+    })
+  })
   it("remaps shell working_directory → workdir", () => {
     const r = mapCursorArgsToOpencode("bash", {
       command: "ls",

@@ -227,6 +227,18 @@ const CURSOR_INTERNAL_KEYS = new Set([
   "ignore",
 ])
 
+/** Required content fields where an empty string is meaningful (for example, truncating a file). */
+const PRESERVE_EMPTY_STRING_KEYS = new Set([
+  "content",
+  "file_text",
+  "fileText",
+  "stream_content",
+  "oldString",
+  "old_string",
+  "newString",
+  "new_string",
+])
+
 export function mapExecServerToToolName(execField: string): string | undefined {
   return cursorToolToOpencode[execField]
 }
@@ -326,8 +338,9 @@ export function mapCursorArgsToOpencode(
   for (const [k, v] of Object.entries(raw)) {
     if (v === undefined || v === null) continue
     if (CURSOR_INTERNAL_KEYS.has(k)) continue
-    // Drop empty strings from optional protobuf defaults.
-    if (typeof v === "string" && v.length === 0) continue
+    // Drop empty strings from optional protobuf defaults, but retain required
+    // content fields where empty means a valid destructive edit/write.
+    if (typeof v === "string" && v.length === 0 && !PRESERVE_EMPTY_STRING_KEYS.has(k)) continue
     cleaned[k] = v
   }
 
@@ -363,7 +376,7 @@ export function mapCursorArgsToOpencode(
       const args: Record<string, unknown> = {}
       const filePath = str(cleaned.filePath) ?? str(cleaned.path) ?? str(cleaned.file_path)
       if (filePath) args.filePath = filePath
-      const content = str(cleaned.content) ?? str(cleaned.file_text) ?? str(cleaned.fileText)
+      const content = stringValue(cleaned.content) ?? stringValue(cleaned.file_text) ?? stringValue(cleaned.fileText)
       if (content !== undefined) args.content = content
       return { toolName: "write", args }
     }
@@ -371,9 +384,9 @@ export function mapCursorArgsToOpencode(
       const args: Record<string, unknown> = {}
       const filePath = str(cleaned.filePath) ?? str(cleaned.path) ?? str(cleaned.file_path)
       if (filePath) args.filePath = filePath
-      const oldString = str(cleaned.oldString) ?? str(cleaned.old_string)
+      const oldString = stringValue(cleaned.oldString) ?? stringValue(cleaned.old_string)
       if (oldString !== undefined) args.oldString = oldString
-      const newString = str(cleaned.newString) ?? str(cleaned.new_string)
+      const newString = stringValue(cleaned.newString) ?? stringValue(cleaned.new_string)
       if (newString !== undefined) args.newString = newString
       if (typeof cleaned.replaceAll === "boolean") args.replaceAll = cleaned.replaceAll
       return { toolName: "edit", args }
@@ -421,6 +434,10 @@ export function mapCursorArgsToOpencode(
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined
+}
+
+function stringValue(v: unknown): string | undefined {
+  return typeof v === "string" ? v : undefined
 }
 
 function num(v: unknown): number | undefined {

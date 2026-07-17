@@ -14,6 +14,8 @@ export type DisplayToolCall = {
   /** Preferred OpenCode tool id before advertisement checks. */
   preferredToolName: string
   args: Record<string, unknown>
+  /** False when the Cursor call cannot be represented safely in OpenCode. */
+  bridgeable?: boolean
 }
 
 export type BridgedOpenCodeToolCall = {
@@ -40,7 +42,7 @@ const VARIANT_TO_OPENCODE: Record<string, string> = {
   read_tool_call: "read",
   update_todos_tool_call: "todowrite",
   read_todos_tool_call: "todoread",
-  edit_tool_call: "edit",
+  edit_tool_call: "write",
   ls_tool_call: "read",
   mcp_tool_call: "mcp",
   create_plan_tool_call: "todowrite",
@@ -142,7 +144,14 @@ export function parseDisplayToolCall(
   }
 
   if (variant === "update_todos_tool_call" || variant === "create_plan_tool_call") {
-    const todos = mapTodos(args.todos)
+    const result = asRecord(payload.result)
+    const success = asRecord(result?.success)
+    const completedTodos = Array.isArray(success?.todos) ? success.todos : undefined
+    const isMerge = variant === "update_todos_tool_call" && args.merge === true
+    // OpenCode todowrite replaces the whole list. For Cursor merge updates,
+    // only bridge when ToolCallCompleted includes the final merged list.
+    const sourceTodos = completedTodos ?? (!isMerge ? args.todos : undefined)
+    const todos = mapTodos(sourceTodos)
     if (variant === "create_plan_tool_call") {
       const overview = typeof args.overview === "string" ? args.overview.trim() : ""
       const plan = typeof args.plan === "string" ? args.plan.trim() : ""
@@ -161,6 +170,56 @@ export function parseDisplayToolCall(
       variant,
       preferredToolName: "todowrite",
       args: { todos },
+      bridgeable: variant === "create_plan_tool_call" ? todos.length > 0 : Array.isArray(sourceTodos),
+    }
+  }
+
+  if (variant === "edit_tool_call") {
+    const path = typeof args.path === "string" ? args.path : ""
+    const content = typeof args.stream_content === "string" ? args.stream_content : undefined
+    return {
+      callId,
+      variant,
+      preferredToolName: "write",
+      args: { path, content },
+      bridgeable: path.length > 0 && content !== undefined,
+    }
+  }
+
+  if (variant === "pi_edit_tool_call") {
+    const path = typeof args.path === "string" ? args.path : ""
+    const edits = Array.isArray(args.edits) ? args.edits : []
+    const replacement = edits.length === 1 ? asRecord(edits[0]) : undefined
+    const oldText = replacement?.old_text
+    const newText = replacement?.new_text
+    return {
+      callId,
+      variant,
+      preferredToolName: "edit",
+      args: { path, old_string: oldText, new_string: newText },
+      bridgeable:
+        path.length > 0 &&
+        typeof oldText === "string" && oldText.length > 0 &&
+        typeof newText === "string",
+    }
+  }
+
+  if (variant === "task_tool_call") {
+    const subagentType = openCodeSubagentType(args.subagent_type)
+    const description = typeof args.description === "string" ? args.description : ""
+    const prompt = typeof args.prompt === "string" ? args.prompt : ""
+    const taskArgs: Record<string, unknown> = {
+      description,
+      prompt,
+      subagent_type: subagentType,
+    }
+    if (typeof args.resume === "string" && args.resume) taskArgs.task_id = args.resume
+    return {
+      callId,
+      variant,
+      preferredToolName: "task",
+      args: taskArgs,
+      bridgeable: description.length > 0 && prompt.length > 0 && !!subagentType,
     }
   }
 
@@ -203,9 +262,8 @@ export function parseDisplayToolCall(
       callId,
       variant,
       preferredToolName: preferred,
-      args: {
-        explanation: typeof args.explanation === "string" ? args.explanation : undefined,
-      },
+      // OpenCode plan_enter / plan_exit both advertise an empty input schema.
+      args: {},
     }
   }
 
@@ -240,6 +298,7 @@ export function resolveBridgedOpenCodeToolCall(
   display: DisplayToolCall,
   advertised: Iterable<string>,
 ): BridgedOpenCodeToolCall | undefined {
+  if (display.bridgeable === false) return undefined
   const names = new Set([...advertised].filter(Boolean))
   if (names.size === 0) return undefined
 
@@ -270,21 +329,11 @@ function candidateToolNames(display: DisplayToolCall, advertised: Set<string>): 
 
   add(display.preferredToolName)
 
-  if (display.variant === "create_plan_tool_call" || display.variant === "switch_mode_tool_call") {
-    add("plan_enter")
-    add("todowrite")
-    add("plan_exit")
-  }
+  if (display.variant === "create_plan_tool_call") add("todowrite")
   if (display.variant === "update_todos_tool_call") add("todowrite")
-  if (display.variant === "read_todos_tool_call") {
-    add("todoread")
-    add("todowrite")
-  }
+  if (display.variant === "read_todos_tool_call") add("todoread")
   if (display.variant === "ask_question_tool_call") add("question")
-  if (display.variant === "web_search_tool_call") {
-    add("websearch")
-    add("webfetch")
-  }
+  if (display.variant === "web_search_tool_call") add("websearch")
   if (display.variant === "fetch_tool_call" || display.variant === "web_fetch_tool_call") {
     add("webfetch")
   }
@@ -293,6 +342,16 @@ function candidateToolNames(display: DisplayToolCall, advertised: Set<string>): 
     if (name.toLowerCase() === display.preferredToolName.toLowerCase()) add(name)
   }
   return out
+}
+
+/** Map only Cursor subagent variants with a safe OpenCode identity. */
+function openCodeSubagentType(raw: unknown): string | undefined {
+  const subtype = asRecord(raw)
+  if (!subtype) return undefined
+  const custom = asRecord(subtype.custom)
+  if (typeof custom?.name === "string" && custom.name.length > 0) return custom.name
+  if (subtype.explore != null) return "explore"
+  return undefined
 }
 
 /** Advertised OpenCode tool ids from Cursor McpToolDefinition descriptors. */

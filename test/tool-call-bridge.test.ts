@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test"
+import protobuf from "protobufjs"
 import { encodeMessage, decodeMessage } from "../src/protocol/messages.js"
 import {
   advertisedToolNamesFromDescriptors,
@@ -9,17 +10,37 @@ import {
   resolveBridgedOpenCodeToolCall,
 } from "../src/protocol/tool-call-bridge.js"
 
+function encodeCanonicalToolCall(
+  variantField: number,
+  writeArgs: (writer: protobuf.Writer) => void,
+): Uint8Array {
+  const writer = protobuf.Writer.create()
+  writer.uint32((variantField << 3) | 2).fork()
+  writer.uint32((1 << 3) | 2).fork()
+  writeArgs(writer)
+  writer.ldelim()
+  writer.ldelim()
+  writer.uint32((57 << 3) | 2).string("canonical-call")
+  return writer.finish()
+}
+
 describe("tool-call-bridge", () => {
   it("decodes UpdateTodosToolCall oneof and maps to todowrite", () => {
     const encoded = encodeMessage("ToolCall", {
       tool_call_id: "tc_todos",
       update_todos_tool_call: {
         args: {
-          todos: [
-            { id: "1", content: "Wire bridge", status: 2 },
-            { id: "2", content: "Add tests", status: 1 },
-          ],
+          todos: [{ id: "1", content: "Wire bridge", status: 2 }],
           merge: true,
+        },
+        result: {
+          success: {
+            todos: [
+              { id: "1", content: "Wire bridge", status: 2 },
+              { id: "2", content: "Add tests", status: 1 },
+            ],
+            was_merge: true,
+          },
         },
       },
     })
@@ -105,7 +126,7 @@ describe("tool-call-bridge", () => {
     })
   })
 
-  it("maps switch_mode plan target to plan_enter / todowrite candidates", () => {
+  it("maps switch_mode only to the matching OpenCode lifecycle tool", () => {
     const display = parseDisplayToolCall("tc_mode", {
       switch_mode_tool_call: {
         args: {
@@ -115,8 +136,143 @@ describe("tool-call-bridge", () => {
       },
     })
     expect(display?.preferredToolName).toBe("plan_enter")
-    expect(resolveBridgedOpenCodeToolCall(display!, ["todowrite"])?.toolName).toBe("todowrite")
+    expect(resolveBridgedOpenCodeToolCall(display!, ["todowrite"])).toBeUndefined()
     expect(resolveBridgedOpenCodeToolCall(display!, ["plan_enter"])?.toolName).toBe("plan_enter")
+    expect(resolveBridgedOpenCodeToolCall(display!, ["plan_enter"])?.args).toEqual({})
+  })
+
+  it("declines state-destructive todo fallbacks", () => {
+    const mergeWithoutFinalState = parseDisplayToolCall("merge", {
+      update_todos_tool_call: {
+        args: { merge: true, todos: [{ id: "changed", content: "delta", status: 3 }] },
+      },
+    })
+    expect(resolveBridgedOpenCodeToolCall(mergeWithoutFinalState!, ["todowrite"])).toBeUndefined()
+
+    const readTodos = parseDisplayToolCall("read", { read_todos_tool_call: { args: {} } })
+    expect(resolveBridgedOpenCodeToolCall(readTodos!, ["todowrite"])).toBeUndefined()
+
+    const leavePlan = parseDisplayToolCall("leave", {
+      switch_mode_tool_call: { args: { target_mode_id: "agent" } },
+    })
+    expect(resolveBridgedOpenCodeToolCall(leavePlan!, ["todowrite"])).toBeUndefined()
+  })
+
+  it("translates only schema-valid edit and task calls", () => {
+    const fullEdit = parseDisplayToolCall("edit", {
+      edit_tool_call: { args: { path: "/tmp/a.ts", stream_content: "const x = 1\n" } },
+    })
+    expect(resolveBridgedOpenCodeToolCall(fullEdit!, ["write"])).toMatchObject({
+      toolName: "write",
+      args: { filePath: "/tmp/a.ts", content: "const x = 1\n" },
+    })
+    expect(resolveBridgedOpenCodeToolCall(fullEdit!, ["edit"])).toBeUndefined()
+
+    const piEdit = parseDisplayToolCall("pi-edit", {
+      pi_edit_tool_call: {
+        args: { path: "/tmp/a.ts", edits: [{ old_text: "old", new_text: "" }] },
+      },
+    })
+    expect(resolveBridgedOpenCodeToolCall(piEdit!, ["edit"])).toMatchObject({
+      toolName: "edit",
+      args: { filePath: "/tmp/a.ts", oldString: "old", newString: "" },
+    })
+
+    const multiEdit = parseDisplayToolCall("pi-multi", {
+      pi_edit_tool_call: {
+        args: {
+          path: "/tmp/a.ts",
+          edits: [
+            { old_text: "a", new_text: "b" },
+            { old_text: "c", new_text: "d" },
+          ],
+        },
+      },
+    })
+    expect(resolveBridgedOpenCodeToolCall(multiEdit!, ["edit"])).toBeUndefined()
+
+    const task = parseDisplayToolCall("task", {
+      task_tool_call: {
+        args: { description: "Inspect", prompt: "Find the bug", subagent_type: { explore: {} } },
+      },
+    })
+    expect(resolveBridgedOpenCodeToolCall(task!, ["task"])).toMatchObject({
+      toolName: "task",
+      args: { description: "Inspect", prompt: "Find the bug", subagent_type: "explore" },
+    })
+    const missingSubtype = parseDisplayToolCall("task-invalid", {
+      task_tool_call: { args: { description: "Inspect", prompt: "Find the bug" } },
+    })
+    expect(resolveBridgedOpenCodeToolCall(missingSubtype!, ["task"])).toBeUndefined()
+  })
+
+  it("does not substitute a search term for a fetch URL", () => {
+    const search = parseDisplayToolCall("search", {
+      web_search_tool_call: { args: { search_term: "OpenCode" } },
+    })
+    expect(resolveBridgedOpenCodeToolCall(search!, ["webfetch"])).toBeUndefined()
+    expect(resolveBridgedOpenCodeToolCall(search!, ["websearch"])?.toolName).toBe("websearch")
+  })
+
+  it("decodes canonical Pi wire fields and preserves their semantics", () => {
+    const piBash = decodeMessage<Record<string, unknown>>(
+      "ToolCall",
+      encodeCanonicalToolCall(62, (writer) => {
+        writer.uint32((1 << 3) | 2).string("echo hi")
+        writer.uint32((2 << 3) | 1).double(1.5)
+      }),
+    )
+    const bash = parseDisplayToolCall("pi-bash", piBash)
+    expect(resolveBridgedOpenCodeToolCall(bash!, ["bash"])?.args).toEqual({
+      command: "echo hi",
+      timeout: 1.5,
+    })
+
+    const piGrep = decodeMessage<Record<string, unknown>>(
+      "ToolCall",
+      encodeCanonicalToolCall(65, (writer) => {
+        writer.uint32((1 << 3) | 2).string("needle")
+        writer.uint32((2 << 3) | 2).string("/tmp")
+        writer.uint32((4 << 3) | 0).bool(true)
+      }),
+    )
+    const grep = parseDisplayToolCall("pi-grep", piGrep)
+    expect(resolveBridgedOpenCodeToolCall(grep!, ["grep"])?.args).toEqual({
+      pattern: "needle",
+      path: "/tmp",
+    })
+
+    const piFind = decodeMessage<Record<string, unknown>>(
+      "ToolCall",
+      encodeCanonicalToolCall(66, (writer) => {
+        writer.uint32((1 << 3) | 2).string("*.ts")
+        writer.uint32((2 << 3) | 2).string("/tmp")
+      }),
+    )
+    const find = parseDisplayToolCall("pi-find", piFind)
+    expect(resolveBridgedOpenCodeToolCall(find!, ["glob"])?.args).toEqual({
+      pattern: "*.ts",
+      path: "/tmp",
+    })
+  })
+
+  it("decodes canonical Task subagent_type and emits valid OpenCode args", () => {
+    const taskCall = decodeMessage<Record<string, unknown>>(
+      "ToolCall",
+      encodeCanonicalToolCall(19, (writer) => {
+        writer.uint32((1 << 3) | 2).string("Inspect")
+        writer.uint32((2 << 3) | 2).string("Find the bug")
+        writer.uint32((3 << 3) | 2).fork()
+        writer.uint32((4 << 3) | 2).fork().ldelim()
+        writer.ldelim()
+      }),
+    )
+    const task = parseDisplayToolCall("task", taskCall)
+    expect(resolveBridgedOpenCodeToolCall(task!, ["task"])?.args).toEqual({
+      description: "Inspect",
+      prompt: "Find the bug",
+      subagent_type: "explore",
+    })
   })
 
   it("extracts display call ids from exec args variants", () => {
@@ -223,7 +379,7 @@ describe("tool-call-bridge", () => {
       },
       {
         variant: "update_todos_tool_call",
-        payload: { args: { todos: [{ id: "1", content: "x", status: 1 }], merge: true } },
+        payload: { args: { todos: [{ id: "1", content: "x", status: 1 }], merge: false } },
         preferred: "todowrite",
         advertised: ["todowrite"],
         bridged: "todowrite",
@@ -237,10 +393,10 @@ describe("tool-call-bridge", () => {
       },
       {
         variant: "edit_tool_call",
-        payload: { args: { path: "/tmp/a.ts", old_string: "a", new_string: "b" } },
-        preferred: "edit",
-        advertised: ["edit"],
-        bridged: "edit",
+        payload: { args: { path: "/tmp/a.ts", stream_content: "new file" } },
+        preferred: "write",
+        advertised: ["write"],
+        bridged: "write",
       },
       {
         variant: "ls_tool_call",
@@ -278,7 +434,9 @@ describe("tool-call-bridge", () => {
       },
       {
         variant: "task_tool_call",
-        payload: { args: { description: "d", prompt: "p" } },
+        payload: {
+          args: { description: "d", prompt: "p", subagent_type: { explore: {} } },
+        },
         preferred: "task",
         advertised: ["task"],
         bridged: "task",
@@ -353,14 +511,14 @@ describe("tool-call-bridge", () => {
       },
       {
         variant: "pi_edit_tool_call",
-        payload: { args: { path: "/tmp/a.ts", old_string: "a", new_string: "b" } },
+        payload: { args: { path: "/tmp/a.ts", edits: [{ old_text: "a", new_text: "b" }] } },
         preferred: "edit",
         advertised: ["edit"],
         bridged: "edit",
       },
       {
         variant: "pi_write_tool_call",
-        payload: { args: { path: "/tmp/a.ts", file_text: "hi" } },
+        payload: { args: { path: "/tmp/a.ts", content: "hi" } },
         preferred: "write",
         advertised: ["write"],
         bridged: "write",
@@ -374,7 +532,7 @@ describe("tool-call-bridge", () => {
       },
       {
         variant: "pi_find_tool_call",
-        payload: { args: { glob_pattern: "*.ts", target_directory: "/tmp" } },
+        payload: { args: { pattern: "*.ts", path: "/tmp" } },
         preferred: "glob",
         advertised: ["glob"],
         bridged: "glob",
@@ -411,12 +569,14 @@ describe("tool-call-bridge", () => {
       ["read_tool_call", { args: { path: "/tmp/a" } }],
       ["update_todos_tool_call", { args: { todos: [], merge: false } }],
       ["read_todos_tool_call", { args: {} }],
-      ["edit_tool_call", { args: { path: "/tmp/a", old_string: "a", new_string: "b" } }],
+      ["edit_tool_call", { args: { path: "/tmp/a", stream_content: "new file" } }],
       ["ls_tool_call", { args: { path: "/tmp" } }],
       ["mcp_tool_call", { args: { tool_name: "read", provider_identifier: "opencode" } }],
       ["create_plan_tool_call", { args: { name: "n", overview: "o", plan: "p" } }],
       ["web_search_tool_call", { args: { search_term: "q" } }],
-      ["task_tool_call", { args: { description: "d", prompt: "p" } }],
+      ["task_tool_call", {
+        args: { description: "d", prompt: "p", subagent_type: { explore: {} } },
+      }],
       ["ask_question_tool_call", { args: { title: "t", questions: [] } }],
       ["fetch_tool_call", { args: { url: "https://example.com" } }],
       ["switch_mode_tool_call", { args: { target_mode_id: "agent" } }],
@@ -425,11 +585,13 @@ describe("tool-call-bridge", () => {
       ["await_tool_call", { args: { task_id: "t1" } }],
       ["get_mcp_tools_tool_call", { args: { tool_name: "edit" } }],
       ["pi_read_tool_call", { args: { path: "/tmp/a" } }],
-      ["pi_bash_tool_call", { args: { command: "echo" } }],
-      ["pi_edit_tool_call", { args: { path: "/tmp/a", old_string: "a", new_string: "b" } }],
-      ["pi_write_tool_call", { args: { path: "/tmp/a", file_text: "x" } }],
-      ["pi_grep_tool_call", { args: { pattern: "x" } }],
-      ["pi_find_tool_call", { args: { glob_pattern: "*.ts" } }],
+      ["pi_bash_tool_call", { args: { command: "echo", timeout: 1.5 } }],
+      ["pi_edit_tool_call", {
+        args: { path: "/tmp/a", edits: [{ old_text: "a", new_text: "b" }] },
+      }],
+      ["pi_write_tool_call", { args: { path: "/tmp/a", content: "x" } }],
+      ["pi_grep_tool_call", { args: { pattern: "x", ignore_case: true } }],
+      ["pi_find_tool_call", { args: { pattern: "*.ts", path: "/tmp" } }],
       ["pi_ls_tool_call", { args: { path: "/tmp" } }],
     ]
     for (const [variant, payload] of variants) {

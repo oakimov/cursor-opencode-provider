@@ -60,7 +60,25 @@ export function createMessageTypes(): protobuf.Root {
     { id: 1, name: "todos", type: "TodoItem", repeated: true },
     { id: 2, name: "merge", type: "bool" },
   ])
-  addType(root, "UpdateTodosToolCall", [{ id: 1, name: "args", type: "UpdateTodosArgs" }])
+  addType(root, "UpdateTodosSuccess", [
+    { id: 1, name: "todos", type: "TodoItem", repeated: true },
+    { id: 2, name: "total_count", type: "int32" },
+    { id: 3, name: "was_merge", type: "bool" },
+  ])
+  addType(root, "UpdateTodosError", [{ id: 1, name: "error", type: "string" }])
+  addType(
+    root,
+    "UpdateTodosResult",
+    [
+      { id: 1, name: "success", type: "UpdateTodosSuccess" },
+      { id: 2, name: "error", type: "UpdateTodosError" },
+    ],
+    [{ name: "result", fields: ["success", "error"] }],
+  )
+  addType(root, "UpdateTodosToolCall", [
+    { id: 1, name: "args", type: "UpdateTodosArgs" },
+    { id: 2, name: "result", type: "UpdateTodosResult" },
+  ])
   addType(root, "ReadToolArgs", [
     { id: 1, name: "path", type: "string" },
     { id: 2, name: "offset", type: "int32" },
@@ -91,10 +109,50 @@ export function createMessageTypes(): protobuf.Root {
     { id: 2, name: "tool_call_id", type: "string" },
   ])
   addType(root, "WebSearchToolCall", [{ id: 1, name: "args", type: "WebSearchToolArgs" }])
+  addType(root, "SubagentTypeUnspecified", [])
+  addType(root, "SubagentTypeComputerUse", [])
+  addType(root, "SubagentTypeCustom", [{ id: 1, name: "name", type: "string" }])
+  addType(root, "SubagentTypeExplore", [])
+  addType(root, "SubagentTypeMediaReview", [])
+  addType(root, "SubagentTypeBash", [])
+  addType(root, "SubagentTypeBrowserUse", [])
+  addType(root, "SubagentTypeShell", [])
+  addType(root, "SubagentTypeVmSetupHelper", [])
+  addType(root, "SubagentTypeDebug", [])
+  addType(root, "SubagentTypeCursorGuide", [])
+  addType(root, "SubagentTypeWatchVideo", [])
+  addType(
+    root,
+    "SubagentType",
+    [
+      { id: 1, name: "unspecified", type: "SubagentTypeUnspecified" },
+      { id: 2, name: "computer_use", type: "SubagentTypeComputerUse" },
+      { id: 3, name: "custom", type: "SubagentTypeCustom" },
+      { id: 4, name: "explore", type: "SubagentTypeExplore" },
+      { id: 5, name: "media_review", type: "SubagentTypeMediaReview" },
+      { id: 6, name: "bash", type: "SubagentTypeBash" },
+      { id: 7, name: "browser_use", type: "SubagentTypeBrowserUse" },
+      { id: 8, name: "shell", type: "SubagentTypeShell" },
+      { id: 9, name: "vm_setup_helper", type: "SubagentTypeVmSetupHelper" },
+      { id: 10, name: "debug", type: "SubagentTypeDebug" },
+      { id: 11, name: "cursor_guide", type: "SubagentTypeCursorGuide" },
+      { id: 12, name: "watch_video", type: "SubagentTypeWatchVideo" },
+    ],
+    [{
+      name: "type",
+      fields: [
+        "unspecified", "computer_use", "custom", "explore", "media_review", "bash",
+        "browser_use", "shell", "vm_setup_helper", "debug", "cursor_guide", "watch_video",
+      ],
+    }],
+  )
   addType(root, "TaskToolArgs", [
     { id: 1, name: "description", type: "string" },
     { id: 2, name: "prompt", type: "string" },
+    { id: 3, name: "subagent_type", type: "SubagentType" },
     { id: 4, name: "model", type: "string" },
+    { id: 5, name: "resume", type: "string" },
+    { id: 6, name: "agent_id", type: "string" },
   ])
   addType(root, "TaskToolCall", [{ id: 1, name: "args", type: "TaskToolArgs" }])
   addType(root, "AskQuestionOption", [
@@ -124,17 +182,52 @@ export function createMessageTypes(): protobuf.Root {
     { id: 3, name: "tool_call_id", type: "string" },
   ])
   addType(root, "SwitchModeToolCall", [{ id: 1, name: "args", type: "SwitchModeToolArgs" }])
+  addType(root, "PiReadToolArgs", [
+    { id: 1, name: "path", type: "string" },
+    { id: 2, name: "offset", type: "int32" },
+    { id: 3, name: "limit", type: "int32" },
+  ])
+  addType(root, "PiBashToolArgs", [
+    { id: 1, name: "command", type: "string" },
+    { id: 2, name: "timeout", type: "double" },
+  ])
+  addType(root, "PiEditReplacement", [
+    { id: 1, name: "old_text", type: "string" },
+    { id: 2, name: "new_text", type: "string" },
+  ])
+  addType(root, "PiEditToolArgs", [
+    { id: 1, name: "path", type: "string" },
+    { id: 2, name: "edits", type: "PiEditReplacement", repeated: true },
+  ])
   addType(root, "PiWriteToolArgs", [
     { id: 1, name: "path", type: "string" },
-    { id: 2, name: "file_text", type: "string" },
+    { id: 2, name: "content", type: "string" },
+  ])
+  addType(root, "PiGrepToolArgs", [
+    { id: 1, name: "pattern", type: "string" },
+    { id: 2, name: "path", type: "string" },
+    { id: 3, name: "glob", type: "string" },
+    { id: 4, name: "ignore_case", type: "bool" },
+    { id: 5, name: "literal", type: "bool" },
+    { id: 6, name: "context", type: "int32" },
+    { id: 7, name: "limit", type: "int32" },
+  ])
+  addType(root, "PiFindToolArgs", [
+    { id: 1, name: "pattern", type: "string" },
+    { id: 2, name: "path", type: "string" },
+    { id: 3, name: "limit", type: "int32" },
+  ])
+  addType(root, "PiLsToolArgs", [
+    { id: 1, name: "path", type: "string" },
+    { id: 2, name: "limit", type: "int32" },
   ])
   addType(root, "PiWriteToolCall", [{ id: 1, name: "args", type: "PiWriteToolArgs" }])
-  addType(root, "PiReadToolCall", [{ id: 1, name: "args", type: "ReadToolArgs" }])
-  addType(root, "PiBashToolCall", [{ id: 1, name: "args", type: "ShellArgs" }])
-  addType(root, "PiEditToolCall", [{ id: 1, name: "args", type: "EditToolArgs" }])
-  addType(root, "PiGrepToolCall", [{ id: 1, name: "args", type: "GrepArgs" }])
-  addType(root, "PiFindToolCall", [{ id: 1, name: "args", type: "GlobArgs" }])
-  addType(root, "PiLsToolCall", [{ id: 1, name: "args", type: "LsArgs" }])
+  addType(root, "PiReadToolCall", [{ id: 1, name: "args", type: "PiReadToolArgs" }])
+  addType(root, "PiBashToolCall", [{ id: 1, name: "args", type: "PiBashToolArgs" }])
+  addType(root, "PiEditToolCall", [{ id: 1, name: "args", type: "PiEditToolArgs" }])
+  addType(root, "PiGrepToolCall", [{ id: 1, name: "args", type: "PiGrepToolArgs" }])
+  addType(root, "PiFindToolCall", [{ id: 1, name: "args", type: "PiFindToolArgs" }])
+  addType(root, "PiLsToolCall", [{ id: 1, name: "args", type: "PiLsToolArgs" }])
   // Display-only native tools Cursor may complete without an ExecServerMessage.
   addType(root, "ReadTodosArgs", [
     { id: 1, name: "todo_ids", type: "string", repeated: true },
@@ -156,8 +249,8 @@ export function createMessageTypes(): protobuf.Root {
 
   addType(root, "GenerateImageToolArgs", [
     { id: 1, name: "description", type: "string" },
-    { id: 2, name: "filename", type: "string" },
-    { id: 3, name: "tool_call_id", type: "string" },
+    { id: 2, name: "file_path", type: "string" },
+    { id: 5, name: "reference_image_paths", type: "string", repeated: true },
   ])
   addType(root, "GenerateImageToolCall", [{ id: 1, name: "args", type: "GenerateImageToolArgs" }])
 
