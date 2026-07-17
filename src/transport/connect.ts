@@ -4,6 +4,15 @@ import { createCursorChecksumHeader } from "../protocol/checksum.js"
 import { getDeviceIds } from "../protocol/device-id.js"
 import { resolveClientVersion } from "../protocol/client-version.js"
 import { trace } from "../debug.js"
+import {
+  CursorLocalCancellationError,
+  CursorProtocolError,
+  CursorTransportError,
+  cursorGrpcError,
+  cursorHttpError,
+  errorCode,
+  CursorProviderError,
+} from "../errors.js"
 import http2 from "node:http2"
 
 const API_BASE = `https://${CURSOR_API_HOST}`
@@ -20,16 +29,20 @@ export function buildBaseHeaders(
   extra?: Record<string, string>,
 ): Record<string, string> {
   const { machineId, macMachineId } = getDeviceIds()
-  return {
+  const headers: Record<string, string> = {
     authorization: `Bearer ${token}`,
     "connect-protocol-version": CONNECT_PROTOCOL_VERSION,
     "x-cursor-client-type": "cli",
     "x-cursor-client-version": clientVersion,
     "x-cursor-checksum": createCursorChecksumHeader(machineId, macMachineId),
     "x-ghost-mode": "true",
-    "x-request-id": crypto.randomUUID(),
     ...extra,
   }
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === "x-request-id") delete headers[key]
+  }
+  headers["x-request-id"] = crypto.randomUUID()
+  return headers
 }
 
 // ── Unary (AvailableModels) ──
@@ -43,32 +56,40 @@ export async function unaryAvailableModels(
   const clientVersion = await resolveClientVersion()
   const headers = buildBaseHeaders(token, clientVersion, options.headers)
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      ...headers,
-      "content-type": "application/json",
-      accept: "application/json",
-    },
-    // AvailableModelsRequest flags (proto aiserver.v1). The IDE sets these
-    // (modelConfigService.js useModelParameters, entry.js includeLongContextModels).
-    // useModelParameters + useCloudAgentEffortModes return parameterized
-    // variants (effort/context/fast). includeLongContextModels may populate
-    // context_token_limit fields; when those stay empty we still derive limits
-    // from each variant's `context` param in mapAvailableModelsResponse.
-    body: JSON.stringify({
-      includeLongContextModels: true,
-      useModelParameters: true,
-      useCloudAgentEffortModes: true,
-    }),
-  })
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "")
-    throw new Error(`AvailableModels failed: ${res.status} ${res.statusText}${text ? ` - ${text.slice(0, 200)}` : ""}`)
+  let res: Response
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        ...headers,
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      // Request parameterized effort/context/fast variants like Cursor IDE.
+      body: JSON.stringify({
+        includeLongContextModels: true,
+        useModelParameters: true,
+        useCloudAgentEffortModes: true,
+      }),
+    })
+  } catch (cause) {
+    throw new CursorTransportError("AvailableModels network request failed", {
+      transient: true,
+      replaySafe: true,
+      code: errorCode(cause),
+      cause,
+    })
   }
 
-  return (await res.json()) as Record<string, unknown>
+  if (!res.ok) {
+    throw cursorHttpError("AvailableModels failed:", res.status)
+  }
+
+  try {
+    return (await res.json()) as Record<string, unknown>
+  } catch (cause) {
+    throw new CursorProtocolError("AvailableModels returned malformed JSON", { cause })
+  }
 }
 
 // ── Unary (GetServerConfig) ──
@@ -123,22 +144,36 @@ export async function fetchAgentUrl(
   const headers = buildBaseHeaders(token, clientVersion)
 
   trace(`GetServerConfig POST ${url}`)
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      ...headers,
-      "content-type": "application/json",
-      accept: "application/json",
-    },
-    body: JSON.stringify({ telem_enabled: options.telemetryEnabled ?? false }),
-  })
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "")
-    throw new Error(`GetServerConfig failed: ${res.status} ${res.statusText}${text ? ` - ${text.slice(0, 200)}` : ""}`)
+  let res: Response
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        ...headers,
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify({ telem_enabled: options.telemetryEnabled ?? false }),
+    })
+  } catch (cause) {
+    throw new CursorTransportError("GetServerConfig network request failed", {
+      transient: true,
+      replaySafe: true,
+      code: errorCode(cause),
+      cause,
+    })
   }
 
-  const body = (await res.json()) as Record<string, unknown>
+  if (!res.ok) {
+    throw cursorHttpError("GetServerConfig failed:", res.status)
+  }
+
+  let body: Record<string, unknown>
+  try {
+    body = (await res.json()) as Record<string, unknown>
+  } catch (cause) {
+    throw new CursorProtocolError("GetServerConfig returned malformed JSON", { cause })
+  }
   const cfg = body.agentUrlConfig as { agentnUrl?: string; agentUrl?: string } | undefined
   const raw = cfg?.agentnUrl || cfg?.agentUrl
   const normalized = normalizeAgentRunOrigin(raw)
@@ -147,7 +182,7 @@ export async function fetchAgentUrl(
       `agentUrl=${cfg?.agentUrl ?? "<missing>"} → ${normalized ?? "<invalid>"}`,
   )
   if (!normalized) {
-    throw new Error(
+    throw new CursorProtocolError(
       raw
         ? "GetServerConfig returned an invalid Cursor agent URL"
         : "GetServerConfig response missing agentUrlConfig.agentnUrl",
@@ -159,16 +194,27 @@ export async function fetchAgentUrl(
 // ── Bidi (Run stream) ──
 
 export type BidiStream = {
-  write(msg: Uint8Array): void
+  write(msg: Uint8Array): boolean | void
+  waitForDrain?(timeoutMs: number): Promise<void>
   end(): void
   frames(): AsyncIterable<{ flags: number; payload: Uint8Array }>
   destroy(): void
   isClosed(): boolean
+  onTerminal(listener: (event: BidiTerminalEvent) => void): () => void
 }
 
-export class CursorRunInterruptedError extends Error {
+export type BidiTerminalEvent =
+  | { kind: "remote-clean-close" }
+  | { kind: "remote-error"; error: CursorProviderError }
+  | { kind: "local-close" }
+
+export class CursorRunInterruptedError extends CursorTransportError {
   constructor(message = "Cursor Run ended before turn_ended", options?: ErrorOptions) {
-    super(message, options)
+    super(message, {
+      transient: true,
+      replaySafe: true,
+      cause: options?.cause,
+    })
     this.name = "CursorRunInterruptedError"
   }
 }
@@ -178,7 +224,7 @@ export function cursorRunTerminationError(input: {
   responseHeaders?: Record<string, unknown>
   responseTrailers?: Record<string, unknown>
   streamError?: Error | null
-}): CursorRunInterruptedError {
+}): CursorProviderError {
   const headers = input.responseHeaders ?? {}
   const trailers = input.responseTrailers ?? {}
   if (input.streamError) {
@@ -188,15 +234,11 @@ export function cursorRunTerminationError(input: {
     )
   }
   if (input.responseStatus !== 0 && input.responseStatus !== 200) {
-    return new CursorRunInterruptedError(
-      `Cursor Run HTTP ${input.responseStatus} ${JSON.stringify(stripPseudo(headers))}`,
-    )
+    return cursorHttpError("Cursor Run failed by remote:", input.responseStatus)
   }
   const grpcStatus = trailers["grpc-status"] ?? headers["grpc-status"]
   if (grpcStatus !== undefined && String(grpcStatus) !== "0") {
-    return new CursorRunInterruptedError(
-      `Cursor Run gRPC status ${grpcStatus}: ${trailers["grpc-message"] ?? headers["grpc-message"] ?? ""}`.trim(),
-    )
+    return cursorGrpcError("Cursor Run failed by remote:", String(grpcStatus))
   }
   return new CursorRunInterruptedError()
 }
@@ -205,13 +247,18 @@ export function cursorRunTerminationError(input: {
 // connection opened to the default agent host — and vice versa.
 const _http2Sessions = new Map<string, http2.ClientHttp2Session>()
 const _http2SessionCreatedAt = new WeakMap<http2.ClientHttp2Session, number>()
-// In-flight connects for the same origin share one Promise (avoid parallel races).
+const _http2SessionListenerCleanup = new WeakMap<http2.ClientHttp2Session, () => void>()
+// Validation and connect work for the same origin shares one Promise.
 const _http2Connecting = new Map<string, Promise<http2.ClientHttp2Session>>()
 
 // Bound the time we'll wait for the initial connect. Without this, a dead or
 // unreachable host (DNS failure, network partition) hangs the provider forever
 // because the 'connect' / 'error' event may never fire.
 const CONNECT_TIMEOUT_MS = 15_000
+const DEFAULT_SESSION_PING_TIMEOUT_MS = 5_000
+const DEFAULT_READ_IDLE_MS = 120_000
+const WRITE_DRAIN_TIMEOUT_CODE = "CURSOR_WRITE_DRAIN_TIMEOUT"
+const MAX_TIMER_MS = 2_147_483_647
 export const HTTP2_SESSION_MAX_AGE_MS = 15 * 60_000
 
 export function shouldReuseHttp2Session(
@@ -226,7 +273,7 @@ export function shouldReuseHttp2Session(
 export function resolveAgentOrigin(baseURL: string): string {
   const origin = normalizeAgentRunOrigin(baseURL)
   if (!origin) {
-    throw new Error("Cursor Run stream requires an allowlisted Cursor agent base URL")
+    throw new CursorProtocolError("Cursor Run stream requires an allowlisted Cursor agent base URL")
   }
   return origin
 }
@@ -235,78 +282,259 @@ function dropSession(origin: string, session: http2.ClientHttp2Session): void {
   if (_http2Sessions.get(origin) === session) _http2Sessions.delete(origin)
 }
 
-function getSession(baseURL: string): Promise<http2.ClientHttp2Session> {
-  const origin = resolveAgentOrigin(baseURL)
-  const existing = _http2Sessions.get(origin)
-  if (existing) {
-    const createdAt = _http2SessionCreatedAt.get(existing) ?? 0
-    if (shouldReuseHttp2Session(existing, createdAt)) return Promise.resolve(existing)
-    trace(`h2 session rotate: origin=${origin} ageMs=${Math.max(0, Date.now() - createdAt)}`)
-    dropSession(origin, existing)
-    // Graceful GOAWAY: existing streams may finish, but new Runs use a fresh
-    // connection instead of inheriting a server-aged shared session.
-    try { existing.close() } catch { /* already closed */ }
+/** Test cleanup for local HTTP/2 fixtures; production sessions stay process-cached. */
+export function closeCachedHttp2SessionsForTests(): void {
+  for (const session of _http2Sessions.values()) {
+    _http2SessionListenerCleanup.get(session)?.()
+    try { session.destroy() } catch { /* already closed */ }
   }
-  const inflight = _http2Connecting.get(origin)
-  if (inflight) return inflight
+  _http2Sessions.clear()
+  _http2Connecting.clear()
+}
 
-  const promise = new Promise<http2.ClientHttp2Session>((resolve, reject) => {
+function timeoutMs(name: string, value: number | undefined, fallback: number): number {
+  const resolved = value ?? fallback
+  if (!Number.isSafeInteger(resolved) || resolved <= 0 || resolved > MAX_TIMER_MS) {
+    throw new CursorProtocolError(
+      `${name} must be a positive integer no greater than ${MAX_TIMER_MS}`,
+    )
+  }
+  return resolved
+}
+
+function toTransportError(value: unknown, fallback: string): CursorTransportError {
+  if (value instanceof CursorTransportError) return value
+  return new CursorTransportError(fallback, {
+    transient: true,
+    replaySafe: true,
+    code: errorCode(value),
+    cause: value,
+  })
+}
+
+function installSessionInvalidation(
+  origin: string,
+  session: http2.ClientHttp2Session,
+): void {
+  const socket = session.socket
+  let cleaned = false
+  let removeSocketListeners: (() => void) | undefined
+  const cleanup = () => {
+    if (cleaned) return
+    cleaned = true
+    session.removeListener("close", onSessionClose)
+    session.removeListener("goaway", onSessionGoaway)
+    session.removeListener("error", onSessionError)
+    removeSocketListeners?.()
+    removeSocketListeners = undefined
+    _http2SessionListenerCleanup.delete(session)
+  }
+  const onSessionClose = () => {
+    trace(`h2 session closed: origin=${origin}`)
+    dropSession(origin, session)
+    cleanup()
+  }
+  const onSessionGoaway = (errorCode: number, lastStreamID: number) => {
+    trace(`h2 session GOAWAY: origin=${origin} errorCode=${errorCode} lastStreamID=${lastStreamID}`)
+    // Existing streams may drain, but future Runs must use a fresh session.
+    dropSession(origin, session)
+  }
+  const onSessionError = (error: Error) => {
+    trace(`h2 session error: origin=${origin} err=${error.message}`)
+    dropSession(origin, session)
+  }
+  const onSocketEnd = () => {
+    trace(`h2 socket ended: origin=${origin}`)
+    dropSession(origin, session)
+  }
+  const onSocketClose = () => {
+    trace(`h2 socket closed: origin=${origin}`)
+    dropSession(origin, session)
+  }
+
+  session.once("close", onSessionClose)
+  session.on("goaway", onSessionGoaway)
+  // Keep an error listener until close so teardown errors cannot become an
+  // unhandled EventEmitter error.
+  session.on("error", onSessionError)
+  if (socket) {
+    socket.once("end", onSocketEnd)
+    socket.once("close", onSocketClose)
+    // Http2Session.socket is a lifecycle-bound proxy. Looking up methods after
+    // detach throws ERR_HTTP2_SOCKET_UNBOUND, so bind removers while attached.
+    const removeEndListener = socket.removeListener.bind(socket, "end", onSocketEnd)
+    const removeCloseListener = socket.removeListener.bind(socket, "close", onSocketClose)
+    removeSocketListeners = () => {
+      try { removeEndListener() } catch { /* teardown is best-effort */ }
+      try { removeCloseListener() } catch { /* teardown is best-effort */ }
+    }
+  }
+  _http2SessionListenerCleanup.set(session, cleanup)
+}
+
+/** Node-runtime regression hook; production callers use getSession(). */
+export function installSessionInvalidationForTests(
+  origin: string,
+  session: http2.ClientHttp2Session,
+): void {
+  installSessionInvalidation(origin, session)
+}
+
+function invalidateSession(origin: string, session: http2.ClientHttp2Session): void {
+  dropSession(origin, session)
+  _http2SessionListenerCleanup.get(session)?.()
+  try { session.destroy() } catch { /* already closed */ }
+}
+
+function validateCachedSession(
+  session: http2.ClientHttp2Session,
+  pingTimeoutMs: number,
+): Promise<void> {
+  if (session.destroyed || session.closed) {
+    return Promise.reject(new CursorTransportError("Cursor HTTP/2 cached session is already closed"))
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (error?: Error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      session.removeListener("close", onClosed)
+      session.removeListener("goaway", onGoaway)
+      session.removeListener("error", onError)
+      if (error) reject(error)
+      else resolve()
+    }
+    const onClosed = () => finish(new CursorTransportError("Cursor HTTP/2 cached session closed during ping"))
+    const onGoaway = () => finish(new CursorTransportError("Cursor HTTP/2 cached session received GOAWAY during ping"))
+    const onError = (error: Error) => finish(toTransportError(error, "Cursor HTTP/2 cached session ping failed"))
+    const timer = setTimeout(() => {
+      finish(new CursorTransportError(`Cursor HTTP/2 cached session ping timed out after ${pingTimeoutMs}ms`))
+    }, pingTimeoutMs)
+    timer.unref?.()
+    session.once("close", onClosed)
+    session.once("goaway", onGoaway)
+    session.once("error", onError)
+    try {
+      const accepted = session.ping((error) => {
+        if (error) finish(toTransportError(error, "Cursor HTTP/2 cached session ping failed"))
+        else finish()
+      })
+      if (!accepted) finish(new CursorTransportError("Cursor HTTP/2 cached session refused a health-check ping"))
+    } catch (error) {
+      finish(toTransportError(error, "Cursor HTTP/2 cached session ping failed"))
+    }
+  })
+}
+
+function connectSession(origin: string): Promise<http2.ClientHttp2Session> {
+  return new Promise((resolve, reject) => {
     const session = http2.connect(origin)
+    let settled = false
     const cleanup = () => {
       clearTimeout(timer)
       session.removeListener("error", onError)
+      session.removeListener("close", onClose)
       session.removeListener("connect", onConnect)
     }
-    const onError = (err: Error) => {
+    const fail = (error: Error) => {
+      if (settled) return
+      settled = true
       cleanup()
-      _http2Connecting.delete(origin)
       dropSession(origin, session)
       try { session.destroy() } catch { /* ignore */ }
-      reject(err)
+      reject(error)
     }
+    const onError = (error: Error) => fail(toTransportError(error, "Cursor HTTP/2 connection failed"))
+    const onClose = () => fail(new CursorTransportError(`HTTP/2 connection to ${origin} closed before connecting`))
     const onConnect = () => {
+      if (settled) return
+      settled = true
       cleanup()
-      _http2Connecting.delete(origin)
-      // Future post-connect errors (GOAWAY, RST_STREAM) must invalidate the
-      // cache; otherwise subsequent getSession() calls reuse a degraded session.
-      const onCloseOrError = () => dropSession(origin, session)
-      session.once("close", () => {
-        trace(`h2 session closed: origin=${origin}`)
-        onCloseOrError()
-      })
-      session.on("error", (err: Error) => {
-        trace(`h2 session error: origin=${origin} err=${err.message}`)
-        onCloseOrError()
-      })
-      session.on("goaway", (errorCode: number, lastStreamID: number) => {
-        trace(`h2 session GOAWAY: origin=${origin} errorCode=${errorCode} lastStreamID=${lastStreamID}`)
-        dropSession(origin, session)
-      })
+      installSessionInvalidation(origin, session)
+      if (session.destroyed || session.closed) {
+        const error = new CursorTransportError(`HTTP/2 connection to ${origin} closed while connecting`)
+        invalidateSession(origin, session)
+        reject(error)
+        return
+      }
       _http2SessionCreatedAt.set(session, Date.now())
       _http2Sessions.set(origin, session)
+      trace(`h2 session connected: origin=${origin}`)
       resolve(session)
     }
     const timer = setTimeout(() => {
-      cleanup()
-      _http2Connecting.delete(origin)
-      dropSession(origin, session)
-      try { session.destroy() } catch { /* ignore */ }
-      reject(new Error(`HTTP/2 connect to ${origin} timed out after ${CONNECT_TIMEOUT_MS}ms`))
+      fail(new CursorTransportError(`HTTP/2 connect to ${origin} timed out after ${CONNECT_TIMEOUT_MS}ms`))
     }, CONNECT_TIMEOUT_MS)
+    timer.unref?.()
     session.on("error", onError)
-    session.on("connect", onConnect)
+    session.once("close", onClose)
+    session.once("connect", onConnect)
   })
+}
+
+export function getSession(
+  baseURL: string,
+  options: { pingTimeoutMs?: number } = {},
+): Promise<http2.ClientHttp2Session> {
+  const origin = resolveAgentOrigin(baseURL)
+  const pingTimeoutMs = timeoutMs(
+    "Cursor provider pingTimeoutMs",
+    options.pingTimeoutMs,
+    DEFAULT_SESSION_PING_TIMEOUT_MS,
+  )
+  const inflight = _http2Connecting.get(origin)
+  if (inflight) return inflight
+
+  const promise = (async () => {
+    const existing = _http2Sessions.get(origin)
+    if (existing) {
+      const createdAt = _http2SessionCreatedAt.get(existing) ?? 0
+      if (!shouldReuseHttp2Session(existing, createdAt)) {
+        trace(`h2 session rotate: origin=${origin} ageMs=${Math.max(0, Date.now() - createdAt)}`)
+        dropSession(origin, existing)
+        try { existing.close() } catch { /* already closed */ }
+      } else {
+        try {
+          await validateCachedSession(existing, pingTimeoutMs)
+          if (_http2Sessions.get(origin) === existing && !existing.destroyed && !existing.closed) {
+            trace(`h2 cached session ping ok: origin=${origin}`)
+            return existing
+          }
+        } catch (error) {
+          trace(`h2 cached session ping failed: origin=${origin} err=${(error as Error).message}`)
+          invalidateSession(origin, existing)
+        }
+      }
+    }
+    return connectSession(origin)
+  })()
   _http2Connecting.set(origin, promise)
+  const cleanup = () => {
+    if (_http2Connecting.get(origin) === promise) _http2Connecting.delete(origin)
+  }
+  promise.then(cleanup, cleanup)
   return promise
 }
 
 export async function bidiRunStream(
   token: string,
-  options: { signal?: AbortSignal; baseURL: string; headers?: Record<string, string> },
+  options: {
+    signal?: AbortSignal
+    baseURL: string
+    headers?: Record<string, string>
+    readIdleMs?: number
+    pingTimeoutMs?: number
+  },
 ): Promise<BidiStream> {
   const origin = resolveAgentOrigin(options.baseURL)
+  const readIdleMs = timeoutMs(
+    "Cursor provider readIdleMs",
+    options.readIdleMs,
+    DEFAULT_READ_IDLE_MS,
+  )
   const [session, clientVersion] = await Promise.all([
-    getSession(options.baseURL),
+    getSession(options.baseURL, { pingTimeoutMs: options.pingTimeoutMs }),
     resolveClientVersion(),
   ])
   const headers = {
@@ -329,10 +557,163 @@ export async function bidiRunStream(
   let writable = true
   let locallyClosed = false
   let remotelyClosed = false
+  let backpressured = false
   let responseStatus = 0
   let responseHeaders: Record<string, unknown> = {}
   let responseTrailers: Record<string, unknown> = {}
-  let streamError: Error | null = null
+  let rawStreamError: unknown
+  let streamFailure: CursorProviderError | null = null
+  let terminalEvent: BidiTerminalEvent | undefined
+  let terminalSettlementScheduled = false
+  const terminalListeners = new Set<(event: BidiTerminalEvent) => void>()
+
+  const inboundFrames: Array<{ flags: number; payload: Uint8Array }> = []
+  const pendingChunks: Uint8Array[] = []
+  let inboundEnded = false
+  let inboundFailure: Error | undefined
+  let inboundWaiter:
+    | {
+        resolve: (frame: { flags: number; payload: Uint8Array } | undefined) => void
+        reject: (error: Error) => void
+      }
+    | undefined
+  let readIdleTimer: ReturnType<typeof setTimeout> | undefined
+  let inboundReaderStarted = false
+  const abortSignal = options.signal
+  let abortHandler: (() => void) | undefined
+
+  const observedFailure = (): CursorProviderError | undefined => {
+    if (streamFailure) return streamFailure
+    if (responseStatus !== 0 && responseStatus !== 200) {
+      streamFailure = cursorHttpError("Cursor Run failed by remote:", responseStatus)
+      return streamFailure
+    }
+    const grpcStatus = responseTrailers["grpc-status"] ?? responseHeaders["grpc-status"]
+    if (grpcStatus !== undefined && String(grpcStatus) !== "0") {
+      streamFailure = cursorGrpcError("Cursor Run failed by remote:", String(grpcStatus))
+      return streamFailure
+    }
+    if (rawStreamError) {
+      streamFailure = toTransportError(rawStreamError, "Cursor Run transport interrupted")
+      return streamFailure
+    }
+    return undefined
+  }
+  const settleTerminal = (event: BidiTerminalEvent) => {
+    if (terminalEvent) return
+    terminalEvent = event
+    for (const listener of terminalListeners) {
+      try { listener(event) } catch { /* observers cannot destabilize teardown */ }
+    }
+    terminalListeners.clear()
+  }
+  const clearReadIdleTimer = () => {
+    if (readIdleTimer) clearTimeout(readIdleTimer)
+    readIdleTimer = undefined
+  }
+  const cleanupTerminalResources = () => {
+    clearReadIdleTimer()
+    if (abortSignal && abortHandler) {
+      abortSignal.removeEventListener("abort", abortHandler)
+      abortHandler = undefined
+    }
+  }
+  const finishInbound = (error?: Error) => {
+    if (error) {
+      inboundFailure = error
+      pendingChunks.length = 0
+    } else if (!inboundFailure) {
+      inboundEnded = true
+    }
+    const waiter = inboundWaiter
+    inboundWaiter = undefined
+    if (!waiter) return
+    if (inboundFailure) waiter.reject(inboundFailure)
+    else waiter.resolve(undefined)
+  }
+  const stopInboundReader = () => {
+    cleanupTerminalResources()
+    if (inboundReaderStarted) {
+      stream.removeListener("data", onInboundChunk)
+      inboundReaderStarted = false
+    }
+  }
+  const nextInboundFrame = (): Promise<{ flags: number; payload: Uint8Array } | undefined> => {
+    const queued = inboundFrames.shift()
+    if (queued) return Promise.resolve(queued)
+    if (inboundFailure) return Promise.reject(inboundFailure)
+    if (inboundEnded) return Promise.resolve(undefined)
+    return new Promise((resolve, reject) => {
+      inboundWaiter = { resolve, reject }
+    })
+  }
+  const enqueueFrame = (frame: { flags: number; payload: Uint8Array }) => {
+    const waiter = inboundWaiter
+    inboundWaiter = undefined
+    if (waiter) waiter.resolve(frame)
+    else inboundFrames.push(frame)
+  }
+  const settleObservedTerminal = () => {
+    terminalSettlementScheduled = false
+    if (terminalEvent) return
+    if (locallyClosed) {
+      finishInbound()
+      stopInboundReader()
+      settleTerminal({ kind: "local-close" })
+      return
+    }
+    const failure = observedFailure()
+    finishInbound(failure)
+    stopInboundReader()
+    settleTerminal(
+      failure
+        ? { kind: "remote-error", error: failure }
+        : { kind: "remote-clean-close" },
+    )
+  }
+  const scheduleTerminalSettlement = () => {
+    if (terminalEvent || terminalSettlementScheduled) return
+    terminalSettlementScheduled = true
+    // HTTP/2 often emits end/aborted immediately before error/close. One turn
+    // lets the strongest terminal metadata win.
+    setImmediate(settleObservedTerminal)
+  }
+  const onReadIdleTimeout = () => {
+    readIdleTimer = undefined
+    if (locallyClosed || remotelyClosed || streamFailure) return
+    streamFailure = new CursorTransportError(
+      `Cursor Run stream read-idle timeout after ${readIdleMs}ms — connection presumed dead`,
+      { transient: true, replaySafe: true, code: "CURSOR_READ_IDLE_TIMEOUT" },
+    )
+    writable = false
+    finishInbound(streamFailure)
+    stopInboundReader()
+    settleTerminal({ kind: "remote-error", error: streamFailure })
+    try { stream.destroy(streamFailure) } catch { /* already closing */ }
+  }
+  const armReadIdleWatchdog = () => {
+    clearReadIdleTimer()
+    if (locallyClosed || remotelyClosed || streamFailure) return
+    readIdleTimer = setTimeout(onReadIdleTimeout, readIdleMs)
+    readIdleTimer.unref?.()
+  }
+  const onInboundChunk = (chunk: Buffer | Uint8Array) => {
+    armReadIdleWatchdog()
+    if (inboundEnded || inboundFailure) return
+    pendingChunks.push(new Uint8Array(chunk))
+    const merged = mergeBuffers(pendingChunks)
+    const parsed = Array.from(streamFrames(merged))
+    const consumed = parsed.reduce((sum, frame) => sum + 5 + frame.payload.length, 0)
+    pendingChunks.length = 0
+    if (consumed < merged.length) pendingChunks.push(merged.subarray(consumed))
+    for (const frame of parsed) enqueueFrame(frame)
+  }
+  const startInboundReader = () => {
+    if (inboundReaderStarted || locallyClosed || remotelyClosed || streamFailure) return
+    inboundReaderStarted = true
+    stream.on("data", onInboundChunk)
+    armReadIdleWatchdog()
+  }
 
   // Capture the HTTP/2 response status/headers and any stream-level error.
   // Without this, a non-200 or RST_STREAM surfaces as a silent clean end
@@ -347,8 +728,24 @@ export async function bidiRunStream(
     trace(`h2 trailers: ${JSON.stringify(stripPseudo(h))}`)
   })
   stream.on("error", (err: Error) => {
-    streamError = err
+    rawStreamError = err
+    writable = false
     trace(`h2 stream error: ${err?.name}: ${err?.message}`)
+    scheduleTerminalSettlement()
+  })
+  stream.on("aborted", () => {
+    writable = false
+    rawStreamError ??= new CursorTransportError("Cursor Run stream aborted by remote", {
+      transient: true,
+      replaySafe: true,
+      rstCode: stream.rstCode,
+      code: "ERR_HTTP2_STREAM_CANCEL",
+    })
+    scheduleTerminalSettlement()
+  })
+  stream.on("end", () => {
+    writable = false
+    scheduleTerminalSettlement()
   })
   stream.on("close", () => {
     writable = false
@@ -362,93 +759,156 @@ export async function bidiRunStream(
     }
     trace(
       `h2 stream closed (status=${responseStatus}, local=${locallyClosed}, ` +
-        `err=${streamError?.message ?? "none"})`,
+        `err=${rawStreamError instanceof Error ? rawStreamError.message : "none"})`,
     )
+    scheduleTerminalSettlement()
   })
 
-  if (options.signal) {
-    options.signal.addEventListener("abort", () => {
+  if (abortSignal) {
+    abortHandler = () => {
       if (!locallyClosed) {
         locallyClosed = true
         writable = false
+        inboundFrames.length = 0
+        pendingChunks.length = 0
+        finishInbound()
+        stopInboundReader()
+        settleTerminal({ kind: "local-close" })
         stream.close()
       }
-    }, { once: true })
+    }
+    abortSignal.addEventListener("abort", abortHandler, { once: true })
+    if (abortSignal.aborted) abortHandler()
   }
+
+  startInboundReader()
 
   return {
     write(msg: Uint8Array) {
       if (!writable || remotelyClosed || stream.closed || stream.destroyed) {
-        throw new CursorRunInterruptedError("Cursor Run stream is no longer writable")
+        if (locallyClosed) {
+          throw new CursorLocalCancellationError("Cursor Run stream is closed locally")
+        }
+        throw observedFailure() ?? new CursorRunInterruptedError("Cursor Run stream is no longer writable")
       }
       const frame = encodeFrame(0x00, msg)
-      stream.write(frame)
+      try {
+        const accepted = stream.write(frame)
+        backpressured = !accepted
+        return accepted
+      } catch (cause) {
+        rawStreamError = cause
+        streamFailure = toTransportError(cause, "Cursor Run stream write failed")
+        streamFailure.replaySafe = false
+        writable = false
+        scheduleTerminalSettlement()
+        throw streamFailure
+      }
+    },
+    waitForDrain(timeout) {
+      if (!backpressured) return Promise.resolve()
+      const drainTimeoutMs = timeoutMs("Cursor write drain timeout", timeout, timeout)
+      return new Promise<void>((resolve, reject) => {
+        let settled = false
+        const finish = (error?: CursorProviderError) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          stream.removeListener("drain", onDrain)
+          stream.removeListener("error", onError)
+          stream.removeListener("close", onClose)
+          if (error) reject(error)
+          else resolve()
+        }
+        const onDrain = () => {
+          backpressured = false
+          finish()
+        }
+        const onError = (cause: Error) => {
+          streamFailure ??= toTransportError(cause, "Cursor Run stream drain failed")
+          streamFailure.replaySafe = false
+          finish(streamFailure)
+        }
+        const onClose = () => {
+          finish(
+            locallyClosed
+              ? new CursorLocalCancellationError("Cursor Run stream closed locally during drain")
+              : observedFailure() ?? new CursorRunInterruptedError("Cursor Run stream closed before drain"),
+          )
+        }
+        const timer = setTimeout(() => {
+          streamFailure ??= new CursorTransportError(
+            `Cursor Run stream backpressure did not drain after ${drainTimeoutMs}ms`,
+            { transient: false, replaySafe: false, code: WRITE_DRAIN_TIMEOUT_CODE },
+          )
+          finish(streamFailure)
+          try { stream.destroy(streamFailure) } catch { /* already closing */ }
+        }, drainTimeoutMs)
+        timer.unref?.()
+        stream.once("drain", onDrain)
+        stream.once("error", onError)
+        stream.once("close", onClose)
+      })
     },
     end() {
+      locallyClosed = true
       writable = false
+      inboundFrames.length = 0
+      pendingChunks.length = 0
+      finishInbound()
+      stopInboundReader()
+      settleTerminal({ kind: "local-close" })
       stream.end()
     },
     async *frames() {
-      const buffer: Uint8Array[] = []
       try {
-        for await (const chunk of stream) {
-          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-          if (locallyClosed) return
-
-          buffer.push(new Uint8Array(buf))
-
-          // Try to parse frames from accumulated data
-          const merged = mergeBuffers(buffer)
-          const parsed = Array.from(streamFrames(merged))
-
-          if (parsed.length > 0) {
-            const consumed = parsed.reduce((sum, f) => sum + 5 + f.payload.length, 0)
-
-            // Only clear if we fully consumed all pending data
-            if (consumed === merged.length) {
-              buffer.length = 0
-            } else {
-              buffer.length = 0
-              buffer.push(merged.subarray(consumed))
-            }
-
-            for (const frame of parsed) {
-              trace(`frame yield: flags=0x${frame.flags.toString(16)} payload=${frame.payload.length}B`)
-              yield frame
-            }
-          }
+        while (true) {
+          const frame = await nextInboundFrame()
+          if (!frame) break
+          trace(`frame yield: flags=0x${frame.flags.toString(16)} payload=${frame.payload.length}B`)
+          yield frame
         }
+
+        remotelyClosed = !locallyClosed
+        if (locallyClosed) return
+
+        // A clean HTTP/2 end before Cursor's turn_ended is still an interrupted
+        // Run at the provider layer.
+        throw observedFailure() ?? cursorRunTerminationError({
+          responseStatus,
+          responseHeaders,
+          responseTrailers,
+        })
       } catch (error) {
         if (locallyClosed) return
-        throw new CursorRunInterruptedError(
-          `Cursor Run transport interrupted: ${(error as Error).message}`,
-          { cause: error },
-        )
+        if (error instanceof CursorProviderError) throw error
+        throw toTransportError(error, "Cursor Run transport interrupted")
+      } finally {
+        stopInboundReader()
       }
-
-      writable = false
-      remotelyClosed = !locallyClosed
-      if (locallyClosed) return
-
-      // Surface connection-level failures instead of ending silently. A
-      // non-200, a Connect error in the trailers, or an RST_STREAM would
-      // otherwise look like an empty successful response.
-      throw cursorRunTerminationError({
-        responseStatus,
-        responseHeaders,
-        responseTrailers,
-        streamError,
-      })
     },
     destroy() {
       if (!locallyClosed) {
         locallyClosed = true
         writable = false
+        inboundFrames.length = 0
+        pendingChunks.length = 0
+        finishInbound()
+        stopInboundReader()
+        settleTerminal({ kind: "local-close" })
         stream.close()
       }
     },
     isClosed() {
       return remotelyClosed || locallyClosed || stream.closed || stream.destroyed
+    },
+    onTerminal(listener) {
+      if (terminalEvent) {
+        try { listener(terminalEvent) } catch { /* observers cannot destabilize teardown */ }
+        return () => {}
+      }
+      terminalListeners.add(listener)
+      return () => terminalListeners.delete(listener)
     },
   }
 }

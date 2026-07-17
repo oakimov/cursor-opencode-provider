@@ -13,11 +13,38 @@ import {
   registerCursorShellCall,
   resetCursorShellCalls,
 } from "../src/shell-timeout.js"
+import { sessionActivity } from "../src/activity.js"
 
 // Characters safeLabel must remove from emitted names/keys (issue #2).
 const INVALID = new RegExp("[()<>&\"'`]")
 const variantParams = (params: Array<{ id: string; value: string }>) => ({
   [CURSOR_VARIANT_PARAMETERS_KEY]: params,
+})
+
+describe("session activity hooks", () => {
+  it("propagates child message activity to a parent continuation lease", async () => {
+    const hooks = await CursorPlugin({} as any)
+    sessionActivity.clear()
+    try {
+      await hooks.event?.({
+        event: {
+          type: "session.updated",
+          properties: { info: { id: "child", parentID: "parent" } },
+        } as any,
+      })
+      expect(sessionActivity.lastActivityAt("parent")).toBeUndefined()
+
+      await hooks.event?.({
+        event: {
+          type: "message.part.updated",
+          properties: { part: { sessionID: "child" } },
+        } as any,
+      })
+      expect(sessionActivity.lastActivityAt("parent")).toBeNumber()
+    } finally {
+      sessionActivity.clear()
+    }
+  })
 })
 
 describe("modelInfoToConfig", () => {

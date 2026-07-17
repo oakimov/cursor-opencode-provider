@@ -107,7 +107,7 @@ describe("Run transport lifecycle", () => {
       responseHeaders: { "grpc-status": "0" },
       responseTrailers: { "grpc-status": "14", "grpc-message": "upstream unavailable" },
     })
-    expect(error.message).toContain("gRPC status 14: upstream unavailable")
+    expect(error.message).toContain("gRPC status 14")
   })
 
   it("does not classify bare HTTP 200 EOF as successful completion", () => {
@@ -150,13 +150,14 @@ describe("explicit agent Run host overrides", () => {
       const model = createCursor({
         name: "cursor",
         accessToken: "token",
+        retry: { maxAttempts: 1 },
       }).languageModel("cursor-test")
 
       await expect(
         model.doStream({
           prompt: [{ role: "user", content: "hello" }],
         } as LanguageModelV3CallOptions),
-      ).rejects.toThrow("config down")
+      ).rejects.toThrow("GetServerConfig network request failed")
     } finally {
       globalThis.fetch = realFetch
       resetClientVersionCache()

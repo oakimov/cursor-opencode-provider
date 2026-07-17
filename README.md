@@ -17,7 +17,7 @@ OpenCode driving a Cursor-routed Grok model through this provider:
 - **OpenCode integration** — registers a `cursor` provider with auth hooks and cached model list
 - **Authentication** — browser OAuth (PKCE), or API key from [cursor.com/settings](https://cursor.com/settings)
 - **Model discovery** — fetches available models from Cursor's API and caches them locally
-- **Streaming** — bidirectional Connect-RPC stream for agent runs, with stale HTTP/2 connection rotation and one transparent history rebase when a Run is interrupted before its terminal event
+- **Streaming** — bidirectional Connect-RPC Runs with stale-session rotation, health checks, semantic/read-idle deadlines, bounded replay-safe recovery, and activity-aware held tool continuations
 - **Tool calls** — maps Cursor exec-server messages to AI SDK / OpenCode tool-call parts, including native subagent/Task execution (Cursor's `generalPurpose` maps to OpenCode `general`; read-oriented `bugbot` reviews map to `explore`) and the Pi read/bash/edit/write/grep/find/ls request/result field range; enforces the exact current OpenCode agent catalog before emitting any tool call; mirrors finalized display-only todo/plan state into OpenCode; strips OpenCode's `read` XML envelope (`<path>`/`<content>` + `N:` prefixes) before returning content to Cursor so the model cannot echo the wrapper into writes
 - **Thinking / reasoning** — surfaces extended-thinking deltas where the model supports it
 
@@ -157,13 +157,15 @@ const cursor = createCursor({
   // apiBaseURL: "https://api2.cursor.sh",
   // agentBaseURL: "https://agentn.us.api5.cursor.sh", // explicit Run host override
   // telemetryEnabled: true, // opt in to GetServerConfig telemetry
+  // retry: { maxAttempts: 3, baseDelayMs: 500, maxDelayMs: 8_000 },
+  // continuation: { heartbeatMs: 5_000, semanticIdleMs: 120_000, hardCapMs: 600_000 },
 })
 
 const model = cursor.languageModel("composer-2.5")
 // model implements AI SDK LanguageModelV3 (doStream / doGenerate)
 ```
 
-Pass either `accessToken` (JWT from OAuth or key exchange) or `apiKey` (raw `sk-...` key). Optional: `apiBaseURL`, `agentBaseURL`, `headers`, `telemetryEnabled`. The older `baseURL` option is still accepted as a legacy alias for `agentBaseURL`.
+Pass either `accessToken` (JWT from OAuth or key exchange) or `apiKey` (raw `sk-...` key). Optional: `apiBaseURL`, `agentBaseURL`, `headers`, `telemetryEnabled`, `retry`, and `continuation`. Retries occur only before visible output or stateful server activity; unsafe replay is surfaced instead of risking duplicate text or tool work. Pending-tool inactivity is renewed by OpenCode activity from the session or its descendants. The older `baseURL` option is still accepted as a legacy alias for `agentBaseURL`.
 
 ## Environment variables
 
@@ -186,6 +188,7 @@ bun install          # install dependencies
 bun run build        # compile TypeScript → dist/
 bun run typecheck    # type-check without emit
 bun test             # run unit tests
+bun run test:node-http2 # Node-specific HTTP/2 detach regression
 bun run test:watch   # watch mode
 ```
 
