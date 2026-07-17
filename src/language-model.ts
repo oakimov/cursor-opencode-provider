@@ -2,11 +2,12 @@ import fs from "node:fs"
 import path from "node:path"
 import { createHash } from "node:crypto"
 import type { LanguageModelV3, LanguageModelV3CallOptions, LanguageModelV3StreamResult, LanguageModelV3GenerateResult, LanguageModelV3StreamPart, LanguageModelV3Usage, LanguageModelV3FinishReason } from "@ai-sdk/provider"
-import type { CreateCursorOptions } from "./index.js"
+import type { CreateCursorOptions, CursorRetryOptions } from "./index.js"
 import {
   bidiRunStream,
   CursorRunInterruptedError,
   normalizeAgentRunOrigin,
+  type BidiStream,
 } from "./transport/connect.js"
 import { trace } from "./debug.js"
 import { buildRunRequest, buildHeartbeat } from "./protocol/request.js"
@@ -39,7 +40,24 @@ import { conversationBlobCount } from "./protocol/blob-store.js"
 import {
   bindConversationId,
 } from "./protocol/conversation-bind.js"
-import { sessionManager, type CursorSession, type Frame } from "./session.js"
+import {
+  resolveContinuationPolicy,
+  sessionManager,
+  type CursorSession,
+  type Frame,
+} from "./session.js"
+import {
+  CursorAuthError,
+  CursorLocalCancellationError,
+  CursorProtocolError,
+  CursorProviderError,
+  CursorRetryExhaustedError,
+  CursorServerError,
+  CursorTransportError,
+  isTransientGrpcStatus,
+  retrySuppressedError,
+  toCursorProviderError,
+} from "./errors.js"
 import { readCache, cacheFilePath, resolveVariantParameters, paramsImplyMaxMode, extractCursorVariantParameters, resolveCursorWireModelId, type ModelInfo } from "./models.js"
 import { buildRequestContext } from "./context/build.js"
 import { opencodeGlobalCacheDir } from "./context/paths.js"
@@ -66,6 +84,175 @@ const toolCatalogBySession = new Map<string, OpencodeToolDef[]>()
 // tool use instead of emitting exec requests. Rebase once on the next turn.
 const postCompactionRebaseBySession = new Set<string>()
 export const MAX_TURN_STATE_SESSIONS = 256
+const DEFAULT_RETRY_POLICY = {
+  maxAttempts: 3,
+  baseDelayMs: 500,
+  maxDelayMs: 8_000,
+} as const
+const MAX_RETRY_ATTEMPTS = 10
+const MAX_RETRY_DELAY_MS = 30_000
+
+export type CursorRetryPolicy = {
+  maxAttempts: number
+  baseDelayMs: number
+  maxDelayMs: number
+}
+
+function retryInteger(name: string, value: unknown, fallback: number): number {
+  const resolved = value === undefined ? fallback : value
+  if (typeof resolved !== "number" || !Number.isSafeInteger(resolved) || resolved <= 0) {
+    throw new CursorProtocolError(`Cursor retry ${name} must be a positive integer`)
+  }
+  return resolved
+}
+
+export function resolveRetryPolicy(options: CursorRetryOptions | undefined): CursorRetryPolicy {
+  if (options !== undefined && (options === null || typeof options !== "object" || Array.isArray(options))) {
+    throw new CursorProtocolError("Cursor retry options must be an object")
+  }
+  for (const key of Object.keys(options ?? {})) {
+    if (!["maxAttempts", "baseDelayMs", "maxDelayMs"].includes(key)) {
+      throw new CursorProtocolError(`Unknown Cursor retry option: ${key}`)
+    }
+  }
+  const maxAttempts = retryInteger("maxAttempts", options?.maxAttempts, DEFAULT_RETRY_POLICY.maxAttempts)
+  const baseDelayMs = retryInteger("baseDelayMs", options?.baseDelayMs, DEFAULT_RETRY_POLICY.baseDelayMs)
+  const maxDelayMs = retryInteger("maxDelayMs", options?.maxDelayMs, DEFAULT_RETRY_POLICY.maxDelayMs)
+  if (maxAttempts > MAX_RETRY_ATTEMPTS) {
+    throw new CursorProtocolError(`Cursor retry maxAttempts must be no greater than ${MAX_RETRY_ATTEMPTS}`)
+  }
+  if (baseDelayMs > MAX_RETRY_DELAY_MS || maxDelayMs > MAX_RETRY_DELAY_MS) {
+    throw new CursorProtocolError(`Cursor retry delays must be no greater than ${MAX_RETRY_DELAY_MS}ms`)
+  }
+  if (baseDelayMs > maxDelayMs) {
+    throw new CursorProtocolError("Cursor retry baseDelayMs must be no greater than maxDelayMs")
+  }
+  return { maxAttempts, baseDelayMs, maxDelayMs }
+}
+
+function retryDelayMs(error: CursorProviderError, attempt: number, policy: CursorRetryPolicy): number {
+  if (error.retryAfterMs !== undefined) return Math.min(MAX_RETRY_DELAY_MS, error.retryAfterMs)
+  const ceiling = Math.min(policy.maxDelayMs, policy.baseDelayMs * 2 ** Math.max(0, attempt - 1))
+  return Math.floor(Math.random() * ceiling)
+}
+
+function sleepForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new CursorLocalCancellationError("Cursor retry cancelled"))
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(finish, delayMs)
+    const onAbort = () => finish(new CursorLocalCancellationError("Cursor retry cancelled"))
+    function finish(error?: Error) {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", onAbort)
+      if (error) reject(error)
+      else resolve()
+    }
+    signal?.addEventListener("abort", onAbort, { once: true })
+  })
+}
+
+function retryDelayFromValue(value: unknown): number | undefined {
+  if (typeof value === "string") {
+    const seconds = /^(\d+(?:\.\d+)?)s$/.exec(value.trim())
+    if (seconds) return Math.ceil(Number(seconds[1]) * 1_000)
+    const protobufDelay = retryInfoProtobufDelayMs(value.trim())
+    if (protobufDelay !== undefined) return protobufDelay
+  }
+  if (!value || typeof value !== "object") return undefined
+  const duration = value as { seconds?: unknown; nanos?: unknown }
+  const seconds = Number(duration.seconds ?? 0)
+  const nanos = Number(duration.nanos ?? 0)
+  if (!Number.isFinite(seconds) || !Number.isFinite(nanos) || seconds < 0 || nanos < 0) return undefined
+  return Math.ceil(seconds * 1_000 + nanos / 1_000_000)
+}
+
+/** Decode google.rpc.RetryInfo.value without adding another protobuf schema. */
+function retryInfoProtobufDelayMs(encoded: string): number | undefined {
+  if (!encoded || encoded.length > 512 || !/^[A-Za-z0-9+/_-]+={0,2}$/.test(encoded)) {
+    return undefined
+  }
+  let bytes: Uint8Array
+  try {
+    bytes = Buffer.from(encoded.replaceAll("-", "+").replaceAll("_", "/"), "base64")
+  } catch {
+    return undefined
+  }
+  const readVarint = (input: Uint8Array, start: number): [bigint, number] | undefined => {
+    let value = 0n
+    let shift = 0n
+    for (let offset = start; offset < input.length && offset < start + 10; offset++) {
+      const byte = input[offset]!
+      value |= BigInt(byte & 0x7f) << shift
+      if ((byte & 0x80) === 0) return [value, offset + 1]
+      shift += 7n
+    }
+    return undefined
+  }
+  const outerKey = readVarint(bytes, 0)
+  if (!outerKey || outerKey[0] !== 0x0an) return undefined
+  const outerLength = readVarint(bytes, outerKey[1])
+  if (!outerLength || outerLength[0] > BigInt(bytes.length - outerLength[1])) return undefined
+  const duration = bytes.subarray(
+    outerLength[1],
+    outerLength[1] + Number(outerLength[0]),
+  )
+  let offset = 0
+  let seconds = 0n
+  let nanos = 0n
+  while (offset < duration.length) {
+    const key = readVarint(duration, offset)
+    if (!key) return undefined
+    offset = key[1]
+    const field = Number(key[0] >> 3n)
+    if (Number(key[0] & 7n) !== 0) return undefined
+    const item = readVarint(duration, offset)
+    if (!item) return undefined
+    offset = item[1]
+    if (field === 1) seconds = item[0]
+    else if (field === 2) nanos = item[0]
+  }
+  if (seconds > BigInt(Number.MAX_SAFE_INTEGER) || nanos > 999_999_999n) return undefined
+  return Math.ceil(Number(seconds) * 1_000 + Number(nanos) / 1_000_000)
+}
+
+export function connectFrameError(payload: string): CursorProviderError {
+  try {
+    const envelope = JSON.parse(payload) as {
+      error?: { code?: unknown; details?: unknown; retryAfter?: unknown; retry_after?: unknown }
+    }
+    const code = typeof envelope.error?.code === "string" ? envelope.error.code : "unknown"
+    if (code === "unauthenticated" || code === "permission_denied") {
+      return new CursorAuthError(`Cursor authentication failed (${code}); reauthenticate with Cursor`, { code })
+    }
+    let retryAfterMs = retryDelayFromValue(
+      envelope.error?.retryAfter ?? envelope.error?.retry_after,
+    )
+    let hasRetryInfo = false
+    if (Array.isArray(envelope.error?.details)) {
+      for (const detail of envelope.error.details) {
+        if (!detail || typeof detail !== "object") continue
+        const record = detail as Record<string, unknown>
+        const type = record.type
+        if (type === "google.rpc.RetryInfo" || (typeof type === "string" && type.endsWith("/google.rpc.RetryInfo"))) {
+          hasRetryInfo = true
+          retryAfterMs ??= retryDelayFromValue(
+            record.retryDelay ?? record.retry_delay ?? record.value,
+          )
+        }
+      }
+    }
+    return new CursorServerError(`Cursor API error (code=${code})`, {
+      transient: isTransientGrpcStatus(code) || hasRetryInfo,
+      replaySafe: true,
+      code,
+      retryAfterMs: retryAfterMs === undefined
+        ? undefined
+        : Math.min(MAX_RETRY_DELAY_MS, retryAfterMs),
+    })
+  } catch {
+    return new CursorProtocolError("Cursor returned a malformed Connect error envelope")
+  }
+}
 
 function rememberToolCatalog(sessionKey: string, tools: OpencodeToolDef[]): void {
   toolCatalogBySession.delete(sessionKey)
@@ -136,6 +323,13 @@ async function doStreamImpl(
   })
 
   const prompt = callOptions.prompt
+  const promptTokens = estimatePromptTokens(prompt)
+  const retryPolicy = resolveRetryPolicy(options.retry)
+  // pumpWithRecovery owns the complete per-turn attempt budget.  Opening a
+  // replacement session here must be a single attempt; otherwise setup retry
+  // loops nest inside recovery and `maxAttempts` no longer caps total Runs.
+  const openSession = (startOptions?: { recovery?: boolean }) =>
+    startSession(modelId, token, callOptions, options, startOptions)
 
   // ── Continuation vs fresh turn ──
   // OpenCode embeds *all* historical tool results in every prompt. Only the
@@ -162,7 +356,7 @@ async function doStreamImpl(
       // Cursor can continue instead of deadlocking.
       const ids = trailingToolResults.map((r) => `${r.sessionId}:${r.execId}`).join(",")
       trace(`continuation: ${trailingToolResults.length} interrupted trailing tool result(s) [${ids}] — rebasing fresh Run`)
-      session = await startSession(modelId, token, callOptions, options, { recovery: true })
+      session = await openSession({ recovery: true })
     } else {
       // Fresh turn (prompt ends with user/assistant text). Historical tool
       // results may exist mid-prompt; they are not live exec replies.
@@ -170,7 +364,7 @@ async function doStreamImpl(
       if (historical > 0) {
         trace(`fresh turn: ignoring ${historical} historical tool result(s) (not trailing)`)
       }
-      session = await startSession(modelId, token, callOptions, options)
+      session = await openSession()
     }
   }
 
@@ -195,7 +389,9 @@ async function doStreamImpl(
             initialSession: activeSession,
             controller,
             abortSignal: callOptions.abortSignal,
-            recover: () => startSession(modelId, token, callOptions, options, { recovery: true }),
+            promptTokens,
+            retryPolicy,
+            recover: () => openSession({ recovery: true }),
             onSession: (next) => { activeSession = next },
           })
           try {
@@ -228,36 +424,65 @@ export async function pumpWithRecovery(input: {
   initialSession: CursorSession
   controller: ReadableStreamDefaultController<V3Part>
   abortSignal?: AbortSignal
+  promptTokens?: number
+  retryPolicy?: CursorRetryPolicy
   recover: () => Promise<CursorSession>
   onSession?: (session: CursorSession) => void
   maxRecoveries?: number
 }): Promise<CursorSession> {
   let session = input.initialSession
-  const maxRecoveries = input.maxRecoveries ?? 1
+  const retryPolicy = input.retryPolicy ?? {
+    ...DEFAULT_RETRY_POLICY,
+    maxAttempts: (input.maxRecoveries ?? 1) + 1,
+  }
+  const maxRecoveries = retryPolicy.maxAttempts - 1
   input.onSession?.(session)
 
   for (let attempt = 0; ; attempt++) {
     const pumpedSession = session
-    pumpedSession.pumpActive = true
+    const pumpOwner = Symbol("cursor-pump")
+    sessionManager.beginPump(pumpedSession, pumpOwner)
     try {
       await pump(
         pumpedSession,
         input.controller,
-        { textId: crypto.randomUUID(), reasoningId: crypto.randomUUID() },
+        {
+          textId: crypto.randomUUID(),
+          reasoningId: crypto.randomUUID(),
+          promptTokens: input.promptTokens ?? 0,
+        },
         input.abortSignal,
       )
       return session
     } catch (error) {
-      if (!(error instanceof CursorRunInterruptedError) || attempt >= maxRecoveries) throw error
+      const failure = toCursorProviderError(error, {
+        replaySafe: error instanceof CursorProviderError ? error.replaySafe : false,
+        fallback: "Cursor Run interrupted",
+      })
+      if (!failure.transient) throw failure
+      if (!failure.replaySafe) {
+        throw retrySuppressedError(
+          failure,
+          "after visible output or stateful server activity",
+          attempt + 1,
+          maxRecoveries + 1,
+        )
+      }
+      if (attempt >= maxRecoveries) {
+        throw new CursorRetryExhaustedError(attempt + 1, failure)
+      }
       trace(
         `Run interrupted: sessionId=${pumpedSession.sessionId} attempt=${attempt + 1}/${maxRecoveries} ` +
-          `err=${error.message} — rebasing fresh Run`,
+          `err=${failure.message} — rebasing fresh Run`,
       )
-      sessionManager.close(pumpedSession)
+      sessionManager.close(pumpedSession, "remote-error", failure)
+      const delayMs = retryDelayMs(failure, attempt + 1, retryPolicy)
+      trace(`Run retry backoff: attempt=${attempt + 1}/${maxRecoveries} delayMs=${delayMs}`)
+      await sleepForRetry(delayMs, input.abortSignal)
       session = await input.recover()
       input.onSession?.(session)
     } finally {
-      pumpedSession.pumpActive = false
+      sessionManager.endPump(pumpedSession, pumpOwner)
     }
   }
 }
@@ -269,6 +494,7 @@ async function startSession(
   options: CreateCursorOptions,
   startOptions?: { recovery?: boolean },
 ): Promise<CursorSession> {
+  const continuationPolicy = resolveContinuationPolicy(options.continuation)
   const prompt = callOptions.prompt
   const incomingTools = extractTools(callOptions)
   const sessionKey = opencodeSessionKey(callOptions)
@@ -406,11 +632,17 @@ async function startSession(
   if (systemPrompt) trace(`hash systemPrompt sha256=${sha(systemPrompt)}`)
   if (conversationState) trace(`hash checkpoint sha256=${sha(conversationState)}`)
 
-  stream.write(reqBytes)
+  try {
+    await writeWithBackpressure(stream, reqBytes, "initial Run request")
+  } catch (error) {
+    stream.destroy()
+    throw error
+  }
 
   const session: CursorSession = {
     sessionId: crypto.randomUUID(),
     conversationId,
+    openCodeSessionId: sessionKey,
     stream,
     frames: stream.frames()[Symbol.asyncIterator](),
     pending: new Map(),
@@ -422,12 +654,56 @@ async function startSession(
     allowTools,
     usageEstimate,
     pumpActive: false,
+    pumpOwner: null,
     heartbeat: null,
-    expiresAt: Date.now() + 300_000,
+    heartbeatCancel: null,
+    hardDeadlineTimer: null,
+    semanticDeadlineCancel: null,
+    terminalUnsubscribe: null,
+    deferredTerminalReason: null,
+    policy: continuationPolicy,
+    createdAt: Date.now(),
+    lastInboundAt: Date.now(),
+    lastHeartbeatWriteAt: Date.now(),
+    semanticDeadlineAt: Date.now() + continuationPolicy.semanticIdleMs,
+    closeError: null,
+    closed: false,
   }
+  sessionManager.registerSession(session)
+  let heartbeatWritePending = false
   session.heartbeat = setInterval(() => {
-    try { stream.write(buildHeartbeat()) } catch { /* closed */ }
-  }, 5000)
+    if (session.closed) return
+    if (heartbeatWritePending) {
+      sessionManager.close(
+        session,
+        "heartbeat-write-failed",
+        new CursorTransportError("Cursor heartbeat write remained backpressured", {
+          transient: false,
+          replaySafe: false,
+          code: "CURSOR_HEARTBEAT_BACKPRESSURE",
+        }),
+      )
+      return
+    }
+    heartbeatWritePending = true
+    void writeWithBackpressure(stream, buildHeartbeat(), "heartbeat")
+      .then(() => sessionManager.recordHeartbeatWrite(session))
+      .catch((cause) => {
+        sessionManager.close(
+          session,
+          "heartbeat-write-failed",
+          toCursorProviderError(cause, {
+            replaySafe: false,
+            fallback: "Cursor heartbeat write failed",
+          }),
+        )
+      })
+      .finally(() => { heartbeatWritePending = false })
+  }, continuationPolicy.heartbeatMs)
+  session.heartbeat.unref?.()
+  session.heartbeatCancel = () => {
+    if (session.heartbeat) clearInterval(session.heartbeat)
+  }
 
   callOptions.abortSignal?.addEventListener("abort", () => {
     // Abort after tool-calls is normal — preserve pending sessions.
@@ -471,48 +747,58 @@ export function deliverContinuationResults(
       `pending={${[...session.pending.keys()].join(",")}}`,
   )
   for (const r of pendingResults) {
-    const pending = session.pending.get(r.execId)
-    if (!pending) continue
-    if (pending.bridged) {
-      // Display-only Cursor tool — OpenCode already ran it; nothing to write
-      // back on the Run stream.
-      session.usageEstimate.inputTokens += estimateTokens(r.output.length)
-      trace(
-        `continuation: bridged tool result execId=${r.execId} toolName=${pending.toolName ?? r.toolName} outLen=${r.output.length}`,
-      )
-      sessionManager.resolve(session.sessionId, r.execId)
-      continue
-    }
-    try {
-      const shellResult = pending.resultField === "shell_stream"
-        ? consumeCursorShellResult(r.toolCallId, r.output)
-        : undefined
-      for (const frame of buildExecClientMessages({
-        execId: r.execId,
-        resultField: pending.resultField,
-        output: shellResult?.output ?? r.output,
-        error: r.error,
-        toolName: pending.toolName ?? r.toolName,
-        resultMetadata: pending.resultMetadata,
-        shellOutcome: shellResult?.outcome,
-      })) {
-        session.stream.write(frame)
+    const claim = sessionManager.claim(session.sessionId, r.execId)
+    if ("kind" in claim) {
+      if (claim.kind === "deliverable") {
+        throw new CursorProtocolError("Cursor continuation claim remained unclaimed")
       }
-      // Tool results enlarge Cursor's context for the rest of this Run.
-      session.usageEstimate.inputTokens += estimateTokens(r.output.length)
-      trace(`continuation: wrote exec result execId=${r.execId} field=${pending.resultField} outLen=${r.output.length}`)
-      // Only resolve after the write succeeded — if it threw, the server never
-      // got the result and would block on heartbeats forever otherwise.
-      sessionManager.resolve(session.sessionId, r.execId)
-    } catch (e) {
-      trace(
-        `continuation: write FAILED execId=${r.execId} err=${(e as Error).message} — closing for rebase`,
-      )
-      sessionManager.close(session)
+      if (claim.kind === "duplicate") {
+        trace(`continuation: skipped duplicate execId=${r.execId} reason=${claim.reason}`)
+        continue
+      }
+      trace(`continuation: unavailable execId=${r.execId} reason=${claim.reason}`)
       return undefined
     }
+    const pending = claim.pending
+    let frames: Uint8Array[] = []
+    if (!pending.bridged) {
+      try {
+        const shellResult = pending.resultField === "shell_stream"
+          ? consumeCursorShellResult(r.toolCallId, r.output)
+          : undefined
+        frames = buildExecClientMessages({
+          execId: r.execId,
+          resultField: pending.resultField,
+          output: shellResult?.output ?? r.output,
+          error: r.error,
+          toolName: pending.toolName ?? r.toolName,
+          resultMetadata: pending.resultMetadata,
+          shellOutcome: shellResult?.outcome,
+        })
+      } catch (error) {
+        trace(`continuation: result encode FAILED execId=${r.execId} err=${(error as Error).message}`)
+        sessionManager.close(session, "result-write-failed")
+        return undefined
+      }
+    }
+    const outcome = sessionManager.deliverClaim(claim, frames)
+    if (outcome.kind !== "delivered") {
+      trace(`continuation: delivery stopped execId=${r.execId} reason=${outcome.reason}`)
+      if (outcome.kind === "duplicate") continue
+      return undefined
+    }
+    session.usageEstimate.inputTokens += estimateTokens(r.output.length)
+    if (pending.bridged) {
+      trace(
+        `continuation: completed bridged result execId=${r.execId} toolName=${pending.toolName ?? r.toolName} outLen=${r.output.length}`,
+      )
+      continue
+    }
+    trace(
+      `continuation: wrote exec result execId=${r.execId} field=${pending.resultField} ` +
+        `frames=${outcome.framesWritten} outLen=${r.output.length}`,
+    )
   }
-  sessionManager.touch(session)
   return session
 }
 
@@ -549,7 +835,7 @@ function resolveExplicitAgentBaseURL(options: CreateCursorOptions): string | und
   if (!raw) return undefined
   const normalized = normalizeAgentRunOrigin(raw)
   if (!normalized) {
-    throw new Error(
+    throw new CursorProtocolError(
       "Invalid Cursor agent base URL override: expected https://*.cursor.sh",
     )
   }
@@ -558,6 +844,78 @@ function resolveExplicitAgentBaseURL(options: CreateCursorOptions): string | und
 
 function isTruthyEnv(value: string | undefined): boolean {
   return value === "1" || value === "true"
+}
+
+async function writeWithBackpressure(
+  stream: BidiStream,
+  message: Uint8Array,
+  operation: string,
+): Promise<void> {
+  let accepted: boolean | void
+  try {
+    accepted = stream.write(message)
+  } catch (cause) {
+    throw toCursorProviderError(cause, {
+      replaySafe: false,
+      fallback: `Cursor ${operation} write failed`,
+    })
+  }
+  if (accepted !== false) return
+  if (!stream.waitForDrain) {
+    throw new CursorTransportError(`Cursor ${operation} write was backpressured`, {
+      transient: false,
+      replaySafe: false,
+      code: "CURSOR_WRITE_BACKPRESSURE",
+    })
+  }
+  try {
+    await stream.waitForDrain(5_000)
+  } catch (cause) {
+    throw toCursorProviderError(cause, {
+      replaySafe: false,
+      fallback: `Cursor ${operation} backpressure drain failed`,
+    })
+  }
+}
+
+async function nextFrameWithSemanticDeadline(
+  session: CursorSession,
+): Promise<IteratorResult<Frame>> {
+  const remainingMs = session.semanticDeadlineAt - Date.now()
+  if (remainingMs <= 0) {
+    throw new CursorTransportError(
+      `Cursor semantic-progress timeout after ${session.policy.semanticIdleMs}ms`,
+      { transient: true, replaySafe: true, code: "CURSOR_SEMANTIC_IDLE_TIMEOUT" },
+    )
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let rejectCancelled: ((error: CursorProviderError) => void) | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    rejectCancelled = reject
+    timer = setTimeout(() => {
+      reject(
+        new CursorTransportError(
+          `Cursor semantic-progress timeout after ${session.policy.semanticIdleMs}ms`,
+          { transient: true, replaySafe: true, code: "CURSOR_SEMANTIC_IDLE_TIMEOUT" },
+        ),
+      )
+    }, remainingMs)
+    timer.unref?.()
+  })
+  session.semanticDeadlineCancel = () => {
+    rejectCancelled?.(
+      session.closeError ?? new CursorTransportError("Cursor semantic wait cancelled locally", {
+        transient: false,
+        replaySafe: false,
+      }),
+    )
+  }
+  try {
+    return await Promise.race([session.frames.next(), deadline])
+  } finally {
+    if (timer) clearTimeout(timer)
+    session.semanticDeadlineCancel = null
+  }
 }
 
 /**
@@ -570,14 +928,18 @@ function isTruthyEnv(value: string | undefined): boolean {
 export async function pump(
   session: CursorSession,
   controller: ReadableStreamDefaultController<V3Part>,
-  ids: { textId: string; reasoningId: string },
+  ids: { textId: string; reasoningId: string; promptTokens?: number },
   abortSignal?: AbortSignal,
 ): Promise<void> {
+  sessionManager.registerSession(session)
   const { textId, reasoningId } = ids
+  const promptTokens = ids.promptTokens ?? 0
   const advertisedToolNames = advertisedToolNamesFromDescriptors(session.toolDescriptors)
   const advertisedToolNameSet = new Set(advertisedToolNames)
   let textStarted = false
   let reasoningStarted = false
+  let emittedOutputChars = 0
+  let replaySafe = true
   // OpenCode cancels the ReadableStream between turns (see the cancel handler
   // in doStreamImpl). The frames iterator can still yield a final `done` after
   // the cancel lands — controller.enqueue on a cancelled controller throws.
@@ -641,6 +1003,7 @@ export async function pump(
 
   const emitText = (text: string) => {
     if (!text) return
+    replaySafe = false
     // Close reasoning before text (hosts expect reasoning-end before text-start).
     if (reasoningStarted && !textStarted) {
       safeEnqueue({ type: "reasoning-end", id: reasoningId } as V3Part)
@@ -651,16 +1014,21 @@ export async function pump(
       textStarted = true
     }
     session.usageEstimate.outputTokens += estimateTokens(text.length)
-    safeEnqueue({ type: "text-delta", id: textId, delta: text } as V3Part)
+    if (safeEnqueue({ type: "text-delta", id: textId, delta: text } as V3Part)) {
+      emittedOutputChars += text.length
+    }
   }
   const emitReasoning = (text: string) => {
     if (!text) return
+    replaySafe = false
     if (!reasoningStarted) {
       safeEnqueue({ type: "reasoning-start", id: reasoningId } as V3Part)
       reasoningStarted = true
     }
     session.usageEstimate.outputTokens += estimateTokens(text.length)
-    safeEnqueue({ type: "reasoning-delta", id: reasoningId, delta: text } as V3Part)
+    if (safeEnqueue({ type: "reasoning-delta", id: reasoningId, delta: text } as V3Part)) {
+      emittedOutputChars += text.length
+    }
   }
   const emitFinish = (
     te: Record<string, unknown> | undefined,
@@ -679,27 +1047,34 @@ export async function pump(
     const est = session.usageEstimate
     const usage: LanguageModelV3Usage = {
       inputTokens: {
-        total: est.inputTokens,
+        total: promptTokens,
         noCache: undefined,
-        cacheRead: est.cacheRead,
-        cacheWrite: est.cacheWrite,
+        cacheRead: 0,
+        cacheWrite: 0,
       },
       outputTokens: {
-        total: est.outputTokens,
+        total: estimateTokens(emittedOutputChars),
         text: undefined,
         reasoning: undefined,
       },
     }
+    const providerMetadata = te ? cursorTurnEndedProviderMetadata(te) : undefined
     const reasonLabel = typeof reason === "object" && reason && "unified" in reason
       ? String((reason as { unified?: string }).unified ?? "unknown")
       : String(reason)
     trace(
       `finish: reason=${reasonLabel} ` +
-        `in=${est.inputTokens} out=${est.outputTokens} ` +
-        `cacheRead=${est.cacheRead} cacheWrite=${est.cacheWrite} ` +
+        `requestIn=${usage.inputTokens.total} requestOut=${usage.outputTokens.total} ` +
+        `rawIn=${est.inputTokens} rawOut=${est.outputTokens} ` +
+        `rawCacheRead=${est.cacheRead} rawCacheWrite=${est.cacheWrite} ` +
         `source=${te ? "turn_ended" : "estimate"}`,
     )
-    safeEnqueue({ type: "finish", usage, finishReason: reason } as V3Part)
+    safeEnqueue({
+      type: "finish",
+      usage,
+      finishReason: reason,
+      ...(providerMetadata ? { providerMetadata } : {}),
+    } as V3Part)
   }
 
   while (true) {
@@ -721,19 +1096,26 @@ export async function pump(
 
     let next: IteratorResult<Frame>
     try {
-      next = await session.frames.next()
+      next = session.pending.size === 0
+        ? await nextFrameWithSemanticDeadline(session)
+        : await session.frames.next()
     } catch (error) {
       closeOpenSpans()
-      if (error instanceof CursorRunInterruptedError) throw error
-      throw new CursorRunInterruptedError(
-        `Cursor Run frame stream interrupted: ${(error as Error).message}`,
-        { cause: error },
-      )
+      const failure = error instanceof CursorProviderError
+        ? error
+        : new CursorRunInterruptedError(
+            `Cursor Run frame stream interrupted: ${(error as Error).message}`,
+            { cause: error },
+          )
+      failure.replaySafe = replaySafe && failure.replaySafe
+      throw failure
     }
     if (next.done) {
       closeOpenSpans()
       trace("pump: frames iterator ended before turn_ended")
-      throw new CursorRunInterruptedError()
+      const failure = new CursorRunInterruptedError()
+      failure.replaySafe = replaySafe
+      throw failure
     }
     const frame = next.value as Frame
 
@@ -741,15 +1123,18 @@ export async function pump(
       // A successful agent turn has an explicit turn_ended update before the
       // Connect envelope closes. Reaching end-stream here means the Run was
       // interrupted, even if the HTTP status itself was 200.
-      let detail = ""
+      let payload = ""
       if (frame.payload.length > 0) {
         try {
-          const text = new TextDecoder().decode(decodeFramePayload(frame))
-          if (text.includes('"error"')) detail = `: ${text.slice(0, 500)}`
+          payload = new TextDecoder().decode(decodeFramePayload(frame))
         } catch { /* not decodable */ }
       }
       closeOpenSpans()
-      throw new CursorRunInterruptedError(`Cursor Run ended before turn_ended${detail}`)
+      const failure = payload
+        ? connectFrameError(payload)
+        : new CursorRunInterruptedError()
+      failure.replaySafe = replaySafe && failure.replaySafe
+      throw failure
     }
 
     // decodeFramePayload can throw on a corrupt gzip payload (gunzipSync).
@@ -768,6 +1153,7 @@ export async function pump(
       // A single malformed/truncated frame must not abort the whole turn
       // (protobufjs throws "index out of range: …" on length overruns). Log it
       // and keep pumping.
+      replaySafe = false
       const preview = Array.from(payload.subarray(0, 32))
         .map((x) => x.toString(16).padStart(2, "0"))
         .join("")
@@ -783,6 +1169,23 @@ export async function pump(
     const interactionQuery = asm.interaction_query as Record<string, unknown> | undefined
     const checkpointRaw = asm.conversation_checkpoint_update
     const topField = payload.length > 0 ? payload[0] >> 3 : 0
+    const textProgress = (iu?.text_delta as Record<string, unknown> | undefined)?.text
+    const thinkingProgress = (iu?.thinking_delta as Record<string, unknown> | undefined)?.text
+    const checkpointProgress = normalizeCheckpointBytes(checkpointRaw)
+    if (
+      (typeof textProgress === "string" && textProgress.length > 0) ||
+      (typeof thinkingProgress === "string" && thinkingProgress.length > 0) ||
+      !!iu?.turn_ended ||
+      !!iu?.tool_call_started ||
+      !!iu?.tool_call_completed ||
+      !!esm ||
+      !!kv ||
+      !!interactionQuery ||
+      !!checkpointProgress?.length
+    ) {
+      replaySafe = false
+      sessionManager.recordSemanticProgress(session)
+    }
 
     {
       const iuKind = iu ? Object.keys(iu).find((k) => iu[k]) : undefined
@@ -1231,6 +1634,47 @@ export function buildOpenCodeInteractionGuidance(
 export function estimateTokens(chars: number): number {
   if (!Number.isFinite(chars) || chars <= 0) return 0
   return Math.ceil(chars / 4)
+}
+
+/** Estimate current-request prompt tokens from the complete serialized V3 prompt. */
+export function estimatePromptTokens(prompt: LanguageModelV3CallOptions["prompt"]): number {
+  const serializedContent = prompt
+    .map((message) =>
+      typeof message.content === "string"
+        ? message.content
+        : (JSON.stringify(message.content) ?? ""),
+    )
+    .join("\n")
+  return estimateTokens(serializedContent.length)
+}
+
+/** Preserve cumulative Cursor counters as diagnostics, never as AI SDK request usage. */
+export function cursorTurnEndedProviderMetadata(te: Record<string, unknown>): {
+  cursor: {
+    usageVersion: number
+    inputTokensRaw: number
+    outputTokensRaw: number
+    cacheReadRaw: number
+    cacheWriteRaw: number
+    reasoningTokensRaw: number
+  }
+} {
+  const counter = (key: string): number => {
+    const value = te[key]
+    return typeof value === "number" && Number.isFinite(value) && value >= 0
+      ? Math.trunc(value)
+      : 0
+  }
+  return {
+    cursor: {
+      usageVersion: 2,
+      inputTokensRaw: counter("input_tokens"),
+      outputTokensRaw: counter("output_tokens"),
+      cacheReadRaw: counter("cache_read"),
+      cacheWriteRaw: counter("cache_write"),
+      reasoningTokensRaw: counter("reasoning_tokens"),
+    },
+  }
 }
 
 /**

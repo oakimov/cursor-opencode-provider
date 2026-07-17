@@ -131,7 +131,9 @@ describe("resolveAgentUrl", () => {
     globalThis.fetch = (async () => {
       throw new Error("network down")
     }) as typeof fetch
-    await expect(resolveAgentUrl(fakeJwt(3600))).rejects.toThrow("network down")
+    await expect(resolveAgentUrl(fakeJwt(3600))).rejects.toThrow(
+      "GetServerConfig network request failed",
+    )
   })
 
   it("does not memoize empty agentUrlConfig — the next call retries and self-heals", async () => {
@@ -182,7 +184,9 @@ describe("resolveAgentUrl", () => {
     }) as typeof fetch
 
     // First call fails and is not memoized.
-    await expect(resolveAgentUrl(fakeJwt(3600))).rejects.toThrow("transient")
+    await expect(resolveAgentUrl(fakeJwt(3600))).rejects.toThrow(
+      "GetServerConfig network request failed",
+    )
     expect(getServerConfigCalls).toHaveLength(1)
 
     // Backend recovers → second call resolves the real region and memoizes it.

@@ -8,6 +8,7 @@ import {
 import { encodeMessage } from "../src/protocol/messages.js"
 import type { CursorSession, Frame } from "../src/session.js"
 import { CursorRunInterruptedError } from "../src/transport/connect.js"
+import { CursorRetryExhaustedError } from "../src/errors.js"
 
 function fakeSession(id: string, frames: Frame[]): CursorSession {
   let index = 0
@@ -114,8 +115,75 @@ describe("interrupted Cursor Run handling", () => {
           return fakeSession("second-eof", [])
         },
       }),
-    ).rejects.toBeInstanceOf(CursorRunInterruptedError)
+    ).rejects.toBeInstanceOf(CursorRetryExhaustedError)
     expect(recoveries).toBe(1)
+  })
+
+  it("uses retry.maxAttempts as the total Run attempt budget", async () => {
+    let recoveries = 0
+    await expect(
+      pumpWithRecovery({
+        initialSession: fakeSession("first-eof", []),
+        controller: controller([]),
+        retryPolicy: { maxAttempts: 3, baseDelayMs: 0, maxDelayMs: 0 },
+        recover: async () => {
+          recoveries++
+          return fakeSession(`recovery-${recoveries}`, [])
+        },
+      }),
+    ).rejects.toBeInstanceOf(CursorRetryExhaustedError)
+    // One initial Run plus two replacements, never three replacements.
+    expect(recoveries).toBe(2)
+  })
+
+  it("does not recover after visible output because replay could duplicate text", async () => {
+    let recoveries = 0
+    const parts: any[] = []
+    await expect(
+      pumpWithRecovery({
+        initialSession: fakeSession("partial", [
+          serverFrame({ interaction_update: { text_delta: { text: "partial" } } }),
+        ]),
+        controller: controller(parts),
+        recover: async () => {
+          recoveries++
+          return fakeSession("unused", [])
+        },
+      }),
+    ).rejects.toThrow("automatic retry unsafe")
+    expect(recoveries).toBe(0)
+    expect(parts.some((part) => part.type === "text-delta" && part.delta === "partial")).toBe(true)
+  })
+
+  it("reports per-request usage while preserving cumulative Cursor counters as metadata", async () => {
+    const parts: any[] = []
+    await pump(
+      fakeSession("usage", [
+        serverFrame({ interaction_update: { thinking_delta: { text: "think" } } }),
+        serverFrame({ interaction_update: { text_delta: { text: "answer" } } }),
+        serverFrame({
+          interaction_update: {
+            turn_ended: {
+              input_tokens: 120_000,
+              output_tokens: 73_483,
+              cache_read: 5_810_572,
+              cache_write: 24_000,
+            },
+          },
+        }),
+      ]),
+      controller(parts),
+      { textId: "t", reasoningId: "r", promptTokens: 25 },
+    )
+    const finish = parts.find((part) => part.type === "finish")
+    expect(finish.usage.inputTokens).toMatchObject({ total: 25, cacheRead: 0, cacheWrite: 0 })
+    expect(finish.usage.outputTokens.total).toBe(3)
+    expect(finish.providerMetadata.cursor).toMatchObject({
+      usageVersion: 2,
+      inputTokensRaw: 120_000,
+      outputTokensRaw: 73_483,
+      cacheReadRaw: 5_810_572,
+    })
   })
 
   it("preserves the live user request when rebasing recovery history", () => {

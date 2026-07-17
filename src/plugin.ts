@@ -11,6 +11,7 @@ import {
   cursorShellOriginalCommand,
   prepareCursorShellArgs,
 } from "./shell-timeout.js"
+import { sessionActivity } from "./activity.js"
 
 const MODULE_URL = new URL("./index.js", import.meta.url).href
 
@@ -337,6 +338,27 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
   }
 
   return {
+    async event({ event }) {
+      switch (event.type) {
+        case "session.created":
+          sessionActivity.linkSession(event.properties.info.id, event.properties.info.parentID)
+          sessionActivity.recordActivity(event.properties.info.id)
+          break
+        case "session.updated":
+          sessionActivity.linkSession(event.properties.info.id, event.properties.info.parentID)
+          break
+        case "session.deleted":
+          sessionActivity.removeSession(event.properties.info.id)
+          break
+        case "message.updated":
+          sessionActivity.recordActivity(event.properties.info.sessionID)
+          break
+        case "message.part.updated":
+          sessionActivity.recordActivity(event.properties.part.sessionID)
+          break
+      }
+    },
+
     async "tool.execute.before"(hookInput, output) {
       if (hookInput.tool !== "bash") return
       prepareCursorShellArgs(hookInput.callID, output.args as Record<string, unknown>)

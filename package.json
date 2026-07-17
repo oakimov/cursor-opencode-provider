@@ -47,6 +47,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "test:node-http2": "bun run build && node test/node-http2-cleanup.mjs",
     "test:watch": "bun test --watch",
     "prepublishOnly": "bun run build"
   },
