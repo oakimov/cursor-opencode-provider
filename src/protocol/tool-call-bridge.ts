@@ -491,6 +491,7 @@ export function extractExecDisplayCallId(execMsg: Record<string, unknown>): stri
     "ls_args",
     "delete_args",
     "shell_stream_args",
+    "background_shell_spawn_args",
     "mcp_args",
     "subagent_args",
   ]) {

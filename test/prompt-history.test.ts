@@ -43,9 +43,17 @@ describe("buildOpenCodeInteractionGuidance", () => {
     expect(guidance).not.toContain("AskQuestion")
   })
 
-  it("does not alter compaction or advertise unavailable equivalents", () => {
+  it("does not alter compaction and forbids native tools outside the exact catalog", () => {
     expect(buildOpenCodeInteractionGuidance([{ name: "question" }], true)).toBeUndefined()
-    expect(buildOpenCodeInteractionGuidance([{ name: "bash" }], false)).toBeUndefined()
+    const guidance = buildOpenCodeInteractionGuidance([
+      { name: "bash" },
+      { name: "read" },
+    ], false)
+    expect(guidance).toContain("exactly these executable tools for this turn: `bash`, `read`")
+    expect(guidance).toContain("Task/subagents")
+    expect(guidance).toContain("are unavailable; do not invoke them")
+    expect(guidance).not.toContain("OpenCode `question` tool")
+    expect(buildOpenCodeInteractionGuidance([], false)).toBeUndefined()
   })
 })
 

@@ -25,6 +25,7 @@ describe("collectRules / buildRequestContext", () => {
       path.join(root, "opencode.json"),
       JSON.stringify({
         instructions: [".cursor/rules/*.md"],
+        permission: "allow",
         mcp: {
           github: { type: "remote", url: "https://example.test/github" },
           "my server": { type: "remote", url: "https://example.test/custom" },
@@ -57,6 +58,10 @@ describe("collectRules / buildRequestContext", () => {
     expect((ctx.rules as unknown[]).length).toBeGreaterThan(0)
     expect(ctx.rules_info_complete).toBe(true)
     expect(ctx.env_info_complete).toBe(true)
+    // OpenCode owns execution permissions. A global allow boolean cannot be
+    // translated into Cursor's allow/block instruction-list messages.
+    expect(ctx).not.toHaveProperty("user_permissions_auto_run")
+    expect(ctx).not.toHaveProperty("project_permissions_auto_run")
     const bytes = encodeMessage("RequestContext", ctx)
     expect(bytes.length).toBeGreaterThan(50)
     const decoded = decodeMessage("RequestContext", bytes) as Record<string, unknown>

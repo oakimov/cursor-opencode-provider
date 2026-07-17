@@ -3,6 +3,12 @@ import type { LanguageModelV3CallOptions } from "@ai-sdk/provider"
 import { sessionManager, type CursorSession } from "../src/session.js"
 import { findContinuationSession, deliverContinuationResults, extractTrailingToolResults } from "../src/language-model.js"
 import { CursorRunInterruptedError } from "../src/transport/connect.js"
+import { decodeMessage } from "../src/protocol/messages.js"
+import {
+  captureCursorShellResult,
+  registerCursorShellCall,
+  resetCursorShellCalls,
+} from "../src/shell-timeout.js"
 
 let _seq = 0
 function fakeSession(id?: string): CursorSession {
@@ -45,6 +51,7 @@ function toolMsg(sessionId: string, execId: number): LanguageModelV3CallOptions[
 
 afterEach(() => {
   sessionManager.dispose()
+  resetCursorShellCalls()
 })
 
 describe("findContinuationSession", () => {
@@ -92,8 +99,8 @@ describe("extractTrailingToolResults", () => {
 
     const trailing = extractTrailingToolResults(prompt)
     expect(trailing).toEqual([
-      { sessionId: "live", execId: 1, toolName: "glob", output: "ok", error: undefined },
-      { sessionId: "live", execId: 2, toolName: "glob", output: "ok", error: undefined },
+      { toolCallId: "cursor_live_1", sessionId: "live", execId: 1, toolName: "glob", output: "ok", error: undefined },
+      { toolCallId: "cursor_live_2", sessionId: "live", execId: 2, toolName: "glob", output: "ok", error: undefined },
     ])
   })
 
@@ -130,6 +137,75 @@ describe("deliverContinuationResults", () => {
     expect(kept).toBe(live)
     expect(writes.length).toBeGreaterThan(0)
     expect(live.pending.has(7)).toBe(false)
+  })
+
+  it("carries background-shell request metadata into the typed continuation result", () => {
+    const writes: Uint8Array[] = []
+    const live = fakeSession("background-write")
+    live.stream.write = (frame: Uint8Array) => { writes.push(frame) }
+    sessionManager.registerPending(
+      49,
+      live,
+      "background_shell_spawn_result",
+      "bash",
+      false,
+      { command: "sleep 5", working_directory: "/tmp" },
+    )
+
+    const kept = deliverContinuationResults(live, [{
+      sessionId: "background-write",
+      execId: 49,
+      toolName: "bash",
+      output: "__CURSOR_BACKGROUND_SHELL__54321:/tmp/cursor-opencode-bg.ABC123\n",
+    }])
+
+    expect(kept).toBe(live)
+    const result = decodeMessage<any>("AgentClientMessage", writes[0]).exec_client_message
+    expect(result.background_shell_spawn_result?.success).toEqual({
+      shell_id: 54321,
+      command: "sleep 5",
+      working_directory: "/tmp",
+      pid: 54321,
+    })
+    expect(live.pending.has(49)).toBe(false)
+  })
+
+  it("returns a sanitized OpenCode timeout as Cursor's typed aborted shell exit", () => {
+    const writes: Uint8Array[] = []
+    const live = fakeSession("timeout-write")
+    live.stream.write = (frame: Uint8Array) => { writes.push(frame) }
+    const toolCallId = "cursor_timeout-write_12"
+    const metadata = {
+      shell_stream: true,
+      command: "./runtests",
+      working_directory: "/tmp",
+      timeout_ms: 30_000,
+      timeout_behavior: 1,
+    }
+    registerCursorShellCall(toolCallId, metadata)
+    const clean = captureCursorShellResult(
+      toolCallId,
+      "partial output\n\n<shell_metadata>\nshell tool terminated command after exceeding timeout 30000 ms. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout value in milliseconds.\n</shell_metadata>",
+      { exit: null },
+    )
+    sessionManager.registerPending(12, live, "shell_stream", "bash", false, metadata)
+
+    const kept = deliverContinuationResults(live, [{
+      toolCallId,
+      sessionId: "timeout-write",
+      execId: 12,
+      toolName: "bash",
+      output: clean,
+    }])
+
+    expect(kept).toBe(live)
+    expect(clean).toBe("partial output\n")
+    const stdout = decodeMessage<any>("AgentClientMessage", writes[1]).exec_client_message
+    const exit = decodeMessage<any>("AgentClientMessage", writes[2]).exec_client_message
+    expect(stdout.shell_stream.stdout.data).toBe("partial output\n")
+    expect(exit.shell_stream.exit).toMatchObject({ code: 0, aborted: true, abort_reason: 2 })
+    expect(JSON.stringify(writes.map((frame) => decodeMessage("AgentClientMessage", frame))))
+      .not.toContain("shell_metadata")
   })
 
   it("closes and returns undefined when continuation write fails", () => {

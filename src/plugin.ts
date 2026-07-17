@@ -6,6 +6,11 @@ import { CURSOR_VARIANT_PARAMETERS_KEY, CURSOR_WIRE_MODEL_ID_KEY, readCache, dis
 import { opencodeGlobalCacheDir } from "./context/paths.js"
 import { readStoredAuth, type StoredAuth } from "./context/auth-store.js"
 import { resolveAgentUrl } from "./agent-url.js"
+import {
+  captureCursorShellResult,
+  cursorShellOriginalCommand,
+  prepareCursorShellArgs,
+} from "./shell-timeout.js"
 
 const MODULE_URL = new URL("./index.js", import.meta.url).href
 
@@ -332,6 +337,21 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
   }
 
   return {
+    async "tool.execute.before"(hookInput, output) {
+      if (hookInput.tool !== "bash") return
+      prepareCursorShellArgs(hookInput.callID, output.args as Record<string, unknown>)
+    },
+
+    async "tool.execute.after"(hookInput, output) {
+      if (hookInput.tool !== "bash") return
+      output.title = cursorShellOriginalCommand(hookInput.callID) ?? output.title
+      output.output = captureCursorShellResult(
+        hookInput.callID,
+        output.output,
+        output.metadata as Record<string, unknown> | undefined,
+      )
+    },
+
     async "chat.params"(hookInput, output) {
       if (hookInput.model.providerID !== CURSOR_PROVIDER_ID) return
       // OpenCode's compaction pipeline invokes the LLM with agent="compaction".

@@ -76,8 +76,23 @@ function rawSubagentArgs(): Uint8Array {
     out.push(...bytes)
   }
   writeString(1, "task-call-34")
-  writeString(2, "explore")
+  writeString(2, "generalPurpose")
   writeString(4, "Investigate why the conversation stopped")
+  return Uint8Array.from(out)
+}
+
+function rawBackgroundShellArgs(): Uint8Array {
+  const out: number[] = []
+  const text = new TextEncoder()
+  const writeString = (field: number, value: string) => {
+    const bytes = text.encode(value)
+    writeVarint(out, (field << 3) | 2)
+    writeVarint(out, bytes.length)
+    out.push(...bytes)
+  }
+  writeString(1, "zig translate-c /tmp/tiny.c -lc")
+  writeString(2, "/tmp")
+  writeString(3, "shell-call-49")
   return Uint8Array.from(out)
 }
 
@@ -103,7 +118,11 @@ function turnEndedPayload(): Uint8Array {
   })
 }
 
-function fakeSession(payloads: Uint8Array[], writes: Uint8Array[]): CursorSession {
+function fakeSession(
+  payloads: Uint8Array[],
+  writes: Uint8Array[],
+  definitionsOverride?: Array<{ name: string; description: string }>,
+): CursorSession {
   let index = 0
   const frames: AsyncIterator<Frame> = {
     next: async () =>
@@ -111,7 +130,7 @@ function fakeSession(payloads: Uint8Array[], writes: Uint8Array[]): CursorSessio
         ? { done: false, value: { flags: 0, payload: payloads[index++] } }
         : { done: true, value: undefined },
   }
-  const definitions = [
+  const definitions = definitionsOverride ?? [
     { name: "question", description: "Ask" },
     { name: "todowrite", description: "Todos" },
     { name: "plan_enter", description: "Enter plan" },
@@ -383,9 +402,31 @@ describe("display-only ToolCall pump bridge", () => {
 
     await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
 
-    expect(streamError?.message).toContain("Unsupported Cursor exec variant field #38")
+    expect(streamError?.message).toContain(
+      "Unsupported Cursor exec variant smart_mode_classifier_args " +
+      "(request field #38, expected result smart_mode_classifier_result field #38, handling=unsupported)",
+    )
     expect(writes).toHaveLength(0)
     expect(parts.some((p) => p.type === "finish")).toBe(false)
+  })
+
+  it("distinguishes future protocol drift from a known unsupported exec", async () => {
+    const writes: Uint8Array[] = []
+    let streamError: Error | undefined
+    const session = fakeSession([rawExecPayload(42, 53)], writes)
+    const controller = {
+      enqueue() {},
+      error(error: Error) {
+        streamError = error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    expect(streamError?.message).toContain(
+      "Unsupported Cursor exec variant unknown request field #53 (id=42)",
+    )
+    expect(writes).toHaveLength(0)
   })
 
   it("emits canonical subagent field #28 as an OpenCode task call", async () => {
@@ -410,13 +451,129 @@ describe("display-only ToolCall pump bridge", () => {
     expect(JSON.parse(toolCall.input)).toEqual({
       description: "Investigate why the conversation stopped",
       prompt: "Investigate why the conversation stopped",
-      subagent_type: "explore",
+      subagent_type: "general",
     })
     expect(parts.some((part) =>
       part.type === "finish" && part.finishReason?.unified === "tool-calls"
     )).toBe(true)
     expect(sessionManager.pendingFor(session.sessionId, 34)?.resultField).toBe("subagent_result")
     sessionManager.resolve(session.sessionId, 34)
+  })
+
+  it("rejects native Task on Cursor's typed channel when the current agent omits task", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    let streamError: Error | undefined
+    const session = fakeSession(
+      [rawExecPayload(34, 28, rawSubagentArgs()), turnEndedPayload()],
+      writes,
+      [
+        { name: "bash", description: "Shell" },
+        { name: "read", description: "Read" },
+        { name: "write", description: "Write" },
+      ],
+    )
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error(error: Error) {
+        streamError = error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    expect(streamError).toBeUndefined()
+    expect(parts.some((part) => part.type === "tool-call")).toBe(false)
+    expect(parts.some((part) =>
+      part.type === "finish" && part.finishReason?.unified === "stop"
+    )).toBe(true)
+    expect(writes).toHaveLength(2)
+    const result = decodeMessage<any>("AgentClientMessage", writes[0]!)
+      .exec_client_message.subagent_result
+    expect(result.error.error).toContain("OpenCode tool 'task' is unavailable")
+    expect(result.error.error).toContain("Available tools: bash, read, write")
+    expect(decodeMessage<any>("AgentClientMessage", writes[1]!))
+      .toEqual({ exec_client_control_message: { stream_close: { id: 34 } } })
+    expect(sessionManager.pendingFor(session.sessionId, 34)).toBeUndefined()
+  })
+
+  it("rejects every unavailable native exec target before OpenCode sees it", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    const session = fakeSession(
+      [
+        encodeMessage("AgentServerMessage", {
+          exec_server_message: {
+            id: 7,
+            write_args: { path: "/tmp/should-not-write", file_text: "blocked" },
+          },
+        }),
+        turnEndedPayload(),
+      ],
+      writes,
+      [{ name: "read", description: "Read" }],
+    )
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error(error: Error) {
+        throw error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    expect(parts.some((part) => part.type === "tool-call")).toBe(false)
+    expect(writes).toHaveLength(2)
+    const result = decodeMessage<any>("AgentClientMessage", writes[0]!)
+      .exec_client_message.write_result
+    expect(result.error.error).toContain("OpenCode tool 'write' is unavailable")
+    expect(result.error.error).toContain("Available tools: read")
+    expect(sessionManager.pendingFor(session.sessionId, 7)).toBeUndefined()
+  })
+
+  it("emits canonical background shell field #16 once and claims its display call", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    let streamError: Error | undefined
+    const callId = "shell-call-49"
+    const session = fakeSession([
+      displayPayload("started", callId, {
+        shell_tool_call: {
+          args: { command: "zig translate-c /tmp/tiny.c -lc", working_directory: "/tmp" },
+        },
+      }),
+      rawExecPayload(49, 16, rawBackgroundShellArgs()),
+    ], writes)
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error(error: Error) {
+        streamError = error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    expect(streamError).toBeUndefined()
+    const toolCalls = parts.filter((part) => part.type === "tool-call")
+    expect(toolCalls).toHaveLength(1)
+    expect(toolCalls[0].toolName).toBe("bash")
+    expect(JSON.parse(toolCalls[0].input)).toMatchObject({ workdir: "/tmp" })
+    expect(JSON.parse(toolCalls[0].input).command).toContain("__CURSOR_BACKGROUND_SHELL__")
+    expect(session.displayToolCalls.has(callId)).toBe(false)
+    expect(sessionManager.pendingFor(session.sessionId, 49)).toMatchObject({
+      resultField: "background_shell_spawn_result",
+      resultMetadata: {
+        command: "zig translate-c /tmp/tiny.c -lc",
+        working_directory: "/tmp",
+      },
+    })
+    sessionManager.resolve(session.sessionId, 49)
   })
 
   it("answers MCP state field #36 before emitting the requested write", async () => {

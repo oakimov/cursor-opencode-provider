@@ -20,7 +20,9 @@ import {
   buildRequestContextResult,
   buildMcpStateResult,
   type OpencodeToolDef,
+  type ParsedExecRequest,
 } from "./protocol/tools.js"
+import { describeCursorExecVariant } from "./protocol/exec-variants.js"
 import {
   advertisedToolNamesFromDescriptors,
   extractExecDisplayCallId,
@@ -43,6 +45,10 @@ import { opencodeGlobalCacheDir } from "./context/paths.js"
 import { resolveAgentUrl } from "./agent-url.js"
 import { CURSOR_API_HOST, CURSOR_COMPACTION_OPTION } from "./shared.js"
 import type { SeedHistoryMessage } from "./protocol/request.js"
+import {
+  consumeCursorShellResult,
+  registerCursorShellCall,
+} from "./shell-timeout.js"
 
 let _availableModels: ModelInfo[] | undefined
 // mtime of the cache file the last time we loaded it. Compared on each call
@@ -360,7 +366,6 @@ async function startSession(
     conversationState,
     parameterValues,
     maxMode,
-    availableModels: _availableModels,
     tools,
     toolDescriptors,
     requestContext,
@@ -478,12 +483,17 @@ export function deliverContinuationResults(
       continue
     }
     try {
+      const shellResult = pending.resultField === "shell_stream"
+        ? consumeCursorShellResult(r.toolCallId, r.output)
+        : undefined
       for (const frame of buildExecClientMessages({
         execId: r.execId,
         resultField: pending.resultField,
-        output: r.output,
+        output: shellResult?.output ?? r.output,
         error: r.error,
         toolName: pending.toolName ?? r.toolName,
+        resultMetadata: pending.resultMetadata,
+        shellOutcome: shellResult?.outcome,
       })) {
         session.stream.write(frame)
       }
@@ -563,6 +573,8 @@ export async function pump(
   abortSignal?: AbortSignal,
 ): Promise<void> {
   const { textId, reasoningId } = ids
+  const advertisedToolNames = advertisedToolNamesFromDescriptors(session.toolDescriptors)
+  const advertisedToolNameSet = new Set(advertisedToolNames)
   let textStarted = false
   let reasoningStarted = false
   // OpenCode cancels the ReadableStream between turns (see the cancel handler
@@ -589,6 +601,32 @@ export async function pump(
       trace(`pump: controller.error failed (suppressing) err=${(e as Error).message}`)
     }
     streamClosed = true
+  }
+
+  /** Reply on Cursor's correlated exec channel without exposing a host tool call. */
+  const rejectExec = (parsed: ParsedExecRequest, reason: string, label: string): boolean => {
+    try {
+      for (const frame of buildExecClientMessages({
+        execId: parsed.id,
+        resultField: parsed.resultField,
+        output: "",
+        error: reason,
+        toolName: parsed.toolName,
+        resultMetadata: parsed.resultMetadata,
+      })) {
+        session.stream.write(frame)
+      }
+      trace(`exec: REFUSED ${label} toolName=${parsed.toolName} id=${parsed.id}`)
+      return true
+    } catch (e) {
+      const error = new Error(
+        `Failed to reject Cursor tool request (${label}): ${(e as Error).message}`,
+      )
+      trace(`exec: REFUSED reply FAILED ${error.message}`)
+      safeError(error)
+      sessionManager.close(session)
+      return false
+    }
   }
 
   /** AI SDK V3 requires text-end / reasoning-end before finish or tool-call. */
@@ -909,26 +947,7 @@ export async function pump(
         trace(`exec: id=${parsed?.id} variant=${parsed ? Object.keys(parsed).join(",") : "none"} toolName=${parsed?.toolName} resultField=${parsed?.resultField}`)
         if (parsed) {
           if (parsed.localError) {
-            trace(`exec: REFUSED invalid mapping toolName=${parsed.toolName} error=${parsed.localError}`)
-            try {
-              for (const frame of buildExecClientMessages({
-                execId: parsed.id,
-                resultField: parsed.resultField,
-                output: "",
-                error: parsed.localError,
-                toolName: parsed.toolName,
-              })) {
-                session.stream.write(frame)
-              }
-            } catch (e) {
-              const error = new Error(
-                `Failed to reject unsupported Cursor tool request: ${(e as Error).message}`,
-              )
-              trace(`exec: invalid-mapping reply FAILED ${error.message}`)
-              safeError(error)
-              sessionManager.close(session)
-              return
-            }
+            if (!rejectExec(parsed, parsed.localError, "invalid mapping")) return
             continue
           }
           // OpenCode throws "Tool call not allowed while generating summary"
@@ -937,25 +956,43 @@ export async function pump(
           // pumping for text / turn_ended instead of emitting tool-call.
           if (!session.allowTools) {
             const reason = "Tool calls are not available during this turn (summary/compaction)."
-            trace(`exec: REFUSED (allowTools=false) toolName=${parsed.toolName} — auto-replying`)
-            try {
-              for (const frame of buildExecClientMessages({
-                execId: parsed.id,
-                resultField: parsed.resultField,
-                output: "",
-                error: reason,
-                toolName: parsed.toolName,
-              })) {
-                session.stream.write(frame)
-              }
-            } catch (e) {
-              trace(`exec: REFUSED write FAILED ${(e as Error).message}`)
-            }
+            if (!rejectExec(parsed, reason, "allowTools=false")) return
+            continue
+          }
+          // Cursor has native capabilities (Task, filesystem, shell, etc.) in
+          // addition to the MCP descriptors sent by this provider. The model
+          // can request one even when the current OpenCode agent omitted its
+          // corresponding host tool. Emitting that request makes OpenCode
+          // manufacture an `invalid` tool result. Refuse it on the held-open
+          // Cursor exec channel instead, using the request's exact typed result.
+          if (!advertisedToolNameSet.has(parsed.toolName)) {
+            const available = advertisedToolNames.length > 0
+              ? advertisedToolNames.join(", ")
+              : "none"
+            const reason =
+              `OpenCode tool '${parsed.toolName}' is unavailable for the current agent. ` +
+              `Available tools: ${available}. Continue using only available tools; do not retry ` +
+              `'${parsed.toolName}'.`
+            trace(
+              `exec: unavailable catalog target toolName=${parsed.toolName} ` +
+                `advertised=[${advertisedToolNames.join(",")}]`,
+            )
+            if (!rejectExec(parsed, reason, "unavailable tool")) return
             continue
           }
           const tc = buildToolCallPart(parsed, session.sessionId)
+          if (parsed.resultField === "shell_stream") {
+            registerCursorShellCall(tc.toolCallId, parsed.resultMetadata)
+          }
           // Keep the stream open; the result arrives on the next doStream call.
-          sessionManager.registerPending(parsed.id, session, parsed.resultField, parsed.toolName)
+          sessionManager.registerPending(
+            parsed.id,
+            session,
+            parsed.resultField,
+            parsed.toolName,
+            false,
+            parsed.resultMetadata,
+          )
           // tc.input is already a JSON string (LanguageModelV3ToolCall.input).
           trace(`exec: EMITTED tool-call toolCallId=${tc.toolCallId} toolName=${tc.toolName} inputLen=${tc.input.length}`)
           // Close open text/reasoning spans before tool-call (required by AI SDK V3).
@@ -974,14 +1011,15 @@ export async function pump(
         // wrong reply recreates the heartbeat-only deadlock. Fail promptly so
         // schema drift is actionable.
         const variantField = detectExecVariantField(payload)
+        const variantDescription = describeCursorExecVariant(variantField)
         const hex = Array.from(payload.subarray(0, 48))
           .map((x) => x.toString(16).padStart(2, "0"))
           .join("")
         trace(
-          `exec UNMAPPED: id=${esmId} variantField=${variantField} keys=[${Object.keys(esm).join(",")}] hex=${hex}`,
+          `exec UNMAPPED: id=${esmId} variant=${variantDescription} keys=[${Object.keys(esm).join(",")}] hex=${hex}`,
         )
         const err = new Error(
-          `Unsupported Cursor exec variant field #${variantField ?? "unknown"} (id=${esmId})`,
+          `Unsupported Cursor exec variant ${variantDescription} (id=${esmId})`,
         )
         safeError(err)
         sessionManager.close(session)
@@ -1058,6 +1096,7 @@ function normalizeCheckpointBytes(raw: unknown): Uint8Array | undefined {
 // ── Prompt extraction ──
 
 type ExtractedToolResult = {
+  toolCallId: string
   sessionId: string
   execId: number
   toolName: string
@@ -1072,10 +1111,12 @@ function extractToolResults(prompt: LanguageModelV3CallOptions["prompt"]): Extra
     for (const part of msg.content) {
       const p = part as unknown as Record<string, unknown>
       if (p.type !== "tool-result") continue
-      const parsed = parseExecIdFromToolCallId((p.toolCallId as string) ?? "")
+      const toolCallId = (p.toolCallId as string) ?? ""
+      const parsed = parseExecIdFromToolCallId(toolCallId)
       if (!parsed) continue
       const { text, isError } = toolResultOutputToText(p.output)
       out.push({
+        toolCallId,
         sessionId: parsed.sessionId,
         execId: parsed.execId,
         toolName: (p.toolName as string) ?? "mcp",
@@ -1147,6 +1188,7 @@ export function buildOpenCodeInteractionGuidance(
 ): string | undefined {
   if (isCompaction) return undefined
   const names = new Set(tools.map((tool) => tool.name))
+  if (names.size === 0) return undefined
   const instructions: string[] = []
 
   if (names.has("question")) {
@@ -1171,10 +1213,12 @@ export function buildOpenCodeInteractionGuidance(
       "- To fetch a known URL, call the OpenCode `webfetch` tool; do not use Cursor's native WebFetch interaction.",
     )
   }
-  if (instructions.length === 0) return undefined
-
   return [
-    "OpenCode owns interactive workflows and tool execution for this session. Use the advertised OpenCode tools below instead of equivalent Cursor-native UI interactions:",
+    `OpenCode exposes exactly these executable tools for this turn: ${[...names].map((name) => `\`${name}\``).join(", ")}.`,
+    "Call only tools in that exact list. Cursor-native tools that are not listed—including Task/subagents—are unavailable; do not invoke them. If a capability is absent, complete the work directly with the listed tools or explain the limitation.",
+    ...(instructions.length > 0
+      ? ["Use these OpenCode tools instead of equivalent Cursor-native UI interactions:"]
+      : []),
     ...instructions,
     "Emit the actual tool call and wait for its result; never merely claim or summarize that a tool was used.",
   ].join("\n")

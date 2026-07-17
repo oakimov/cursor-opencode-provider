@@ -39,13 +39,6 @@ export async function buildRequestContext(
   const flat = toolsToDescriptors(tools, providerIdentifier, mcpServerNames)
   const nested = toolsToMcpDescriptors(tools, providerIdentifier, mcpServerNames)
 
-  const permission = config.permission
-  const autoRun =
-    permission === "allow" ||
-    (typeof permission === "object" &&
-      permission !== null &&
-      (permission as { "*": string })["*"] === "allow")
-
   const ctx: Record<string, unknown> = {
     env: buildEnv(workspaceRoot),
     tools: flat,
@@ -86,8 +79,6 @@ export async function buildRequestContext(
     custom_subagents_info_complete: true,
     mcp_file_system_info_complete: true,
     mcp_info_complete: true,
-    user_permissions_auto_run: autoRun,
-    project_permissions_auto_run: autoRun,
   }
 
   if (plugins.length > 0) {

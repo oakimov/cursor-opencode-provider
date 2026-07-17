@@ -1,6 +1,5 @@
 import { encodeMessage, getMessageTypes } from "./messages.js"
 import { toolsToDescriptors, type OpencodeToolDef } from "./tools.js"
-import type { ModelInfo } from "../models.js"
 
 export type SeedHistoryMessage = {
   role: "system" | "user" | "assistant"
@@ -28,7 +27,6 @@ export type RunRequestInput = {
   parameterValues?: Array<{ id: string; value: string }>
   maxMode?: boolean
   messageId?: string
-  availableModels?: ModelInfo[]
   tools?: OpencodeToolDef[]
   /** Pre-resolved descriptors (including config-backed MCP server identity). */
   toolDescriptors?: Array<Record<string, unknown>>
@@ -69,15 +67,6 @@ export function buildSeedConversationState(input?: {
   const obj: Record<string, unknown> = {}
   if (messages.length > 0) obj.root_prompt_messages_json = messages
   return type.encode(type.fromObject(obj)).finish()
-}
-
-function buildAvailableModels(models: ModelInfo[]): Array<Record<string, unknown>> {
-  return models.map((m) => ({
-    model_id: m.id,
-    parameters: (m.variants ?? []).flatMap((v) =>
-      (v.parameterValues ?? []).map((p) => p),
-    ),
-  }))
 }
 
 /**
@@ -133,8 +122,6 @@ export function buildRunRequest(input: RunRequestInput): Uint8Array {
     mcp_tools: { mcp_tools: mcpTools },
     unknown_flag: 0,
     field_12: 0,
-    available_models: input.availableModels ? buildAvailableModels(input.availableModels) : [],
-    conversation_id_dup: input.conversationId,
   }
 
   return encodeMessage("AgentClientMessage", {

@@ -1,4 +1,5 @@
 import { describe, it, expect } from "bun:test"
+import protobuf from "protobufjs"
 import {
   mapExecServerToToolName,
   mapToolNameToExecField,
@@ -50,7 +51,7 @@ function canonicalSubagentExecMessage(): Uint8Array {
     out.push(...bytes)
   }
   writeString(args, 1, "task-call-34")
-  writeString(args, 2, "explore")
+  writeString(args, 2, "generalPurpose")
   writeString(args, 3, "cursor-model")
   writeString(args, 4, "Inspect recent logs and identify the root cause")
   writeString(args, 6, "ses_previous")
@@ -58,6 +59,56 @@ function canonicalSubagentExecMessage(): Uint8Array {
   writeVarint(exec, (1 << 3) | 0); writeVarint(exec, 34)
   writeVarint(exec, (28 << 3) | 2); writeVarint(exec, args.length); exec.push(...args)
   return Uint8Array.from(exec)
+}
+
+/** Independent canonical agent.v1 ExecServerMessage #16 fixture. */
+function canonicalBackgroundShellExecMessage(): Uint8Array {
+  const text = new TextEncoder()
+  const args: number[] = []
+  const exec: number[] = []
+  const writeVarint = (out: number[], n: number) => {
+    let v = n >>> 0
+    while (v > 0x7f) { out.push((v & 0x7f) | 0x80); v >>>= 7 }
+    out.push(v)
+  }
+  const writeString = (out: number[], field: number, value: string) => {
+    const bytes = text.encode(value)
+    writeVarint(out, (field << 3) | 2)
+    writeVarint(out, bytes.length)
+    out.push(...bytes)
+  }
+  writeString(args, 1, "zig translate-c /tmp/tiny.c -lc")
+  writeString(args, 2, "/tmp")
+  writeString(args, 3, "shell-call-49")
+  writeString(args, 7, "Run translate-c without blocking")
+  writeVarint(exec, (1 << 3) | 0); writeVarint(exec, 49)
+  writeVarint(exec, (16 << 3) | 2); writeVarint(exec, args.length); exec.push(...args)
+  return Uint8Array.from(exec)
+}
+
+/** Decode only the exec #36 response using an independent canonical schema. */
+function decodeCanonicalMcpStateResult(bytes: Uint8Array): any {
+  const root = new protobuf.Root()
+  root.add(new protobuf.Type("CanonicalMcpToolDefinition")
+    .add(new protobuf.Field("name", 1, "string"))
+    .add(new protobuf.Field("description", 2, "string"))
+    .add(new protobuf.Field("input_schema", 3, "bytes"))
+    .add(new protobuf.Field("provider_identifier", 4, "string"))
+    .add(new protobuf.Field("tool_name", 5, "string")))
+  root.add(new protobuf.Type("CanonicalMcpStateServer")
+    .add(new protobuf.Field("server_name", 1, "string"))
+    .add(new protobuf.Field("server_identifier", 2, "string"))
+    .add(new protobuf.Field("tools", 5, "CanonicalMcpToolDefinition", "repeated")))
+  root.add(new protobuf.Type("CanonicalMcpStateSuccess")
+    .add(new protobuf.Field("servers", 1, "CanonicalMcpStateServer", "repeated")))
+  root.add(new protobuf.Type("CanonicalMcpStateExecResult")
+    .add(new protobuf.Field("success", 1, "CanonicalMcpStateSuccess")))
+  root.add(new protobuf.Type("CanonicalExecClientMessage")
+    .add(new protobuf.Field("id", 1, "uint32"))
+    .add(new protobuf.Field("mcp_state_exec_result", 36, "CanonicalMcpStateExecResult")))
+  root.add(new protobuf.Type("CanonicalAgentClientMessage")
+    .add(new protobuf.Field("exec_client_message", 2, "CanonicalExecClientMessage")))
+  return root.lookupType("CanonicalAgentClientMessage").decode(bytes) as any
 }
 
 describe("resolveToolServerIdentity", () => {
@@ -207,6 +258,7 @@ describe("mapExecServerToToolName", () => {
   })
   it("maps shell_stream_args → bash", () => {
     expect(mapExecServerToToolName("shell_stream_args")).toBe("bash")
+    expect(mapExecServerToToolName("background_shell_spawn_args")).toBe("bash")
   })
   it("maps mcp_args → mcp", () => {
     expect(mapExecServerToToolName("mcp_args")).toBe("mcp")
@@ -351,7 +403,7 @@ describe("parseExecServerMessage", () => {
       args: {
         description: "Inspect recent logs and identify",
         prompt: "Inspect recent logs and identify the root cause",
-        subagent_type: "explore",
+        subagent_type: "general",
         task_id: "ses_previous",
         background: true,
       },
@@ -359,11 +411,69 @@ describe("parseExecServerMessage", () => {
     expect(result?.localError).toBeUndefined()
   })
 
+  it("decodes canonical field #16 and maps it to a detached OpenCode bash call", () => {
+    const esm = decodeMessage<any>("ExecServerMessage", canonicalBackgroundShellExecMessage())
+    const result = parseExecServerMessage(esm)
+    expect(result).toMatchObject({
+      id: 49,
+      toolName: "bash",
+      resultField: "background_shell_spawn_result",
+      resultMetadata: {
+        command: "zig translate-c /tmp/tiny.c -lc",
+        working_directory: "/tmp",
+      },
+      args: { workdir: "/tmp" },
+    })
+    expect(result?.args.command).toContain("nohup sh -c 'zig translate-c /tmp/tiny.c -lc'")
+    expect(result?.args.command).toContain("__CURSOR_BACKGROUND_SHELL__")
+    expect(result?.args.command).toContain("</dev/null &")
+    expect(result?.localError).toBeUndefined()
+  })
+
+  it("rejects interactive background shells with a typed local error", () => {
+    const result = parseExecServerMessage({
+      id: 49,
+      background_shell_spawn_args: {
+        command: "python -i",
+        enable_write_shell_stdin_tool: true,
+      },
+    })
+    expect(result?.resultField).toBe("background_shell_spawn_result")
+    expect(result?.localError).toContain("Interactive background shells")
+  })
+
   it("rejects a subagent exec missing required OpenCode task fields", () => {
     const result = parseExecServerMessage({ id: 34, subagent_args: { prompt: "Inspect" } })
     expect(result?.toolName).toBe("task")
     expect(result?.resultField).toBe("subagent_result")
     expect(result?.localError).toContain("missing a required prompt or subagent type")
+  })
+
+  it("preserves compatible and custom OpenCode subagent names", () => {
+    for (const subagentType of ["explore", "my-reviewer"]) {
+      const result = parseExecServerMessage({
+        id: 34,
+        subagent_args: { prompt: "Inspect", subagent_type: subagentType },
+      })
+      expect(result?.args.subagent_type).toBe(subagentType)
+    }
+  })
+
+  it("maps Cursor-native bugbot review tasks to OpenCode explore", () => {
+    const result = parseExecServerMessage({
+      id: 35,
+      subagent_args: {
+        prompt: "Review the uncommitted diff for correctness bugs",
+        subagent_type: "bugbot",
+        readonly: true,
+      },
+    })
+    expect(result?.toolName).toBe("task")
+    expect(result?.args).toMatchObject({
+      prompt: "Review the uncommitted diff for correctness bugs",
+      subagent_type: "explore",
+    })
+    expect(result?.localError).toBeUndefined()
   })
 
   it("maps every canonical Pi exec request to its offset result field", () => {
@@ -491,8 +601,40 @@ describe("parseExecServerMessage", () => {
       shell_stream_args: { command: "ls", working_directory: "/tmp" },
     })
     expect(result!.toolName).toBe("bash")
-    expect(result!.args).toEqual({ command: "ls", workdir: "/tmp" })
+    expect(result!.args).toEqual({ command: "ls", workdir: "/tmp", timeout: 30_000 })
     expect(result!.resultField).toBe("shell_stream")
+  })
+
+  it("preserves Cursor shell timeout policy and applies native zero defaults", () => {
+    const foreground = parseExecServerMessage({
+      id: 5,
+      shell_stream_args: { command: "make test", timeout: 0, timeout_behavior: 0 },
+    })
+    expect(foreground!.args.timeout).toBe(30_000)
+    expect(foreground!.resultMetadata).toEqual({
+      shell_stream: true,
+      command: "make test",
+      working_directory: "",
+      timeout_ms: 30_000,
+      timeout_behavior: 0,
+    })
+
+    const background = parseExecServerMessage({
+      id: 6,
+      shell_stream_args: {
+        command: "make test",
+        working_directory: "/repo",
+        timeout: 0,
+        timeout_behavior: 2,
+        hard_timeout: 120_000,
+      },
+    })
+    expect(background!.args.timeout).toBe(0)
+    expect(background!.resultMetadata).toMatchObject({
+      timeout_ms: 0,
+      timeout_behavior: 2,
+      hard_timeout_ms: 120_000,
+    })
   })
 
   it("resolves the real MCP tool name and replies with mcp_result", () => {
@@ -720,6 +862,89 @@ describe("buildExecClientMessages", () => {
     expect(mid.shell_stream?.stdout?.data).toBe("stdout output")
     expect(end.shell_stream?.exit?.code).toBe(0)
     expect(close.exec_client_control_message?.stream_close?.id).toBe(3)
+  })
+
+  it("encodes Cursor-native shell timeout, background, and nonzero-exit states", () => {
+    const timedOut = buildExecClientMessages({
+      execId: 4,
+      resultField: "shell_stream",
+      output: "partial\n",
+      shellOutcome: { kind: "timeout", timeoutMs: 30_000 },
+    })
+    const timeoutExit = decodeMessage<any>("AgentClientMessage", timedOut[2]).exec_client_message
+    expect(timeoutExit.shell_stream.exit).toMatchObject({ code: 0, aborted: true, abort_reason: 2 })
+
+    const backgrounded = buildExecClientMessages({
+      execId: 5,
+      resultField: "shell_stream",
+      output: "started\n",
+      shellOutcome: {
+        kind: "backgrounded",
+        shellId: 43210,
+        pid: 43210,
+        command: "make test",
+        workingDirectory: "/repo",
+        msToWait: 30_000,
+        reason: 1,
+      },
+    })
+    const handoff = decodeMessage<any>("AgentClientMessage", backgrounded[2]).exec_client_message
+    expect(handoff.shell_stream.backgrounded).toEqual({
+      shell_id: 43210,
+      command: "make test",
+      working_directory: "/repo",
+      pid: 43210,
+      ms_to_wait: 30_000,
+      reason: 1,
+    })
+
+    const failed = buildExecClientMessages({
+      execId: 6,
+      resultField: "shell_stream",
+      output: "failed\n",
+      shellOutcome: { kind: "exit", code: 23 },
+    })
+    const failedExit = decodeMessage<any>("AgentClientMessage", failed[2]).exec_client_message
+    expect(failedExit.shell_stream.exit).toMatchObject({ code: 23, aborted: false })
+  })
+
+  it("encodes a typed background shell spawn result and preserves request metadata", () => {
+    const frames = buildExecClientMessages({
+      execId: 49,
+      resultField: "background_shell_spawn_result",
+      output: "__CURSOR_BACKGROUND_SHELL__43210:/tmp/cursor-opencode-bg.ABC123\n",
+      resultMetadata: {
+        command: "zig translate-c /tmp/tiny.c -lc",
+        working_directory: "/tmp",
+      },
+    })
+    expect(frames).toHaveLength(2)
+    const result = decodeMessage<any>("AgentClientMessage", frames[0]).exec_client_message
+    expect(result.background_shell_spawn_result?.success).toEqual({
+      shell_id: 43210,
+      command: "zig translate-c /tmp/tiny.c -lc",
+      working_directory: "/tmp",
+      pid: 43210,
+    })
+    const close = decodeMessage<any>("AgentClientMessage", frames[1])
+    expect(close.exec_client_control_message?.stream_close?.id).toBe(49)
+  })
+
+  it("returns a typed background spawn error when OpenCode produces no pid marker", () => {
+    const result = buildTypedExecResult(
+      "background_shell_spawn_result",
+      "mktemp failed",
+      undefined,
+      "bash",
+      { command: "sleep 10", working_directory: "/tmp" },
+    )
+    expect(result).toEqual({
+      error: {
+        command: "sleep 10",
+        working_directory: "/tmp",
+        error: "OpenCode did not return a valid background shell process id.",
+      },
+    })
   })
 
   it("shell error replies with Start→Stderr→Exit then stream_close", () => {
@@ -1136,7 +1361,46 @@ describe("exec safety net (unmapped variants)", () => {
       .exec_client_message.mcp_state_exec_result.success
     expect(result.servers).toHaveLength(1)
     expect(result.servers[0].server_identifier).toBe("github")
+    expect(result.servers[0].tools[0].name).toBe("github-get_me")
+    expect(result.servers[0].tools[0].provider_identifier).toBe("github")
     expect(result.servers[0].tools[0].tool_name).toBe("get_me")
+  })
+
+  it("encodes MCP state tools with Cursor's canonical full definition shape", () => {
+    const tools = [
+      {
+        name: "github_create_pull_request",
+        description: "Open a pull request",
+        inputSchema: {
+          type: "object",
+          properties: { title: { type: "string" } },
+          required: ["title"],
+        },
+      },
+    ]
+    const response = buildMcpStateResult(
+      69,
+      { server_identifiers: ["github"] },
+      {
+        tools: toolsToDescriptors(tools, "opencode", ["github"]),
+        mcp_file_system_options: {
+          mcp_descriptors: toolsToMcpDescriptors(tools, "opencode", ["github"]),
+        },
+      },
+    )
+
+    const decoded = decodeCanonicalMcpStateResult(response)
+    const exec = decoded.exec_client_message
+    expect(exec.id).toBe(69)
+    const server = exec.mcp_state_exec_result.success.servers[0]
+    expect(server.server_name).toBe("github")
+    expect(server.server_identifier).toBe("github")
+    expect(server.tools).toHaveLength(1)
+    expect(server.tools[0].name).toBe("github-create_pull_request")
+    expect(server.tools[0].description).toBe("Open a pull request")
+    expect(server.tools[0].provider_identifier).toBe("github")
+    expect(server.tools[0].tool_name).toBe("create_pull_request")
+    expect(server.tools[0].input_schema.length).toBeGreaterThan(0)
   })
 
   it("buildRequestContextResult encodes a prebuilt request_context", () => {

@@ -1,6 +1,8 @@
 import { encodeMessage } from "./messages.js"
 import { encodeJsonAsValue, decodeStructEntriesToJson, readAllFields } from "./struct.js"
 import { trace } from "../debug.js"
+import { cursorExecVariantByRequestName } from "./exec-variants.js"
+import type { CursorShellOutcome } from "../shell-timeout.js"
 
 // Exec variant field number whose reply is the server-initiated request_context
 // probe (ExecServerMessage #10 → ExecClientMessage #10). request/result share a
@@ -192,6 +194,7 @@ const cursorToolToOpencode: Record<string, string> = {
   ls_args: "read",
   delete_args: "bash",
   shell_stream_args: "bash",
+  background_shell_spawn_args: "bash",
   subagent_args: "task",
   mcp_args: "mcp",
 }
@@ -255,29 +258,6 @@ export function mapToolNameToExecField(toolName: string): string | undefined {
   return opencodeToolToCursor[toolName]
 }
 
-// Cursor exec-request variant → the ExecClientMessage result field the client
-// must reply with. This is keyed off the REQUEST variant, not the opencode tool
-// name, because an MCP call must always answer with `mcp_result` even though the
-// resolved tool name (e.g. "read") looks like a built-in.
-const execVariantToResultField: Record<string, string> = {
-  read_args: "read_result",
-  write_args: "write_result",
-  pi_read_args: "pi_read_result",
-  pi_bash_args: "pi_bash_result",
-  pi_edit_args: "pi_edit_result",
-  pi_write_args: "pi_write_result",
-  pi_grep_args: "pi_grep_result",
-  pi_find_args: "pi_find_result",
-  pi_ls_args: "pi_ls_result",
-  grep_args: "grep_result",
-  ls_args: "ls_result",
-  delete_args: "delete_result",
-  shell_stream_args: "shell_stream",
-  subagent_args: "subagent_result",
-  mcp_args: "mcp_result",
-}
-
-
 // ── Extract exec args from ExecServerMessage ──
 
 export type ParsedExecRequest = {
@@ -289,7 +269,11 @@ export type ParsedExecRequest = {
   resultField: string
   /** Typed error to return without asking OpenCode to execute invalid args. */
   localError?: string
+  /** Original request values needed by typed Cursor result messages. */
+  resultMetadata?: Record<string, unknown>
 }
+
+const BACKGROUND_SHELL_MARKER = "__CURSOR_BACKGROUND_SHELL__"
 
 export function parseExecServerMessage(
   msg: Record<string, unknown>,
@@ -303,18 +287,47 @@ export function parseExecServerMessage(
     "pi_read_args", "pi_bash_args", "pi_edit_args", "pi_write_args",
     "pi_grep_args", "pi_find_args", "pi_ls_args",
     "grep_args", "ls_args",
-    "delete_args", "shell_stream_args", "mcp_args",
+    "delete_args", "shell_stream_args", "background_shell_spawn_args", "mcp_args",
     "subagent_args",
   ])
   if (!execVariant) return undefined
 
-  const resultField = execVariantToResultField[execVariant]
+  // Use the complete canonical request/result table. In particular, Pi request
+  // fields #45..#51 pair with result fields #46..#52 rather than matching ids.
+  const resultField = cursorExecVariantByRequestName(execVariant)?.resultName
+  if (!resultField) return undefined
   const execId = (msg.exec_id as string) ?? ""
+
+  if (execVariant === "background_shell_spawn_args") {
+    const raw = (msg.background_shell_spawn_args as Record<string, unknown>) ?? {}
+    const command = str(raw.command)
+    const workingDirectory = str(raw.working_directory) ?? ""
+    const args: Record<string, unknown> = {}
+    if (command) args.command = buildBackgroundShellCommand(command)
+    if (workingDirectory) args.workdir = workingDirectory
+    return {
+      id,
+      execId,
+      toolName: "bash",
+      args,
+      resultField,
+      resultMetadata: { command: command ?? "", working_directory: workingDirectory },
+      localError:
+        raw.enable_write_shell_stdin_tool === true
+          ? "Interactive background shells are not available through OpenCode's bash tool."
+          : command
+            ? undefined
+            : "Cursor background shell request is missing a command.",
+    }
+  }
 
   if (execVariant === "subagent_args") {
     const raw = (msg.subagent_args as Record<string, unknown>) ?? {}
     const prompt = str(raw.prompt)
-    const subagentType = str(raw.subagent_type)
+    const cursorSubagentType = str(raw.subagent_type)
+    const subagentType = cursorSubagentType
+      ? mapCursorSubagentTypeToOpenCode(cursorSubagentType)
+      : undefined
     const args: Record<string, unknown> = {
       description: describeSubagentTask(prompt, subagentType),
       prompt: prompt ?? "",
@@ -333,7 +346,7 @@ export function parseExecServerMessage(
       args,
       resultField,
       localError:
-        prompt && subagentType
+        prompt && cursorSubagentType
           ? undefined
           : "Cursor subagent request is missing a required prompt or subagent type.",
     }
@@ -388,12 +401,46 @@ export function parseExecServerMessage(
     (msg[execVariant] as Record<string, unknown>) ?? {},
     execVariant,
   )
+  const resultMetadata = execVariant === "shell_stream_args"
+    ? shellStreamResultMetadata((msg[execVariant] as Record<string, unknown>) ?? {})
+    : undefined
+  if (
+    resultMetadata
+    && resultMetadata.timeout_behavior !== 2
+    && typeof resultMetadata.timeout_ms === "number"
+  ) {
+    // Cursor's protobuf default (timeout=0) means 30 seconds for an ordinary
+    // foreground shell. OpenCode instead treats zero literally, so pass the
+    // effective native value rather than the raw protobuf default.
+    mapped.args.timeout = resultMetadata.timeout_ms
+  }
   return {
     id,
     execId,
     toolName: mapped.toolName,
     args: mapped.args,
     resultField,
+    ...(resultMetadata ? { resultMetadata } : {}),
+  }
+}
+
+function shellStreamResultMetadata(raw: Record<string, unknown>): Record<string, unknown> {
+  const timeout = num(raw.timeout) ?? 0
+  const timeoutBehavior = num(raw.timeout_behavior) ?? 0
+  const hardTimeout = num(raw.hard_timeout)
+  // Cursor CLI: a nonzero timeout is used verbatim. A zero foreground timeout
+  // defaults to 30s; zero with background/hard-timeout semantics means an
+  // immediate soft handoff governed by the separate hard deadline.
+  const effectiveTimeout = timeout !== 0
+    ? timeout
+    : (timeoutBehavior === 2 || (hardTimeout !== undefined && hardTimeout > 0) ? 0 : 30_000)
+  return {
+    shell_stream: true,
+    command: str(raw.command) ?? "",
+    working_directory: str(raw.working_directory) ?? "",
+    timeout_ms: effectiveTimeout,
+    timeout_behavior: timeoutBehavior,
+    ...(hardTimeout !== undefined && hardTimeout > 0 ? { hard_timeout_ms: hardTimeout } : {}),
   }
 }
 
@@ -525,8 +572,35 @@ function describeSubagentTask(prompt?: string, subagentType?: string): string {
   return `${subagentType || "Delegated"} task`
 }
 
+function mapCursorSubagentTypeToOpenCode(subagentType: string): string {
+  // Cursor's built-in general agent uses a camelCase protocol identifier, and
+  // its native Bugbot reviewer has no OpenCode-specific agent definition.
+  // OpenCode `general` is the general-purpose equivalent; `explore` preserves
+  // Bugbot's review-only/read-oriented semantics while retaining grep/read/bash.
+  // Preserve every other value so `explore` and configured custom agents keep
+  // their exact advertised names.
+  if (subagentType === "generalPurpose") return "general"
+  if (subagentType === "bugbot") return "explore"
+  return subagentType
+}
+
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`
+}
+
+/**
+ * OpenCode's bash tool is foreground-only. Detach the requested command inside
+ * that one foreground call and print a private marker containing the spawned
+ * PID and log path. With stdin and all output redirected, the host shell can
+ * return immediately instead of retaining OpenCode's tool pipe.
+ */
+function buildBackgroundShellCommand(command: string): string {
+  return [
+    'bg_log="$(mktemp "${TMPDIR:-/tmp}/cursor-opencode-bg.XXXXXX")" || exit 1',
+    `nohup sh -c ${shellQuote(command)} >"$bg_log" 2>&1 </dev/null &`,
+    "bg_pid=$!",
+    `printf '${BACKGROUND_SHELL_MARKER}%s:%s\\n' "$bg_pid" "$bg_log"`,
+  ].join("\n")
 }
 
 /**
@@ -608,6 +682,10 @@ export type ToolResultInput = {
    * rewritten. read_result is always a read, so it unwraps regardless.
    */
   toolName?: string
+  /** Original request fields required by a typed result (background shell). */
+  resultMetadata?: Record<string, unknown>
+  /** Structured shell completion captured by the OpenCode plugin hook. */
+  shellOutcome?: CursorShellOutcome
 }
 
 /**
@@ -631,16 +709,43 @@ export function buildExecClientMessages(input: ToolResultInput): Uint8Array[] {
       if (input.output) {
         frames.push(encodeShellStream(input.execId, undefined, { stdout: { data: input.output } }))
       }
-      frames.push(encodeShellStream(input.execId, input.executionTimeMs, {
-        exit: { code: 0, aborted: false },
-      }))
+      if (input.shellOutcome?.kind === "backgrounded") {
+        frames.push(encodeShellStream(input.execId, input.executionTimeMs, {
+          backgrounded: {
+            shell_id: input.shellOutcome.shellId,
+            command: input.shellOutcome.command,
+            working_directory: input.shellOutcome.workingDirectory,
+            pid: input.shellOutcome.pid,
+            ms_to_wait: input.shellOutcome.msToWait,
+            reason: input.shellOutcome.reason,
+          },
+        }))
+      } else if (input.shellOutcome?.kind === "timeout") {
+        frames.push(encodeShellStream(input.execId, input.executionTimeMs, {
+          // Native CLI represents timeout structurally. ShellAbortReason.TIMEOUT=2.
+          exit: { code: 0, aborted: true, abort_reason: 2 },
+        }))
+      } else {
+        const exitCode = input.shellOutcome?.kind === "exit"
+          ? Math.max(0, Math.min(0xffff_ffff, input.shellOutcome.code))
+          : 0
+        frames.push(encodeShellStream(input.execId, input.executionTimeMs, {
+          exit: { code: exitCode, aborted: false },
+        }))
+      }
     }
   } else {
     const clientMsg: Record<string, unknown> = {
       id: input.execId,
       local_execution_time_ms: input.executionTimeMs ?? 0,
     }
-    clientMsg[resultField] = buildTypedExecResult(resultField, input.output, input.error, input.toolName)
+    clientMsg[resultField] = buildTypedExecResult(
+      resultField,
+      input.output,
+      input.error,
+      input.toolName,
+      input.resultMetadata,
+    )
     frames.push(
       encodeMessage("AgentClientMessage", {
         exec_client_message: clientMsg,
@@ -735,6 +840,7 @@ export function buildTypedExecResult(
   output: string,
   error?: string,
   toolName?: string,
+  resultMetadata?: Record<string, unknown>,
 ): Record<string, unknown> {
   switch (resultField) {
     case "read_result":
@@ -799,6 +905,30 @@ export function buildTypedExecResult(
     case "delete_result":
       if (error) return { error: { path: "", error } }
       return { success: { path: "", deleted_file: "" } }
+    case "background_shell_spawn_result": {
+      const command = str(resultMetadata?.command) ?? ""
+      const workingDirectory = str(resultMetadata?.working_directory) ?? ""
+      if (error) return { error: { command, working_directory: workingDirectory, error } }
+      const match = new RegExp(`${BACKGROUND_SHELL_MARKER}(\\d+):([^\\r\\n]+)`).exec(output)
+      const pid = match ? Number(match[1]) : 0
+      if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 0xffff_ffff) {
+        return {
+          error: {
+            command,
+            working_directory: workingDirectory,
+            error: "OpenCode did not return a valid background shell process id.",
+          },
+        }
+      }
+      return {
+        success: {
+          shell_id: pid,
+          command,
+          working_directory: workingDirectory,
+          pid,
+        },
+      }
+    }
     case "ls_result": {
       if (error) return { error: { path: "", error } }
       const rootPath = process.cwd()
@@ -1016,18 +1146,29 @@ export function buildMcpStateResult(
     ? fsOptions.mcp_descriptors.map(recordValue).filter((d): d is Record<string, unknown> => !!d)
     : []
   const descriptors = nested.length > 0 ? nested : descriptorsFromFlatTools(requestContext.tools)
+  const flatTools = Array.isArray(requestContext.tools)
+    ? requestContext.tools.map(recordValue).filter((tool): tool is Record<string, unknown> => !!tool)
+    : []
   const servers = descriptors
     .filter((descriptor) => {
       const id = stringValue(descriptor.server_identifier)
       return requested.size === 0 || (id !== undefined && requested.has(id))
     })
-    .map((descriptor) => ({
-      server_name:
-        stringValue(descriptor.server_name) ?? stringValue(descriptor.server_identifier) ?? "",
-      server_identifier:
-        stringValue(descriptor.server_identifier) ?? stringValue(descriptor.server_name) ?? "",
-      tools: Array.isArray(descriptor.tools) ? descriptor.tools : [],
-    }))
+    .map((descriptor) => {
+      const serverIdentifier =
+        stringValue(descriptor.server_identifier) ?? stringValue(descriptor.server_name) ?? ""
+      const tools = Array.isArray(descriptor.tools)
+        ? descriptor.tools
+            .map(recordValue)
+            .filter((tool): tool is Record<string, unknown> => !!tool)
+            .map((tool) => mcpStateToolDefinition(serverIdentifier, tool, flatTools))
+        : []
+      return {
+        server_name: stringValue(descriptor.server_name) ?? serverIdentifier,
+        server_identifier: serverIdentifier,
+        tools,
+      }
+    })
 
   return encodeMessage("AgentClientMessage", {
     exec_client_message: {
@@ -1035,6 +1176,32 @@ export function buildMcpStateResult(
       mcp_state_exec_result: { success: { servers } },
     },
   })
+}
+
+/**
+ * Exec #36 uses McpToolDefinition, not the narrower McpToolDescriptor used by
+ * RequestContext's filesystem/meta-tool catalogs. Rehydrate the full identity
+ * from RequestContext.tools so Cursor's native get_mcp_tools can correlate the
+ * discovered definition with the later provider_identifier/tool_name request.
+ */
+function mcpStateToolDefinition(
+  serverIdentifier: string,
+  descriptor: Record<string, unknown>,
+  flatTools: Array<Record<string, unknown>>,
+): Record<string, unknown> {
+  const toolName = stringValue(descriptor.tool_name) ?? ""
+  const advertised = flatTools.find((tool) =>
+    stringValue(tool.provider_identifier) === serverIdentifier
+      && stringValue(tool.tool_name) === toolName
+  )
+  return {
+    name: stringValue(advertised?.name) ?? `${serverIdentifier}-${toolName}`,
+    description:
+      stringValue(advertised?.description) ?? stringValue(descriptor.description) ?? "",
+    input_schema: advertised?.input_schema ?? descriptor.input_schema,
+    provider_identifier: serverIdentifier,
+    tool_name: toolName,
+  }
 }
 
 function recordValue(value: unknown): Record<string, unknown> | undefined {
