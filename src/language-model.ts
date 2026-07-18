@@ -534,7 +534,10 @@ async function startSession(
   const systemPrompt = interactionGuidance
     ? [baseSystemPrompt, interactionGuidance].filter(Boolean).join("\n\n")
     : baseSystemPrompt
-  const history = extractPromptHistory(prompt, { preserveTrailingUser: recovery })
+  const history = extractPromptHistory(prompt, {
+    preserveTrailingUser: recovery,
+    toolResults: isCompaction ? "all" : (recovery ? "trailing" : "omit"),
+  })
 
   await loadAvailableModels()
 
@@ -992,6 +995,65 @@ export async function pump(
     }
   }
 
+  /**
+   * Cursor's streamed edit handshake reads the target before it sends the
+   * replacement through write_args. For a new file that read naturally fails,
+   * which makes the model abandon the edit and fall back to a shell heredoc.
+   * Treat only a missing target correlated to an edit_tool_call as an empty
+   * file, allowing Cursor to continue to the ordinary OpenCode write call.
+   */
+  const recoverMissingEditRead = (
+    parsed: ParsedExecRequest,
+    displayCallId: string | undefined,
+  ): boolean => {
+    if (
+      !displayCallId ||
+      parsed.resultField !== "read_result" ||
+      parsed.toolName !== "read" ||
+      !advertisedToolNameSet.has("write")
+    ) return false
+
+    const stored = session.displayToolCalls.get(displayCallId)
+    const display = parseDisplayToolCall(displayCallId, stored)
+    if (display?.variant !== "edit_tool_call" || display.bridgeable === false) return false
+
+    const requestedPath = typeof parsed.args.filePath === "string" ? parsed.args.filePath : ""
+    const editPath = typeof display.args.path === "string" ? display.args.path : ""
+    if (!requestedPath || !editPath) return false
+
+    const workspaceRoot = typeof session.requestContext.workspace_project_dir === "string"
+      ? session.requestContext.workspace_project_dir
+      : process.cwd()
+    const resolvePath = (value: string) => path.resolve(workspaceRoot, value)
+    const absolutePath = resolvePath(requestedPath)
+    if (absolutePath !== resolvePath(editPath) || fs.existsSync(absolutePath)) return false
+
+    try {
+      for (const frame of buildExecClientMessages({
+        execId: parsed.id,
+        resultField: parsed.resultField,
+        output: "",
+        toolName: parsed.toolName,
+        resultMetadata: { path: requestedPath },
+      })) {
+        session.stream.write(frame)
+      }
+      trace(
+        `exec: missing edit target treated as empty file id=${parsed.id} ` +
+          `path=${JSON.stringify(requestedPath)}; awaiting write_args`,
+      )
+      return true
+    } catch (e) {
+      const error = new Error(
+        `Failed to recover Cursor edit read for a new file: ${(e as Error).message}`,
+      )
+      trace(`exec: edit read recovery FAILED ${error.message}`)
+      safeError(error)
+      sessionManager.close(session)
+      return true
+    }
+  }
+
   /** AI SDK V3 requires text-end / reasoning-end before finish or tool-call. */
   const closeOpenSpans = () => {
     for (const part of spanEndParts({ textStarted, reasoningStarted, textId, reasoningId })) {
@@ -1321,7 +1383,13 @@ export async function pump(
           session.stream.write(buildRequestContextResult(esmId, session.requestContext))
           trace(`exec request_context: replied`)
         } catch (e) {
-          trace(`exec request_context: write FAILED ${(e as Error).message}`)
+          const error = new Error(
+            `Failed to answer Cursor request_context probe: ${(e as Error).message}`,
+          )
+          trace(`exec request_context: write FAILED ${error.message}`)
+          safeError(error)
+          sessionManager.close(session)
+          return
         }
       } else if (esm.mcp_state_exec_args) {
         // MCP-backed writes/reads can be preceded by this control-plane probe.
@@ -1344,10 +1412,6 @@ export async function pump(
       } else {
         const parsed = parseExecServerMessage(esm)
         const displayCallId = extractExecDisplayCallId(esm)
-        if (displayCallId) {
-          session.displayToolCalls.delete(displayCallId)
-          trace(`exec: claimed display callId=${displayCallId}`)
-        }
         trace(`exec: id=${parsed?.id} variant=${parsed ? Object.keys(parsed).join(",") : "none"} toolName=${parsed?.toolName} resultField=${parsed?.resultField}`)
         if (parsed) {
           if (parsed.localError) {
@@ -1383,6 +1447,11 @@ export async function pump(
             )
             if (!rejectExec(parsed, reason, "unavailable tool")) return
             continue
+          }
+          if (recoverMissingEditRead(parsed, displayCallId)) continue
+          if (displayCallId) {
+            session.displayToolCalls.delete(displayCallId)
+            trace(`exec: claimed display callId=${displayCallId}`)
           }
           const tc = buildToolCallPart(parsed, session.sessionId)
           if (parsed.resultField === "shell_stream") {
@@ -1432,7 +1501,8 @@ export async function pump(
     } else if (interactionQuery) {
       // InteractionQuery is a must-reply channel, just like exec and KV. AI
       // SDK has no Cursor-specific UI callback, so answer immediately with the
-      // conservative headless policy from protocol/interactions.ts.
+      // conservative headless policy from protocol/interactions.ts (including
+      // F14 create_plan auto-ack / empty plan_uri for CLI headless parity).
       try {
         const handled = handleInteractionQuery(interactionQuery, payload)
         session.stream.write(handled.reply)
@@ -1470,7 +1540,13 @@ export async function pump(
               `found=${handled.found} echoed=${!!handled.echoed} ` +
               `sessionBlobs=${session.blobs.size} convBlobs=${conversationBlobCount(session.conversationId)}`,
             )
-        } catch { /* stream closed; pump will surface end */ }
+        } catch (e) {
+          const error = new Error(`Failed to answer Cursor KV blob request: ${(e as Error).message}`)
+          trace(`kv: write FAILED ${error.message}`)
+          safeError(error)
+          sessionManager.close(session)
+          return
+        }
       }
     }
     } catch (e) {
@@ -1618,6 +1694,13 @@ export function buildOpenCodeInteractionGuidance(
       "- To fetch a known URL, call the OpenCode `webfetch` tool; do not use Cursor's native WebFetch interaction.",
     )
   }
+  if (names.has("write")) {
+    instructions.push(
+      names.has("edit")
+        ? "- For file changes, use OpenCode `edit` for targeted changes to existing files and `write` to create files or intentionally replace complete contents; do not use shell, Python, or heredocs to change file content while these tools are available."
+        : "- Use OpenCode `write` for file-content changes; do not use shell, Python, or heredocs to change file content while it is available.",
+    )
+  }
   return [
     `OpenCode exposes exactly these executable tools for this turn: ${[...names].map((name) => `\`${name}\``).join(", ")}.`,
     `Workspace root: ${JSON.stringify(workspaceRoot)}. Resolve workspace paths against exactly this root; never invent an absolute prefix, and verify uncertain paths with an available tool before using them.`,
@@ -1678,16 +1761,30 @@ export function cursorTurnEndedProviderMetadata(te: Record<string, unknown>): {
 }
 
 /**
- * Prior prompt turns for a seed ConversationStateStructure after compaction
- * reset. Drops the trailing user message (live action), but preserves tool
- * result payloads as labeled assistant observations for Cursor's text history.
+ * Prior prompt turns for a seed ConversationStateStructure. Tool results must
+ * never be replayed as assistant-authored prose: that teaches the model to
+ * counterfeit `Tool result (...)` text instead of emitting a real tool call.
+ * Normal rebases omit old results; compaction can retain all results and
+ * interrupted continuations retain only the trailing live result suffix as
+ * explicit OpenCode-host observations.
  */
 export function extractPromptHistory(
   prompt: LanguageModelV3CallOptions["prompt"],
-  options?: { preserveTrailingUser?: boolean },
+  options?: {
+    preserveTrailingUser?: boolean
+    toolResults?: "omit" | "all" | "trailing"
+  },
 ): SeedHistoryMessage[] {
   const out: SeedHistoryMessage[] = []
-  for (const m of prompt) {
+  const toolResults = options?.toolResults ?? "omit"
+  let trailingToolStart = prompt.length
+  if (toolResults === "trailing") {
+    while (trailingToolStart > 0 && prompt[trailingToolStart - 1]?.role === "tool") {
+      trailingToolStart--
+    }
+  }
+  for (let messageIndex = 0; messageIndex < prompt.length; messageIndex++) {
+    const m = prompt[messageIndex]!
     if (m.role === "system") {
       if (typeof m.content === "string" && m.content.length > 0) {
         out.push({ role: "system", content: m.content })
@@ -1705,16 +1802,25 @@ export function extractPromptHistory(
       continue
     }
     if (m.role === "tool" && Array.isArray(m.content)) {
+      if (
+        toolResults === "omit" ||
+        (toolResults === "trailing" && messageIndex < trailingToolStart)
+      ) continue
       const results: string[] = []
       for (const part of m.content) {
         const p = part as unknown as Record<string, unknown>
         if (p.type !== "tool-result") continue
         const toolName = typeof p.toolName === "string" && p.toolName ? p.toolName : "tool"
+        const toolCallId = typeof p.toolCallId === "string" ? p.toolCallId : ""
         const result = toolResultOutputToText(p.output)
-        const label = result.isError ? "Tool error" : "Tool result"
-        results.push(`${label} (${toolName}):\n${result.text}`)
+        results.push(formatSeedToolObservation({
+          toolName,
+          toolCallId,
+          output: result.text,
+          isError: result.isError,
+        }))
       }
-      if (results.length > 0) appendSeedHistory(out, "assistant", results.join("\n\n"))
+      if (results.length > 0) appendSeedHistory(out, "user", results.join("\n\n"))
     }
   }
   // Live user message is the Run action, not seed history.
@@ -1722,6 +1828,21 @@ export function extractPromptHistory(
     out.pop()
   }
   return out
+}
+
+function formatSeedToolObservation(input: {
+  toolName: string
+  toolCallId: string
+  output: string
+  isError: boolean
+}): string {
+  const metadata = JSON.stringify({
+    source: "opencode-tool",
+    tool: input.toolName,
+    callId: input.toolCallId,
+    status: input.isError ? "error" : "completed",
+  })
+  return `OpenCode host observation ${metadata}:\n${input.output}`
 }
 
 function extractAssistantHistoryText(msg: Record<string, unknown>): string {

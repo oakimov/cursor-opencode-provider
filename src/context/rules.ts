@@ -131,8 +131,42 @@ async function expandGlob(pattern: string, workspaceRoot: string): Promise<strin
   return out
 }
 
+/** Same truthy rule as OpenCode's Flag.OPENCODE_DISABLE_PROJECT_CONFIG. */
+export function isProjectConfigDisabled(): boolean {
+  const value = process.env.OPENCODE_DISABLE_PROJECT_CONFIG?.toLowerCase()
+  return value === "true" || value === "1"
+}
+
+/** Fetch a remote instruction with one deadline covering headers and body. */
+export async function fetchRemoteInstruction(
+  url: string,
+  timeoutMs = 5000,
+): Promise<string | undefined> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), Math.max(1, timeoutMs))
+  try {
+    const res = await fetch(url, { signal: ctrl.signal })
+    if (!res.ok) return undefined
+    return await res.text()
+  } catch {
+    return undefined
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export async function loadMergedConfig(workspaceRoot: string): Promise<OpencodeJson> {
   const globalConfig = await readJsonConfig(opencodeGlobalConfigDir())
+  if (isProjectConfigDisabled()) {
+    return {
+      ...globalConfig,
+      instructions: [...(globalConfig.instructions ?? [])],
+      plugin: [...(globalConfig.plugin ?? [])],
+      plugins: [...(globalConfig.plugins ?? [])],
+      mcp: { ...(globalConfig.mcp ?? {}) },
+      permission: globalConfig.permission,
+    }
+  }
   const projectConfig = await readJsonConfig(workspaceRoot)
   return {
     ...globalConfig,
@@ -168,11 +202,15 @@ export async function collectRules(workspaceRoot: string): Promise<{
     rules.push(rule)
   }
 
-  for (const name of ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"]) {
-    const hit = await findUp(name, workspaceRoot, worktree)
-    if (hit) {
-      await add(hit)
-      break
+  // Match OpenCode: OPENCODE_DISABLE_PROJECT_CONFIG skips project AGENTS/CLAUDE/CONTEXT
+  // discovery and project opencode.json (see loadMergedConfig).
+  if (!isProjectConfigDisabled()) {
+    for (const name of ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"]) {
+      const hit = await findUp(name, workspaceRoot, worktree)
+      if (hit) {
+        await add(hit)
+        break
+      }
     }
   }
 
@@ -181,19 +219,19 @@ export async function collectRules(workspaceRoot: string): Promise<{
 
   for (const raw of config.instructions ?? []) {
     if (raw.startsWith("http://") || raw.startsWith("https://")) {
+      // HTTPS-only. Redirects (incl. to a local proxy) are intentional — do not
+      // disable follow-redirects or reject localhost/private/metadata hosts.
+      let remoteUrl: URL
       try {
-        const ctrl = new AbortController()
-        const t = setTimeout(() => ctrl.abort(), 5000)
-        const res = await fetch(raw, { signal: ctrl.signal })
-        clearTimeout(t)
-        if (!res.ok) continue
-        const content = await res.text()
-        if (!content.trim() || seen.has(raw)) continue
-        seen.add(raw)
-        rules.push({ fullPath: raw, content })
+        remoteUrl = new URL(raw)
       } catch {
-        /* ignore */
+        continue
       }
+      if (remoteUrl.protocol !== "https:") continue
+      const content = await fetchRemoteInstruction(remoteUrl.href)
+      if (!content?.trim() || seen.has(raw)) continue
+      seen.add(raw)
+      rules.push({ fullPath: raw, content })
       continue
     }
     const expanded = resolveHomeRelative(raw)

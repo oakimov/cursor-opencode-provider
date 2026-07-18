@@ -68,6 +68,18 @@ describe("buildOpenCodeInteractionGuidance", () => {
     expect(guidance).toContain("never invent an absolute prefix")
     expect(guidance).toContain("verify uncertain paths")
   })
+
+  it("prefers edit and write over shell file mutation", () => {
+    const guidance = buildOpenCodeInteractionGuidance([
+      { name: "bash" },
+      { name: "edit" },
+      { name: "write" },
+    ], false, "/workspace/project")
+
+    expect(guidance).toContain("OpenCode `edit` for targeted changes")
+    expect(guidance).toContain("`write` to create files")
+    expect(guidance).toContain("do not use shell, Python, or heredocs")
+  })
 })
 
 describe("extractPromptHistory", () => {
@@ -85,8 +97,7 @@ describe("extractPromptHistory", () => {
     ])
   })
 
-  it("preserves real tool results instead of inventing a used-tools claim", () => {
-    const history = extractPromptHistory([
+  const toolHistoryPrompt = [
       { role: "user", content: "do it" },
       {
         role: "assistant",
@@ -104,18 +115,71 @@ describe("extractPromptHistory", () => {
         ],
       },
       { role: "user", content: "Continue" },
-    ] as LanguageModelV3CallOptions["prompt"])
+    ] as LanguageModelV3CallOptions["prompt"]
+
+  it("omits historical tool results from normal rebases", () => {
+    const history = extractPromptHistory(toolHistoryPrompt)
     expect(history).toEqual([
       { role: "user", content: "do it" },
       {
         role: "assistant",
-        content:
-          "Checking the debug log and recent tool-call behavior.\n\n" +
-          "Tool result (bash):\nACTUAL DEBUG LOG OUTPUT\n\n" +
-          "Tool error (grep):\nACTUAL GREP ERROR",
+        content: "Checking the debug log and recent tool-call behavior.",
       },
     ])
-    expect(history[1]?.content).not.toContain("[Used tools:")
+    expect(JSON.stringify(history)).not.toContain("Tool result")
+    expect(JSON.stringify(history)).not.toContain("ACTUAL DEBUG LOG OUTPUT")
+  })
+
+  it("keeps compaction tool evidence as OpenCode host observations", () => {
+    const history = extractPromptHistory(toolHistoryPrompt, { toolResults: "all" })
+    expect(history).toEqual([
+      { role: "user", content: "do it" },
+      {
+        role: "assistant",
+        content: "Checking the debug log and recent tool-call behavior.",
+      },
+      {
+        role: "user",
+        content:
+          'OpenCode host observation {"source":"opencode-tool","tool":"bash","callId":"1","status":"completed"}:\n' +
+          "ACTUAL DEBUG LOG OUTPUT\n\n" +
+          'OpenCode host observation {"source":"opencode-tool","tool":"grep","callId":"2","status":"error"}:\n' +
+          "ACTUAL GREP ERROR",
+      },
+    ])
+    expect(history[2]?.content).not.toContain("Tool result")
+  })
+
+  it("keeps only trailing tool results for interrupted continuation recovery", () => {
+    const prompt = [
+      ...toolHistoryPrompt.slice(0, -1),
+      { role: "user", content: "Run one more check" },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool-call", toolCallId: "3", toolName: "read", input: "{}" },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          { type: "tool-result", toolCallId: "3", toolName: "read", output: { type: "text", value: "LATEST FILE" } },
+        ],
+      },
+    ] as LanguageModelV3CallOptions["prompt"]
+
+    const history = extractPromptHistory(prompt, {
+      preserveTrailingUser: true,
+      toolResults: "trailing",
+    })
+    expect(JSON.stringify(history)).not.toContain("ACTUAL DEBUG LOG OUTPUT")
+    expect(JSON.stringify(history)).toContain("LATEST FILE")
+    expect(history.at(-1)).toEqual({
+      role: "user",
+      content:
+        "Run one more check\n\n" +
+        'OpenCode host observation {"source":"opencode-tool","tool":"read","callId":"3","status":"completed"}:\nLATEST FILE',
+    })
   })
 })
 

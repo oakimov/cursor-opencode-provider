@@ -102,11 +102,26 @@ describe("message round-trip", () => {
     const data = encodeMessage("ExecClientMessage", {
       id: 1,
       local_execution_time_ms: 42,
-      read_result: { success: { path: "/f", content: "file content", total_lines: 1 } },
+      read_result: {
+        success: {
+          path: "/f",
+          content: "file content",
+          total_lines: 12,
+          file_size: 120,
+          truncated: false,
+          range_applied: true,
+        },
+      },
     })
     const decoded = decodeMessage<any>("ExecClientMessage", data)
     expect(decoded.id).toBe(1)
     expect(decoded.read_result?.success?.content).toBe("file content")
+    expect(decoded.read_result?.success).toMatchObject({
+      total_lines: 12,
+      file_size: 120,
+      truncated: false,
+      range_applied: true,
+    })
     expect(decoded.local_execution_time_ms).toBe(42)
   })
 
@@ -173,6 +188,25 @@ describe("message round-trip", () => {
   it("Unknown type throws", () => {
     expect(() => encodeMessage("NonExistent", {})).toThrow()
     expect(() => decodeMessage("NonExistent", new Uint8Array(0))).toThrow()
+  })
+})
+
+describe("canonical read-result wire fields", () => {
+  it("encodes ReadSuccess range_applied on canonical field 8", () => {
+    const data = encodeMessage("ReadSuccess", {
+      path: "/f",
+      content: "x",
+      total_lines: 12,
+      file_size: 120,
+      range_applied: true,
+    })
+    expect(Array.from(data)).toEqual([
+      0x0a, 0x02, 0x2f, 0x66, // path #1 = /f
+      0x12, 0x01, 0x78, // content #2 = x
+      0x18, 0x0c, // total_lines #3 = 12
+      0x20, 0x78, // file_size #4 = 120
+      0x40, 0x01, // range_applied #8 = true
+    ])
   })
 })
 

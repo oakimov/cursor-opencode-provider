@@ -1,5 +1,8 @@
 import { describe, it, expect } from "bun:test"
 import protobuf from "protobufjs"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
 import {
   mapExecServerToToolName,
   mapToolNameToExecField,
@@ -371,6 +374,16 @@ describe("parseExecServerMessage", () => {
     expect(result!.args.path).toBeUndefined()
     expect(result!.args.tool_call_id).toBeUndefined()
     expect(result!.resultField).toBe("read_result")
+  })
+
+  it("preserves the applied native read range for typed result metadata", () => {
+    const result = parseExecServerMessage({
+      id: 2,
+      exec_id: "exec-2",
+      read_args: { path: "/test.txt", offset: 175, limit: 40 },
+    })
+    expect(result!.args).toEqual({ filePath: "/test.txt", offset: 175, limit: 40 })
+    expect(result!.resultMetadata).toEqual({ path: "/test.txt", offset: 175, limit: 40 })
   })
 
   it("parses write_args with filePath/content", () => {
@@ -1149,15 +1162,171 @@ describe("buildTypedExecResult read-envelope unwrap", () => {
     expect(r.success.total_lines).toBe(3)
   })
 
+  it("returns full-file metadata for a bounded middle-of-file read", () => {
+    const r = buildTypedExecResult(
+      "read_result",
+      OPENCODE_READ_PAGED,
+      undefined,
+      "read",
+      { path: "/abs/big.ts", offset: 100, limit: 2 },
+    ) as {
+      success: {
+        content: string
+        total_lines: number
+        file_size: number
+        truncated: boolean
+        range_applied: boolean
+      }
+    }
+    expect(r.success).toMatchObject({
+      content: "lineA\nlineB",
+      total_lines: 500,
+      file_size: 0,
+      truncated: false,
+      range_applied: true,
+    })
+  })
+
+  it("keeps Cursor's 175/40 range distinct from the complete 1238-line file", () => {
+    const body = Array.from({ length: 40 }, (_, index) => `${175 + index}: line ${175 + index}`)
+    const output = [
+      "<path>/abs/large.ts</path>",
+      "<type>file</type>",
+      "<content>",
+      ...body,
+      "",
+      "(Showing lines 175-214 of 1238. Use offset=215 to continue.)",
+      "</content>",
+    ].join("\n")
+    const r = buildTypedExecResult(
+      "read_result",
+      output,
+      undefined,
+      "read",
+      { path: "/abs/large.ts", offset: 175, limit: 40 },
+    ) as { success: { total_lines: number; truncated: boolean; range_applied: boolean } }
+    expect(r.success).toMatchObject({
+      total_lines: 1238,
+      truncated: false,
+      range_applied: true,
+    })
+  })
+
+  it("marks implicit OpenCode pagination as truncation, not a Cursor range", () => {
+    const firstPage = OPENCODE_READ_PAGED
+      .replaceAll("100: lineA", "1: lineA")
+      .replaceAll("101: lineB", "2: lineB")
+      .replace("Showing lines 100-101", "Showing lines 1-2")
+    const r = buildTypedExecResult(
+      "read_result",
+      firstPage,
+      undefined,
+      "read",
+      { path: "/abs/big.ts" },
+    ) as { success: { total_lines: number; truncated: boolean; range_applied: boolean } }
+    expect(r.success).toMatchObject({
+      total_lines: 500,
+      truncated: true,
+      range_applied: false,
+    })
+  })
+
+  it("marks OpenCode's byte-capped output as truncated and recovers the full line count", () => {
+    const packagePath = `${process.cwd()}/package.json`
+    const capped = [
+      `<path>${packagePath}</path>`,
+      "<type>file</type>",
+      "<content>",
+      "1: partial",
+      "",
+      "(Output capped at 50KB. Showing lines 1-1. Use offset=2 to continue.)",
+      "</content>",
+    ].join("\n")
+    const r = buildTypedExecResult(
+      "read_result",
+      capped,
+      undefined,
+      "read",
+      { path: packagePath },
+    ) as { success: { total_lines: number; truncated: boolean; range_applied: boolean } }
+    expect(r.success.total_lines).toBeGreaterThan(1)
+    expect(r.success).toMatchObject({ truncated: true, range_applied: false })
+  })
+
+  it("counts capped files incrementally across buffer boundaries", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-read-line-count-"))
+    const filePath = path.join(root, "large.txt")
+    try {
+      fs.writeFileSync(filePath, `${"a".repeat(64 * 1024)}\nb\nc`)
+      const capped = [
+        `<path>${filePath}</path>`,
+        "<type>file</type>",
+        "<content>",
+        "1: partial",
+        "",
+        "(Output capped at 50KB. Showing lines 1-1. Use offset=2 to continue.)",
+        "</content>",
+      ].join("\n")
+      const r = buildTypedExecResult(
+        "read_result",
+        capped,
+        undefined,
+        "read",
+        { path: filePath },
+      ) as { success: { total_lines: number; truncated: boolean } }
+      expect(r.success).toMatchObject({ total_lines: 3, truncated: true })
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps a bounded range ending at EOF non-truncated", () => {
+    const eofRange = [
+      "<path>/abs/big.ts</path>",
+      "<type>file</type>",
+      "<content>",
+      "499: penultimate",
+      "500: final",
+      "",
+      "(End of file - total 500 lines)",
+      "</content>",
+    ].join("\n")
+    const r = buildTypedExecResult(
+      "read_result",
+      eofRange,
+      undefined,
+      "read",
+      { path: "/abs/big.ts", offset: 499, limit: 40 },
+    ) as { success: { total_lines: number; truncated: boolean; range_applied: boolean } }
+    expect(r.success).toMatchObject({
+      total_lines: 500,
+      truncated: false,
+      range_applied: true,
+    })
+  })
+
+  it("returns the actual byte size when the read path is available", () => {
+    const packagePath = `${process.cwd()}/package.json`
+    const r = buildTypedExecResult(
+      "read_result",
+      OPENCODE_READ_FULL.replace("/abs/file.ts", packagePath),
+      undefined,
+      "read",
+      { path: packagePath },
+    ) as { success: { file_size: number } }
+    expect(r.success.file_size).toBeGreaterThan(0)
+  })
+
   it("read_result empty file → content \"\" (no envelope echoed)", () => {
     const empty = [
       "<path>/x</path>", "<type>file</type>", "<content>",
       "", "(End of file - total 0 lines)", "</content>",
     ].join("\n")
     const r = buildTypedExecResult("read_result", empty) as {
-      success: { content: string }
+      success: { content: string; total_lines: number; truncated: boolean; range_applied: boolean }
     }
     expect(r.success.content).toBe("")
+    expect(r.success).toMatchObject({ total_lines: 0, truncated: false, range_applied: false })
   })
 
   it("mcp_result text is unwrapped for read-via-MCP when toolName=read", () => {

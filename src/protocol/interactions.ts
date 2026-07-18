@@ -71,7 +71,14 @@ export function inspectInteractionQueryWire(
   }
 }
 
-/** Build the immediate typed response required by Cursor's Run RPC. */
+/**
+ * Build the immediate typed response required by Cursor's Run RPC.
+ *
+ * OpenCode has no Cursor UI callbacks, so every InteractionQuery is answered
+ * here with a conservative headless policy (reject UI-bound prompts; ack a few
+ * no-UI cases). See case 7 / F14 for create_plan auto-ack parity with Cursor
+ * CLI headless mode.
+ */
 export function handleInteractionQuery(
   query: Record<string, unknown>,
   agentServerPayload: Uint8Array,
@@ -105,8 +112,14 @@ export function handleInteractionQuery(
       outcome = "rejected"
       break
     case 7:
+      // F14: create_plan_request_query auto-ack (Cursor CLI headless parity).
       // Cursor CLI's headless fallback acknowledges plan creation without a
-      // client-side URI; the plan remains in conversation state/checkpoints.
+      // client-side URI (`success` + empty `plan_uri`); the plan remains in
+      // conversation state / checkpoints. This provider mirrors that reply so
+      // the Run RPC does not deadlock waiting for UI approval. Impact: Cursor
+      // may treat the plan as accepted without an OpenCode UI confirm; local
+      // tool execution is still gated by OpenCode permissions. Do not change
+      // this to reject/prompt without CLI parity evidence.
       response = { create_plan_request_response: { result: { success: {}, plan_uri: "" } } }
       outcome = "acknowledged"
       break

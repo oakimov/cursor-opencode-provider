@@ -1,3 +1,4 @@
+import fs from "node:fs"
 import { encodeMessage } from "./messages.js"
 import { encodeJsonAsValue, decodeStructEntriesToJson, readAllFields } from "./struct.js"
 import { trace } from "../debug.js"
@@ -178,8 +179,13 @@ export function buildLiveRequestContext(
 // glob_args on the exec channel — Cursor's EditToolCall is display-only, and
 // glob/edit from opencode are advertised as MCP tools and arrive as mcp_args.
 //
-// OpenCode has no `ls` / `delete` builtins: ls → read (dirs are readable),
-// delete → bash `rm`. Arg key remapping happens in mapCursorArgsToOpencode.
+// Design note (F11): Cursor has native delete / background-shell tools; OpenCode
+// does not. This provider intentionally remaps:
+//   - delete_args → bash `rm -f -- <quoted-path>`
+//   - background_shell_spawn_args → bash + nohup detach wrapper
+// Permissions still flow through OpenCode's advertised `bash` tool. Soft-
+// background / detached children can outlive the OpenCode tool call; leftover
+// process cleanup is left to the user / OS. Arg key remapping happens below.
 const cursorToolToOpencode: Record<string, string> = {
   read_args: "read",
   write_args: "write",
@@ -298,6 +304,9 @@ export function parseExecServerMessage(
   if (!resultField) return undefined
   const execId = (msg.exec_id as string) ?? ""
 
+  // F11: Cursor native background shell → OpenCode bash. The wrapper detaches
+  // via nohup immediately; OpenCode only sees the spawn marker (pid + log path).
+  // Residual: the child can keep running after this tool call completes.
   if (execVariant === "background_shell_spawn_args") {
     const raw = (msg.background_shell_spawn_args as Record<string, unknown>) ?? {}
     const command = str(raw.command)
@@ -401,9 +410,16 @@ export function parseExecServerMessage(
     (msg[execVariant] as Record<string, unknown>) ?? {},
     execVariant,
   )
+  const rawArgs = (msg[execVariant] as Record<string, unknown>) ?? {}
   const resultMetadata = execVariant === "shell_stream_args"
-    ? shellStreamResultMetadata((msg[execVariant] as Record<string, unknown>) ?? {})
-    : undefined
+    ? shellStreamResultMetadata(rawArgs)
+    : execVariant === "read_args"
+      ? {
+          path: str(rawArgs.path) ?? str(rawArgs.file_path) ?? "",
+          ...(typeof mapped.args.offset === "number" ? { offset: mapped.args.offset } : {}),
+          ...(typeof mapped.args.limit === "number" ? { limit: mapped.args.limit } : {}),
+        }
+      : undefined
   if (
     resultMetadata
     && resultMetadata.timeout_behavior !== 2
@@ -470,7 +486,9 @@ export function mapCursorArgsToOpencode(
     return { toolName: "read", args: filePath ? { filePath } : {} }
   }
 
-  // Native delete_args → bash rm (OpenCode has no delete builtin).
+  // F11: Cursor native delete_args → OpenCode bash. No delete builtin exists, so
+  // we emulate with `rm -f -- <path>` (shell-quoted). Same permission boundary
+  // as any other bash tool call.
   if (execVariant === "delete_args") {
     const target = str(cleaned.path) ?? str(cleaned.filePath)
     return {
@@ -589,10 +607,15 @@ function shellQuote(s: string): string {
 }
 
 /**
+ * F11 / background_shell_spawn_args helper.
+ *
  * OpenCode's bash tool is foreground-only. Detach the requested command inside
- * that one foreground call and print a private marker containing the spawned
- * PID and log path. With stdin and all output redirected, the host shell can
- * return immediately instead of retaining OpenCode's tool pipe.
+ * that one foreground call (`nohup … &`) and print a private marker containing
+ * the spawned PID and log path. With stdin and all output redirected, the host
+ * shell can return immediately instead of retaining OpenCode's tool pipe.
+ *
+ * Residual: the detached child is not reaped by this provider after OpenCode
+ * completes the tool call; cleanup is left to the user / OS.
  */
 function buildBackgroundShellCommand(command: string): string {
   return [
@@ -843,19 +866,28 @@ export function buildTypedExecResult(
   resultMetadata?: Record<string, unknown>,
 ): Record<string, unknown> {
   switch (resultField) {
-    case "read_result":
-      if (error) return { error: { path: "", error } }
+    case "read_result": {
+      const readPath = str(resultMetadata?.path) ?? extractPathTag(output) ?? ""
+      if (error) return { error: { path: readPath, error } }
       // Strip opencode's <path>/<content> envelope so Cursor's model receives
       // raw file content and can't echo the wrapper into subsequent writes.
       // reads route here only for native read_args; most arrive via mcp_result.
       const content = unwrapReadOutput(output)
+      const statPath = extractPathTag(output) ?? readPath
+      const outputMetadata = parseOpenCodeReadMetadata(output)
+      const totalLines = outputMetadata.totalLines ?? readFileLineCount(statPath) ?? countLines(content)
+      const rangeApplied = readRangeApplied(resultMetadata, totalLines)
       return {
         success: {
-          path: extractPathTag(output) ?? "",
+          path: readPath,
           content,
-          total_lines: countLines(content),
+          total_lines: totalLines,
+          file_size: readFileSize(statPath),
+          truncated: readOutputTruncated(resultMetadata, outputMetadata, totalLines),
+          range_applied: rangeApplied,
         },
       }
+    }
     case "grep_result": {
       if (error) return { error: { error } }
       // Prefer files_with_matches: OpenCode glob/grep often returns path lists.
@@ -1017,6 +1049,99 @@ function parseOpenCodeTaskOutput(output: string): {
 function extractPathTag(output: string): string | undefined {
   const m = output.match(/<path>([^<]+)<\/path>/)
   return m?.[1]
+}
+
+type OpenCodeReadMetadata = {
+  startLine?: number
+  endLine?: number
+  totalLines?: number
+  outputCapped?: boolean
+}
+
+/** Recover full-file metadata before unwrapReadOutput removes OpenCode's footer. */
+function parseOpenCodeReadMetadata(output: string): OpenCodeReadMetadata {
+  const showing = /Showing lines (\d+)-(\d+)(?: of (\d+))?\./.exec(output)
+  if (showing) {
+    return {
+      startLine: Number(showing[1]),
+      endLine: Number(showing[2]),
+      ...(showing[3] ? { totalLines: Number(showing[3]) } : {}),
+      outputCapped: output.includes("(Output capped at "),
+    }
+  }
+  const complete = /\(End of file - total (\d+) lines?\)/.exec(output)
+  if (complete) return { totalLines: Number(complete[1]) }
+  return {}
+}
+
+function readRangeApplied(
+  resultMetadata: Record<string, unknown> | undefined,
+  totalLines: number,
+): boolean {
+  const offset = num(resultMetadata?.offset)
+  const limit = num(resultMetadata?.limit)
+  if (offset === undefined && limit === undefined) return false
+  if (totalLines === 0) return false
+  const startLine = offset ?? 1
+  return startLine < 0 || startLine <= totalLines
+}
+
+function readOutputTruncated(
+  resultMetadata: Record<string, unknown> | undefined,
+  outputMetadata: OpenCodeReadMetadata,
+  totalLines: number,
+): boolean {
+  if (outputMetadata.outputCapped) return true
+  const returnedEnd = outputMetadata.endLine
+  if (returnedEnd === undefined || totalLines === 0) return false
+
+  const offset = num(resultMetadata?.offset)
+  const limit = num(resultMetadata?.limit)
+  const startLine = offset ?? 1
+  if (startLine < 0) return false
+  const expectedEnd = limit === undefined
+    ? totalLines
+    : Math.min(totalLines, Math.max(1, startLine) + limit - 1)
+  return returnedEnd < expectedEnd
+}
+
+function readFileSize(filePath: string): number {
+  if (!filePath) return 0
+  try {
+    return fs.statSync(filePath).size
+  } catch {
+    return 0
+  }
+}
+
+function readFileLineCount(filePath: string): number | undefined {
+  if (!filePath) return undefined
+  let fd: number | undefined
+  try {
+    fd = fs.openSync(filePath, "r")
+    const buffer = Buffer.allocUnsafe(64 * 1024)
+    let totalBytes = 0
+    let lines = 1
+    while (true) {
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null)
+      if (bytesRead === 0) break
+      totalBytes += bytesRead
+      for (let index = 0; index < bytesRead; index++) {
+        if (buffer[index] === 0x0a) lines++
+      }
+    }
+    return totalBytes === 0 ? 0 : lines
+  } catch {
+    return undefined
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd)
+      } catch {
+        /* best effort */
+      }
+    }
+  }
 }
 
 function extractPathLines(output: string): string[] {

@@ -81,9 +81,16 @@ function shellQuote(value: string): string {
 }
 
 /**
+ * F11 / soft-background helper.
+ *
  * Run a Cursor soft-background command for its foreground window, then leave
- * it detached if still alive. The sentinel is removed by the after hook before
- * OpenCode stores/renders the result.
+ * it detached (`nohup`) if still alive. The sentinel is removed by the after
+ * hook before OpenCode stores/renders the result.
+ *
+ * This approximates Cursor's TIMEOUT_BACKGROUND semantics through OpenCode's
+ * foreground-only bash tool. Residual: after OpenCode returns, the child (and
+ * optional hard-timeout watchdog) may still be running; this provider does not
+ * reap leftover processes — cleanup is left to the user / OS.
  */
 export function buildSoftBackgroundCommand(policy: CursorShellPolicy): string {
   const polls = Math.ceil(policy.timeoutMs / POLL_INTERVAL_MS)

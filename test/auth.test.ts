@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test"
 import {
   isExpiringSoon,
   decodeJwtPayload,
+  decodeJwtExpiryMs,
   exchangeApiKey,
   refreshAccessToken,
   resolveBearerToken,
@@ -19,11 +20,17 @@ import { obfuscate, createCursorChecksumHeader } from "../src/protocol/checksum.
 
 // ── JWT expiry ──
 
-function makeJwt(expOffsetS: number): string {
-  const header = btoa(JSON.stringify({ alg: "HS256" }))
-  const payload = btoa(
-    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + expOffsetS }),
-  )
+function makeJwt(expOffsetS: number, extra: Record<string, unknown> = {}): string {
+  const header = Buffer.from(JSON.stringify({ alg: "HS256" })).toString("base64url")
+  const payload = Buffer.from(
+    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + expOffsetS, ...extra }),
+  ).toString("base64url")
+  return `${header}.${payload}.fakesig`
+}
+
+function makeJwtRawPayload(payloadJson: string): string {
+  const header = Buffer.from(JSON.stringify({ alg: "HS256" })).toString("base64url")
+  const payload = Buffer.from(payloadJson, "utf8").toString("base64url")
   return `${header}.${payload}.fakesig`
 }
 
@@ -43,6 +50,30 @@ describe("isExpiringSoon", () => {
   it("returns true for malformed JWT", () => {
     expect(isExpiringSoon("not-a-jwt")).toBe(true)
   })
+
+  it("returns true when exp claim is missing", () => {
+    expect(isExpiringSoon(makeJwtRawPayload(JSON.stringify({ sub: "x" })))).toBe(true)
+  })
+
+  it("returns true when exp claim is a string", () => {
+    expect(isExpiringSoon(makeJwtRawPayload(JSON.stringify({ exp: "9999999999" })))).toBe(true)
+  })
+
+  it("returns true when exp claim is null", () => {
+    expect(isExpiringSoon(makeJwtRawPayload(JSON.stringify({ exp: null })))).toBe(true)
+  })
+
+  it("returns true when exp overflows to non-finite (e.g. 1e400 → Infinity)", () => {
+    // JSON.parse turns oversized numbers into Infinity; Number.isFinite must reject them.
+    expect(isExpiringSoon(makeJwtRawPayload('{"exp":1e400}'))).toBe(true)
+  })
+
+  it("decodes base64url alphabet (- and _) in the payload segment", () => {
+    // Force '-' / '_' into the segment via a value that base64url-encodes with them.
+    const jwt = makeJwt(600, { note: ">>?<<" })
+    expect(jwt.split(".")[1]).toMatch(/[-_]/)
+    expect(isExpiringSoon(jwt)).toBe(false)
+  })
 })
 
 describe("decodeJwtPayload", () => {
@@ -54,6 +85,28 @@ describe("decodeJwtPayload", () => {
 
   it("returns null for malformed JWT", () => {
     expect(decodeJwtPayload("bad")).toBeNull()
+  })
+
+  it("decodes payload segments that use base64url -/_", () => {
+    const jwt = makeJwt(600, { note: ">>?<<" })
+    expect(jwt.split(".")[1]).toMatch(/[-_]/)
+    const payload = decodeJwtPayload(jwt)
+    expect(payload?.note).toBe(">>?<<")
+  })
+})
+
+describe("decodeJwtExpiryMs", () => {
+  it("returns exp in milliseconds", () => {
+    const expS = Math.floor(Date.now() / 1000) + 600
+    const jwt = makeJwtRawPayload(JSON.stringify({ exp: expS }))
+    expect(decodeJwtExpiryMs(jwt)).toBe(expS * 1000)
+  })
+
+  it("returns null when exp is missing or malformed", () => {
+    expect(decodeJwtExpiryMs(makeJwtRawPayload(JSON.stringify({ sub: "x" })))).toBeNull()
+    expect(decodeJwtExpiryMs(makeJwtRawPayload(JSON.stringify({ exp: "nope" })))).toBeNull()
+    expect(decodeJwtExpiryMs("not-a-jwt")).toBeNull()
+    expect(decodeJwtExpiryMs(makeJwtRawPayload('{"exp":1e400}'))).toBeNull()
   })
 })
 

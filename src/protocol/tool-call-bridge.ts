@@ -33,7 +33,12 @@ const TODO_STATUS: Record<number, string> = {
   4: "cancelled",
 }
 
-/** Cursor ToolCall oneof field → default OpenCode tool id. */
+/**
+ * Cursor ToolCall oneof field → default OpenCode tool id.
+ *
+ * F11: `delete_tool_call` has no OpenCode builtin; it remaps to bash (see the
+ * delete_tool_call branch below for `rm -f -- <path>`).
+ */
 const VARIANT_TO_OPENCODE: Record<string, string> = {
   shell_tool_call: "bash",
   delete_tool_call: "bash",
@@ -153,6 +158,10 @@ export function parseDisplayToolCall(
     }
   }
 
+  // create_plan_tool_call here is display-state mirroring into todowrite.
+  // Separately, InteractionQuery create_plan_request_query is auto-acked in
+  // protocol/interactions.ts (F14 / CLI headless parity) — that ack is not an
+  // execution of this display payload.
   if (variant === "update_todos_tool_call" || variant === "create_plan_tool_call") {
     const result = asRecord(payload.result)
     const success = asRecord(result?.success)
@@ -277,6 +286,7 @@ export function parseDisplayToolCall(
     }
   }
 
+  // F11: display-path delete → bash `rm -f` (OpenCode has no delete tool).
   if (variant === "delete_tool_call") {
     const path = typeof args.path === "string" ? args.path : ""
     return {

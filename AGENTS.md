@@ -82,7 +82,7 @@ When changing rule/skill discovery, keep parity with OpenCode behavior and updat
 |-----------------|------|
 | `CURSOR_API_BASE_URL` | Auth, models, GetServerConfig (default `https://api2.cursor.sh`) |
 | `CURSOR_WEBSITE_URL` | OAuth login base |
-| `CURSOR_PROVIDER_DEBUG` | Wire debug log (`CURSOR_PROVIDER_DEBUG_FILE`, default `/tmp/cursor-provider-debug.log`) |
+| `CURSOR_PROVIDER_DEBUG` | Wire debug log (`CURSOR_PROVIDER_DEBUG_FILE`; default under `$TMPDIR/cursor-provider-logs-<uid>/debug-<pid>.log`) |
 | `CURSOR_GET_SERVER_CONFIG_TELEMETRY` | Opt in GetServerConfig telemetry |
 | `~/.cache/opencode/cursor-models.json` | Model cache (`$XDG_CACHE_HOME/opencode/` when set) |
 | OpenCode auth | `~/.local/share/opencode/auth.json` (`$XDG_DATA_HOME`) |

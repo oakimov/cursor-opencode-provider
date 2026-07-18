@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test"
+import path from "node:path"
 import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
 import { toolsToDescriptors, toolsToMcpDescriptors } from "../src/protocol/tools.js"
 import { pump } from "../src/language-model.js"
@@ -171,6 +172,114 @@ function fakeSession(
 }
 
 describe("display-only ToolCall pump bridge", () => {
+  it("continues a new-file edit through write instead of shell fallback", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    const callId = "edit-new-file"
+    const target = `/tmp/cursor-opencode-missing-${process.pid}-${Date.now()}.md`
+    const session = fakeSession(
+      [
+        displayPayload("started", callId, {
+          edit_tool_call: {
+            args: { path: target, stream_content: "# New file\n" },
+          },
+        }),
+        encodeMessage("AgentServerMessage", {
+          exec_server_message: {
+            id: 15,
+            read_args: { path: target, tool_call_id: callId },
+          },
+        }),
+        encodeMessage("AgentServerMessage", {
+          exec_server_message: {
+            id: 16,
+            write_args: {
+              path: target,
+              file_text: "# New file\n",
+              tool_call_id: callId,
+            },
+          },
+        }),
+      ],
+      writes,
+      [
+        { name: "read", description: "Read" },
+        { name: "edit", description: "Edit" },
+        { name: "write", description: "Write" },
+      ],
+    )
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error(error: Error) {
+        throw error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    expect(writes).toHaveLength(2)
+    const read = decodeMessage<any>("AgentClientMessage", writes[0]!)
+      .exec_client_message.read_result
+    expect(read.success).toMatchObject({ path: target, content: "", total_lines: 0 })
+    expect(decodeMessage<any>("AgentClientMessage", writes[1]!))
+      .toEqual({ exec_client_control_message: { stream_close: { id: 15 } } })
+    const toolCalls = parts.filter((part) => part.type === "tool-call")
+    expect(toolCalls).toHaveLength(1)
+    expect(toolCalls[0].toolName).toBe("write")
+    expect(JSON.parse(toolCalls[0].input)).toEqual({
+      filePath: target,
+      content: "# New file\n",
+    })
+    expect(session.displayToolCalls.has(callId)).toBe(false)
+    sessionManager.resolve(session.sessionId, 16)
+  })
+
+  it("keeps the normal read step for an existing-file edit", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    const callId = "edit-existing-file"
+    const target = path.join(process.cwd(), "README.md")
+    const session = fakeSession(
+      [
+        displayPayload("started", callId, {
+          edit_tool_call: {
+            args: { path: target, stream_content: "replacement" },
+          },
+        }),
+        encodeMessage("AgentServerMessage", {
+          exec_server_message: {
+            id: 17,
+            read_args: { path: target, tool_call_id: callId },
+          },
+        }),
+      ],
+      writes,
+      [
+        { name: "read", description: "Read" },
+        { name: "edit", description: "Edit" },
+        { name: "write", description: "Write" },
+      ],
+    )
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error(error: Error) {
+        throw error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    expect(writes).toHaveLength(0)
+    const toolCall = parts.find((part) => part.type === "tool-call")
+    expect(toolCall?.toolName).toBe("read")
+    expect(JSON.parse(toolCall.input)).toEqual({ filePath: target })
+    sessionManager.resolve(session.sessionId, 17)
+  })
+
   it("does not replay a completed ask_question_tool_call", async () => {
     const writes: Uint8Array[] = []
     const parts: any[] = []
@@ -618,5 +727,69 @@ describe("display-only ToolCall pump bridge", () => {
     expect(toolCall?.toolName).toBe("write")
     expect(JSON.parse(toolCall.input)).toEqual({ filePath: "/tmp/result.txt", content: "done" })
     sessionManager.resolve(session.sessionId, 1)
+  })
+
+  it("fails closed when request_context write throws (F5)", async () => {
+    const parts: any[] = []
+    let streamError: Error | undefined
+    const session = fakeSession(
+      [
+        encodeMessage("AgentServerMessage", {
+          exec_server_message: {
+            id: 10,
+            request_context_args: {},
+          },
+        }),
+        turnEndedPayload(),
+      ],
+      [],
+    )
+    session.stream.write = () => {
+      throw new Error("simulated request_context write failure")
+    }
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error(error: Error) {
+        streamError = error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    expect(streamError?.message).toContain("request_context")
+    expect(session.closed).toBe(true)
+    expect(parts.some((part) => part.type === "tool-call")).toBe(false)
+  })
+
+  it("fails closed when a KV reply write throws (F5)", async () => {
+    let streamError: Error | undefined
+    const session = fakeSession(
+      [
+        encodeMessage("AgentServerMessage", {
+          kv_server_message: {
+            id: 11,
+            get_blob_args: { blob_id: new TextEncoder().encode("missing blob") },
+          },
+        }),
+        turnEndedPayload(),
+      ],
+      [],
+    )
+    session.stream.write = () => {
+      throw new Error("simulated KV write failure")
+    }
+    const controller = {
+      enqueue() {},
+      error(error: Error) {
+        streamError = error
+      },
+    } as unknown as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    expect(streamError?.message).toContain("KV blob request")
+    expect(session.closed).toBe(true)
   })
 })

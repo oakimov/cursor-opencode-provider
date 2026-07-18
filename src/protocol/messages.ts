@@ -407,13 +407,21 @@ export function createMessageTypes(): protobuf.Root {
 
   // agent.v1 ReadResult is a oneof — flat {content,error} was rejected by the
   // server (endless heartbeats after read_result).
-  addType(root, "ReadSuccess", [
-    { id: 1, name: "path", type: "string" },
-    { id: 2, name: "content", type: "string" },
-    { id: 3, name: "total_lines", type: "int32" },
-    { id: 4, name: "file_size", type: "int64" },
-    { id: 6, name: "truncated", type: "bool" },
-  ])
+  addType(
+    root,
+    "ReadSuccess",
+    [
+      { id: 1, name: "path", type: "string" },
+      { id: 2, name: "content", type: "string" },
+      { id: 3, name: "total_lines", type: "int32" },
+      { id: 4, name: "file_size", type: "int64" },
+      { id: 5, name: "data", type: "bytes" },
+      { id: 6, name: "truncated", type: "bool" },
+      { id: 7, name: "output_blob_id", type: "bytes" },
+      { id: 8, name: "range_applied", type: "bool" },
+    ],
+    [{ name: "output", fields: ["content", "data"] }],
+  )
   addType(root, "ReadError", [
     { id: 1, name: "path", type: "string" },
     { id: 2, name: "error", type: "string" },

@@ -33,20 +33,33 @@ export class AuthTimeoutError extends Error {
 // ── Helpers ──
 
 export function isExpiringSoon(jwt: string, thresholdS = 300): boolean {
-  try {
-    const payload = JSON.parse(atob(jwt.split(".")[1]))
-    return (payload.exp * 1000 - Date.now()) < thresholdS * 1000
-  } catch {
+  const payload = decodeJwtPayload(jwt)
+  if (!payload || typeof payload.exp !== "number" || !Number.isFinite(payload.exp)) {
     return true
   }
+  return payload.exp * 1000 - Date.now() < thresholdS * 1000
 }
 
 export function decodeJwtPayload(jwt: string): Record<string, unknown> | null {
   try {
-    return JSON.parse(atob(jwt.split(".")[1]))
+    const segment = jwt.split(".")[1]
+    if (!segment) return null
+    const json = Buffer.from(segment, "base64url").toString("utf8")
+    const payload = JSON.parse(json) as unknown
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null
+    return payload as Record<string, unknown>
   } catch {
     return null
   }
+}
+
+/** JWT `exp` claim as epoch milliseconds, or null if missing/malformed. */
+export function decodeJwtExpiryMs(jwt: string): number | null {
+  const payload = decodeJwtPayload(jwt)
+  if (!payload || typeof payload.exp !== "number" || !Number.isFinite(payload.exp)) {
+    return null
+  }
+  return payload.exp * 1000
 }
 
 function base64url(bytes: Uint8Array): string {
@@ -254,17 +267,4 @@ export async function pollForTokens(
   throw new AuthTimeoutError(
     `Poll timed out after ${maxAttempts} attempts (~5 min)`,
   )
-}
-
-// ── Combined login (Mode C, one-shot) ──
-
-export async function loginWithBrowser(
-  websiteUrl?: string,
-  apiBaseUrl?: string,
-  signal?: AbortSignal,
-): Promise<TokenPair> {
-  const params = generatePkceParams()
-  const challenge = await generatePkceChallenge(params.verifier)
-  const loginUrl = buildLoginUrl(challenge, params.uuid, websiteUrl)
-  return await pollForTokens(params.uuid, params.verifier, apiBaseUrl, signal)
 }

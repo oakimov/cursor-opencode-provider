@@ -13,8 +13,8 @@ export type RunRequestInput = {
   systemPrompt?: string
   /**
    * Prior chat turns for a seed ConversationStateStructure (no checkpoint).
-   * Used after compaction reset so Cursor sees OpenCode's compacted history
-   * instead of an empty conversation.
+   * Tool outputs, when required for compaction/recovery, are represented as
+   * user-role OpenCode host observations rather than assistant-authored prose.
    */
   history?: SeedHistoryMessage[]
   /**

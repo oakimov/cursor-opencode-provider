@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeAll, afterAll } from "bun:test"
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test"
 import { mkdir, writeFile, rm } from "node:fs/promises"
 import path from "node:path"
 import os from "node:os"
-import { collectRules } from "../src/context/rules.js"
+import { collectRules, fetchRemoteInstruction } from "../src/context/rules.js"
 import { collectSkills } from "../src/context/skills.js"
 import { buildRequestContext } from "../src/context/build.js"
 import { encodeMessage, decodeMessage } from "../src/protocol/messages.js"
@@ -83,5 +83,115 @@ describe("collectRules / buildRequestContext", () => {
       ["my_server", "lookup"],
       ["opencode", "custom_helper"],
     ])
+  })
+})
+
+describe("collectRules remote instructions (F1 HTTPS-only)", () => {
+  let root: string
+  let realFetch: typeof globalThis.fetch
+  let fetchedUrls: string[]
+
+  beforeAll(async () => {
+    root = path.join(os.tmpdir(), `cursor-ctx-remote-${process.pid}-${Date.now()}`)
+    await mkdir(root, { recursive: true })
+    await writeFile(path.join(root, "AGENTS.md"), "# Project\n")
+  })
+
+  afterAll(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+
+  beforeEach(async () => {
+    realFetch = globalThis.fetch
+    fetchedUrls = []
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      fetchedUrls.push(url)
+      return new Response("# remote instruction\n", { status: 200 })
+    }) as typeof fetch
+  })
+
+  afterEach(() => {
+    globalThis.fetch = realFetch
+  })
+
+  it("fetches https:// instructions and includes content", async () => {
+    await writeFile(
+      path.join(root, "opencode.json"),
+      JSON.stringify({ instructions: ["https://example.com/rules.md"] }),
+    )
+    const { rules } = await collectRules(root)
+    expect(fetchedUrls).toEqual(["https://example.com/rules.md"])
+    expect(rules.some((r) => r.fullPath === "https://example.com/rules.md" && r.content.includes("remote instruction"))).toBe(
+      true,
+    )
+  })
+
+  it("skips http:// instructions without fetching", async () => {
+    await writeFile(
+      path.join(root, "opencode.json"),
+      JSON.stringify({ instructions: ["http://example.com/rules.md", "https://example.com/ok.md"] }),
+    )
+    const { rules } = await collectRules(root)
+    expect(fetchedUrls).toEqual(["https://example.com/ok.md"])
+    expect(rules.some((r) => r.fullPath.startsWith("http://"))).toBe(false)
+    expect(rules.some((r) => r.fullPath === "https://example.com/ok.md")).toBe(true)
+  })
+
+  it("keeps the timeout active while consuming the response body", async () => {
+    let aborted = false
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => ({
+      ok: true,
+      text: () => new Promise<string>((_resolve, reject) => {
+        const signal = init?.signal
+        const onAbort = () => {
+          aborted = true
+          reject(new DOMException("Aborted", "AbortError"))
+        }
+        if (signal?.aborted) onAbort()
+        else signal?.addEventListener("abort", onAbort, { once: true })
+      }),
+    })) as typeof fetch
+
+    expect(await fetchRemoteInstruction("https://example.com/stalled.md", 5)).toBeUndefined()
+    expect(aborted).toBe(true)
+  })
+})
+
+describe("collectRules OPENCODE_DISABLE_PROJECT_CONFIG (F2)", () => {
+  let root: string
+  let prev: string | undefined
+
+  beforeAll(async () => {
+    root = path.join(os.tmpdir(), `cursor-ctx-disable-project-${process.pid}-${Date.now()}`)
+    await mkdir(root, { recursive: true })
+    await writeFile(path.join(root, "AGENTS.md"), "# Should be skipped when project config disabled\n")
+    await mkdir(path.join(root, ".cursor", "rules"), { recursive: true })
+    await writeFile(path.join(root, ".cursor", "rules", "extra.md"), "project instruction")
+    await writeFile(
+      path.join(root, "opencode.json"),
+      JSON.stringify({ instructions: [".cursor/rules/*.md", "~/.ssh/id_rsa"] }),
+    )
+  })
+
+  afterAll(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+
+  beforeEach(() => {
+    prev = process.env.OPENCODE_DISABLE_PROJECT_CONFIG
+    process.env.OPENCODE_DISABLE_PROJECT_CONFIG = "1"
+  })
+
+  afterEach(() => {
+    if (prev === undefined) delete process.env.OPENCODE_DISABLE_PROJECT_CONFIG
+    else process.env.OPENCODE_DISABLE_PROJECT_CONFIG = prev
+  })
+
+  it("skips project AGENTS.md and project instructions", async () => {
+    const { rules, config } = await collectRules(root)
+    expect(config.instructions ?? []).not.toContain(".cursor/rules/*.md")
+    expect(rules.some((r) => r.fullPath.replace(/\\/g, "/").includes("/.cursor/rules/extra.md"))).toBe(false)
+    expect(rules.some((r) => r.fullPath === path.resolve(root, "AGENTS.md"))).toBe(false)
   })
 })

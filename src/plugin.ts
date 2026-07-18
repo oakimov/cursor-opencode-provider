@@ -1,7 +1,7 @@
 import type { Hooks, PluginInput, AuthOAuthResult, Config } from "@opencode-ai/plugin"
 import type { Auth } from "@opencode-ai/sdk"
 import { CURSOR_COMPACTION_OPTION, CURSOR_PROVIDER_ID, CURSOR_WEBSITE_HOST, CURSOR_API_HOST } from "./shared.js"
-import { pollForTokens, exchangeApiKey, refreshAccessToken, isExpiringSoon, generatePkceParams, generatePkceChallenge, buildLoginUrl, decodeJwtPayload } from "./auth.js"
+import { pollForTokens, exchangeApiKey, refreshAccessToken, isExpiringSoon, generatePkceParams, generatePkceChallenge, buildLoginUrl, decodeJwtExpiryMs } from "./auth.js"
 import { CURSOR_VARIANT_PARAMETERS_KEY, CURSOR_WIRE_MODEL_ID_KEY, readCache, discoverModels, isCacheFresh, parseCursorContextLimit, type ModelInfo, type ModelVariant } from "./models.js"
 import { opencodeGlobalCacheDir } from "./context/paths.js"
 import { readStoredAuth, type StoredAuth } from "./context/auth-store.js"
@@ -299,7 +299,7 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
           type: "oauth",
           access: newTokens.accessToken,
           refresh: newTokens.refreshToken,
-          expires: decodeExpFromJwt(newTokens.accessToken),
+          expires: decodeJwtExpiryMs(newTokens.accessToken) ?? Date.now(),
           ...(extras.accountId !== undefined ? { accountId: extras.accountId } : {}),
           ...(extras.enterpriseUrl !== undefined ? { enterpriseUrl: extras.enterpriseUrl } : {}),
         })
@@ -430,7 +430,7 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
                   provider: CURSOR_PROVIDER_ID,
                   access: result.accessToken,
                   refresh: result.refreshToken,
-                  expires: decodeExpFromJwt(result.accessToken),
+                  expires: decodeJwtExpiryMs(result.accessToken) ?? Date.now(),
                 }
               },
             }
@@ -500,10 +500,4 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
       },
     },
   }
-}
-
-function decodeExpFromJwt(jwt: string): number {
-  const payload = decodeJwtPayload(jwt)
-  if (payload && typeof payload.exp === "number") return payload.exp * 1000
-  return Date.now() + 3600_000
 }
