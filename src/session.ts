@@ -166,6 +166,8 @@ export type CursorSession = {
    * conversation_checkpoint_update (CLI parity).
   */
   conversationId: string
+  /** Latest eligible checkpoint emitted by this Run attempt. */
+  resumeCheckpoint?: Uint8Array
   /** OpenCode session whose own or descendant activity renews tool leases. */
   openCodeSessionId?: string
   stream: BidiStream

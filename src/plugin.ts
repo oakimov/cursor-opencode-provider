@@ -8,8 +8,11 @@ import { readStoredAuth, type StoredAuth } from "./context/auth-store.js"
 import { resolveAgentUrl } from "./agent-url.js"
 import {
   captureCursorShellResult,
+  cursorShellEnvForCall,
   cursorShellOriginalCommand,
   prepareCursorShellArgs,
+  releaseCursorShellEnv,
+  sanitizeRegisteredCursorShellOutput,
 } from "./shell-timeout.js"
 import { sessionActivity } from "./activity.js"
 
@@ -363,17 +366,38 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
 
     async "tool.execute.before"(hookInput, output) {
       if (hookInput.tool !== "bash") return
+      // Keep args.command as the original display/permission command. Wrapping
+      // happens via shell.env (BASH_ENV / ZDOTDIR) so OpenCode's bash UI never
+      // stores or renders the private wrapper script.
       prepareCursorShellArgs(hookInput.callID, output.args as Record<string, unknown>)
+    },
+
+    async "shell.env"(hookInput, output) {
+      const env = cursorShellEnvForCall(hookInput.callID)
+      if (!env) return
+      Object.assign(output.env, env)
     },
 
     async "tool.execute.after"(hookInput, output) {
       if (hookInput.tool !== "bash") return
-      output.title = cursorShellOriginalCommand(hookInput.callID) ?? output.title
-      output.output = captureCursorShellResult(
-        hookInput.callID,
-        output.output,
-        output.metadata as Record<string, unknown> | undefined,
-      )
+      try {
+        output.title = cursorShellOriginalCommand(hookInput.callID) ?? output.title
+        output.output = captureCursorShellResult(
+          hookInput.callID,
+          output.output,
+          output.metadata as Record<string, unknown> | undefined,
+        )
+        // OpenCode's bash GUI falls back to metadata.output when output is empty
+        // (`props.output || props.metadata.output`), so strip private markers there too.
+        if (output.metadata && typeof output.metadata === "object") {
+          const metadata = output.metadata as Record<string, unknown>
+          if (typeof metadata.output === "string") {
+            metadata.output = sanitizeRegisteredCursorShellOutput(hookInput.callID, metadata.output)
+          }
+        }
+      } finally {
+        releaseCursorShellEnv(hookInput.callID)
+      }
     },
 
     async "chat.params"(hookInput, output) {

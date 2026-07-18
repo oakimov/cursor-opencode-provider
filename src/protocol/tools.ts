@@ -3,7 +3,7 @@ import { encodeMessage } from "./messages.js"
 import { encodeJsonAsValue, decodeStructEntriesToJson, readAllFields } from "./struct.js"
 import { trace } from "../debug.js"
 import { cursorExecVariantByRequestName } from "./exec-variants.js"
-import type { CursorShellOutcome } from "../shell-timeout.js"
+import { BACKGROUND_SHELL_MARKER, type CursorShellOutcome } from "../shell-timeout.js"
 
 // Exec variant field number whose reply is the server-initiated request_context
 // probe (ExecServerMessage #10 → ExecClientMessage #10). request/result share a
@@ -182,7 +182,7 @@ export function buildLiveRequestContext(
 // Design note (F11): Cursor has native delete / background-shell tools; OpenCode
 // does not. This provider intentionally remaps:
 //   - delete_args → bash `rm -f -- <quoted-path>`
-//   - background_shell_spawn_args → bash + nohup detach wrapper
+//   - background_shell_spawn_args → bash (original command; plugin wraps nohup)
 // Permissions still flow through OpenCode's advertised `bash` tool. Soft-
 // background / detached children can outlive the OpenCode tool call; leftover
 // process cleanup is left to the user / OS. Arg key remapping happens below.
@@ -279,8 +279,6 @@ export type ParsedExecRequest = {
   resultMetadata?: Record<string, unknown>
 }
 
-const BACKGROUND_SHELL_MARKER = "__CURSOR_BACKGROUND_SHELL__"
-
 export function parseExecServerMessage(
   msg: Record<string, unknown>,
 ): ParsedExecRequest | undefined {
@@ -304,15 +302,15 @@ export function parseExecServerMessage(
   if (!resultField) return undefined
   const execId = (msg.exec_id as string) ?? ""
 
-  // F11: Cursor native background shell → OpenCode bash. The wrapper detaches
-  // via nohup immediately; OpenCode only sees the spawn marker (pid + log path).
+  // F11: Cursor native background shell → OpenCode bash. Emit the original
+  // command for UI/storage; the classic plugin before-hook wraps with nohup.
   // Residual: the child can keep running after this tool call completes.
   if (execVariant === "background_shell_spawn_args") {
     const raw = (msg.background_shell_spawn_args as Record<string, unknown>) ?? {}
     const command = str(raw.command)
     const workingDirectory = str(raw.working_directory) ?? ""
     const args: Record<string, unknown> = {}
-    if (command) args.command = buildBackgroundShellCommand(command)
+    if (command) args.command = command
     if (workingDirectory) args.workdir = workingDirectory
     return {
       id,
@@ -320,7 +318,11 @@ export function parseExecServerMessage(
       toolName: "bash",
       args,
       resultField,
-      resultMetadata: { command: command ?? "", working_directory: workingDirectory },
+      resultMetadata: {
+        background_shell_spawn: true,
+        command: command ?? "",
+        working_directory: workingDirectory,
+      },
       localError:
         raw.enable_write_shell_stdin_tool === true
           ? "Interactive background shells are not available through OpenCode's bash tool."
@@ -607,26 +609,6 @@ function shellQuote(s: string): string {
 }
 
 /**
- * F11 / background_shell_spawn_args helper.
- *
- * OpenCode's bash tool is foreground-only. Detach the requested command inside
- * that one foreground call (`nohup … &`) and print a private marker containing
- * the spawned PID and log path. With stdin and all output redirected, the host
- * shell can return immediately instead of retaining OpenCode's tool pipe.
- *
- * Residual: the detached child is not reaped by this provider after OpenCode
- * completes the tool call; cleanup is left to the user / OS.
- */
-function buildBackgroundShellCommand(command: string): string {
-  return [
-    'bg_log="$(mktemp "${TMPDIR:-/tmp}/cursor-opencode-bg.XXXXXX")" || exit 1',
-    `nohup sh -c ${shellQuote(command)} >"$bg_log" 2>&1 </dev/null &`,
-    "bg_pid=$!",
-    `printf '${BACKGROUND_SHELL_MARKER}%s:%s\\n' "$bg_pid" "$bg_log"`,
-  ].join("\n")
-}
-
-/**
  * Map Cursor McpArgs back to the OpenCode tool id.
  * Prefers provider_identifier + bare tool_name (github + create_pull_request
  * → github_create_pull_request). Builtins under the default server stay bare.
@@ -768,6 +750,7 @@ export function buildExecClientMessages(input: ToolResultInput): Uint8Array[] {
       input.error,
       input.toolName,
       input.resultMetadata,
+      input.shellOutcome,
     )
     frames.push(
       encodeMessage("AgentClientMessage", {
@@ -864,6 +847,7 @@ export function buildTypedExecResult(
   error?: string,
   toolName?: string,
   resultMetadata?: Record<string, unknown>,
+  shellOutcome?: CursorShellOutcome,
 ): Record<string, unknown> {
   switch (resultField) {
     case "read_result": {
@@ -941,6 +925,19 @@ export function buildTypedExecResult(
       const command = str(resultMetadata?.command) ?? ""
       const workingDirectory = str(resultMetadata?.working_directory) ?? ""
       if (error) return { error: { command, working_directory: workingDirectory, error } }
+      // Prefer the structured outcome captured by the plugin after-hook; markers
+      // are already stripped from the stored/rendered OpenCode output by then.
+      if (shellOutcome?.kind === "backgrounded") {
+        return {
+          success: {
+            shell_id: shellOutcome.shellId,
+            command: shellOutcome.command || command,
+            working_directory: shellOutcome.workingDirectory || workingDirectory,
+            pid: shellOutcome.pid,
+          },
+        }
+      }
+      // Fallback when no plugin hook ran: parse the private spawn marker inline.
       const match = new RegExp(`${BACKGROUND_SHELL_MARKER}(\\d+):([^\\r\\n]+)`).exec(output)
       const pid = match ? Number(match[1]) : 0
       if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 0xffff_ffff) {

@@ -328,7 +328,7 @@ async function doStreamImpl(
   // pumpWithRecovery owns the complete per-turn attempt budget.  Opening a
   // replacement session here must be a single attempt; otherwise setup retry
   // loops nest inside recovery and `maxAttempts` no longer caps total Runs.
-  const openSession = (startOptions?: { recovery?: boolean }) =>
+  const openSession = (startOptions?: { recovery?: CursorRunRecovery }) =>
     startSession(modelId, token, callOptions, options, startOptions)
 
   // ── Continuation vs fresh turn ──
@@ -356,7 +356,7 @@ async function doStreamImpl(
       // Cursor can continue instead of deadlocking.
       const ids = trailingToolResults.map((r) => `${r.sessionId}:${r.execId}`).join(",")
       trace(`continuation: ${trailingToolResults.length} interrupted trailing tool result(s) [${ids}] — rebasing fresh Run`)
-      session = await openSession({ recovery: true })
+      session = await openSession({ recovery: { kind: "rebase" } })
     } else {
       // Fresh turn (prompt ends with user/assistant text). Historical tool
       // results may exist mid-prompt; they are not live exec replies.
@@ -391,7 +391,7 @@ async function doStreamImpl(
             abortSignal: callOptions.abortSignal,
             promptTokens,
             retryPolicy,
-            recover: () => openSession({ recovery: true }),
+            recover: (recovery) => openSession({ recovery }),
             onSession: (next) => { activeSession = next },
           })
           try {
@@ -426,7 +426,7 @@ export async function pumpWithRecovery(input: {
   abortSignal?: AbortSignal
   promptTokens?: number
   retryPolicy?: CursorRetryPolicy
-  recover: () => Promise<CursorSession>
+  recover: (recovery: CursorRunRecovery) => Promise<CursorSession>
   onSession?: (session: CursorSession) => void
   maxRecoveries?: number
 }): Promise<CursorSession> {
@@ -436,6 +436,7 @@ export async function pumpWithRecovery(input: {
     maxAttempts: (input.maxRecoveries ?? 1) + 1,
   }
   const maxRecoveries = retryPolicy.maxAttempts - 1
+  const requestUsage = { outputChars: 0 }
   input.onSession?.(session)
 
   for (let attempt = 0; ; attempt++) {
@@ -450,6 +451,7 @@ export async function pumpWithRecovery(input: {
           textId: crypto.randomUUID(),
           reasoningId: crypto.randomUUID(),
           promptTokens: input.promptTokens ?? 0,
+          requestUsage,
         },
         input.abortSignal,
       )
@@ -460,7 +462,8 @@ export async function pumpWithRecovery(input: {
         fallback: "Cursor Run interrupted",
       })
       if (!failure.transient) throw failure
-      if (!failure.replaySafe) {
+      const checkpoint = pumpedSession.resumeCheckpoint
+      if (!failure.replaySafe && !checkpoint) {
         throw retrySuppressedError(
           failure,
           "after visible output or stateful server activity",
@@ -473,13 +476,21 @@ export async function pumpWithRecovery(input: {
       }
       trace(
         `Run interrupted: sessionId=${pumpedSession.sessionId} attempt=${attempt + 1}/${maxRecoveries} ` +
-          `err=${failure.message} — rebasing fresh Run`,
+          `err=${failure.message} — ${checkpoint ? `resuming ${checkpoint.length}B checkpoint` : "rebasing fresh Run"}`,
       )
       sessionManager.close(pumpedSession, "remote-error", failure)
       const delayMs = retryDelayMs(failure, attempt + 1, retryPolicy)
       trace(`Run retry backoff: attempt=${attempt + 1}/${maxRecoveries} delayMs=${delayMs}`)
       await sleepForRetry(delayMs, input.abortSignal)
-      session = await input.recover()
+      session = await input.recover(
+        checkpoint
+          ? {
+              kind: "resume",
+              conversationId: pumpedSession.conversationId,
+              checkpoint: Uint8Array.from(checkpoint),
+            }
+          : { kind: "rebase" },
+      )
       input.onSession?.(session)
     } finally {
       sessionManager.endPump(pumpedSession, pumpOwner)
@@ -487,12 +498,16 @@ export async function pumpWithRecovery(input: {
   }
 }
 
+export type CursorRunRecovery =
+  | { kind: "rebase" }
+  | { kind: "resume"; conversationId: string; checkpoint: Uint8Array }
+
 async function startSession(
   modelId: string,
   token: string,
   callOptions: LanguageModelV3CallOptions,
   options: CreateCursorOptions,
-  startOptions?: { recovery?: boolean },
+  startOptions?: { recovery?: CursorRunRecovery },
 ): Promise<CursorSession> {
   const continuationPolicy = resolveContinuationPolicy(options.continuation)
   const prompt = callOptions.prompt
@@ -511,21 +526,24 @@ async function startSession(
   const tools = toolState.advertisedTools
   const allowTools = toolState.allowTools
   const resetState = resolveTurnConversationReset({ sessionKey, isCompaction })
-  const recovery = startOptions?.recovery === true
+  const recovery = startOptions?.recovery
+  const resuming = recovery?.kind === "resume"
   // Compaction must not reuse the prior conversation; its first normal turn
   // must also rebase so the summary-agent checkpoint cannot replace the normal
   // system prompt and OpenCode's newly compacted history.
-  const bound = bindConversationId(sessionKey, { reset: resetState.reset || recovery })
+  const bound = resuming
+    ? { conversationId: recovery.conversationId, reset: false, previousId: undefined }
+    : bindConversationId(sessionKey, { reset: resetState.reset || recovery?.kind === "rebase" })
   const conversationId = bound.conversationId
   if (bound.reset) {
     trace(
-      `conversation reset: reason=${recovery ? "interrupted-run" : (resetState.reason ?? "unknown")} ` +
+      `conversation reset: reason=${recovery?.kind === "rebase" ? "interrupted-run" : (resetState.reason ?? "unknown")} ` +
         `sessionKey=${sessionKey ?? "(none)"} ` +
         `previousId=${bound.previousId ?? "-"} → conversationId=${conversationId}`,
     )
   }
 
-  const userText = recovery
+  const userText = recovery?.kind === "rebase"
     ? "Continue the interrupted turn from the conversation history above. Do not repeat completed work."
     : (extractUserText([...prompt].reverse().find((m) => m.role === "user")) || ".")
   const workspaceRoot = path.resolve(options.workspaceRoot || process.cwd())
@@ -535,8 +553,8 @@ async function startSession(
     ? [baseSystemPrompt, interactionGuidance].filter(Boolean).join("\n\n")
     : baseSystemPrompt
   const history = extractPromptHistory(prompt, {
-    preserveTrailingUser: recovery,
-    toolResults: isCompaction ? "all" : (recovery ? "trailing" : "omit"),
+    preserveTrailingUser: recovery?.kind === "rebase",
+    toolResults: isCompaction ? "all" : (recovery?.kind === "rebase" ? "trailing" : "omit"),
   })
 
   await loadAvailableModels()
@@ -586,7 +604,9 @@ async function startSession(
     : []
   // CLI parity: echo the last conversation_checkpoint_update as conversation_state.
   // After compaction reset there is no checkpoint — seed from OpenCode history.
-  const conversationState = bound.reset ? undefined : getCheckpoint(conversationId)
+  const conversationState = resuming
+    ? recovery.checkpoint
+    : (bound.reset ? undefined : getCheckpoint(conversationId))
   const reqBytes = buildRunRequest({
     text: userText,
     modelId: cursorModelId,
@@ -599,6 +619,7 @@ async function startSession(
     tools,
     toolDescriptors,
     requestContext,
+    action: resuming ? "resume" : "user",
   })
   // Content hashes — Cursor content-addresses large payloads; logging these lets
   // us match a server get_blob_args.blob_id to what it wants served.
@@ -628,6 +649,7 @@ async function startSession(
       `availableModels=${_availableModels?.length ?? 0} userTextLen=${userText.length} ` +
       `historyMsgs=${history.length} historyChars=${historyChars} ` +
       `checkpointLen=${conversationState?.length ?? 0} reset=${bound.reset} ` +
+      `resume=${resuming} ` +
       `usageEstimateIn=${usageEstimate.inputTokens} runRequestBytes=${reqBytes.length}`,
   )
   if (hooksCtx) trace(`outbound Run hooks_additional_context: ${hooksCtx}`)
@@ -645,6 +667,7 @@ async function startSession(
   const session: CursorSession = {
     sessionId: crypto.randomUUID(),
     conversationId,
+    resumeCheckpoint: undefined,
     openCodeSessionId: sessionKey,
     stream,
     frames: stream.frames()[Symbol.asyncIterator](),
@@ -766,9 +789,11 @@ export function deliverContinuationResults(
     let frames: Uint8Array[] = []
     if (!pending.bridged) {
       try {
-        const shellResult = pending.resultField === "shell_stream"
-          ? consumeCursorShellResult(r.toolCallId, r.output)
-          : undefined
+        const shellResult =
+          pending.resultField === "shell_stream"
+          || pending.resultField === "background_shell_spawn_result"
+            ? consumeCursorShellResult(r.toolCallId, r.output)
+            : undefined
         frames = buildExecClientMessages({
           execId: r.execId,
           resultField: pending.resultField,
@@ -931,7 +956,12 @@ async function nextFrameWithSemanticDeadline(
 export async function pump(
   session: CursorSession,
   controller: ReadableStreamDefaultController<V3Part>,
-  ids: { textId: string; reasoningId: string; promptTokens?: number },
+  ids: {
+    textId: string
+    reasoningId: string
+    promptTokens?: number
+    requestUsage?: { outputChars: number }
+  },
   abortSignal?: AbortSignal,
 ): Promise<void> {
   sessionManager.registerSession(session)
@@ -941,7 +971,7 @@ export async function pump(
   const advertisedToolNameSet = new Set(advertisedToolNames)
   let textStarted = false
   let reasoningStarted = false
-  let emittedOutputChars = 0
+  const requestUsage = ids.requestUsage ?? { outputChars: 0 }
   let replaySafe = true
   // OpenCode cancels the ReadableStream between turns (see the cancel handler
   // in doStreamImpl). The frames iterator can still yield a final `done` after
@@ -1077,7 +1107,7 @@ export async function pump(
     }
     session.usageEstimate.outputTokens += estimateTokens(text.length)
     if (safeEnqueue({ type: "text-delta", id: textId, delta: text } as V3Part)) {
-      emittedOutputChars += text.length
+      requestUsage.outputChars += text.length
     }
   }
   const emitReasoning = (text: string) => {
@@ -1089,7 +1119,7 @@ export async function pump(
     }
     session.usageEstimate.outputTokens += estimateTokens(text.length)
     if (safeEnqueue({ type: "reasoning-delta", id: reasoningId, delta: text } as V3Part)) {
-      emittedOutputChars += text.length
+      requestUsage.outputChars += text.length
     }
   }
   const emitFinish = (
@@ -1115,7 +1145,7 @@ export async function pump(
         cacheWrite: 0,
       },
       outputTokens: {
-        total: estimateTokens(emittedOutputChars),
+        total: estimateTokens(requestUsage.outputChars),
         text: undefined,
         reasoning: undefined,
       },
@@ -1266,6 +1296,7 @@ export async function pump(
       const bytes = normalizeCheckpointBytes(checkpointRaw)
       if (bytes && bytes.length > 0) {
         setCheckpoint(session.conversationId, bytes)
+        session.resumeCheckpoint = Uint8Array.from(bytes)
         trace(
           `checkpoint: stored ${bytes.length}B for conversationId=${session.conversationId}`,
         )
@@ -1454,7 +1485,10 @@ export async function pump(
             trace(`exec: claimed display callId=${displayCallId}`)
           }
           const tc = buildToolCallPart(parsed, session.sessionId)
-          if (parsed.resultField === "shell_stream") {
+          if (
+            parsed.resultField === "shell_stream"
+            || parsed.resultField === "background_shell_spawn_result"
+          ) {
             registerCursorShellCall(tc.toolCallId, parsed.resultMetadata)
           }
           // Keep the stream open; the result arrives on the next doStream call.

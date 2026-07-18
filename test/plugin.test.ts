@@ -277,14 +277,14 @@ describe("CursorPlugin shell result hooks", () => {
     } as never, output as never)
 
     expect(output.title).toBe("bun test")
-    expect(output.output).toBe("partial\n")
+    expect(output.output).toBe("partial\nTimed out after 30000ms.\n")
     expect(consumeCursorShellResult(callID, output.output).outcome).toEqual({
       kind: "timeout",
       timeoutMs: 30_000,
     })
   })
 
-  it("rewrites only Cursor soft-background Bash calls before execution", async () => {
+  it("keeps soft-background Bash command original and injects wrap via shell.env", async () => {
     const plugin = await CursorPlugin({ directory: process.cwd() } as never)
     const callID = "cursor_hook_2"
     registerCursorShellCall(callID, {
@@ -300,8 +300,18 @@ describe("CursorPlugin shell result hooks", () => {
       sessionID: "ses_1",
       callID,
     } as never, output as never)
-    expect(output.args.command).toContain("__CURSOR_SHELL_BACKGROUND__")
+    // UI/storage must keep the original command; wrap comes from shell.env.
+    expect(output.args.command).toBe("sleep 60")
     expect(output.args.timeout).toBe(20_000)
+
+    const envOut = { env: {} as Record<string, string> }
+    await plugin["shell.env"]?.({
+      cwd: process.cwd(),
+      sessionID: "ses_1",
+      callID,
+    } as never, envOut as never)
+    expect(envOut.env.BASH_ENV).toBeString()
+    expect(envOut.env.ZDOTDIR).toBeString()
 
     const ordinary = { args: { command: "pwd" } }
     await plugin["tool.execute.before"]?.({
@@ -310,6 +320,95 @@ describe("CursorPlugin shell result hooks", () => {
       callID: "ordinary-call",
     } as never, ordinary as never)
     expect(ordinary.args.command).toBe("pwd")
+    const ordinaryEnv = { env: {} as Record<string, string> }
+    await plugin["shell.env"]?.({
+      cwd: process.cwd(),
+      sessionID: "ses_1",
+      callID: "ordinary-call",
+    } as never, ordinaryEnv as never)
+    expect(ordinaryEnv.env).toEqual({})
+  })
+
+  it("wraps background_shell_spawn via shell.env without rewriting args.command", async () => {
+    const plugin = await CursorPlugin({ directory: process.cwd() } as never)
+    const callID = "cursor_hook_bg_spawn"
+    registerCursorShellCall(callID, {
+      background_shell_spawn: true,
+      command: "sleep 10",
+      working_directory: process.cwd(),
+    })
+    const output = { args: { command: "sleep 10" } }
+    await plugin["tool.execute.before"]?.({
+      tool: "bash",
+      sessionID: "ses_1",
+      callID,
+    } as never, output as never)
+    expect(output.args.command).toBe("sleep 10")
+
+    const envOut = { env: {} as Record<string, string> }
+    await plugin["shell.env"]?.({
+      cwd: process.cwd(),
+      sessionID: "ses_1",
+      callID,
+    } as never, envOut as never)
+    expect(envOut.env.BASH_ENV).toBeString()
+    const injector = await Bun.file(envOut.env.BASH_ENV).text()
+    expect(injector).toContain("exec /bin/sh")
+  })
+
+  it("sanitizes both output and metadata.output after soft-background completion", async () => {
+    const plugin = await CursorPlugin({ directory: process.cwd() } as never)
+    const callID = "cursor_hook_meta_sanitize"
+    registerCursorShellCall(callID, {
+      shell_stream: true,
+      command: "sleep 60",
+      working_directory: process.cwd(),
+      timeout_ms: 5_000,
+      timeout_behavior: CURSOR_TIMEOUT_BACKGROUND,
+    })
+    const marker = "__CURSOR_SHELL_BACKGROUND__43210:/tmp/cursor-opencode-shell.XYZ\n"
+    const output = {
+      title: "wrapped",
+      output: `started\n\n${marker}`,
+      metadata: { exit: 0, output: `started\n\n${marker}` },
+    }
+    await plugin["tool.execute.after"]?.({
+      tool: "bash",
+      sessionID: "ses_1",
+      callID,
+      args: {},
+    } as never, output as never)
+    expect(output.title).toBe("sleep 60")
+    expect(output.output).toBe("started\nStill running in the background (pid 43210) after 5000ms.\n")
+    expect(output.metadata.output).toBe("started\nStill running in the background (pid 43210) after 5000ms.\n")
+  })
+
+  it("sanitizes exit markers when host-shell Terminated noise trails them", async () => {
+    const plugin = await CursorPlugin({ directory: process.cwd() } as never)
+    const callID = "cursor_hook_exit_trailing"
+    registerCursorShellCall(callID, {
+      shell_stream: true,
+      command: "echo hello",
+      working_directory: process.cwd(),
+      timeout_ms: 5_000,
+      timeout_behavior: CURSOR_TIMEOUT_BACKGROUND,
+    })
+    const noise =
+      "/bin/bash: line 31:  4676 Terminated: 15          nohup sh -c 'cursor-shell-watchdog'\n"
+    const output = {
+      title: "wrapped",
+      output: `hello\n\n__CURSOR_SHELL_EXIT__0\n${noise}`,
+      metadata: { exit: 0, output: `hello\n\n__CURSOR_SHELL_EXIT__0\n${noise}` },
+    }
+    await plugin["tool.execute.after"]?.({
+      tool: "bash",
+      sessionID: "ses_1",
+      callID,
+      args: {},
+    } as never, output as never)
+    expect(output.title).toBe("echo hello")
+    expect(output.output).toBe("hello\n")
+    expect(output.metadata.output).toBe("hello\n")
   })
 })
 

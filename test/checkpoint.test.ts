@@ -81,4 +81,21 @@ describe("buildRunRequest checkpoint echo", () => {
       content: "Be brief.",
     })
   })
+
+  it("encodes checkpoint recovery as ResumeAction without replaying user text", () => {
+    const checkpoint = Uint8Array.from([0x0a, 0x01, 0x7f])
+    const data = buildRunRequest({
+      text: "must not be replayed",
+      modelId: "m",
+      conversationId: "c",
+      conversationState: checkpoint,
+      action: "resume",
+    })
+    const runRequest = decodeMessage<any>("AgentClientMessage", data).run_request
+
+    expect(runRequest.action.resume_action).toEqual({ request_context: null })
+    expect(runRequest.action.user_message_action).toBeUndefined()
+    expect(Buffer.from(runRequest.conversation_state)).toEqual(Buffer.from(checkpoint))
+    expect(runRequest.conversation_id).toBe("c")
+  })
 })

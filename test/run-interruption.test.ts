@@ -155,6 +155,69 @@ describe("interrupted Cursor Run handling", () => {
     expect(parts.some((part) => part.type === "text-delta" && part.delta === "partial")).toBe(true)
   })
 
+  it("resumes the latest checkpoint after visible output instead of replaying the turn", async () => {
+    const firstCheckpoint = Uint8Array.from([0x0a, 0x01, 0x01])
+    const latestCheckpoint = Uint8Array.from([0x0a, 0x01, 0x02])
+    const interrupted = fakeSession("checkpointed", [
+      serverFrame({ interaction_update: { text_delta: { text: "partial" } } }),
+      serverFrame({ conversation_checkpoint_update: firstCheckpoint }),
+      serverFrame({ conversation_checkpoint_update: latestCheckpoint }),
+      {
+        flags: 0x02,
+        payload: new TextEncoder().encode(JSON.stringify({ error: { code: "unavailable" } })),
+      },
+    ])
+    const resumed = fakeSession("resumed", [
+      serverFrame({ interaction_update: { text_delta: { text: " continuation" } } }),
+      serverFrame({ interaction_update: { turn_ended: { input_tokens: 4, output_tokens: 2 } } }),
+    ])
+    const parts: any[] = []
+    const recoveries: unknown[] = []
+
+    const finalSession = await pumpWithRecovery({
+      initialSession: interrupted,
+      controller: controller(parts),
+      retryPolicy: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1 },
+      recover: async (recovery) => {
+        recoveries.push(recovery)
+        return resumed
+      },
+    })
+
+    expect(finalSession).toBe(resumed)
+    expect(recoveries).toHaveLength(1)
+    expect(recoveries[0]).toMatchObject({
+      kind: "resume",
+      conversationId: interrupted.conversationId,
+    })
+    expect(Buffer.from((recoveries[0] as any).checkpoint)).toEqual(Buffer.from(latestCheckpoint))
+    expect(parts.filter((part) => part.type === "text-delta").map((part) => part.delta)).toEqual([
+      "partial",
+      " continuation",
+    ])
+    expect(parts.filter((part) => part.type === "finish")).toHaveLength(1)
+    expect(parts.find((part) => part.type === "finish").usage.outputTokens.total).toBe(5)
+  })
+
+  it("does not retry a transport close after turn_ended", async () => {
+    let recoveries = 0
+    const parts: any[] = []
+    await pumpWithRecovery({
+      initialSession: fakeSession("terminal", [
+        serverFrame({ interaction_update: { turn_ended: { input_tokens: 1, output_tokens: 1 } } }),
+        { flags: 0x02, payload: new Uint8Array() },
+      ]),
+      controller: controller(parts),
+      recover: async () => {
+        recoveries++
+        return fakeSession("unused", [])
+      },
+    })
+
+    expect(recoveries).toBe(0)
+    expect(parts.filter((part) => part.type === "finish")).toHaveLength(1)
+  })
+
   it("reports per-request usage while preserving cumulative Cursor counters as metadata", async () => {
     const parts: any[] = []
     await pump(

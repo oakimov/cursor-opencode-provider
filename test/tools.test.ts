@@ -424,7 +424,7 @@ describe("parseExecServerMessage", () => {
     expect(result?.localError).toBeUndefined()
   })
 
-  it("decodes canonical field #16 and maps it to a detached OpenCode bash call", () => {
+  it("decodes canonical field #16 and maps it to an OpenCode bash call with original command", () => {
     const esm = decodeMessage<any>("ExecServerMessage", canonicalBackgroundShellExecMessage())
     const result = parseExecServerMessage(esm)
     expect(result).toMatchObject({
@@ -432,14 +432,15 @@ describe("parseExecServerMessage", () => {
       toolName: "bash",
       resultField: "background_shell_spawn_result",
       resultMetadata: {
+        background_shell_spawn: true,
         command: "zig translate-c /tmp/tiny.c -lc",
         working_directory: "/tmp",
       },
-      args: { workdir: "/tmp" },
+      args: {
+        command: "zig translate-c /tmp/tiny.c -lc",
+        workdir: "/tmp",
+      },
     })
-    expect(result?.args.command).toContain("nohup sh -c 'zig translate-c /tmp/tiny.c -lc'")
-    expect(result?.args.command).toContain("__CURSOR_BACKGROUND_SHELL__")
-    expect(result?.args.command).toContain("</dev/null &")
     expect(result?.localError).toBeUndefined()
   })
 
@@ -941,6 +942,35 @@ describe("buildExecClientMessages", () => {
     })
     const close = decodeMessage<any>("AgentClientMessage", frames[1])
     expect(close.exec_client_control_message?.stream_close?.id).toBe(49)
+  })
+
+  it("prefers structured shellOutcome over markers for background shell spawn results", () => {
+    const frames = buildExecClientMessages({
+      execId: 50,
+      resultField: "background_shell_spawn_result",
+      // Markers already stripped from OpenCode-stored output after the plugin hook.
+      output: "",
+      resultMetadata: {
+        command: "zig translate-c /tmp/tiny.c -lc",
+        working_directory: "/tmp",
+      },
+      shellOutcome: {
+        kind: "backgrounded",
+        shellId: 43210,
+        pid: 43210,
+        command: "zig translate-c /tmp/tiny.c -lc",
+        workingDirectory: "/tmp",
+        msToWait: 0,
+        reason: 1,
+      },
+    })
+    const result = decodeMessage<any>("AgentClientMessage", frames[0]).exec_client_message
+    expect(result.background_shell_spawn_result?.success).toEqual({
+      shell_id: 43210,
+      command: "zig translate-c /tmp/tiny.c -lc",
+      working_directory: "/tmp",
+      pid: 43210,
+    })
   })
 
   it("returns a typed background spawn error when OpenCode produces no pid marker", () => {

@@ -32,6 +32,8 @@ export type RunRequestInput = {
   toolDescriptors?: Array<Record<string, unknown>>
   /** Prebuilt RequestContext (OpenCode-sourced). */
   requestContext?: Record<string, unknown>
+  /** Resume the supplied checkpoint instead of submitting another user turn. */
+  action?: "user" | "resume"
 }
 
 /**
@@ -91,9 +93,10 @@ export function buildRunRequest(input: RunRequestInput): Uint8Array {
       message_id: msgId,
     },
   }
-  if (requestContext) {
-    userMessageAction.request_context = requestContext
-  }
+  if (requestContext) userMessageAction.request_context = requestContext
+  const action = input.action === "resume"
+    ? { resume_action: {} }
+    : { user_message_action: userMessageAction }
 
   const conversationState =
     input.conversationState && input.conversationState.length > 0
@@ -105,9 +108,7 @@ export function buildRunRequest(input: RunRequestInput): Uint8Array {
 
   const runRequest: Record<string, unknown> = {
     conversation_id: input.conversationId,
-    action: {
-      user_message_action: userMessageAction,
-    },
+    action,
     requested_model: {
       // The provider always selects a concrete model. Cursor's "default"
       // pseudo-model (Auto) is never used here — we send the real id plus the

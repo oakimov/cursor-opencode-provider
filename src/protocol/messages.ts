@@ -1094,7 +1094,9 @@ export function createMessageTypes(): protobuf.Root {
   ])
 
   addType(root, "ResumeAction", [
-    { id: 1, name: "conversation_id", type: "string" },
+    // Cursor CLI sends an empty ResumeAction. Field #2 is available for a
+    // refreshed RequestContext; the conversation id belongs to AgentRunRequest.
+    { id: 2, name: "request_context", type: "RequestContext" },
   ])
 
   addType(root, "CancelAction", [

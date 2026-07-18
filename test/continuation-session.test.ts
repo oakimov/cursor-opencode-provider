@@ -143,23 +143,37 @@ describe("deliverContinuationResults", () => {
     const writes: Uint8Array[] = []
     const live = fakeSession("background-write")
     live.stream.write = (frame: Uint8Array) => { writes.push(frame) }
+    const toolCallId = "cursor_background-write_49"
+    const metadata = {
+      background_shell_spawn: true,
+      command: "sleep 5",
+      working_directory: "/tmp",
+    }
+    registerCursorShellCall(toolCallId, metadata)
+    const clean = captureCursorShellResult(
+      toolCallId,
+      "__CURSOR_BACKGROUND_SHELL__54321:/tmp/cursor-opencode-bg.ABC123\n",
+      { exit: 0 },
+    )
     sessionManager.registerPending(
       49,
       live,
       "background_shell_spawn_result",
       "bash",
       false,
-      { command: "sleep 5", working_directory: "/tmp" },
+      metadata,
     )
 
     const kept = deliverContinuationResults(live, [{
+      toolCallId,
       sessionId: "background-write",
       execId: 49,
       toolName: "bash",
-      output: "__CURSOR_BACKGROUND_SHELL__54321:/tmp/cursor-opencode-bg.ABC123\n",
+      output: clean,
     }])
 
     expect(kept).toBe(live)
+    expect(clean).toBe("Started in the background (pid 54321).\n")
     const result = decodeMessage<any>("AgentClientMessage", writes[0]).exec_client_message
     expect(result.background_shell_spawn_result?.success).toEqual({
       shell_id: 54321,
@@ -199,10 +213,10 @@ describe("deliverContinuationResults", () => {
     }])
 
     expect(kept).toBe(live)
-    expect(clean).toBe("partial output\n")
+    expect(clean).toBe("partial output\nTimed out after 30000ms.\n")
     const stdout = decodeMessage<any>("AgentClientMessage", writes[1]).exec_client_message
     const exit = decodeMessage<any>("AgentClientMessage", writes[2]).exec_client_message
-    expect(stdout.shell_stream.stdout.data).toBe("partial output\n")
+    expect(stdout.shell_stream.stdout.data).toBe("partial output\nTimed out after 30000ms.\n")
     expect(exit.shell_stream.exit).toMatchObject({ code: 0, aborted: true, abort_reason: 2 })
     expect(JSON.stringify(writes.map((frame) => decodeMessage("AgentClientMessage", frame))))
       .not.toContain("shell_metadata")
