@@ -62,6 +62,11 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
+      # OpenCode's default interactive shell is zsh; shell-timeout's ZDOTDIR
+      # injector integration test needs /bin/zsh (absent on stock ubuntu-latest).
+      - name: Install zsh
+        run: sudo apt-get update && sudo apt-get install -y zsh
+
       - name: Typecheck
         run: bun run typecheck
 

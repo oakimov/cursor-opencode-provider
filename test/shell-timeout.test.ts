@@ -293,6 +293,8 @@ describe("Cursor shell timeout translation", () => {
   })
 
   it("exec-replaces OpenCode-style zsh -l -c via ZDOTDIR injector", () => {
+    // Ubuntu CI images do not ship /bin/zsh by default; skip rather than ENOENT.
+    if (!existsSync("/bin/zsh")) return
     const id = "cursor_session_env_exec_zsh_opencode"
     const command = "echo INNER_OK"
     registerCursorShellCall(id, metadata({
