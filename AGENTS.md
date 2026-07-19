@@ -85,6 +85,7 @@ When changing rule/skill discovery, keep parity with OpenCode behavior and updat
 | `CURSOR_PROVIDER_DEBUG` | Wire debug log (`CURSOR_PROVIDER_DEBUG_FILE`; default under `$TMPDIR/cursor-provider-logs-<uid>/debug-<pid>.log`) |
 | `CURSOR_GET_SERVER_CONFIG_TELEMETRY` | Opt in GetServerConfig telemetry |
 | `~/.cache/opencode/cursor-models.json` | Model cache (`$XDG_CACHE_HOME/opencode/` when set) |
+| `~/.cache/opencode/projects/<slug>/` | Cursor project metadata root (`project_folder` / `workspace_project_dir`; keeps `agent-tools` out of the git workspace) |
 | OpenCode auth | `~/.local/share/opencode/auth.json` (`$XDG_DATA_HOME`) |
 
 ## Docs map

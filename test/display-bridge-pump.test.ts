@@ -672,10 +672,10 @@ describe("display-only ToolCall pump bridge", () => {
     const toolCalls = parts.filter((part) => part.type === "tool-call")
     expect(toolCalls).toHaveLength(1)
     expect(toolCalls[0].toolName).toBe("bash")
-    expect(JSON.parse(toolCalls[0].input)).toEqual({
-      command: "zig translate-c /tmp/tiny.c -lc",
-      workdir: "/tmp",
-    })
+    const input = JSON.parse(toolCalls[0].input)
+    expect(input.workdir).toBe("/tmp")
+    expect(input.command).toContain("nohup sh -c 'zig translate-c /tmp/tiny.c -lc'")
+    expect(input.command).toContain("__CURSOR_BACKGROUND_SHELL__")
     expect(session.displayToolCalls.has(callId)).toBe(false)
     expect(sessionManager.pendingFor(session.sessionId, 49)).toMatchObject({
       resultField: "background_shell_spawn_result",

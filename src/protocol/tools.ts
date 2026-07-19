@@ -1,9 +1,15 @@
 import fs from "node:fs"
 import { encodeMessage } from "./messages.js"
 import { encodeJsonAsValue, decodeStructEntriesToJson, readAllFields } from "./struct.js"
-import { trace } from "../debug.js"
+import { buildEnv } from "../context/env.js"
+import { ensureOpencodeProjectDir } from "../context/paths.js"
+import { trace, traceRequestContextPaths } from "../debug.js"
 import { cursorExecVariantByRequestName } from "./exec-variants.js"
-import { BACKGROUND_SHELL_MARKER, type CursorShellOutcome } from "../shell-timeout.js"
+import {
+  BACKGROUND_SHELL_MARKER,
+  buildBackgroundShellCommand,
+  type CursorShellOutcome,
+} from "../shell-timeout.js"
 
 // Exec variant field number whose reply is the server-initiated request_context
 // probe (ExecServerMessage #10 → ExecClientMessage #10). request/result share a
@@ -146,19 +152,12 @@ export function buildLiveRequestContext(
   const flat = toolsToDescriptors(tools, providerIdentifier, knownMcpServers)
   const nested = toolsToMcpDescriptors(tools, providerIdentifier, knownMcpServers)
   const cwd = process.cwd()
-  return {
-    env: {
-      os_version: process.platform,
-      workspace_paths: [cwd],
-      shell: process.env.SHELL || "/bin/bash",
-      time_zone: "UTC",
-      project_folder: cwd,
-      process_working_directory: cwd,
-    },
+  const ctx: Record<string, unknown> = {
+    env: buildEnv(cwd),
     tools: flat,
     mcp_file_system_options: {
       enabled: true,
-      workspace_project_dir: cwd,
+      workspace_project_dir: ensureOpencodeProjectDir(cwd),
       mcp_descriptors: nested,
     },
     mcp_meta_tool_options: {
@@ -171,6 +170,8 @@ export function buildLiveRequestContext(
     mcp_file_system_info_complete: true,
     git_status_info_complete: true,
   }
+  traceRequestContextPaths("buildLiveRequestContext", ctx)
+  return ctx
 }
 
 // ── Cursor exec-variant → opencode tool name ──
@@ -302,15 +303,16 @@ export function parseExecServerMessage(
   if (!resultField) return undefined
   const execId = (msg.exec_id as string) ?? ""
 
-  // F11: Cursor native background shell → OpenCode bash. Emit the original
-  // command for UI/storage; the classic plugin before-hook wraps with nohup.
-  // Residual: the child can keep running after this tool call completes.
+  // F11: Cursor native background shell → OpenCode bash. Keep the wrapper
+  // self-contained so direct provider / hosts without shell.env still detach
+  // and return a PID. The classic plugin replaces this with its display-safe
+  // env or wrapper-file path before execution.
   if (execVariant === "background_shell_spawn_args") {
     const raw = (msg.background_shell_spawn_args as Record<string, unknown>) ?? {}
     const command = str(raw.command)
     const workingDirectory = str(raw.working_directory) ?? ""
     const args: Record<string, unknown> = {}
-    if (command) args.command = command
+    if (command) args.command = buildBackgroundShellCommand(command)
     if (workingDirectory) args.workdir = workingDirectory
     return {
       id,
@@ -1141,6 +1143,7 @@ function readFileLineCount(filePath: string): number | undefined {
   }
 }
 
+
 function extractPathLines(output: string): string[] {
   const lines = output.split("\n").map((l) => l.trim()).filter(Boolean)
   // Prefer absolute / relative path-looking lines; fall back to all non-empty.
@@ -1236,6 +1239,7 @@ export function buildRequestContextResult(
   execId: number,
   requestContext: Record<string, unknown>,
 ): Uint8Array {
+  traceRequestContextPaths(`buildRequestContextResult id=${execId}`, requestContext)
   return encodeMessage("AgentClientMessage", {
     exec_client_message: {
       id: execId,

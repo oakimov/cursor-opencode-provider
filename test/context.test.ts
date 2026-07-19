@@ -5,6 +5,8 @@ import os from "node:os"
 import { collectRules, fetchRemoteInstruction } from "../src/context/rules.js"
 import { collectSkills } from "../src/context/skills.js"
 import { buildRequestContext } from "../src/context/build.js"
+import { workspaceRootFromRequestContext } from "../src/context/env.js"
+import { opencodeProjectDir } from "../src/context/paths.js"
 import { encodeMessage, decodeMessage } from "../src/protocol/messages.js"
 
 describe("collectRules / buildRequestContext", () => {
@@ -66,6 +68,32 @@ describe("collectRules / buildRequestContext", () => {
     expect(bytes.length).toBeGreaterThan(50)
     const decoded = decodeMessage("RequestContext", bytes) as Record<string, unknown>
     expect(Array.isArray(decoded.rules)).toBe(true)
+  })
+
+  it("advertises Cursor metadata under ~/.cache/opencode/projects, not the workspace", async () => {
+    const prevCache = process.env.XDG_CACHE_HOME
+    const cacheRoot = path.join(os.tmpdir(), `cursor-ctx-cache-${process.pid}-${Date.now()}`)
+    process.env.XDG_CACHE_HOME = cacheRoot
+    try {
+      const expectedProject = opencodeProjectDir(root)
+      const ctx = await buildRequestContext({
+        workspaceRoot: root,
+        tools: [{ name: "read", description: "Read a file", inputSchema: { type: "object", properties: {} } }],
+      })
+      const env = ctx.env as Record<string, unknown>
+      expect(env.workspace_paths).toEqual([path.resolve(root)])
+      expect(env.project_folder).toBe(expectedProject)
+      expect(env.project_folder).not.toBe(path.resolve(root))
+      expect(env.terminals_folder).toBe(path.join(expectedProject, "terminals"))
+      expect(env.agent_transcripts_folder).toBe(path.join(expectedProject, "agent-transcripts"))
+      const fsOpts = ctx.mcp_file_system_options as Record<string, unknown>
+      expect(fsOpts.workspace_project_dir).toBe(expectedProject)
+      expect(workspaceRootFromRequestContext(ctx)).toBe(path.resolve(root))
+    } finally {
+      if (prevCache === undefined) delete process.env.XDG_CACHE_HOME
+      else process.env.XDG_CACHE_HOME = prevCache
+      await rm(cacheRoot, { recursive: true, force: true })
+    }
   })
 
   it("splits only config-backed MCP tools and preserves custom underscore names", async () => {

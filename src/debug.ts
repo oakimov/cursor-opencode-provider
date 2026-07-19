@@ -13,6 +13,12 @@ const DEBUG_ENABLED =
 let _traceInitialized = false
 let _debugFile: string | undefined
 let _debugFileUsesManagedDirectory = false
+let _announcedLogPath = false
+
+/** Whether `CURSOR_PROVIDER_DEBUG` is enabled for this process. */
+export function isDebugEnabled(): boolean {
+  return DEBUG_ENABLED
+}
 
 /** Resolve the debug log path (env override or per-uid tmpdir default). */
 export function resolveDebugLogPath(): string {
@@ -50,6 +56,17 @@ export function ensureSecureDebugLog(
   fs.chmodSync(filePath, 0o600)
 }
 
+function announceLogPath(filePath: string): void {
+  if (_announcedLogPath) return
+  _announcedLogPath = true
+  try {
+    // Visible in the OpenCode / terminal session so operators know where to look.
+    console.error(`[cursor-provider] CURSOR_PROVIDER_DEBUG logging to ${filePath}`)
+  } catch {
+    /* ignore */
+  }
+}
+
 export function trace(msg: string): void {
   if (!DEBUG_ENABLED) return
   try {
@@ -65,9 +82,44 @@ export function trace(msg: string): void {
         { mode: 0o600 },
       )
       _traceInitialized = true
+      announceLogPath(_debugFile)
+      fs.appendFileSync(
+        _debugFile,
+        `[${new Date().toISOString()}] debug: enabled file=${_debugFile} ` +
+          `xdg_cache_home=${process.env.XDG_CACHE_HOME ?? "(unset)"} ` +
+          `cwd=${process.cwd()}\n`,
+      )
     }
     fs.appendFileSync(_debugFile, `[${new Date().toISOString()}] ${msg}\n`)
   } catch {
     /* ignore */
   }
+}
+
+/**
+ * Compact path-advertising summary for RequestContext troubleshooting.
+ * Safe: no tokens / file contents — only workspace vs metadata roots.
+ */
+export function traceRequestContextPaths(
+  label: string,
+  requestContext: Record<string, unknown> | undefined,
+): void {
+  if (!DEBUG_ENABLED) return
+  const env =
+    requestContext?.env && typeof requestContext.env === "object"
+      ? (requestContext.env as Record<string, unknown>)
+      : undefined
+  const mcp =
+    requestContext?.mcp_file_system_options &&
+    typeof requestContext.mcp_file_system_options === "object"
+      ? (requestContext.mcp_file_system_options as Record<string, unknown>)
+      : undefined
+  trace(
+    `${label}: workspace_paths=${JSON.stringify(env?.workspace_paths ?? null)} ` +
+      `process_working_directory=${JSON.stringify(env?.process_working_directory ?? null)} ` +
+      `project_folder=${JSON.stringify(env?.project_folder ?? null)} ` +
+      `terminals_folder=${JSON.stringify(env?.terminals_folder ?? null)} ` +
+      `agent_transcripts_folder=${JSON.stringify(env?.agent_transcripts_folder ?? null)} ` +
+      `workspace_project_dir=${JSON.stringify(mcp?.workspace_project_dir ?? null)}`,
+  )
 }

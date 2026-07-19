@@ -9,6 +9,7 @@ import { resetAgentUrlCache } from "../src/agent-url.js"
 import { CURSOR_COMPACTION_OPTION } from "../src/shared.js"
 import {
   CURSOR_TIMEOUT_BACKGROUND,
+  buildBackgroundShellCommand,
   consumeCursorShellResult,
   registerCursorShellCall,
   resetCursorShellCalls,
@@ -286,6 +287,7 @@ describe("CursorPlugin shell result hooks", () => {
 
   it("keeps soft-background Bash command original and injects wrap via shell.env", async () => {
     const plugin = await CursorPlugin({ directory: process.cwd() } as never)
+    await plugin.config?.({ shell: "/bin/bash" } as never)
     const callID = "cursor_hook_2"
     registerCursorShellCall(callID, {
       shell_stream: true,
@@ -331,18 +333,20 @@ describe("CursorPlugin shell result hooks", () => {
 
   it("wraps background_shell_spawn via shell.env without rewriting args.command", async () => {
     const plugin = await CursorPlugin({ directory: process.cwd() } as never)
+    await plugin.config?.({ shell: "/bin/bash" } as never)
     const callID = "cursor_hook_bg_spawn"
     registerCursorShellCall(callID, {
       background_shell_spawn: true,
       command: "sleep 10",
       working_directory: process.cwd(),
     })
-    const output = { args: { command: "sleep 10" } }
+    const output = { args: { command: buildBackgroundShellCommand("sleep 10") } }
     await plugin["tool.execute.before"]?.({
       tool: "bash",
       sessionID: "ses_1",
       callID,
     } as never, output as never)
+    // The protocol fallback is replaced with the original display/permission command.
     expect(output.args.command).toBe("sleep 10")
 
     const envOut = { env: {} as Record<string, string> }
@@ -354,6 +358,38 @@ describe("CursorPlugin shell result hooks", () => {
     expect(envOut.env.BASH_ENV).toBeString()
     const injector = await Bun.file(envOut.env.BASH_ENV).text()
     expect(injector).toContain("exec /bin/sh")
+  })
+
+  it("replaces background fallback with a short wrapper command for sh", async () => {
+    const plugin = await CursorPlugin({ directory: process.cwd() } as never)
+    await plugin.config?.({ shell: "/bin/sh" } as never)
+    const callID = "cursor_hook_bg_spawn_sh"
+    registerCursorShellCall(callID, {
+      background_shell_spawn: true,
+      command: "sleep 10",
+      working_directory: process.cwd(),
+    })
+    const output = { args: { command: buildBackgroundShellCommand("sleep 10") } }
+    await plugin["tool.execute.before"]?.({
+      tool: "bash",
+      sessionID: "ses_1",
+      callID,
+    } as never, output as never)
+    expect(output.args.command).toStartWith("exec /bin/sh '")
+    expect(output.args.command).not.toContain("__CURSOR_BACKGROUND_SHELL__")
+
+    const envOut = { env: {} as Record<string, string> }
+    await plugin["shell.env"]?.({
+      cwd: process.cwd(),
+      sessionID: "ses_1",
+      callID,
+    } as never, envOut as never)
+    const result = Bun.spawnSync(["/bin/sh", "-c", output.args.command], {
+      env: { ...process.env, ...envOut.env },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    expect(result.stdout.toString()).toContain("__CURSOR_BACKGROUND_SHELL__")
   })
 
   it("sanitizes both output and metadata.output after soft-background completion", async () => {

@@ -7,6 +7,8 @@ import { collectPlugins } from "./plugins.js"
 import { collectGit } from "./git.js"
 import { collectProjectLayout } from "./layout.js"
 import { buildEnv } from "./env.js"
+import { ensureOpencodeProjectDir } from "./paths.js"
+import { traceRequestContextPaths } from "../debug.js"
 
 export type BuildRequestContextInput = {
   workspaceRoot: string
@@ -38,6 +40,7 @@ export async function buildRequestContext(
   const mcpServerNames = Object.keys(config.mcp ?? {})
   const flat = toolsToDescriptors(tools, providerIdentifier, mcpServerNames)
   const nested = toolsToMcpDescriptors(tools, providerIdentifier, mcpServerNames)
+  const projectDir = ensureOpencodeProjectDir(workspaceRoot)
 
   const ctx: Record<string, unknown> = {
     env: buildEnv(workspaceRoot),
@@ -62,7 +65,8 @@ export async function buildRequestContext(
     })),
     mcp_file_system_options: {
       enabled: true,
-      workspace_project_dir: workspaceRoot,
+      // Cursor metadata root (mcps / agent-tools), not the git workspace.
+      workspace_project_dir: projectDir,
       mcp_descriptors: nested,
     },
     mcp_meta_tool_options: {
@@ -87,5 +91,6 @@ export async function buildRequestContext(
       .join("\n")
   }
 
+  traceRequestContextPaths("buildRequestContext", ctx)
   return ctx
 }

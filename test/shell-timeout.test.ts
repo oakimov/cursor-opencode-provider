@@ -12,6 +12,8 @@ import {
   registerCursorShellCall,
   releaseCursorShellEnv,
   resetCursorShellCalls,
+  resolveCursorShellKind,
+  setCursorShellPath,
   shellPolicyFromMetadata,
 } from "../src/shell-timeout.js"
 
@@ -72,6 +74,7 @@ describe("Cursor shell timeout translation", () => {
   })
 
   it("keeps soft-background display command original and wraps via shell.env injectors", () => {
+    setCursorShellPath("/bin/bash")
     const id = "cursor_session_4"
     const policyMetadata = metadata({
       timeout_behavior: CURSOR_TIMEOUT_BACKGROUND,
@@ -197,6 +200,7 @@ describe("Cursor shell timeout translation", () => {
   })
 
   it("keeps background_shell_spawn display command original and wraps via shell.env", () => {
+    setCursorShellPath("/bin/bash")
     const id = "cursor_session_bg_spawn"
     registerCursorShellCall(id, {
       background_shell_spawn: true,
@@ -248,6 +252,7 @@ describe("Cursor shell timeout translation", () => {
   })
 
   it("exec-replaces bash -c original command via BASH_ENV injector", () => {
+    setCursorShellPath("/bin/bash")
     const id = "cursor_session_env_exec_bash"
     registerCursorShellCall(id, {
       background_shell_spawn: true,
@@ -268,6 +273,7 @@ describe("Cursor shell timeout translation", () => {
   })
 
   it("still wraps when a parent left CURSOR_OPENCODE_WRAP_ACTIVE set", () => {
+    setCursorShellPath("/bin/bash")
     const id = "cursor_session_env_exec_sticky_active"
     registerCursorShellCall(id, metadata({
       timeout_behavior: CURSOR_TIMEOUT_BACKGROUND,
@@ -295,6 +301,7 @@ describe("Cursor shell timeout translation", () => {
   it("exec-replaces OpenCode-style zsh -l -c via ZDOTDIR injector", () => {
     // Ubuntu CI images do not ship /bin/zsh by default; skip rather than ENOENT.
     if (!existsSync("/bin/zsh")) return
+    setCursorShellPath("/bin/zsh")
     const id = "cursor_session_env_exec_zsh_opencode"
     const command = "echo INNER_OK"
     registerCursorShellCall(id, metadata({
@@ -324,6 +331,63 @@ describe("Cursor shell timeout translation", () => {
     const raw = result.stdout.toString()
     expect(raw).toContain("__CURSOR_SHELL_EXIT__")
     expect(captureCursorShellResult(id, raw)).toBe("INNER_OK\n")
+    releaseCursorShellEnv(id)
+  })
+
+  it("uses a wrapper-file command for OpenCode sh and dash", () => {
+    for (const shell of ["/bin/sh", "/bin/dash"]) {
+      if (!existsSync(shell)) continue
+      resetCursorShellCalls()
+      setCursorShellPath(shell)
+      expect(resolveCursorShellKind()).toBe(shell.endsWith("dash") ? "dash" : "sh")
+
+      const id = `cursor_session_${shell.endsWith("dash") ? "dash" : "sh"}`
+      const command = "printf ORIGINAL_OK"
+      registerCursorShellCall(id, metadata({
+        timeout_behavior: CURSOR_TIMEOUT_BACKGROUND,
+        timeout_ms: 2_000,
+        command,
+      }))
+      const args: Record<string, unknown> = { command, timeout: 30_000 }
+      prepareCursorShellArgs(id, args)
+      expect(args.command).not.toBe(command)
+      expect(String(args.command)).toStartWith("exec /bin/sh '")
+
+      const env = cursorShellEnvForCall(id)!
+      const result = Bun.spawnSync([shell, "-c", String(args.command)], {
+        env: { ...process.env, ...env },
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const raw = result.stdout.toString()
+      expect(raw).toContain("ORIGINAL_OK")
+      expect(raw).toContain("__CURSOR_SHELL_EXIT__0")
+      expect(captureCursorShellResult(id, raw)).toBe("ORIGINAL_OK\n")
+      releaseCursorShellEnv(id)
+    }
+  })
+
+  it("replaces the inline background fallback with a wrapper file on sh", () => {
+    setCursorShellPath("/bin/sh")
+    const id = "cursor_session_bg_spawn_sh"
+    const command = "sleep 1"
+    registerCursorShellCall(id, {
+      background_shell_spawn: true,
+      command,
+      working_directory: "/tmp",
+    })
+    const args: Record<string, unknown> = { command: buildBackgroundShellCommand(command) }
+    prepareCursorShellArgs(id, args)
+    expect(String(args.command)).toStartWith("exec /bin/sh '")
+    expect(String(args.command)).not.toContain("__CURSOR_BACKGROUND_SHELL__")
+
+    const env = cursorShellEnvForCall(id)!
+    const result = Bun.spawnSync(["/bin/sh", "-c", String(args.command)], {
+      env: { ...process.env, ...env },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    expect(result.stdout.toString()).toContain("__CURSOR_BACKGROUND_SHELL__")
     releaseCursorShellEnv(id)
   })
 })

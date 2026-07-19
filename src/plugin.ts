@@ -13,6 +13,7 @@ import {
   prepareCursorShellArgs,
   releaseCursorShellEnv,
   sanitizeRegisteredCursorShellOutput,
+  setCursorShellPath,
 } from "./shell-timeout.js"
 import { sessionActivity } from "./activity.js"
 
@@ -366,9 +367,9 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
 
     async "tool.execute.before"(hookInput, output) {
       if (hookInput.tool !== "bash") return
-      // Keep args.command as the original display/permission command. Wrapping
-      // happens via shell.env (BASH_ENV / ZDOTDIR) so OpenCode's bash UI never
-      // stores or renders the private wrapper script.
+      // bash/zsh retain the original display/permission command and wrap via
+      // shell.env. sh/dash need a short wrapper-file command because their
+      // non-interactive `-c` path ignores BASH_ENV / ZDOTDIR.
       prepareCursorShellArgs(hookInput.callID, output.args as Record<string, unknown>)
     },
 
@@ -411,6 +412,7 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
     },
 
     async config(cfg: Config) {
+      setCursorShellPath((cfg as Config & { shell?: string }).shell)
       cfg.provider ??= {}
       const models = await loadModels()
       const existing = cfg.provider[CURSOR_PROVIDER_ID]

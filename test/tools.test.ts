@@ -424,7 +424,7 @@ describe("parseExecServerMessage", () => {
     expect(result?.localError).toBeUndefined()
   })
 
-  it("decodes canonical field #16 and maps it to an OpenCode bash call with original command", () => {
+  it("decodes canonical field #16 with a self-contained background fallback", () => {
     const esm = decodeMessage<any>("ExecServerMessage", canonicalBackgroundShellExecMessage())
     const result = parseExecServerMessage(esm)
     expect(result).toMatchObject({
@@ -437,10 +437,11 @@ describe("parseExecServerMessage", () => {
         working_directory: "/tmp",
       },
       args: {
-        command: "zig translate-c /tmp/tiny.c -lc",
         workdir: "/tmp",
       },
     })
+    expect(result?.args.command).toContain("nohup sh -c 'zig translate-c /tmp/tiny.c -lc'")
+    expect(result?.args.command).toContain("__CURSOR_BACKGROUND_SHELL__")
     expect(result?.localError).toBeUndefined()
   })
 

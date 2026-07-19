@@ -9,7 +9,7 @@ import {
   normalizeAgentRunOrigin,
   type BidiStream,
 } from "./transport/connect.js"
-import { trace } from "./debug.js"
+import { trace, traceRequestContextPaths } from "./debug.js"
 import { buildRunRequest, buildHeartbeat } from "./protocol/request.js"
 import { decodeFramePayload } from "./protocol/framing.js"
 import { decodeMessage } from "./protocol/messages.js"
@@ -60,6 +60,7 @@ import {
 } from "./errors.js"
 import { readCache, cacheFilePath, resolveVariantParameters, paramsImplyMaxMode, extractCursorVariantParameters, resolveCursorWireModelId, type ModelInfo } from "./models.js"
 import { buildRequestContext } from "./context/build.js"
+import { workspaceRootFromRequestContext } from "./context/env.js"
 import { opencodeGlobalCacheDir } from "./context/paths.js"
 import { resolveAgentUrl } from "./agent-url.js"
 import { CURSOR_API_HOST, CURSOR_COMPACTION_OPTION } from "./shared.js"
@@ -1051,9 +1052,9 @@ export async function pump(
     const editPath = typeof display.args.path === "string" ? display.args.path : ""
     if (!requestedPath || !editPath) return false
 
-    const workspaceRoot = typeof session.requestContext.workspace_project_dir === "string"
-      ? session.requestContext.workspace_project_dir
-      : process.cwd()
+    // Prefer env.workspace_paths — project_folder / workspace_project_dir are
+    // Cursor metadata roots under ~/.cache/opencode/projects/, not the git tree.
+    const workspaceRoot = workspaceRootFromRequestContext(session.requestContext)
     const resolvePath = (value: string) => path.resolve(workspaceRoot, value)
     const absolutePath = resolvePath(requestedPath)
     if (absolutePath !== resolvePath(editPath) || fs.existsSync(absolutePath)) return false
@@ -1411,6 +1412,10 @@ export async function pump(
           if (hooks) trace(`exec request_context hooks_additional_context: ${hooks}`)
         }
         try {
+          traceRequestContextPaths(
+            `exec request_context reply id=${esmId}`,
+            session.requestContext,
+          )
           session.stream.write(buildRequestContextResult(esmId, session.requestContext))
           trace(`exec request_context: replied`)
         } catch (e) {
