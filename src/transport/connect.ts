@@ -13,6 +13,7 @@ import {
   errorCode,
   CursorProviderError,
 } from "../errors.js"
+import { withAbortDeadline } from "../deadline.js"
 import http2 from "node:http2"
 
 const API_BASE = `https://${CURSOR_API_HOST}`
@@ -30,34 +31,21 @@ function unaryTimeoutMs(operation: string, value: number | undefined): number {
   return timeoutMs
 }
 
-/**
- * Bound a complete unary operation, not only fetch(). Response body readers can
- * ignore abort signals, so Promise.race remains the authoritative deadline.
- */
 async function withUnaryDeadline<T>(
   operation: string,
   timeoutMs: number,
   timeoutCode: string,
   run: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
-  const controller = new AbortController()
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(new CursorTransportError(`${operation} timed out after ${timeoutMs}ms`, {
-        transient: true,
-        replaySafe: true,
-        code: timeoutCode,
-      }))
-      controller.abort()
-    }, timeoutMs)
-    timer.unref?.()
-  })
-  try {
-    return await Promise.race([run(controller.signal), deadline])
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
+  return withAbortDeadline(
+    timeoutMs,
+    () => new CursorTransportError(`${operation} timed out after ${timeoutMs}ms`, {
+      transient: true,
+      replaySafe: true,
+      code: timeoutCode,
+    }),
+    run,
+  )
 }
 
 function resolveApiBaseURL(options: { apiBaseURL?: string; baseURL?: string }): string {

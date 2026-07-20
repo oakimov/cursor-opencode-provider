@@ -6,6 +6,7 @@ import {
   VERSION_CACHE_FILE,
 } from "../shared.js"
 import { opencodeGlobalCacheDir } from "../context/paths.js"
+import { withAbortDeadline } from "../deadline.js"
 
 const INSTALL_URL = "https://cursor.com/install"
 const REMOTE_TIMEOUT_MS = 5_000
@@ -128,29 +129,17 @@ function isCacheFresh(cache: VersionCache, now = Date.now()): boolean {
 }
 
 async function fetchInstallerVersion(): Promise<string | undefined> {
-  const controller = new AbortController()
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(new Error("Cursor installer version request timed out"))
-      controller.abort()
-    }, REMOTE_TIMEOUT_MS)
-    timer.unref?.()
-  })
-  try {
-    return await Promise.race([
-      (async () => {
-        const response = await fetch(INSTALL_URL, { signal: controller.signal })
-        if (!response.ok) return undefined
+  return withAbortDeadline(
+    REMOTE_TIMEOUT_MS,
+    () => new Error("Cursor installer version request timed out"),
+    async (signal) => {
+      const response = await fetch(INSTALL_URL, { signal })
+      if (!response.ok) return undefined
 
-        const build = extractVersionFromInstaller(await response.text())
-        return build ? `cli-${build}` : undefined
-      })(),
-      deadline,
-    ])
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
+      const build = extractVersionFromInstaller(await response.text())
+      return build ? `cli-${build}` : undefined
+    },
+  )
 }
 
 async function refreshVersionCache(): Promise<void> {

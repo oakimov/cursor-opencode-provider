@@ -1,4 +1,5 @@
 import { CURSOR_API_HOST, CURSOR_WEBSITE_HOST } from "./shared.js"
+import { withAbortDeadline } from "./deadline.js"
 
 const API_BASE = `https://${CURSOR_API_HOST}`
 const AUTH_REQUEST_TIMEOUT_MS = 5_000
@@ -83,31 +84,12 @@ export type TokenPair = {
   refreshToken: string
 }
 
-async function withAuthRequestDeadline<T>(
-  timeoutError: () => Error,
-  run: (signal: AbortSignal) => Promise<T>,
-): Promise<T> {
-  const controller = new AbortController()
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(timeoutError())
-      controller.abort()
-    }, AUTH_REQUEST_TIMEOUT_MS)
-    timer.unref?.()
-  })
-  try {
-    return await Promise.race([run(controller.signal), deadline])
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
-}
-
 export async function exchangeApiKey(
   apiKey: string,
   baseUrl = API_BASE,
 ): Promise<TokenPair> {
-  return withAuthRequestDeadline(
+  return withAbortDeadline(
+    AUTH_REQUEST_TIMEOUT_MS,
     () => new AuthExchangeError("API key exchange timed out"),
     async (signal) => {
       let res: Response
@@ -147,7 +129,8 @@ export async function refreshAccessToken(
   refreshToken: string,
   baseUrl = API_BASE,
 ): Promise<TokenPair> {
-  return withAuthRequestDeadline(
+  return withAbortDeadline(
+    AUTH_REQUEST_TIMEOUT_MS,
     () => new AuthRefreshError("Token refresh timed out"),
     async (signal) => {
       let res: Response
