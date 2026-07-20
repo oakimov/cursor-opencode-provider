@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test"
-import { encodeJsonAsValue, decodeValueToJson } from "../src/protocol/struct.js"
+import { encodeJsonAsValue, decodeValueToJson, readAllFieldsStrict } from "../src/protocol/struct.js"
 
 // Minimal google.protobuf.Value decoder for verification.
 function readVarint(b: Uint8Array, i: number): [number, number] {
@@ -111,5 +111,37 @@ describe("decodeValueToJson (production decoder)", () => {
     expect(decodeValueToJson(encodeJsonAsValue(3.5))).toBe(3.5)
     expect(decodeValueToJson(encodeJsonAsValue(false))).toBe(false)
     expect(decodeValueToJson(encodeJsonAsValue(null))).toBe(null)
+  })
+})
+
+describe("readAllFieldsStrict", () => {
+  it("represents every supported wire type", () => {
+    const decoded = readAllFieldsStrict(Uint8Array.from([
+      0x08, 0x01,
+      0x12, 0x01, 0x61,
+      0x1d, 0x01, 0x02, 0x03, 0x04,
+      0x21, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+    ]))
+    expect(decoded?.map((field) => [field.fn, field.wt])).toEqual([
+      [1, 0], [2, 2], [3, 5], [4, 1],
+    ])
+  })
+
+  it("rejects truncated, unsupported, and overflowing wire encodings", () => {
+    expect(readAllFieldsStrict(Uint8Array.from([0x12, 0x02, 0x61]))).toBeUndefined()
+    expect(readAllFieldsStrict(Uint8Array.from([0x0b]))).toBeUndefined()
+    expect(readAllFieldsStrict(Uint8Array.from([0x84, 0x80, 0x80, 0x80, 0x10]))).toBeUndefined()
+    expect(readAllFieldsStrict(Uint8Array.from([
+      0x08,
+      0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02,
+    ]))).toBeUndefined()
+  })
+
+  it("preserves uint64 scalar values", () => {
+    const maximumUint64 = Uint8Array.from([
+      0x08,
+      0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01,
+    ])
+    expect(readAllFieldsStrict(maximumUint64)?.[0]?.varint).toBe(0xffff_ffff_ffff_ffffn)
   })
 })

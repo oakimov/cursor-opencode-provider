@@ -13,8 +13,18 @@ import {
 } from "../src/transport/connect.js"
 import { createCursor } from "../src/index.js"
 import { resetClientVersionCache } from "../src/protocol/client-version.js"
+import { CursorProtocolError, CursorTransportError } from "../src/errors.js"
 
 const INSTALLER_FIXTURE = `var x="https://downloads.cursor.com/lab/2026.07.09-a3815c0/";`
+
+function pendingFetchUntilAbort(init?: RequestInit): Promise<Response> {
+  return new Promise((_resolve, reject) => {
+    const signal = init?.signal
+    if (!signal) return reject(new Error("missing timeout signal"))
+    if (signal.aborted) return reject(signal.reason)
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+  })
+}
 
 describe("resolveAgentOrigin", () => {
   it("requires an explicit resolved agent host", () => {
@@ -92,6 +102,136 @@ describe("buildBaseHeaders", () => {
   it("uses the supplied client version", () => {
     const headers = buildBaseHeaders("token", "cli-test-123")
     expect(headers["x-cursor-client-version"]).toBe("cli-test-123")
+  })
+})
+
+describe("unary startup deadlines", () => {
+  it("times out a stalled AvailableModels fetch with a sanitized typed error", async () => {
+    const realFetch = globalThis.fetch
+    resetClientVersionCache()
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("cursor.com/install")) {
+        return new Response(INSTALLER_FIXTURE, { status: 200 })
+      }
+      return pendingFetchUntilAbort(init)
+    }) as typeof fetch
+    try {
+      const error = await unaryAvailableModels("secret-token", { timeoutMs: 10 })
+        .then(() => undefined, (cause) => cause)
+      expect(error).toBeInstanceOf(CursorTransportError)
+      expect(error).toMatchObject({
+        code: "CURSOR_AVAILABLE_MODELS_TIMEOUT",
+        origin: "transport",
+        transient: true,
+        replaySafe: true,
+      })
+      expect(error.message).not.toContain("secret-token")
+    } finally {
+      globalThis.fetch = realFetch
+      resetClientVersionCache()
+    }
+  })
+
+  it("times out stalled AvailableModels and GetServerConfig JSON body reads", async () => {
+    const realFetch = globalThis.fetch
+    resetClientVersionCache()
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (String(input).includes("cursor.com/install")) {
+        return new Response(INSTALLER_FIXTURE, { status: 200 })
+      }
+      const response = Response.json({})
+      Object.defineProperty(response, "json", {
+        value: () => new Promise<never>(() => {}),
+      })
+      return response
+    }) as typeof fetch
+    try {
+      const availableModelsError = await unaryAvailableModels("secret-token", { timeoutMs: 10 })
+        .then(() => undefined, (cause) => cause)
+      const agentUrlError = await fetchAgentUrl("secret-token", { timeoutMs: 10 })
+        .then(() => undefined, (cause) => cause)
+      expect(availableModelsError).toMatchObject({ code: "CURSOR_AVAILABLE_MODELS_TIMEOUT" })
+      expect(agentUrlError).toMatchObject({
+        code: "CURSOR_AGENT_URL_TIMEOUT",
+        origin: "transport",
+        transient: true,
+        replaySafe: true,
+      })
+      expect(availableModelsError.message).not.toContain("secret-token")
+      expect(agentUrlError.message).not.toContain("secret-token")
+    } finally {
+      globalThis.fetch = realFetch
+      resetClientVersionCache()
+    }
+  })
+
+  it("times out a stalled GetServerConfig fetch", async () => {
+    const realFetch = globalThis.fetch
+    resetClientVersionCache()
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("cursor.com/install")) {
+        return new Response(INSTALLER_FIXTURE, { status: 200 })
+      }
+      return pendingFetchUntilAbort(init)
+    }) as typeof fetch
+    try {
+      const error = await fetchAgentUrl("secret-token", { timeoutMs: 10 })
+        .then(() => undefined, (cause) => cause)
+      expect(error).toBeInstanceOf(CursorTransportError)
+      expect(error).toMatchObject({ code: "CURSOR_AGENT_URL_TIMEOUT" })
+      expect(error.message).not.toContain("secret-token")
+    } finally {
+      globalThis.fetch = realFetch
+      resetClientVersionCache()
+    }
+  })
+
+  it("times out unary error-body reads that ignore abort", async () => {
+    const realFetch = globalThis.fetch
+    resetClientVersionCache()
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (String(input).includes("cursor.com/install")) {
+        return new Response(INSTALLER_FIXTURE, { status: 200 })
+      }
+      const response = new Response("", { status: 503 })
+      Object.defineProperty(response, "text", {
+        value: () => new Promise<never>(() => {}),
+      })
+      return response
+    }) as typeof fetch
+    try {
+      const availableModelsError = await unaryAvailableModels("secret-token", { timeoutMs: 10 })
+        .then(() => undefined, (cause) => cause)
+      const agentUrlError = await fetchAgentUrl("secret-token", { timeoutMs: 10 })
+        .then(() => undefined, (cause) => cause)
+      expect(availableModelsError).toMatchObject({ code: "CURSOR_AVAILABLE_MODELS_TIMEOUT" })
+      expect(agentUrlError).toMatchObject({ code: "CURSOR_AGENT_URL_TIMEOUT" })
+    } finally {
+      globalThis.fetch = realFetch
+      resetClientVersionCache()
+    }
+  })
+
+  it("rejects invalid unary timeout values before fetching", async () => {
+    const realFetch = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = (async () => {
+      calls += 1
+      throw new Error("unexpected fetch")
+    }) as typeof fetch
+    try {
+      for (const request of [
+        unaryAvailableModels("secret-token", { timeoutMs: 0 }),
+        fetchAgentUrl("secret-token", { timeoutMs: Number.NaN }),
+      ]) {
+        const error = await request.then(() => undefined, (cause) => cause)
+        expect(error).toBeInstanceOf(CursorProtocolError)
+        expect(error).toMatchObject({ code: "CURSOR_INVALID_TIMEOUT" })
+      }
+      expect(calls).toBe(0)
+    } finally {
+      globalThis.fetch = realFetch
+    }
   })
 })
 

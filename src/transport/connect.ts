@@ -16,6 +16,49 @@ import {
 import http2 from "node:http2"
 
 const API_BASE = `https://${CURSOR_API_HOST}`
+const DEFAULT_UNARY_TIMEOUT_MS = 5_000
+const MAX_TIMER_MS = 2_147_483_647
+
+function unaryTimeoutMs(operation: string, value: number | undefined): number {
+  const timeoutMs = value ?? DEFAULT_UNARY_TIMEOUT_MS
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMER_MS) {
+    throw new CursorProtocolError(
+      `${operation} timeout must be a positive integer no greater than ${MAX_TIMER_MS}`,
+      { code: "CURSOR_INVALID_TIMEOUT" },
+    )
+  }
+  return timeoutMs
+}
+
+/**
+ * Bound a complete unary operation, not only fetch(). Response body readers can
+ * ignore abort signals, so Promise.race remains the authoritative deadline.
+ */
+async function withUnaryDeadline<T>(
+  operation: string,
+  timeoutMs: number,
+  timeoutCode: string,
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new CursorTransportError(`${operation} timed out after ${timeoutMs}ms`, {
+        transient: true,
+        replaySafe: true,
+        code: timeoutCode,
+      }))
+      controller.abort()
+    }, timeoutMs)
+    timer.unref?.()
+  })
+  try {
+    return await Promise.race([run(controller.signal), deadline])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
 
 function resolveApiBaseURL(options: { apiBaseURL?: string; baseURL?: string }): string {
   return new URL(options.apiBaseURL ?? options.baseURL ?? API_BASE).origin
@@ -49,47 +92,60 @@ export function buildBaseHeaders(
 
 export async function unaryAvailableModels(
   token: string,
-  options: { apiBaseURL?: string; baseURL?: string; headers?: Record<string, string> } = {},
+  options: {
+    apiBaseURL?: string
+    baseURL?: string
+    headers?: Record<string, string>
+    timeoutMs?: number
+  } = {},
 ): Promise<Record<string, unknown>> {
   const base = resolveApiBaseURL(options)
   const url = `${base}/aiserver.v1.AiService/AvailableModels`
-  const clientVersion = await resolveClientVersion()
-  const headers = buildBaseHeaders(token, clientVersion, options.headers)
+  const timeoutMs = unaryTimeoutMs("AvailableModels", options.timeoutMs)
+  return withUnaryDeadline(
+    "AvailableModels",
+    timeoutMs,
+    "CURSOR_AVAILABLE_MODELS_TIMEOUT",
+    async (signal) => {
+      const clientVersion = await resolveClientVersion()
+      const headers = buildBaseHeaders(token, clientVersion, options.headers)
+      let res: Response
+      try {
+        res = await fetch(url, {
+          method: "POST",
+          headers: {
+            ...headers,
+            "content-type": "application/json",
+            accept: "application/json",
+          },
+          // Request parameterized effort/context/fast variants like Cursor IDE.
+          body: JSON.stringify({
+            includeLongContextModels: true,
+            useModelParameters: true,
+            useCloudAgentEffortModes: true,
+          }),
+          signal,
+        })
+      } catch (cause) {
+        throw new CursorTransportError("AvailableModels network request failed", {
+          transient: true,
+          replaySafe: true,
+          code: errorCode(cause),
+          cause,
+        })
+      }
 
-  let res: Response
-  try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: {
-        ...headers,
-        "content-type": "application/json",
-        accept: "application/json",
-      },
-      // Request parameterized effort/context/fast variants like Cursor IDE.
-      body: JSON.stringify({
-        includeLongContextModels: true,
-        useModelParameters: true,
-        useCloudAgentEffortModes: true,
-      }),
-    })
-  } catch (cause) {
-    throw new CursorTransportError("AvailableModels network request failed", {
-      transient: true,
-      replaySafe: true,
-      code: errorCode(cause),
-      cause,
-    })
-  }
+      if (!res.ok) {
+        throw await cursorHttpResponseError("AvailableModels failed:", res)
+      }
 
-  if (!res.ok) {
-    throw await cursorHttpResponseError("AvailableModels failed:", res)
-  }
-
-  try {
-    return (await res.json()) as Record<string, unknown>
-  } catch (cause) {
-    throw new CursorProtocolError("AvailableModels returned malformed JSON", { cause })
-  }
+      try {
+        return (await res.json()) as Record<string, unknown>
+      } catch (cause) {
+        throw new CursorProtocolError("AvailableModels returned malformed JSON", { cause })
+      }
+    },
+  )
 }
 
 // ── Unary (GetServerConfig) ──
@@ -135,60 +191,74 @@ export function normalizeAgentRunOrigin(raw: string | undefined): string | null 
  */
 export async function fetchAgentUrl(
   token: string,
-  options: { apiBaseURL?: string; baseURL?: string; telemetryEnabled?: boolean } = {},
+  options: {
+    apiBaseURL?: string
+    baseURL?: string
+    telemetryEnabled?: boolean
+    timeoutMs?: number
+  } = {},
 ): Promise<string> {
   const base = resolveApiBaseURL(options)
   const url = `${base}${SERVER_CONFIG_PATH}`
-  const clientVersion = await resolveClientVersion()
-  // Match Cursor CLI: GetServerConfig uses base headers only — session headers belong on Run.
-  const headers = buildBaseHeaders(token, clientVersion)
+  const timeoutMs = unaryTimeoutMs("GetServerConfig", options.timeoutMs)
+  return withUnaryDeadline(
+    "GetServerConfig",
+    timeoutMs,
+    "CURSOR_AGENT_URL_TIMEOUT",
+    async (signal) => {
+      const clientVersion = await resolveClientVersion()
+      // Match Cursor CLI: GetServerConfig uses base headers only — session headers belong on Run.
+      const headers = buildBaseHeaders(token, clientVersion)
 
-  trace(`GetServerConfig POST ${url}`)
-  let res: Response
-  try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: {
-        ...headers,
-        "content-type": "application/json",
-        accept: "application/json",
-      },
-      body: JSON.stringify({ telem_enabled: options.telemetryEnabled ?? false }),
-    })
-  } catch (cause) {
-    throw new CursorTransportError("GetServerConfig network request failed", {
-      transient: true,
-      replaySafe: true,
-      code: errorCode(cause),
-      cause,
-    })
-  }
+      trace(`GetServerConfig POST ${url}`)
+      let res: Response
+      try {
+        res = await fetch(url, {
+          method: "POST",
+          headers: {
+            ...headers,
+            "content-type": "application/json",
+            accept: "application/json",
+          },
+          body: JSON.stringify({ telem_enabled: options.telemetryEnabled ?? false }),
+          signal,
+        })
+      } catch (cause) {
+        throw new CursorTransportError("GetServerConfig network request failed", {
+          transient: true,
+          replaySafe: true,
+          code: errorCode(cause),
+          cause,
+        })
+      }
 
-  if (!res.ok) {
-    throw await cursorHttpResponseError("GetServerConfig failed:", res)
-  }
+      if (!res.ok) {
+        throw await cursorHttpResponseError("GetServerConfig failed:", res)
+      }
 
-  let body: Record<string, unknown>
-  try {
-    body = (await res.json()) as Record<string, unknown>
-  } catch (cause) {
-    throw new CursorProtocolError("GetServerConfig returned malformed JSON", { cause })
-  }
-  const cfg = body.agentUrlConfig as { agentnUrl?: string; agentUrl?: string } | undefined
-  const raw = cfg?.agentnUrl || cfg?.agentUrl
-  const normalized = normalizeAgentRunOrigin(raw)
-  trace(
-    `GetServerConfig reply: agentnUrl=${cfg?.agentnUrl ?? "<missing>"} ` +
-      `agentUrl=${cfg?.agentUrl ?? "<missing>"} → ${normalized ?? "<invalid>"}`,
+      let body: Record<string, unknown>
+      try {
+        body = (await res.json()) as Record<string, unknown>
+      } catch (cause) {
+        throw new CursorProtocolError("GetServerConfig returned malformed JSON", { cause })
+      }
+      const cfg = body.agentUrlConfig as { agentnUrl?: string; agentUrl?: string } | undefined
+      const raw = cfg?.agentnUrl || cfg?.agentUrl
+      const normalized = normalizeAgentRunOrigin(raw)
+      trace(
+        `GetServerConfig reply: agentnUrl=${cfg?.agentnUrl ?? "<missing>"} ` +
+          `agentUrl=${cfg?.agentUrl ?? "<missing>"} → ${normalized ?? "<invalid>"}`,
+      )
+      if (!normalized) {
+        throw new CursorProtocolError(
+          raw
+            ? "GetServerConfig returned an invalid Cursor agent URL"
+            : "GetServerConfig response missing agentUrlConfig.agentnUrl",
+        )
+      }
+      return normalized
+    },
   )
-  if (!normalized) {
-    throw new CursorProtocolError(
-      raw
-        ? "GetServerConfig returned an invalid Cursor agent URL"
-        : "GetServerConfig response missing agentUrlConfig.agentnUrl",
-    )
-  }
-  return normalized
 }
 
 // ── Bidi (Run stream) ──
@@ -293,7 +363,6 @@ const CONNECT_TIMEOUT_MS = 15_000
 const DEFAULT_SESSION_PING_TIMEOUT_MS = 5_000
 const DEFAULT_READ_IDLE_MS = 120_000
 const WRITE_DRAIN_TIMEOUT_CODE = "CURSOR_WRITE_DRAIN_TIMEOUT"
-const MAX_TIMER_MS = 2_147_483_647
 export const HTTP2_SESSION_MAX_AGE_MS = 15 * 60_000
 
 export function shouldReuseHttp2Session(

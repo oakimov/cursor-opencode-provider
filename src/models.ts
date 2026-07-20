@@ -501,7 +501,7 @@ export function resolveVariantParameters(
 
 export async function fetchModels(
   token: string,
-  options: { baseURL?: string; headers?: Record<string, string> } = {},
+  options: { baseURL?: string; headers?: Record<string, string>; timeoutMs?: number } = {},
 ): Promise<ModelInfo[]> {
   const raw = await unaryAvailableModels(token, options)
   return mapAvailableModelsResponse(raw)
@@ -536,7 +536,7 @@ export async function refreshModelCache(
 export async function discoverModels(
   token: string,
   cacheDir: string,
-  options: { baseURL?: string; headers?: Record<string, string> } = {},
+  options: { baseURL?: string; headers?: Record<string, string>; timeoutMs?: number } = {},
 ): Promise<ModelInfo[]> {
   const cached = await readCache(cacheDir)
   const refresh = () =>

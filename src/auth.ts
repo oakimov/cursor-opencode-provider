@@ -1,6 +1,7 @@
 import { CURSOR_API_HOST, CURSOR_WEBSITE_HOST } from "./shared.js"
 
 const API_BASE = `https://${CURSOR_API_HOST}`
+const AUTH_REQUEST_TIMEOUT_MS = 5_000
 
 export class AuthExchangeError extends Error {
   constructor(message: string, public cause?: unknown) {
@@ -82,49 +83,101 @@ export type TokenPair = {
   refreshToken: string
 }
 
+async function withAuthRequestDeadline<T>(
+  timeoutError: () => Error,
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(timeoutError())
+      controller.abort()
+    }, AUTH_REQUEST_TIMEOUT_MS)
+    timer.unref?.()
+  })
+  try {
+    return await Promise.race([run(controller.signal), deadline])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 export async function exchangeApiKey(
   apiKey: string,
   baseUrl = API_BASE,
 ): Promise<TokenPair> {
-  const res = await fetch(`${baseUrl}/auth/exchange_user_api_key`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+  return withAuthRequestDeadline(
+    () => new AuthExchangeError("API key exchange timed out"),
+    async (signal) => {
+      let res: Response
+      try {
+        res = await fetch(`${baseUrl}/auth/exchange_user_api_key`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: "{}",
+          signal,
+        })
+      } catch (cause) {
+        throw new AuthExchangeError("API key exchange request failed", cause)
+      }
+      if (!res.ok) {
+        throw new AuthExchangeError(
+          `API key exchange failed: ${res.status} ${res.statusText}`,
+        )
+      }
+      let body: Record<string, unknown>
+      try {
+        body = await res.json() as Record<string, unknown>
+      } catch (cause) {
+        throw new AuthExchangeError("API key exchange returned malformed JSON", cause)
+      }
+      if (typeof body.accessToken !== "string" || typeof body.refreshToken !== "string") {
+        throw new AuthExchangeError("Exchange response missing tokens")
+      }
+      return { accessToken: body.accessToken, refreshToken: body.refreshToken }
     },
-    body: "{}",
-  })
-  if (!res.ok) {
-    throw new AuthExchangeError(
-      `API key exchange failed: ${res.status} ${res.statusText}`,
-    )
-  }
-  const body = await res.json()
-  if (!body.accessToken || !body.refreshToken) {
-    throw new AuthExchangeError("Exchange response missing tokens")
-  }
-  return { accessToken: body.accessToken, refreshToken: body.refreshToken }
+  )
 }
 
 export async function refreshAccessToken(
   refreshToken: string,
   baseUrl = API_BASE,
 ): Promise<TokenPair> {
-  const res = await fetch(`${baseUrl}/auth/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refreshToken }),
-  })
-  if (!res.ok) {
-    throw new AuthRefreshError(
-      `Token refresh failed: ${res.status} ${res.statusText}`,
-    )
-  }
-  const body = await res.json()
-  if (!body.accessToken || !body.refreshToken) {
-    throw new AuthRefreshError("Refresh response missing tokens")
-  }
-  return { accessToken: body.accessToken, refreshToken: body.refreshToken }
+  return withAuthRequestDeadline(
+    () => new AuthRefreshError("Token refresh timed out"),
+    async (signal) => {
+      let res: Response
+      try {
+        res = await fetch(`${baseUrl}/auth/token`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refreshToken }),
+          signal,
+        })
+      } catch (cause) {
+        throw new AuthRefreshError("Token refresh request failed", cause)
+      }
+      if (!res.ok) {
+        throw new AuthRefreshError(
+          `Token refresh failed: ${res.status} ${res.statusText}`,
+        )
+      }
+      let body: Record<string, unknown>
+      try {
+        body = await res.json() as Record<string, unknown>
+      } catch (cause) {
+        throw new AuthRefreshError("Token refresh returned malformed JSON", cause)
+      }
+      if (typeof body.accessToken !== "string" || typeof body.refreshToken !== "string") {
+        throw new AuthRefreshError("Refresh response missing tokens")
+      }
+      return { accessToken: body.accessToken, refreshToken: body.refreshToken }
+    },
+  )
 }
 
 // Cache JWTs obtained via API-key exchange so doStream doesn't re-exchange

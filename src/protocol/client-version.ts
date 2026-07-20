@@ -128,13 +128,29 @@ function isCacheFresh(cache: VersionCache, now = Date.now()): boolean {
 }
 
 async function fetchInstallerVersion(): Promise<string | undefined> {
-  const response = await fetch(INSTALL_URL, {
-    signal: AbortSignal.timeout(REMOTE_TIMEOUT_MS),
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error("Cursor installer version request timed out"))
+      controller.abort()
+    }, REMOTE_TIMEOUT_MS)
+    timer.unref?.()
   })
-  if (!response.ok) return undefined
+  try {
+    return await Promise.race([
+      (async () => {
+        const response = await fetch(INSTALL_URL, { signal: controller.signal })
+        if (!response.ok) return undefined
 
-  const build = extractVersionFromInstaller(await response.text())
-  return build ? `cli-${build}` : undefined
+        const build = extractVersionFromInstaller(await response.text())
+        return build ? `cli-${build}` : undefined
+      })(),
+      deadline,
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 async function refreshVersionCache(): Promise<void> {

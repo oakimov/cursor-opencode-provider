@@ -38,7 +38,7 @@ import {
   resolveBridgedOpenCodeToolCall,
 } from "./protocol/tool-call-bridge.js"
 import { handleKvServerMessage } from "./protocol/kv.js"
-import { handleInteractionQuery, inspectInteractionQueryWire } from "./protocol/interactions.js"
+import { handleInteractionQuery } from "./protocol/interactions.js"
 import { getCheckpoint, setCheckpoint } from "./protocol/checkpoint.js"
 import { conversationBlobCount } from "./protocol/blob-store.js"
 import {
@@ -73,6 +73,8 @@ import {
   consumeCursorShellResult,
   registerCursorShellCall,
 } from "./shell-timeout.js"
+import { analyzeReplayFrame, AttemptReplaySafety } from "./replay-safety.js"
+import { readAllFieldsStrict } from "./protocol/struct.js"
 
 let _availableModels: ModelInfo[] | undefined
 // mtime of the cache file the last time we loaded it. Compared on each call
@@ -96,6 +98,34 @@ const DEFAULT_RETRY_POLICY = {
 } as const
 const MAX_RETRY_ATTEMPTS = 10
 const MAX_RETRY_DELAY_MS = 30_000
+const RUN_REQUEST_DECODE_FAILED = "CURSOR_RUN_REQUEST_DECODE_FAILED"
+const RUN_REQUEST_UNSUPPORTED = "CURSOR_RUN_REQUEST_UNSUPPORTED"
+const RUN_REPLY_FAILED = "CURSOR_RUN_REPLY_FAILED"
+
+type ResponseRequiredChannel = "exec" | "kv" | "interaction" | "multiple"
+const RESPONSE_REQUIRED_CHANNEL_BY_FIELD = new Map<
+  number,
+  Exclude<ResponseRequiredChannel, "multiple">
+>([
+  [2, "exec"],
+  [4, "kv"],
+  [7, "interaction"],
+])
+
+function responseRequiredChannel(payload: Uint8Array): ResponseRequiredChannel | undefined {
+  const fields = readAllFieldsStrict(payload)
+  if (fields) {
+    const channels = fields
+      .map((field) => RESPONSE_REQUIRED_CHANNEL_BY_FIELD.get(field.fn))
+      .filter((channel): channel is Exclude<ResponseRequiredChannel, "multiple"> => !!channel)
+    if (channels.length > 1) return "multiple"
+    return channels[0]
+  }
+
+  // Request tags are single-byte because all must-reply top-level fields are <16.
+  const tag = payload[0]
+  return tag !== undefined ? RESPONSE_REQUIRED_CHANNEL_BY_FIELD.get(tag >> 3) : undefined
+}
 
 export type CursorRetryPolicy = {
   maxAttempts: number
@@ -990,7 +1020,13 @@ export async function pump(
   let textStarted = false
   let reasoningStarted = false
   const requestUsage = ids.requestUsage ?? { outputChars: 0 }
-  let replaySafe = true
+  const replaySafety = new AttemptReplaySafety(session.sessionId)
+  const failRunProtocol = (message: string, code: string): never => {
+    replaySafety.markBarrier("unknown-or-malformed-frame")
+    const error = new CursorProtocolError(message, { code })
+    sessionManager.close(session, "remote-error", error)
+    throw error
+  }
   // OpenCode cancels the ReadableStream between turns (see the cancel handler
   // in doStreamImpl). The frames iterator can still yield a final `done` after
   // the cancel lands — controller.enqueue on a cancelled controller throws.
@@ -1113,7 +1149,7 @@ export async function pump(
 
   const emitText = (text: string) => {
     if (!text) return
-    replaySafe = false
+    replaySafety.markBarrier("visible-text")
     // Close reasoning before text (hosts expect reasoning-end before text-start).
     if (reasoningStarted && !textStarted) {
       safeEnqueue({ type: "reasoning-end", id: reasoningId } as V3Part)
@@ -1130,7 +1166,7 @@ export async function pump(
   }
   const emitReasoning = (text: string) => {
     if (!text) return
-    replaySafe = false
+    replaySafety.markBarrier("visible-reasoning")
     if (!reasoningStarted) {
       safeEnqueue({ type: "reasoning-start", id: reasoningId } as V3Part)
       reasoningStarted = true
@@ -1217,15 +1253,13 @@ export async function pump(
             `Cursor Run frame stream interrupted: ${(error as Error).message}`,
             { cause: error },
           )
-      failure.replaySafe = replaySafe && failure.replaySafe
-      throw failure
+      throw replaySafety.applyTo(failure)
     }
     if (next.done) {
       closeOpenSpans()
       trace("pump: frames iterator ended before turn_ended")
       const failure = new CursorRunInterruptedError()
-      failure.replaySafe = replaySafe
-      throw failure
+      throw replaySafety.applyTo(failure)
     }
     const frame = next.value as Frame
 
@@ -1237,14 +1271,15 @@ export async function pump(
       if (frame.payload.length > 0) {
         try {
           payload = new TextDecoder().decode(decodeFramePayload(frame))
-        } catch { /* not decodable */ }
+        } catch {
+          replaySafety.markBarrier("unknown-or-malformed-frame")
+        }
       }
       closeOpenSpans()
       const failure = payload
         ? connectFrameError(payload)
         : new CursorRunInterruptedError()
-      failure.replaySafe = replaySafe && failure.replaySafe
-      throw failure
+      throw replaySafety.applyTo(failure)
     }
 
     // decodeFramePayload can throw on a corrupt gzip payload (gunzipSync).
@@ -1253,49 +1288,54 @@ export async function pump(
     try {
       payload = decodeFramePayload(frame)
     } catch (e) {
+      replaySafety.markBarrier("unknown-or-malformed-frame")
       trace(`gunzip FAILED (skipping frame): flags=0x${frame.flags.toString(16)} len=${frame.payload.length} err=${(e as Error).message}`)
       continue
     }
     let asm: Record<string, unknown>
     try {
       asm = decodeMessage<Record<string, unknown>>("AgentServerMessage", payload)
-    } catch (e) {
+    } catch {
       // A single malformed/truncated frame must not abort the whole turn
       // (protobufjs throws "index out of range: …" on length overruns). Log it
       // and keep pumping.
-      replaySafe = false
-      const preview = Array.from(payload.subarray(0, 32))
-        .map((x) => x.toString(16).padStart(2, "0"))
-        .join("")
-      trace(
-        `decode FAILED (skipping): flags=0x${frame.flags.toString(16)} len=${payload.length} ` +
-          `topField=${payload.length ? payload[0] >> 3 : "-"} err=${(e as Error).message} hex=${preview}`,
-      )
+      replaySafety.markBarrier("unknown-or-malformed-frame")
+      const channel = responseRequiredChannel(payload)
+      if (channel) {
+        failRunProtocol(`Cursor ${channel} request could not be decoded`, RUN_REQUEST_DECODE_FAILED)
+      }
+      trace(`decode FAILED (skipping non-request frame): flags=0x${frame.flags.toString(16)} len=${payload.length}`)
       continue
     }
     const iu = asm.interaction_update as Record<string, unknown> | undefined
     const esm = asm.exec_server_message as Record<string, unknown> | undefined
     const kv = asm.kv_server_message as Record<string, unknown> | undefined
+    const execControl = asm.exec_server_control_message as Record<string, unknown> | undefined
     const interactionQuery = asm.interaction_query as Record<string, unknown> | undefined
     const checkpointRaw = asm.conversation_checkpoint_update
     const topField = payload.length > 0 ? payload[0] >> 3 : 0
-    const textProgress = (iu?.text_delta as Record<string, unknown> | undefined)?.text
-    const thinkingProgress = (iu?.thinking_delta as Record<string, unknown> | undefined)?.text
     const checkpointProgress = normalizeCheckpointBytes(checkpointRaw)
+    const requiredChannel = responseRequiredChannel(payload)
     if (
-      (typeof textProgress === "string" && textProgress.length > 0) ||
-      (typeof thinkingProgress === "string" && thinkingProgress.length > 0) ||
-      !!iu?.turn_ended ||
-      !!iu?.tool_call_started ||
-      !!iu?.tool_call_completed ||
-      !!esm ||
-      !!kv ||
-      !!interactionQuery ||
-      !!checkpointProgress?.length
+      requiredChannel === "multiple" ||
+      (requiredChannel === "exec" && !esm) ||
+      (requiredChannel === "kv" && !kv) ||
+      (requiredChannel === "interaction" && !interactionQuery)
     ) {
-      replaySafe = false
+      failRunProtocol("Cursor response-requiring request could not be decoded", RUN_REQUEST_DECODE_FAILED)
+    }
+    const replayFrame = analyzeReplayFrame(payload, {
+      interactionUpdate: iu,
+      exec: esm,
+      kv,
+      execControl,
+      interactionQuery,
+      checkpointBytes: checkpointProgress,
+    })
+    if (replayFrame.semanticProgress) {
       sessionManager.recordSemanticProgress(session)
     }
+    if (replayFrame.barrier) replaySafety.markBarrier(replayFrame.barrier)
 
     {
       const iuKind = iu ? Object.keys(iu).find((k) => iu[k]) : undefined
@@ -1435,14 +1475,8 @@ export async function pump(
           )
           session.stream.write(buildRequestContextResult(esmId, session.requestContext))
           trace(`exec request_context: replied`)
-        } catch (e) {
-          const error = new Error(
-            `Failed to answer Cursor request_context probe: ${(e as Error).message}`,
-          )
-          trace(`exec request_context: write FAILED ${error.message}`)
-          safeError(error)
-          sessionManager.close(session)
-          return
+        } catch {
+          failRunProtocol("Cursor request-context reply failed", RUN_REPLY_FAILED)
         }
       } else if (esm.mcp_state_exec_args) {
         // MCP-backed writes/reads can be preceded by this control-plane probe.
@@ -1455,14 +1489,11 @@ export async function pump(
         try {
           session.stream.write(buildMcpStateResult(esmId, stateArgs, session.requestContext))
           trace(`exec mcp_state: replied id=${esmId} requested=[${requested}]`)
-        } catch (e) {
-          const error = new Error(`Failed to answer Cursor MCP state probe: ${(e as Error).message}`)
-          trace(`exec mcp_state: write FAILED ${error.message}`)
-          safeError(error)
-          sessionManager.close(session)
-          return
+        } catch {
+          failRunProtocol("Cursor MCP-state reply failed", RUN_REPLY_FAILED)
         }
       } else {
+        replaySafety.markBarrier("non-control-exec")
         const parsed = parseExecServerMessage(esm)
         if (parsed) {
           const executableToolName = resolveCustomWebToolAlias(parsed.toolName, session.toolAliases)
@@ -1554,35 +1585,34 @@ export async function pump(
         trace(
           `exec UNMAPPED: id=${esmId} variant=${variantDescription} keys=[${Object.keys(esm).join(",")}] hex=${hex}`,
         )
-        const err = new Error(
+        failRunProtocol(
           `Unsupported Cursor exec variant ${variantDescription} (id=${esmId})`,
+          RUN_REQUEST_UNSUPPORTED,
         )
-        safeError(err)
-        sessionManager.close(session)
-        return
       }
     } else if (interactionQuery) {
       // InteractionQuery is a must-reply channel, just like exec and KV. AI
       // SDK has no Cursor-specific UI callback, so answer immediately with the
       // conservative headless policy from protocol/interactions.ts (including
       // F14 create_plan auto-ack / empty plan_uri for CLI headless parity).
+      const handled = (() => {
+        try {
+          return handleInteractionQuery(interactionQuery, payload)
+        } catch {
+          return failRunProtocol("Cursor interaction request could not be handled", RUN_REQUEST_UNSUPPORTED)
+        }
+      })()
       try {
-        const handled = handleInteractionQuery(interactionQuery, payload)
+        if (handled.outcome === "acknowledged") {
+          replaySafety.markBarrier("stateful-interaction")
+        }
         session.stream.write(handled.reply)
         trace(
           `interaction_query: replied id=${handled.id} variant=${handled.variantName} ` +
             `field=${handled.variantField} outcome=${handled.outcome}`,
         )
-      } catch (e) {
-        const info = inspectInteractionQueryWire(payload)
-        const err = e instanceof Error ? e : new Error(String(e))
-        trace(
-          `interaction_query: FAILED id=${info.id ?? "?"} ` +
-            `variantField=${info.variantField ?? "?"} err=${err.message}`,
-        )
-        safeError(err)
-        sessionManager.close(session)
-        return
+      } catch {
+        failRunProtocol("Cursor interaction reply failed", RUN_REPLY_FAILED)
       }
     } else if (kv) {
       // KV blob channel: ack set_blob / answer get_blob, then keep pumping.
@@ -1602,20 +1632,22 @@ export async function pump(
             `kv replied: kind=${handled.kind} id=${handled.id} blobId=${handled.blobIdHex.slice(0, 16)}… ` +
               `found=${handled.found} echoed=${!!handled.echoed} ` +
               `sessionBlobs=${session.blobs.size} convBlobs=${conversationBlobCount(session.conversationId)}`,
-            )
-        } catch (e) {
-          const error = new Error(`Failed to answer Cursor KV blob request: ${(e as Error).message}`)
-          trace(`kv: write FAILED ${error.message}`)
-          safeError(error)
-          sessionManager.close(session)
-          return
+          )
+        } catch {
+          failRunProtocol("Cursor KV reply failed", RUN_REPLY_FAILED)
         }
+      } else {
+        failRunProtocol("Cursor KV request could not be handled", RUN_REQUEST_UNSUPPORTED)
       }
     }
     } catch (e) {
+      if (e instanceof CursorProtocolError) throw e
+      if (requiredChannel) {
+        failRunProtocol(`Cursor ${requiredChannel} request could not be handled`, RUN_REQUEST_UNSUPPORTED)
+      }
       // Any per-frame dispatch throw (e.g. protobufjs length overrun in
       // exec/args decode) must not abort the whole turn — log and skip.
-      trace(`frame dispatch FAILED (skipping): topField=${topField} err=${(e as Error).message}`)
+      trace(`frame dispatch FAILED (skipping): topField=${topField}`)
     }
     // heartbeat / step / partial_tool_call → ignore (partial args are
     // display-only; the exec channel is authoritative. Checkpoints and
