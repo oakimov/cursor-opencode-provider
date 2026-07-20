@@ -21,6 +21,10 @@ import {
   detectExecVariantField,
   buildRequestContextResult,
   buildMcpStateResult,
+  buildCustomWebToolAliases,
+  resolveCustomWebToolAlias,
+  CUSTOM_WEBFETCH_TOOL,
+  CUSTOM_WEBSEARCH_TOOL,
   type OpencodeToolDef,
   type ParsedExecRequest,
 } from "./protocol/tools.js"
@@ -61,7 +65,7 @@ import {
 import { readCache, cacheFilePath, resolveVariantParameters, paramsImplyMaxMode, extractCursorVariantParameters, resolveCursorWireModelId, type ModelInfo } from "./models.js"
 import { buildRequestContext } from "./context/build.js"
 import { workspaceRootFromRequestContext } from "./context/env.js"
-import { opencodeGlobalCacheDir } from "./context/paths.js"
+import { opencodeGlobalCacheDir, setHostCacheDirOverride } from "./context/paths.js"
 import { resolveAgentUrl } from "./agent-url.js"
 import { CURSOR_API_HOST, CURSOR_COMPACTION_OPTION } from "./shared.js"
 import type { SeedHistoryMessage } from "./protocol/request.js"
@@ -282,6 +286,8 @@ export function createCursorLanguageModel(
   providerId: string,
   options: CreateCursorOptions,
 ): LanguageModelV3 {
+  // Host Path.cache / explicit override wins over XDG heuristics for this process.
+  if (options.cacheDir) setHostCacheDirOverride(options.cacheDir)
   return {
     specificationVersion: "v3",
     provider: providerId,
@@ -525,6 +531,14 @@ async function startSession(
     isCompaction,
   })
   const tools = toolState.advertisedTools
+  const webToolAliases = buildCustomWebToolAliases(tools)
+  const cursorTools = webToolAliases.advertisedTools
+  for (const [alias, candidates] of webToolAliases.ambiguous) {
+    trace(`web tool alias skipped: alias=${alias} ambiguous=[${candidates.join(",")}]`)
+  }
+  for (const [alias, original] of webToolAliases.aliases) {
+    trace(`web tool alias: ${alias} -> ${original}`)
+  }
   const allowTools = toolState.allowTools
   const resetState = resolveTurnConversationReset({ sessionKey, isCompaction })
   const recovery = startOptions?.recovery
@@ -549,7 +563,7 @@ async function startSession(
     : (extractUserText([...prompt].reverse().find((m) => m.role === "user")) || ".")
   const workspaceRoot = path.resolve(options.workspaceRoot || process.cwd())
   const baseSystemPrompt = extractSystemPrompt(prompt)
-  const interactionGuidance = buildOpenCodeInteractionGuidance(tools, isCompaction, workspaceRoot)
+  const interactionGuidance = buildOpenCodeInteractionGuidance(cursorTools, isCompaction, workspaceRoot)
   const systemPrompt = interactionGuidance
     ? [baseSystemPrompt, interactionGuidance].filter(Boolean).join("\n\n")
     : baseSystemPrompt
@@ -597,7 +611,7 @@ async function startSession(
     baseURL: agentBaseUrl,
     headers: options.headers,
   })
-  const requestContext = await buildRequestContext({ workspaceRoot, tools })
+  const requestContext = await buildRequestContext({ workspaceRoot, tools: cursorTools })
   // Resolve descriptors once from the merged OpenCode config so MCP identity is
   // consistent across AgentRunRequest and both request_context reply paths.
   const toolDescriptors = Array.isArray(requestContext.tools)
@@ -617,7 +631,7 @@ async function startSession(
     conversationState,
     parameterValues,
     maxMode,
-    tools,
+    tools: cursorTools,
     toolDescriptors,
     requestContext,
     action: resuming ? "resume" : "user",
@@ -677,6 +691,7 @@ async function startSession(
     nextBridgedExecId: 900_000,
     blobs: new Map(),
     toolDescriptors,
+    toolAliases: webToolAliases.aliases,
     requestContext,
     allowTools,
     usageEstimate,
@@ -969,7 +984,9 @@ export async function pump(
   const { textId, reasoningId } = ids
   const promptTokens = ids.promptTokens ?? 0
   const advertisedToolNames = advertisedToolNamesFromDescriptors(session.toolDescriptors)
-  const advertisedToolNameSet = new Set(advertisedToolNames)
+  const advertisedToolNameSet = new Set(
+    advertisedToolNames.map((name) => resolveCustomWebToolAlias(name, session.toolAliases)),
+  )
   let textStarted = false
   let reasoningStarted = false
   const requestUsage = ids.requestUsage ?? { outputChars: 0 }
@@ -1053,7 +1070,7 @@ export async function pump(
     if (!requestedPath || !editPath) return false
 
     // Prefer env.workspace_paths — project_folder / workspace_project_dir are
-    // Cursor metadata roots under ~/.cache/opencode/projects/, not the git tree.
+    // Cursor metadata roots under <host-cache>/projects/, not the git tree.
     const workspaceRoot = workspaceRootFromRequestContext(session.requestContext)
     const resolvePath = (value: string) => path.resolve(workspaceRoot, value)
     const absolutePath = resolvePath(requestedPath)
@@ -1447,6 +1464,13 @@ export async function pump(
         }
       } else {
         const parsed = parseExecServerMessage(esm)
+        if (parsed) {
+          const executableToolName = resolveCustomWebToolAlias(parsed.toolName, session.toolAliases)
+          if (executableToolName !== parsed.toolName) {
+            trace(`web tool alias resolved: ${parsed.toolName} -> ${executableToolName}`)
+            parsed.toolName = executableToolName
+          }
+        }
         const displayCallId = extractExecDisplayCallId(esm)
         trace(`exec: id=${parsed?.id} variant=${parsed ? Object.keys(parsed).join(",") : "none"} toolName=${parsed?.toolName} resultField=${parsed?.resultField}`)
         if (parsed) {
@@ -1728,9 +1752,14 @@ export function buildOpenCodeInteractionGuidance(
   if (names.has("plan_exit")) {
     instructions.push("- To leave plan mode, call the OpenCode `plan_exit` tool.")
   }
-  if (names.has("webfetch")) {
+  if (names.has(CUSTOM_WEBSEARCH_TOOL)) {
     instructions.push(
-      "- To fetch a known URL, call the OpenCode `webfetch` tool; do not use Cursor's native WebFetch interaction.",
+      `- For web searches, call \`${CUSTOM_WEBSEARCH_TOOL}\`; do not use Cursor's native WebSearch interaction.`,
+    )
+  }
+  if (names.has(CUSTOM_WEBFETCH_TOOL)) {
+    instructions.push(
+      `- To fetch a known URL, call \`${CUSTOM_WEBFETCH_TOOL}\`; do not use Cursor's native WebFetch interaction.`,
     )
   }
   if (names.has("write")) {

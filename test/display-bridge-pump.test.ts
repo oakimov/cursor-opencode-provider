@@ -732,6 +732,47 @@ describe("display-only ToolCall pump bridge", () => {
     sessionManager.resolve(session.sessionId, 1)
   })
 
+  it("translates a custom web alias back to the executable host tool", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    const session = fakeSession(
+      [
+        encodeMessage("AgentServerMessage", {
+          exec_server_message: {
+            id: 77,
+            mcp_args: {
+              name: "custom_webfetch",
+              provider_identifier: "opencode",
+              tool_name: "custom_webfetch",
+              args: [],
+            },
+          },
+        }),
+      ],
+      writes,
+      [{ name: "custom_webfetch", description: "Fetch a URL" }],
+    )
+    session.toolAliases = new Map([["custom_webfetch", "webfetch"]])
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error(error: Error) {
+        throw error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    const toolCall = parts.find((part) => part.type === "tool-call")
+    expect(toolCall?.toolName).toBe("webfetch")
+    expect(sessionManager.pendingFor(session.sessionId, 77)).toMatchObject({
+      resultField: "mcp_result",
+      toolName: "webfetch",
+    })
+    sessionManager.resolve(session.sessionId, 77)
+  })
+
   it("fails closed when request_context write throws (F5)", async () => {
     const parts: any[] = []
     let streamError: Error | undefined

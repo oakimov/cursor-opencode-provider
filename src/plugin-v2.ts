@@ -1,6 +1,7 @@
 import { define } from "@opencode-ai/plugin/v2/promise"
 import { CURSOR_PROVIDER_ID } from "./shared.js"
 import { createCursorLanguageModel } from "./language-model.js"
+import { adoptCompatHostCacheDir } from "./context/paths.js"
 import type { CreateCursorOptions } from "./index.js"
 
 /**
@@ -30,6 +31,10 @@ function createSdk(options: CreateCursorOptions) {
 export default define({
   id: "cursor.provider",
   setup: async (ctx) => {
+    // Prefer OCP HostProfile.cacheDir when present; else XDG host heuristic.
+    // Explicit createCursor({ cacheDir }) / event.options.cacheDir still wins via LM.
+    await adoptCompatHostCacheDir()
+
     await ctx.aisdk.sdk((event) => {
       if (event.sdk) return
       if (!isCursorPackage(event.package, event.model.providerID)) return

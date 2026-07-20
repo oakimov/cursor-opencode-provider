@@ -20,6 +20,8 @@ import {
   buildMcpStateResult,
   buildTypedExecResult,
   unwrapReadOutput,
+  buildCustomWebToolAliases,
+  resolveCustomWebToolAlias,
   REQUEST_CONTEXT_RESULT_FIELD,
 } from "../src/protocol/tools.js"
 import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
@@ -179,6 +181,84 @@ describe("toolsToDescriptors", () => {
     const d = toolsToDescriptors([{ name: "x" }])
     expect((d[0].input_schema as Uint8Array).length).toBeGreaterThan(0)
     expect(d[0].description).toBe("")
+  })
+
+  it("keeps collision-safe web aliases exact in Cursor's visible descriptor name", () => {
+    const d = toolsToDescriptors([
+      { name: "custom_websearch", description: "Search" },
+      { name: "custom_webfetch", description: "Fetch" },
+    ])
+    expect(d.map((tool) => tool.name)).toEqual(["custom_websearch", "custom_webfetch"])
+    expect(d.map((tool) => tool.tool_name)).toEqual(["custom_websearch", "custom_webfetch"])
+  })
+})
+
+describe("custom web tool aliases", () => {
+  it("aliases exact web tools and preserves their schemas", () => {
+    const fetchSchema = { type: "object", properties: { url: { type: "string" } } }
+    const catalog = buildCustomWebToolAliases([
+      { name: "websearch", description: "Search", inputSchema: { type: "object" } },
+      { name: "webfetch", description: "Fetch", inputSchema: fetchSchema },
+      { name: "read", description: "Read" },
+    ])
+    expect(catalog.advertisedTools.map((tool) => tool.name)).toEqual([
+      "custom_websearch",
+      "custom_webfetch",
+      "read",
+    ])
+    expect(catalog.advertisedTools[1]!.inputSchema).toBe(fetchSchema)
+    expect(resolveCustomWebToolAlias("custom_websearch", catalog.aliases)).toBe("websearch")
+    expect(resolveCustomWebToolAlias("custom_webfetch", catalog.aliases)).toBe("webfetch")
+  })
+
+  it("aliases one unique flattened MCP search tool", () => {
+    const catalog = buildCustomWebToolAliases([
+      { name: "brave-search_brave_web_search", description: "Search" },
+      { name: "webfetch", description: "Fetch" },
+    ])
+    expect(catalog.aliases.get("custom_websearch")).toBe("brave-search_brave_web_search")
+    expect(catalog.advertisedTools[0]!.name).toBe("custom_websearch")
+    const flat = toolsToDescriptors(catalog.advertisedTools, "opencode", ["brave-search"])
+    expect(flat[0]).toMatchObject({
+      name: "custom_websearch",
+      provider_identifier: "brave-search",
+      tool_name: "custom_websearch",
+    })
+    const nested = toolsToMcpDescriptors(catalog.advertisedTools, "opencode", ["brave-search"])
+    expect(nested[0]).toMatchObject({
+      server_identifier: "brave-search",
+      tools: [{ tool_name: "custom_websearch" }],
+    })
+    expect(
+      resolveCustomWebToolAlias("brave-search_custom_websearch", catalog.aliases),
+    ).toBe("brave-search_brave_web_search")
+  })
+
+  it("fails closed for ambiguous search providers and preserves an existing custom alias", () => {
+    const ambiguous = buildCustomWebToolAliases([
+      { name: "brave_brave_web_search" },
+      { name: "other_web_search" },
+      { name: "webfetch" },
+    ])
+    expect(ambiguous.aliases.has("custom_websearch")).toBe(false)
+    expect(ambiguous.ambiguous.get("custom_websearch")).toEqual([
+      "brave_brave_web_search",
+      "other_web_search",
+    ])
+    expect(ambiguous.advertisedTools.slice(0, 2).map((tool) => tool.name)).toEqual([
+      "brave_brave_web_search",
+      "other_web_search",
+    ])
+
+    const existing = buildCustomWebToolAliases([
+      { name: "custom_websearch" },
+      { name: "brave_brave_web_search" },
+    ])
+    expect(existing.aliases.has("custom_websearch")).toBe(false)
+    expect(existing.advertisedTools.map((tool) => tool.name)).toEqual([
+      "custom_websearch",
+      "brave_brave_web_search",
+    ])
   })
 })
 

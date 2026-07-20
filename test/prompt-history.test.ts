@@ -30,15 +30,18 @@ describe("buildOpenCodeInteractionGuidance", () => {
     expect(guidance).not.toContain("`webfetch`")
   })
 
-  it("uses native OpenCode plan and fetch tools when they are advertised", () => {
+  it("uses native plan tools and collision-safe custom web aliases", () => {
     const guidance = buildOpenCodeInteractionGuidance([
       { name: "plan_enter" },
       { name: "plan_exit" },
-      { name: "webfetch" },
+      { name: "custom_websearch" },
+      { name: "custom_webfetch" },
     ], false, "/workspace/project")
     expect(guidance).toContain("OpenCode `plan_enter` tool")
     expect(guidance).toContain("OpenCode `plan_exit` tool")
-    expect(guidance).toContain("OpenCode `webfetch` tool")
+    expect(guidance).toContain("`custom_websearch`")
+    expect(guidance).toContain("`custom_webfetch`")
+    expect(guidance).not.toContain("OpenCode `custom_web")
     expect(guidance).not.toContain("`todowrite`")
     expect(guidance).not.toContain("AskQuestion")
   })

@@ -2,7 +2,7 @@
 
 OpenCode plugin + AI SDK provider that runs Cursor subscription models by speaking Cursor’s Connect-RPC agent protocol (not a generic chat-completions API).
 
-**Stack:** TypeScript (ESM), Bun for install/test, `tsc` for build. Peer: `@opencode-ai/plugin`. Deps: `@ai-sdk/provider`, `protobufjs`.
+**Stack:** TypeScript (ESM), Bun for install/test, `tsc` for build. Peer: `@opencode-ai/plugin`. Optional peer: `@opencode-compat/profile` (host cache via OCP `detect()`). Deps: `@ai-sdk/provider`, `protobufjs`.
 
 ## Commands
 
@@ -38,6 +38,7 @@ OpenCode
 | Auth / models | `src/auth.ts`, `src/models.ts` | PKCE/API key, JWT refresh, `cursor-models.json` cache |
 | Agent host | `src/agent-url.ts` | `GetServerConfig` → region-specific Run host (in-memory memo) |
 | Request context | `src/context/` | Rules, skills, agents, plugins, git, layout, env |
+| Host paths | `src/context/paths.ts` | Host cache root (`cacheDir` / OCP detect / MiMo·Kilo·OpenCode heuristic); project metadata under `<host-cache>/projects/<slug>/` |
 | Wire protocol | `src/protocol/` | Framing, messages, tools, thinking, checksums, device id |
 | Transport | `src/transport/connect.ts` | HTTP/2 bidi + unary RPC |
 
@@ -84,8 +85,12 @@ When changing rule/skill discovery, keep parity with OpenCode behavior and updat
 | `CURSOR_WEBSITE_URL` | OAuth login base |
 | `CURSOR_PROVIDER_DEBUG` | Wire debug log (`CURSOR_PROVIDER_DEBUG_FILE`; default under `$TMPDIR/cursor-provider-logs-<uid>/debug-<pid>.log`) |
 | `CURSOR_GET_SERVER_CONFIG_TELEMETRY` | Opt in GetServerConfig telemetry |
-| `~/.cache/opencode/cursor-models.json` | Model cache (`$XDG_CACHE_HOME/opencode/` when set) |
-| `~/.cache/opencode/projects/<slug>/` | Cursor project metadata root (`project_folder` / `workspace_project_dir`; keeps `agent-tools` out of the git workspace) |
+| `createCursor({ cacheDir })` | Explicit host cache root (also Effect v2 `Path.cache` when the plugin passes it) |
+| `MIMOCODE_HOME` | When set → `$MIMOCODE_HOME/cache` (before XDG host dirs) |
+| `KILO_CONFIG_DIR` | When set (or `~/.config/kilo` exists) → `$XDG_CACHE_HOME/kilo` |
+| `XDG_CACHE_HOME` | Base for `…/kilo`, `…/mimocode`, or `…/opencode` when no override |
+| `<host-cache>/cursor-models.json` | Model cache under resolved host cache (default `~/.cache/opencode/`) |
+| `<host-cache>/projects/<slug>/` | Cursor project metadata root (`project_folder` / `workspace_project_dir`; keeps `agent-tools` out of the git workspace) |
 | OpenCode auth | `~/.local/share/opencode/auth.json` (`$XDG_DATA_HOME`) |
 
 ## Docs map

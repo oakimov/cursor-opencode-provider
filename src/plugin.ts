@@ -3,7 +3,7 @@ import type { Auth } from "@opencode-ai/sdk"
 import { CURSOR_COMPACTION_OPTION, CURSOR_PROVIDER_ID, CURSOR_WEBSITE_HOST, CURSOR_API_HOST } from "./shared.js"
 import { pollForTokens, exchangeApiKey, refreshAccessToken, isExpiringSoon, generatePkceParams, generatePkceChallenge, buildLoginUrl, decodeJwtExpiryMs } from "./auth.js"
 import { CURSOR_VARIANT_PARAMETERS_KEY, CURSOR_WIRE_MODEL_ID_KEY, readCache, discoverModels, isCacheFresh, parseCursorContextLimit, type ModelInfo, type ModelVariant } from "./models.js"
-import { opencodeGlobalCacheDir } from "./context/paths.js"
+import { adoptCompatHostCacheDir, opencodeGlobalCacheDir } from "./context/paths.js"
 import { readStoredAuth, type StoredAuth } from "./context/auth-store.js"
 import { resolveAgentUrl } from "./agent-url.js"
 import {
@@ -217,6 +217,8 @@ function cursorGetServerConfigTelemetryEnabled(): boolean {
 }
 
 export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
+  // Prefer OCP HostProfile.cacheDir when the compat package is present; else XDG heuristic.
+  await adoptCompatHostCacheDir()
   const cacheDir = opencodeGlobalCacheDir()
   const apiBaseURL = cursorApiBaseURL()
 
@@ -522,6 +524,7 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
         return {
           ...(accessToken ? { accessToken } : {}),
           workspaceRoot: input.directory,
+          cacheDir,
         }
       },
     },

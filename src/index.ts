@@ -27,6 +27,12 @@ export type CreateCursorOptions = {
   telemetryEnabled?: boolean
   /** OpenCode project / worktree directory for request_context collectors. */
   workspaceRoot?: string
+  /**
+   * Host cache root for Cursor project metadata + model/version caches.
+   * Prefer the host's Path.cache (Effect v2) when available; otherwise the
+   * provider resolves OpenCode / MiMo / Kilo XDG cache dirs automatically.
+   */
+  cacheDir?: string
   /** Held-stream policy. Defaults: heartbeat 5s, semantic idle 120s, tool inactivity 10m. */
   continuation?: CursorContinuationOptions
   /** Fresh-turn retry policy. Defaults: 3 attempts, 500ms base, 8000ms cap. */

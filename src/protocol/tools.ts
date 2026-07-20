@@ -22,6 +22,20 @@ export type OpencodeToolDef = {
   name: string
   description?: string
   inputSchema?: unknown
+  /** Original flattened identity when `name` is a Cursor-facing alias. */
+  sourceName?: string
+}
+
+export const CUSTOM_WEBSEARCH_TOOL = "custom_websearch"
+export const CUSTOM_WEBFETCH_TOOL = "custom_webfetch"
+
+/** Cursor-facing alias → exact host tool name accepted by the AI SDK call. */
+export type ToolAliasRegistry = ReadonlyMap<string, string>
+
+export type AliasedToolCatalog = {
+  advertisedTools: OpencodeToolDef[]
+  aliases: ToolAliasRegistry
+  ambiguous: ReadonlyMap<string, string[]>
 }
 
 export type ToolServerIdentity = {
@@ -84,13 +98,18 @@ export function toolsToDescriptors(
   knownMcpServers: Iterable<string> = [],
 ): Array<Record<string, unknown>> {
   return tools.map((t) => {
-    const id = resolveToolServerIdentity(t.name, providerIdentifier, knownMcpServers)
+    const id = resolveToolServerIdentity(t.sourceName ?? t.name, providerIdentifier, knownMcpServers)
+    const collisionSafeWebAlias =
+      t.name === CUSTOM_WEBSEARCH_TOOL || t.name === CUSTOM_WEBFETCH_TOOL
     return {
-      name: `${id.server}-${id.toolName}`,
+      // Keep the collision-safe public name exact. Prefixing it with the
+      // synthetic default server weakens the distinction from Cursor-native
+      // web tools in the model-visible catalog.
+      name: collisionSafeWebAlias ? t.name : `${id.server}-${id.toolName}`,
       description: t.description ?? "",
       input_schema: encodeJsonAsValue(normalizeInputSchema(t.inputSchema)),
       provider_identifier: id.server,
-      tool_name: id.toolName,
+      tool_name: t.sourceName ? t.name : id.toolName,
     }
   })
 }
@@ -100,6 +119,80 @@ function normalizeInputSchema(schema: unknown): Record<string, unknown> {
     return schema as Record<string, unknown>
   }
   return { type: "object", properties: {} }
+}
+
+type WebAliasRule = {
+  alias: string
+  exact: readonly string[]
+  suffixes: readonly string[]
+}
+
+const WEB_ALIAS_RULES: readonly WebAliasRule[] = [
+  {
+    alias: CUSTOM_WEBSEARCH_TOOL,
+    exact: ["websearch", "web_search"],
+    suffixes: ["_web_search", "-web_search", "_websearch", "-websearch"],
+  },
+  {
+    alias: CUSTOM_WEBFETCH_TOOL,
+    exact: ["webfetch", "web_fetch"],
+    suffixes: ["_web_fetch", "-web_fetch", "_webfetch", "-webfetch"],
+  },
+]
+
+/**
+ * Give collision-prone web capabilities names Cursor will not confuse with its
+ * native UI-bound WebSearch/WebFetch interactions. Exact host tools win; a
+ * flattened MCP suffix is accepted only when it identifies one unique tool.
+ */
+export function buildCustomWebToolAliases(tools: OpencodeToolDef[]): AliasedToolCatalog {
+  const aliases = new Map<string, string>()
+  const ambiguous = new Map<string, string[]>()
+  const replacements = new Map<string, string>()
+
+  for (const rule of WEB_ALIAS_RULES) {
+    // A host/plugin may already expose the collision-safe public name. Keep it
+    // authoritative instead of hiding it behind a second mapping.
+    if (tools.some((tool) => tool.name === rule.alias)) continue
+
+    const exact = tools.filter((tool) => rule.exact.includes(tool.name.toLowerCase()))
+    const candidates = exact.length > 0
+      ? exact
+      : tools.filter((tool) => {
+          const name = tool.name.toLowerCase()
+          return rule.suffixes.some((suffix) => name.endsWith(suffix))
+        })
+
+    if (candidates.length !== 1) {
+      if (candidates.length > 1) ambiguous.set(rule.alias, candidates.map((tool) => tool.name))
+      continue
+    }
+
+    const original = candidates[0]!.name
+    aliases.set(rule.alias, original)
+    replacements.set(original, rule.alias)
+  }
+
+  return {
+    advertisedTools: tools.map((tool) => {
+      const alias = replacements.get(tool.name)
+      return alias ? { ...tool, name: alias, sourceName: tool.name } : { ...tool }
+    }),
+    aliases,
+    ambiguous,
+  }
+}
+
+export function resolveCustomWebToolAlias(
+  toolName: string,
+  aliases: ToolAliasRegistry | undefined,
+): string {
+  const direct = aliases?.get(toolName)
+  if (direct) return direct
+  for (const [alias, original] of aliases ?? []) {
+    if (toolName.endsWith(`_${alias}`)) return original
+  }
+  return toolName
 }
 
 /**
@@ -119,7 +212,7 @@ export function toolsToMcpDescriptors(
   const byServer = new Map<string, Array<Record<string, unknown>>>()
 
   for (const t of tools) {
-    const id = resolveToolServerIdentity(t.name, providerIdentifier, knownMcpServers)
+    const id = resolveToolServerIdentity(t.sourceName ?? t.name, providerIdentifier, knownMcpServers)
     let list = byServer.get(id.server)
     if (!list) {
       list = []
@@ -127,7 +220,7 @@ export function toolsToMcpDescriptors(
       order.push(id.server)
     }
     list.push({
-      tool_name: id.toolName,
+      tool_name: t.sourceName ? t.name : id.toolName,
       description: t.description ?? "",
       input_schema: encodeJsonAsValue(normalizeInputSchema(t.inputSchema)),
     })
