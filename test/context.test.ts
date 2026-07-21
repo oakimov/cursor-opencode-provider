@@ -60,6 +60,8 @@ describe("collectRules / buildRequestContext", () => {
     expect((ctx.rules as unknown[]).length).toBeGreaterThan(0)
     expect(ctx.rules_info_complete).toBe(true)
     expect(ctx.env_info_complete).toBe(true)
+    expect(ctx.web_search_enabled).toBe(false)
+    expect(ctx.web_fetch_enabled).toBe(false)
     // OpenCode owns execution permissions. A global allow boolean cannot be
     // translated into Cursor's allow/block instruction-list messages.
     expect(ctx).not.toHaveProperty("user_permissions_auto_run")

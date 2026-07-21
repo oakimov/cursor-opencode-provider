@@ -87,8 +87,8 @@ When changing rule/skill discovery, keep parity with OpenCode behavior and updat
 | `CURSOR_GET_SERVER_CONFIG_TELEMETRY` | Opt in GetServerConfig telemetry |
 | `createCursor({ cacheDir })` | Explicit host cache root (also Effect v2 `Path.cache` when the plugin passes it) |
 | `MIMOCODE_HOME` | When set → `$MIMOCODE_HOME/cache` (before XDG host dirs) |
-| `KILO_CONFIG_DIR` | When set (or `~/.config/kilo` exists) → `$XDG_CACHE_HOME/kilo` |
-| `XDG_CACHE_HOME` | Base for `…/kilo`, `…/mimocode`, or `…/opencode` when no override |
+| `KILO_CONFIG_DIR` | When set → `$XDG_CACHE_HOME/kilo` |
+| `XDG_CACHE_HOME` | Base for the explicitly detected or install-path host; otherwise `…/opencode` |
 | `<host-cache>/cursor-models.json` | Model cache under resolved host cache (default `~/.cache/opencode/`) |
 | `<host-cache>/projects/<slug>/` | Cursor project metadata root (`project_folder` / `workspace_project_dir`; keeps `agent-tools` out of the git workspace) |
 | OpenCode auth | `~/.local/share/opencode/auth.json` (`$XDG_DATA_HOME`) |

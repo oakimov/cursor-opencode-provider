@@ -1,10 +1,20 @@
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync } from "node:fs"
+import { mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 import { trace } from "../debug.js"
 
 export type HostPathEnv = NodeJS.ProcessEnv
+
+type CompatDetectResult = {
+  id: string
+  supported: boolean
+  source?: string
+  profile: { paths: { cacheDir: string } }
+}
+
+type CompatDetector = () => CompatDetectResult
 
 /** Explicit host cache root (e.g. Effect v2 `Path.cache`, or `createCursor({ cacheDir })`). */
 let hostCacheDirOverride: string | undefined
@@ -16,11 +26,6 @@ function resolveHome(env: HostPathEnv = process.env): string {
 function xdgCacheHome(env: HostPathEnv = process.env): string {
   if (env.XDG_CACHE_HOME && env.XDG_CACHE_HOME.length > 0) return env.XDG_CACHE_HOME
   return path.join(resolveHome(env), ".cache")
-}
-
-function xdgConfigHome(env: HostPathEnv = process.env): string {
-  if (env.XDG_CONFIG_HOME && env.XDG_CONFIG_HOME.length > 0) return env.XDG_CONFIG_HOME
-  return path.join(resolveHome(env), ".config")
 }
 
 /**
@@ -37,26 +42,40 @@ export function getHostCacheDirOverride(): string | undefined {
 
 /**
  * Resolve the host cache directory without an override.
- * Mirrors OCP HostProfile drafts: MiMo (`mimocode` / `$MIMOCODE_HOME`), Kilo (`kilo`),
- * then OpenCode (`opencode`). Prefer fork config dirs when several exist.
+ *
+ * Explicit host environment wins. Otherwise, an installed provider inherits
+ * the host-named cache containing its module. A source checkout or otherwise
+ * unidentifiable install defaults to OpenCode. Merely having another host's
+ * config directory installed is not evidence that it owns this process.
  */
-export function resolveHostCacheDir(env: HostPathEnv = process.env): string {
+export function resolveHostCacheDir(
+  env: HostPathEnv = process.env,
+  moduleUrl: string = import.meta.url,
+): string {
   const mimoHome = env.MIMOCODE_HOME
   if (mimoHome && mimoHome.length > 0) {
     return path.join(mimoHome, "cache")
   }
 
-  const configHome = xdgConfigHome(env)
   const cacheHome = xdgCacheHome(env)
   const kiloConfig = env.KILO_CONFIG_DIR
-
-  // Prefer more specific fork dirs before OpenCode (same order as OCP detect).
-  if ((kiloConfig && kiloConfig.length > 0) || existsSync(path.join(configHome, "kilo"))) {
+  if (kiloConfig && kiloConfig.length > 0) {
     return path.join(cacheHome, "kilo")
   }
-  if (existsSync(path.join(configHome, "mimocode"))) {
-    return path.join(cacheHome, "mimocode")
+
+  let modulePath: string | undefined
+  try {
+    modulePath = moduleUrl.startsWith("file:") ? fileURLToPath(moduleUrl) : path.resolve(moduleUrl)
+  } catch {
+    modulePath = undefined
   }
+  if (modulePath) {
+    for (const host of ["mimocode", "kilo", "opencode"] as const) {
+      const root = path.resolve(cacheHome, host)
+      if (modulePath === root || modulePath.startsWith(`${root}${path.sep}`)) return root
+    }
+  }
+
   return path.join(cacheHome, "opencode")
 }
 
@@ -64,11 +83,18 @@ export function resolveHostCacheDir(env: HostPathEnv = process.env): string {
  * Best-effort: if `@opencode-compat/profile` is installed, adopt `detect().profile.paths.cacheDir`
  * when the host is supported. No-op when OCP is absent or detection fails.
  */
-export async function adoptCompatHostCacheDir(): Promise<string | undefined> {
+export async function adoptCompatHostCacheDir(
+  detector?: CompatDetector,
+): Promise<string | undefined> {
+  if (hostCacheDirOverride) return hostCacheDirOverride
   try {
-    const { detect } = await import("@opencode-compat/profile")
+    const detect = detector ?? (await import("@opencode-compat/profile")).detect
     const result = detect()
     if (!result.supported || result.id === "unknown") return undefined
+    if (!result.source || !["env", "binary", "package"].includes(result.source)) {
+      trace(`host-cache: ignored weak OCP detect host=${result.id} source=${result.source ?? "unknown"}`)
+      return undefined
+    }
     const cacheDir = result.profile.paths.cacheDir
     if (!cacheDir || cacheDir.length === 0) return undefined
     setHostCacheDirOverride(cacheDir)
@@ -89,8 +115,8 @@ export function opencodeGlobalConfigDir(): string {
  *
  * Precedence:
  * 1. {@link setHostCacheDirOverride} / `createCursor({ cacheDir })` (host `Path.cache`)
- * 2. OCP `detect()` when {@link adoptCompatHostCacheDir} ran successfully
- * 3. Local host heuristic ({@link resolveHostCacheDir})
+ * 2. Strong OCP `detect()` identity when {@link adoptCompatHostCacheDir} ran successfully
+ * 3. Explicit host environment / provider install path ({@link resolveHostCacheDir})
  */
 export function opencodeGlobalCacheDir(): string {
   if (hostCacheDirOverride) return hostCacheDirOverride

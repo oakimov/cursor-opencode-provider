@@ -306,4 +306,21 @@ describe("message schema accuracy", () => {
     expect(decoded.user_permissions_auto_run.allow_instructions).toEqual(["safe command"])
     expect(decoded.project_permissions_auto_run.block_instructions).toEqual(["destructive command"])
   })
+
+  it("encodes explicit native web capability disables on both RequestContext paths", () => {
+    for (const typeName of ["RequestContext", "RequestContextPayload"]) {
+      const bytes = encodeMessage(typeName, {
+        web_search_enabled: false,
+        web_fetch_enabled: false,
+      })
+      const fields = readAllFields(bytes).filter((field) => field.fn === 17 || field.fn === 24)
+      expect(fields.map((field) => [field.fn, field.wt, field.varint])).toEqual([
+        [17, 0, 0],
+        [24, 0, 0],
+      ])
+      const decoded = decodeMessage<any>(typeName, bytes)
+      expect(decoded.web_search_enabled).toBe(false)
+      expect(decoded.web_fetch_enabled).toBe(false)
+    }
+  })
 })

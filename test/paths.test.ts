@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from "bun:test"
-import { existsSync, mkdirSync, rmSync } from "node:fs"
+import { existsSync, rmSync } from "node:fs"
 import path from "node:path"
 import {
   ensureOpencodeProjectDir,
+  adoptCompatHostCacheDir,
   getHostCacheDirOverride,
   opencodeGlobalCacheDir,
   opencodeGlobalConfigDir,
@@ -95,33 +96,56 @@ describe("resolveHostCacheDir", () => {
     expect(dir).toBe(path.join("/tmp/xdg-cache", "kilo"))
   })
 
-  it("detects mimocode from config dir presence", () => {
-    const root = path.join("/tmp", `cursor-host-detect-${process.pid}-${Date.now()}`)
-    const configHome = path.join(root, "config")
-    const cacheHome = path.join(root, "cache")
-    mkdirSync(path.join(configHome, "mimocode"), { recursive: true })
-    const dir = resolveHostCacheDir({
-      HOME: root,
-      XDG_CONFIG_HOME: configHome,
-      XDG_CACHE_HOME: cacheHome,
-    })
-    expect(dir).toBe(path.join(cacheHome, "mimocode"))
-    rmSync(root, { recursive: true, force: true })
+  it("uses the MiMo cache when the provider module is installed there", () => {
+    const dir = resolveHostCacheDir(
+      { HOME: "/tmp/fake-home", XDG_CACHE_HOME: "/tmp/xdg-cache" },
+      "file:///tmp/xdg-cache/mimocode/packages/provider/dist/context/paths.js",
+    )
+    expect(dir).toBe(path.join("/tmp/xdg-cache", "mimocode"))
   })
 
-  it("prefers kilo over mimocode when both config dirs exist", () => {
-    const root = path.join("/tmp", `cursor-host-prefer-${process.pid}-${Date.now()}`)
-    const configHome = path.join(root, "config")
-    const cacheHome = path.join(root, "cache")
-    mkdirSync(path.join(configHome, "kilo"), { recursive: true })
-    mkdirSync(path.join(configHome, "mimocode"), { recursive: true })
-    const dir = resolveHostCacheDir({
-      HOME: root,
-      XDG_CONFIG_HOME: configHome,
-      XDG_CACHE_HOME: cacheHome,
-    })
-    expect(dir).toBe(path.join(cacheHome, "kilo"))
-    rmSync(root, { recursive: true, force: true })
+  it("uses the Kilo cache when the provider module is installed there", () => {
+    const dir = resolveHostCacheDir(
+      { HOME: "/tmp/fake-home", XDG_CACHE_HOME: "/tmp/xdg-cache" },
+      "/tmp/xdg-cache/kilo/packages/provider/dist/context/paths.js",
+    )
+    expect(dir).toBe(path.join("/tmp/xdg-cache", "kilo"))
+  })
+
+  it("defaults a native source checkout to OpenCode even when forks are co-installed", () => {
+    const dir = resolveHostCacheDir(
+      {
+        HOME: "/tmp/fake-home",
+        XDG_CACHE_HOME: "/tmp/xdg-cache",
+        XDG_CONFIG_HOME: "/tmp/config-with-kilo-and-mimo",
+      },
+      "/Users/dev/Projects/cursor-opencode-provider/dist/context/paths.js",
+    )
+    expect(dir).toBe(path.join("/tmp/xdg-cache", "opencode"))
+  })
+})
+
+describe("adoptCompatHostCacheDir", () => {
+  it("ignores config-only detection from a co-installed host", async () => {
+    const adopted = await adoptCompatHostCacheDir(() => ({
+      id: "kilo",
+      supported: true,
+      source: "config",
+      profile: { paths: { cacheDir: "/tmp/xdg-cache/kilo" } },
+    }))
+    expect(adopted).toBeUndefined()
+    expect(getHostCacheDirOverride()).toBeUndefined()
+  })
+
+  it("adopts strong binary identity", async () => {
+    const adopted = await adoptCompatHostCacheDir(() => ({
+      id: "mimo",
+      supported: true,
+      source: "binary",
+      profile: { paths: { cacheDir: "/tmp/xdg-cache/mimocode" } },
+    }))
+    expect(adopted).toBe("/tmp/xdg-cache/mimocode")
+    expect(getHostCacheDirOverride()).toBe("/tmp/xdg-cache/mimocode")
   })
 })
 

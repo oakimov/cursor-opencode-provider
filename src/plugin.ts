@@ -16,6 +16,7 @@ import {
   setCursorShellPath,
 } from "./shell-timeout.js"
 import { sessionActivity } from "./activity.js"
+import { openCodeWebSearchTool } from "./web-tools.js"
 
 const MODULE_URL = new URL("./index.js", import.meta.url).href
 
@@ -217,7 +218,7 @@ function cursorGetServerConfigTelemetryEnabled(): boolean {
 }
 
 export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
-  // Prefer OCP HostProfile.cacheDir when the compat package is present; else XDG heuristic.
+  // Prefer strong OCP host identity when available; otherwise resolve from explicit host signals/install path.
   await adoptCompatHostCacheDir()
   const cacheDir = opencodeGlobalCacheDir()
   const apiBaseURL = cursorApiBaseURL()
@@ -346,6 +347,13 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
   }
 
   return {
+    tool: {
+      // `websearch` is a reserved OpenCode id and is filtered for third-party
+      // providers after plugin tools are merged. Use the collision-safe id
+      // Cursor already sees so this host-side fallback survives that filter.
+      custom_websearch: openCodeWebSearchTool,
+    },
+
     async event({ event }) {
       switch (event.type) {
         case "session.created":

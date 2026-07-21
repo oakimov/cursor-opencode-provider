@@ -73,6 +73,12 @@ export async function buildRequestContext(
       enabled: true,
       mcp_descriptors: nested,
     },
+    // This provider always rejects native web_search/web_fetch interaction
+    // queries with a headless-UI reason (see interactions.ts). Advertise that
+    // unavailability up front so Cursor prefers the collision-safe
+    // custom_web* aliases instead of routing through a query doomed to fail.
+    web_search_enabled: false,
+    web_fetch_enabled: false,
     // Completeness: true only for sections we actually gathered.
     rules_info_complete: true,
     env_info_complete: true,

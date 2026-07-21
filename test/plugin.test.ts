@@ -27,6 +27,12 @@ describe("package root exports", () => {
   it("keeps runtime root exports safe for OpenCode's legacy plugin loader", () => {
     expect(Object.keys(rootExports).sort()).toEqual(["CursorPlugin", "createCursor", "default"])
   })
+
+  it("registers web search under a non-reserved OpenCode tool id", async () => {
+    const hooks = await CursorPlugin({} as any)
+    expect(hooks.tool?.custom_websearch).toBeDefined()
+    expect(hooks.tool?.websearch).toBeUndefined()
+  })
 })
 
 describe("session activity hooks", () => {

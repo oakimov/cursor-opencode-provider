@@ -211,6 +211,18 @@ describe("custom web tool aliases", () => {
     expect(resolveCustomWebToolAlias("custom_webfetch", catalog.aliases)).toBe("webfetch")
   })
 
+  it("prefers OpenCode's exact websearch over an installed MCP search provider", () => {
+    const catalog = buildCustomWebToolAliases([
+      { name: "brave-search_brave_web_search", description: "Brave" },
+      { name: "websearch", description: "OpenCode Web Search" },
+    ])
+    expect(catalog.aliases.get("custom_websearch")).toBe("websearch")
+    expect(catalog.advertisedTools.map((tool) => tool.name)).toEqual([
+      "brave-search_brave_web_search",
+      "custom_websearch",
+    ])
+  })
+
   it("aliases one unique flattened MCP search tool", () => {
     const catalog = buildCustomWebToolAliases([
       { name: "brave-search_brave_web_search", description: "Search" },
@@ -250,11 +262,17 @@ describe("custom web tool aliases", () => {
       "other_web_search",
     ])
 
+    const customSearch = { name: "custom_websearch", description: "Plugin fallback" }
     const existing = buildCustomWebToolAliases([
-      { name: "custom_websearch" },
+      customSearch,
       { name: "brave_brave_web_search" },
     ])
     expect(existing.aliases.has("custom_websearch")).toBe(false)
+    expect(existing.ambiguous.has("custom_websearch")).toBe(false)
+    expect(existing.advertisedTools[0]).toEqual(customSearch)
+    expect(resolveCustomWebToolAlias("custom_websearch", existing.aliases)).toBe(
+      "custom_websearch",
+    )
     expect(existing.advertisedTools.map((tool) => tool.name)).toEqual([
       "custom_websearch",
       "brave_brave_web_search",
@@ -1690,6 +1708,8 @@ describe("exec safety net (unmapped variants)", () => {
     const bytes = buildRequestContextResult(9, {
       env: { workspace_paths: ["/tmp/ws"], shell: "/bin/zsh" },
       tools: descriptors,
+      web_search_enabled: false,
+      web_fetch_enabled: false,
       rules_info_complete: true,
     })
     const dec = decodeMessage<any>("AgentClientMessage", bytes)
@@ -1697,5 +1717,7 @@ describe("exec safety net (unmapped variants)", () => {
     expect(rc.env.workspace_paths).toEqual(["/tmp/ws"])
     expect(rc.tools).toHaveLength(1)
     expect(rc.tools[0].name).toBe("opencode-read")
+    expect(rc.web_search_enabled).toBe(false)
+    expect(rc.web_fetch_enabled).toBe(false)
   })
 })

@@ -257,6 +257,8 @@ export function buildLiveRequestContext(
       enabled: true,
       mcp_descriptors: nested,
     },
+    web_search_enabled: false,
+    web_fetch_enabled: false,
     rules_info_complete: true,
     env_info_complete: true,
     repository_info_complete: true,

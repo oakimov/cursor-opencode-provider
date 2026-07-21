@@ -90,6 +90,8 @@ describe("buildRunRequest", () => {
     const decoded = decodeMessage<any>("AgentClientMessage", data)
     const rc = decoded.run_request.action.user_message_action.request_context
     expect(rc).toBeDefined()
+    expect(rc.web_search_enabled).toBe(false)
+    expect(rc.web_fetch_enabled).toBe(false)
     // Flat list at RequestContext.tools (#7) — what the CLI historically used.
     expect(rc.tools).toHaveLength(2)
     expect(rc.tools[0].name).toBe("opencode-read")
