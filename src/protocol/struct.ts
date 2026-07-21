@@ -86,6 +86,105 @@ export function readAllFields(b: Uint8Array): RawField[] {
   return out
 }
 
+export type StrictRawField = {
+  fn: number
+  wt: number
+  varint?: bigint
+  bytes?: Uint8Array
+  fixed64?: Uint8Array
+  fixed32?: Uint8Array
+}
+
+type DecodedVarint = { value: bigint; nextOffset: number }
+
+const MAX_UINT32 = 0xffff_ffffn
+const MAX_UINT64 = 0xffff_ffff_ffff_ffffn
+const MAX_PROTOBUF_FIELD_NUMBER = 0x1fff_ffff
+
+/**
+ * Decode one unsigned protobuf varint without JavaScript's 32-bit bitwise
+ * truncation. `maximum` also enforces the protocol width: tags and lengths are
+ * uint32, while wire-type 0 scalar values may use the full uint64 range.
+ */
+function readBoundedVarint(
+  bytes: Uint8Array,
+  offset: number,
+  maximum: bigint,
+): DecodedVarint | undefined {
+  let value = 0n
+  let shift = 0n
+  for (let index = offset; index < bytes.length && index < offset + 10; index++) {
+    const byte = bytes[index]!
+    value |= BigInt(byte & 0x7f) << shift
+    if (value > maximum) return undefined
+    if ((byte & 0x80) === 0) return { value, nextOffset: index + 1 }
+    shift += 7n
+  }
+  return undefined
+}
+
+/**
+ * Strictly walk a protobuf message for security/replay decisions.
+ *
+ * Unlike `readAllFields`, this parser consumes the complete input, preserves
+ * uint64 varints as bigint, represents fixed-width fields, and rejects invalid
+ * tags, truncation, overflow, groups, and unsupported wire types. It deliberately
+ * returns `undefined` instead of a partial result: callers must fail closed when
+ * deciding whether replay is safe.
+ */
+export function readAllFieldsStrict(bytes: Uint8Array): StrictRawField[] | undefined {
+  let offset = 0
+  const fields: StrictRawField[] = []
+
+  while (offset < bytes.length) {
+    const tag = readBoundedVarint(bytes, offset, MAX_UINT32)
+    if (!tag) return undefined
+    offset = tag.nextOffset
+
+    const fieldNumber = Number(tag.value >> 3n)
+    const wireType = Number(tag.value & 7n)
+    if (fieldNumber === 0 || fieldNumber > MAX_PROTOBUF_FIELD_NUMBER) return undefined
+
+    if (wireType === 0) {
+      const scalar = readBoundedVarint(bytes, offset, MAX_UINT64)
+      if (!scalar) return undefined
+      fields.push({ fn: fieldNumber, wt: wireType, varint: scalar.value })
+      offset = scalar.nextOffset
+      continue
+    }
+
+    if (wireType === 1) {
+      if (offset + 8 > bytes.length) return undefined
+      fields.push({ fn: fieldNumber, wt: wireType, fixed64: bytes.subarray(offset, offset + 8) })
+      offset += 8
+      continue
+    }
+
+    if (wireType === 2) {
+      const encodedLength = readBoundedVarint(bytes, offset, MAX_UINT32)
+      if (!encodedLength) return undefined
+      offset = encodedLength.nextOffset
+      const length = Number(encodedLength.value)
+      if (offset + length > bytes.length) return undefined
+      fields.push({ fn: fieldNumber, wt: wireType, bytes: bytes.subarray(offset, offset + length) })
+      offset += length
+      continue
+    }
+
+    if (wireType === 5) {
+      if (offset + 4 > bytes.length) return undefined
+      fields.push({ fn: fieldNumber, wt: wireType, fixed32: bytes.subarray(offset, offset + 4) })
+      offset += 4
+      continue
+    }
+
+    // Groups (3/4) are deprecated and recursive; no replay-safe frame uses them.
+    return undefined
+  }
+
+  return fields
+}
+
 function decodeStructBytes(b: Uint8Array): Record<string, unknown> {
   const obj: Record<string, unknown> = {}
   for (const f of readAllFields(b)) {

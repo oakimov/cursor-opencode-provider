@@ -22,7 +22,14 @@ function normalizeApiBaseURL(baseURL: string | undefined): string {
   return new URL(baseURL).origin
 }
 
-function resolveCacheKey(token: string, options: { apiBaseURL?: string; baseURL?: string; telemetryEnabled?: boolean }): string {
+type AgentUrlOptions = {
+  apiBaseURL?: string
+  baseURL?: string
+  telemetryEnabled?: boolean
+  timeoutMs?: number
+}
+
+function resolveCacheKey(token: string, options: AgentUrlOptions): string {
   const tokenHash = createHash("sha256").update(token).digest("hex").slice(0, 16)
   return `${tokenHash}|${normalizeApiBaseURL(options.apiBaseURL ?? options.baseURL)}|telem:${options.telemetryEnabled === true}`
 }
@@ -43,7 +50,7 @@ const _inflight = new Map<string, Promise<string>>()
  */
 export async function resolveAgentUrl(
   token: string,
-  options: { apiBaseURL?: string; baseURL?: string; telemetryEnabled?: boolean } = {},
+  options: AgentUrlOptions = {},
 ): Promise<string> {
   const cacheKey = resolveCacheKey(token, options)
   const memo = _resolved.get(cacheKey)

@@ -4,6 +4,7 @@ import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
 import { toolsToDescriptors, toolsToMcpDescriptors } from "../src/protocol/tools.js"
 import { pump } from "../src/language-model.js"
 import { sessionManager, type CursorSession, type Frame } from "../src/session.js"
+import { CursorProtocolError } from "../src/errors.js"
 
 function writeVarint(out: number[], value: number): void {
   let remaining = value >>> 0
@@ -498,43 +499,41 @@ describe("display-only ToolCall pump bridge", () => {
   it("fails promptly for an unknown exec variant instead of guessing a response", async () => {
     const writes: Uint8Array[] = []
     const parts: any[] = []
-    let streamError: Error | undefined
     const session = fakeSession([rawExecPayload(42, 38)], writes)
     const controller = {
       enqueue(part: unknown) {
         parts.push(part)
       },
-      error(error: Error) {
-        streamError = error
-      },
+      error() {},
     } as ReadableStreamDefaultController<any>
 
-    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
-
-    expect(streamError?.message).toContain(
-      "Unsupported Cursor exec variant smart_mode_classifier_args " +
-      "(request field #38, expected result smart_mode_classifier_result field #38, handling=unsupported)",
-    )
+    await expect(
+      pump(session, controller, { textId: "text", reasoningId: "reasoning" }),
+    ).rejects.toMatchObject({
+      message:
+        "Unsupported Cursor exec variant smart_mode_classifier_args " +
+        "(request field #38, expected result smart_mode_classifier_result field #38, handling=unsupported) (id=42)",
+      code: "CURSOR_RUN_REQUEST_UNSUPPORTED",
+    })
     expect(writes).toHaveLength(0)
     expect(parts.some((p) => p.type === "finish")).toBe(false)
+    expect(session.closed).toBe(true)
   })
 
   it("distinguishes future protocol drift from a known unsupported exec", async () => {
     const writes: Uint8Array[] = []
-    let streamError: Error | undefined
     const session = fakeSession([rawExecPayload(42, 53)], writes)
     const controller = {
       enqueue() {},
-      error(error: Error) {
-        streamError = error
-      },
+      error() {},
     } as ReadableStreamDefaultController<any>
 
-    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
-
-    expect(streamError?.message).toContain(
-      "Unsupported Cursor exec variant unknown request field #53 (id=42)",
-    )
+    await expect(
+      pump(session, controller, { textId: "text", reasoningId: "reasoning" }),
+    ).rejects.toMatchObject({
+      message: "Unsupported Cursor exec variant unknown request field #53 (id=42)",
+      code: "CURSOR_RUN_REQUEST_UNSUPPORTED",
+    })
     expect(writes).toHaveLength(0)
   })
 
@@ -775,7 +774,6 @@ describe("display-only ToolCall pump bridge", () => {
 
   it("fails closed when request_context write throws (F5)", async () => {
     const parts: any[] = []
-    let streamError: Error | undefined
     const session = fakeSession(
       [
         encodeMessage("AgentServerMessage", {
@@ -795,20 +793,21 @@ describe("display-only ToolCall pump bridge", () => {
       enqueue(part: unknown) {
         parts.push(part)
       },
-      error(error: Error) {
-        streamError = error
-      },
+      error() {},
     } as ReadableStreamDefaultController<any>
 
-    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+    await expect(
+      pump(session, controller, { textId: "text", reasoningId: "reasoning" }),
+    ).rejects.toEqual(expect.objectContaining<Partial<CursorProtocolError>>({
+      message: "Cursor request-context reply failed",
+      code: "CURSOR_RUN_REPLY_FAILED",
+    }))
 
-    expect(streamError?.message).toContain("request_context")
     expect(session.closed).toBe(true)
     expect(parts.some((part) => part.type === "tool-call")).toBe(false)
   })
 
   it("fails closed when a KV reply write throws (F5)", async () => {
-    let streamError: Error | undefined
     const session = fakeSession(
       [
         encodeMessage("AgentServerMessage", {
@@ -826,14 +825,16 @@ describe("display-only ToolCall pump bridge", () => {
     }
     const controller = {
       enqueue() {},
-      error(error: Error) {
-        streamError = error
-      },
+      error() {},
     } as unknown as ReadableStreamDefaultController<any>
 
-    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+    await expect(
+      pump(session, controller, { textId: "text", reasoningId: "reasoning" }),
+    ).rejects.toEqual(expect.objectContaining<Partial<CursorProtocolError>>({
+      message: "Cursor KV reply failed",
+      code: "CURSOR_RUN_REPLY_FAILED",
+    }))
 
-    expect(streamError?.message).toContain("KV blob request")
     expect(session.closed).toBe(true)
   })
 })

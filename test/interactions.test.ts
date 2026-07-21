@@ -234,19 +234,22 @@ describe("interaction query pump regression", () => {
 
   it("errors and closes promptly for an unknown variant", async () => {
     const writes: Uint8Array[] = []
-    let streamError: Error | undefined
     let destroyed = false
     const session = fakeSession([unknownQueryPayload(91, 99)], writes)
     session.stream.destroy = () => { destroyed = true }
     const controller = {
       enqueue() {},
-      error(error: Error) { streamError = error },
+      error() {},
     } as unknown as ReadableStreamDefaultController<any>
 
-    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+    await expect(
+      pump(session, controller, { textId: "text", reasoningId: "reasoning" }),
+    ).rejects.toMatchObject({
+      name: "CursorProtocolError",
+      code: "CURSOR_RUN_REQUEST_UNSUPPORTED",
+    })
 
     expect(writes).toHaveLength(0)
-    expect(streamError).toBeInstanceOf(UnsupportedInteractionQueryError)
     expect(destroyed).toBe(true)
   })
 })
