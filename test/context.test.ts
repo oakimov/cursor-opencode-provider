@@ -21,6 +21,11 @@ describe("collectRules / buildRequestContext", () => {
       path.join(root, ".opencode", "skills", "demo", "SKILL.md"),
       "---\nname: demo\ndescription: Demo skill\n---\n\nDo the demo.\n",
     )
+    await mkdir(path.join(root, ".opencode", "agents"), { recursive: true })
+    await writeFile(
+      path.join(root, ".opencode", "agents", "reviewer.md"),
+      "---\nname: reviewer\ndescription: Review local changes\n---\n\nReview carefully.\n",
+    )
     await mkdir(path.join(root, ".cursor", "rules"), { recursive: true })
     await writeFile(path.join(root, ".cursor", "rules", "extra.md"), "cursor instruction via opencode.json")
     await writeFile(
@@ -49,6 +54,47 @@ describe("collectRules / buildRequestContext", () => {
   it("discovers .opencode skills", async () => {
     const skills = await collectSkills(root, root)
     expect(skills.some((s) => s.name === "demo")).toBe(true)
+  })
+
+  it("advertises the host's complete spawnable-agent catalog to Cursor", async () => {
+    const prevCache = process.env.XDG_CACHE_HOME
+    const cacheRoot = path.join(os.tmpdir(), `cursor-ctx-agents-${process.pid}-${Date.now()}`)
+    process.env.XDG_CACHE_HOME = cacheRoot
+    try {
+      const ctx = await buildRequestContext({
+        workspaceRoot: root,
+        tools: [{
+          name: "task",
+          description: [
+            "Delegate work.",
+            "Available agent types and the tools they have access to:",
+            "- general: General-purpose work.",
+            "- explore: Local codebase search.",
+            "- scout: External dependency research.",
+            "- reviewer: Review local changes.",
+          ].join("\n"),
+        }],
+      })
+      const subagents = ctx.custom_subagents as Array<Record<string, unknown>>
+      expect(subagents.map((agent) => agent.name)).toEqual([
+        "general", "explore", "scout", "reviewer",
+      ])
+      expect(String(subagents.find((agent) => agent.name === "reviewer")?.prompt).trim())
+        .toBe("Review carefully.")
+      expect(subagents.find((agent) => agent.name === "scout")?.description)
+        .toBe("External dependency research.")
+      expect(ctx.custom_subagents_info_complete).toBe(true)
+
+      const decoded = decodeMessage<Record<string, unknown>>(
+        "RequestContext",
+        encodeMessage("RequestContext", ctx),
+      )
+      expect((decoded.custom_subagents as unknown[]).length).toBe(4)
+    } finally {
+      if (prevCache === undefined) delete process.env.XDG_CACHE_HOME
+      else process.env.XDG_CACHE_HOME = prevCache
+      await rm(cacheRoot, { recursive: true, force: true })
+    }
   })
 
   it("builds an encodable RequestContext with rules and skills", async () => {

@@ -18,7 +18,7 @@ OpenCode driving a Cursor-routed Grok model through this provider:
 - **Authentication** — browser OAuth (PKCE), or API key from [cursor.com/settings](https://cursor.com/settings)
 - **Model discovery** — fetches available models from Cursor's API and caches them locally
 - **Streaming** — bidirectional Connect-RPC Runs with stale-session rotation, health checks, semantic/read-idle deadlines, bounded replay-safe recovery, and activity-aware held tool continuations
-- **Tool calls** — maps Cursor exec-server messages to AI SDK / OpenCode tool-call parts, including native subagent/Task execution (Cursor's `generalPurpose` maps to OpenCode `general`; read-oriented `bugbot` reviews map to `explore`) and the Pi read/bash/edit/write/grep/find/ls request/result field range; enforces the exact current OpenCode agent catalog before emitting any tool call; mirrors finalized display-only todo/plan state into OpenCode; strips OpenCode's `read` XML envelope (`<path>`/`<content>` + `N:` prefixes) before returning content to Cursor so the model cannot echo the wrapper into writes
+- **Tool calls** — maps Cursor exec-server messages to AI SDK / OpenCode tool-call parts, including catalog-aware native subagent execution: exact advertised custom agents win, `unspecified` / `generalPurpose` select `general`, read-oriented `bugbot` / `security-review` select `explore`, and `cursor-guide` selects enabled Kilo `scout` before `explore`; MiMo `actor` is used instead of its work-item `task` tool when advertised. The bridge also covers the Pi read/bash/edit/write/grep/find/ls request/result range, enforces the exact current OpenCode tool catalog, mirrors finalized display-only todo/plan state, and strips OpenCode's `read` XML envelope before returning content to Cursor.
 - **Thinking / reasoning** — surfaces extended-thinking deltas where the model supports it
 
 ## Requirements
@@ -237,6 +237,18 @@ OpenCode
 The provider adds OpenCode-specific system guidance to normal tool-capable conversations, including tool availability, canonical workspace-path grounding, and preferring `edit` / `write` over shell-based file mutation when those tools are available. Compaction keeps its dedicated prompt unchanged.
 
 If this guidance causes issues, update `buildOpenCodeInteractionGuidance` in [`src/language-model.ts`](src/language-model.ts) and its focused coverage in [`test/prompt-history.test.ts`](test/prompt-history.test.ts).
+
+### Native subagent routing
+
+The provider reads the permission-filtered subagent catalog from the current host `task` or `actor` definition and advertises those recipients to Cursor as custom subagents. Exact configured names are preserved; unknown future Cursor subtype strings fall back to `general`. If a complete catalog omits every compatible recipient, the request fails on Cursor's typed subagent channel instead of selecting an arbitrary specialist.
+
+| Host | Default recipients | Optional recipients |
+|------|--------------------|---------------------|
+| OpenCode | `general`, `explore` | Add `agent/*.md` or `agents/*.md` with `mode: subagent` or `all` |
+| Kilo | `general`, `explore` | Enable `scout` with `KILO_EXPERIMENTAL_SCOUT=true` (or `KILO_EXPERIMENTAL=true`); add `.kilo/agent/*.md` custom agents with `mode: subagent` or `all` |
+| MiMo | `general`, `explore` | Add `.mimocode/agent/*.md` with `mode: subagent` |
+
+Kilo `scout` is reserved for external documentation, dependency repositories, and upstream source. Local workspace discovery continues to use `explore`. Primary modes and hidden/internal agents are never selected unless the host explicitly exposes them as spawnable.
 
 ## Package exports
 

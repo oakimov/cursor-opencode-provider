@@ -68,7 +68,7 @@ function rawExecPayload(
   return Uint8Array.from(asm)
 }
 
-function rawSubagentArgs(): Uint8Array {
+function rawSubagentArgs(subagentType = "generalPurpose"): Uint8Array {
   const out: number[] = []
   const text = new TextEncoder()
   const writeString = (field: number, value: string) => {
@@ -78,7 +78,7 @@ function rawSubagentArgs(): Uint8Array {
     out.push(...bytes)
   }
   writeString(1, "task-call-34")
-  writeString(2, "generalPurpose")
+  writeString(2, subagentType)
   writeString(4, "Investigate why the conversation stopped")
   return Uint8Array.from(out)
 }
@@ -279,6 +279,147 @@ describe("display-only ToolCall pump bridge", () => {
     expect(toolCall?.toolName).toBe("read")
     expect(JSON.parse(toolCall.input)).toEqual({ filePath: target })
     sessionManager.resolve(session.sessionId, 17)
+  })
+
+  it("rejects a read of a missing path with a typed file_not_found before OpenCode sees it", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    const target = `/tmp/cursor-opencode-hallucinated-${process.pid}-${Date.now()}.ts`
+    const session = fakeSession(
+      [
+        encodeMessage("AgentServerMessage", {
+          exec_server_message: { id: 21, read_args: { path: target } },
+        }),
+        turnEndedPayload(),
+      ],
+      writes,
+      [{ name: "read", description: "Read" }],
+    )
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error(error: Error) {
+        throw error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    // No host tool-call is emitted — the user never sees a permission prompt.
+    expect(parts.some((part) => part.type === "tool-call")).toBe(false)
+    expect(sessionManager.pendingFor(session.sessionId, 21)).toBeUndefined()
+    // The provider answers Cursor with the typed ReadResult.file_not_found case,
+    // then closes the exec stream, exactly as the CLI client does.
+    expect(writes).toHaveLength(2)
+    const result = decodeMessage<any>("AgentClientMessage", writes[0]!).exec_client_message
+    expect(result.id).toBe(21)
+    expect(result.read_result.file_not_found).toMatchObject({ path: target })
+    expect(result.read_result.success).toBeUndefined()
+    expect(result.read_result.error).toBeUndefined()
+    expect(decodeMessage<any>("AgentClientMessage", writes[1]!)).toEqual({
+      exec_client_control_message: { stream_close: { id: 21 } },
+    })
+  })
+
+  it("rejects a read of a directory with a typed invalid_file", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    const target = process.cwd() // a real directory, not a file
+    const session = fakeSession(
+      [
+        encodeMessage("AgentServerMessage", {
+          exec_server_message: { id: 22, read_args: { path: target } },
+        }),
+        turnEndedPayload(),
+      ],
+      writes,
+      [{ name: "read", description: "Read" }],
+    )
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error(error: Error) {
+        throw error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    expect(parts.some((part) => part.type === "tool-call")).toBe(false)
+    const result = decodeMessage<any>("AgentClientMessage", writes[0]!).exec_client_message
+    expect(result.read_result.invalid_file).toMatchObject({
+      path: target,
+      reason: "Path is a directory, not a file",
+    })
+  })
+
+  it("still emits a read tool-call for an existing file", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    const target = path.join(process.cwd(), "README.md")
+    const session = fakeSession(
+      [
+        encodeMessage("AgentServerMessage", {
+          exec_server_message: { id: 23, read_args: { path: target } },
+        }),
+      ],
+      writes,
+      [{ name: "read", description: "Read" }],
+    )
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error(error: Error) {
+        throw error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    expect(writes).toHaveLength(0)
+    const toolCall = parts.find((part) => part.type === "tool-call")
+    expect(toolCall?.toolName).toBe("read")
+    expect(JSON.parse(toolCall.input)).toEqual({ filePath: target })
+    sessionManager.resolve(session.sessionId, 23)
+  })
+
+  it("does not reject a write to a new file whose parent exists", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    const target = path.join(process.cwd(), `new-file-${process.pid}-${Date.now()}.txt`)
+    const session = fakeSession(
+      [
+        encodeMessage("AgentServerMessage", {
+          exec_server_message: {
+            id: 24,
+            write_args: { path: target, file_text: "hello\n" },
+          },
+        }),
+      ],
+      writes,
+      [{ name: "write", description: "Write" }],
+    )
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error(error: Error) {
+        throw error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    // File creation must never be denied — the write reaches OpenCode as a real
+    // tool-call even though the target does not exist yet.
+    expect(writes).toHaveLength(0)
+    const toolCall = parts.find((part) => part.type === "tool-call")
+    expect(toolCall?.toolName).toBe("write")
+    expect(JSON.parse(toolCall.input)).toEqual({ filePath: target, content: "hello\n" })
+    sessionManager.resolve(session.sessionId, 24)
   })
 
   it("does not replay a completed ask_question_tool_call", async () => {
@@ -564,6 +705,74 @@ describe("display-only ToolCall pump bridge", () => {
     expect(parts.some((part) =>
       part.type === "finish" && part.finishReason?.unified === "tool-calls"
     )).toBe(true)
+    expect(sessionManager.pendingFor(session.sessionId, 34)?.resultField).toBe("subagent_result")
+    sessionManager.resolve(session.sessionId, 34)
+  })
+
+  it("routes Cursor guide through enabled Kilo scout without changing local explore", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    const session = fakeSession(
+      [rawExecPayload(34, 28, rawSubagentArgs("cursor-guide"))],
+      writes,
+    )
+    session.subagentCatalog = {
+      executor: "task",
+      agents: [{ name: "general" }, { name: "explore" }, { name: "scout" }],
+      complete: true,
+    }
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error(error: Error) {
+        throw error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    const toolCall = parts.find((part) => part.type === "tool-call")
+    expect(toolCall?.toolName).toBe("task")
+    expect(JSON.parse(toolCall.input).subagent_type).toBe("scout")
+    sessionManager.resolve(session.sessionId, 34)
+  })
+
+  it("routes canonical subagent field #28 to MiMo actor when actor is advertised", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    let streamError: Error | undefined
+    const session = fakeSession(
+      [rawExecPayload(34, 28, rawSubagentArgs())],
+      writes,
+      [
+        { name: "actor", description: "Spawn actors" },
+        { name: "task", description: "Track work items" },
+        { name: "read", description: "Read" },
+      ],
+    )
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error(error: Error) {
+        streamError = error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    expect(streamError).toBeUndefined()
+    const toolCall = parts.find((part) => part.type === "tool-call")
+    expect(toolCall?.toolName).toBe("actor")
+    expect(JSON.parse(toolCall.input)).toEqual({
+      operation: {
+        action: "run",
+        description: "Investigate why the conversation stopped",
+        prompt: "Investigate why the conversation stopped",
+        subagent_type: "general",
+      },
+    })
     expect(sessionManager.pendingFor(session.sessionId, 34)?.resultField).toBe("subagent_result")
     sessionManager.resolve(session.sessionId, 34)
   })

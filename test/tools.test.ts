@@ -22,6 +22,10 @@ import {
   unwrapReadOutput,
   buildCustomWebToolAliases,
   resolveCustomWebToolAlias,
+  extractHostSubagentCatalog,
+  mapCursorSubagentTypeToOpenCode,
+  remapNativeSubagentForCatalog,
+  resolveCursorSubagentType,
   REQUEST_CONTEXT_RESULT_FIELD,
 } from "../src/protocol/tools.js"
 import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
@@ -562,7 +566,13 @@ describe("parseExecServerMessage", () => {
     expect(result?.localError).toContain("missing a required prompt or subagent type")
   })
 
-  it("preserves compatible and custom OpenCode subagent names", () => {
+  it("maps known Cursor subagent types and preserves compatible custom OpenCode names", () => {
+    expect(mapCursorSubagentTypeToOpenCode("generalPurpose")).toBe("general")
+    expect(mapCursorSubagentTypeToOpenCode("cursor-guide")).toBe("explore")
+    expect(mapCursorSubagentTypeToOpenCode("best-of-n-runner")).toBe("general")
+    expect(mapCursorSubagentTypeToOpenCode("bugbot")).toBe("explore")
+    expect(mapCursorSubagentTypeToOpenCode("security-review")).toBe("explore")
+    expect(mapCursorSubagentTypeToOpenCode("computer_use")).toBe("general")
     for (const subagentType of ["explore", "my-reviewer"]) {
       const result = parseExecServerMessage({
         id: 34,
@@ -570,6 +580,83 @@ describe("parseExecServerMessage", () => {
       })
       expect(result?.args.subagent_type).toBe(subagentType)
     }
+  })
+
+  it("extracts OpenCode/Kilo subagents from the generated Task catalog", () => {
+    const catalog = extractHostSubagentCatalog([{
+      name: "task",
+      description: [
+        "Delegate work to a subagent.",
+        "Available agent types and the tools they have access to:",
+        "- general: General-purpose work.",
+        "- explore: Local codebase search.",
+        "- scout: External docs and dependency source.",
+      ].join("\n"),
+      inputSchema: { type: "object", properties: { subagent_type: { type: "string" } } },
+    }])
+
+    expect(catalog).toEqual({
+      executor: "task",
+      agents: [
+        { name: "general", description: "General-purpose work." },
+        { name: "explore", description: "Local codebase search." },
+        { name: "scout", description: "External docs and dependency source." },
+      ],
+      complete: true,
+    })
+  })
+
+  it("extracts MiMo subagents from Actor's nested dynamic enum", () => {
+    const catalog = extractHostSubagentCatalog([{
+      name: "actor",
+      description: [
+        "Launch an actor.",
+        "Available agent types and the tools they have access to:",
+        "- general: General work.",
+        "- explore: Local search.",
+        "- reviewer: Configured subagent.",
+        "- all-mode-agent: Listed in prose but rejected by Actor's enum.",
+      ].join("\n"),
+      inputSchema: {
+        oneOf: [{
+          properties: {
+            operation: {
+              properties: {
+                subagent_type: { type: "string", enum: ["general", "explore", "reviewer"] },
+              },
+            },
+          },
+        }],
+      },
+    }, { name: "task", description: "Track work items" }])
+
+    expect(catalog.executor).toBe("actor")
+    expect(catalog.complete).toBe(true)
+    expect(catalog.agents.map((agent) => agent.name)).toEqual(["general", "explore", "reviewer"])
+  })
+
+  it("resolves exact custom agents before semantic fallbacks", () => {
+    const catalog = {
+      executor: "task" as const,
+      agents: ["general", "explore", "scout", "bugbot", "reviewer", "unspecified"]
+        .map((name) => ({ name })),
+      complete: true,
+    }
+
+    expect(resolveCursorSubagentType("reviewer", catalog)).toBe("reviewer")
+    expect(resolveCursorSubagentType("bugbot", catalog)).toBe("bugbot")
+    expect(resolveCursorSubagentType("cursor-guide", catalog)).toBe("scout")
+    expect(resolveCursorSubagentType("explore", catalog)).toBe("explore")
+    expect(resolveCursorSubagentType("unspecified", catalog)).toBe("general")
+    expect(resolveCursorSubagentType("future-cursor-agent", catalog)).toBe("general")
+  })
+
+  it("does not invent a generic recipient when a complete catalog omits general", () => {
+    expect(resolveCursorSubagentType("unspecified", {
+      executor: "task",
+      agents: [{ name: "explore" }],
+      complete: true,
+    })).toBeUndefined()
   })
 
   it("maps Cursor-native bugbot review tasks to OpenCode explore", () => {
@@ -587,6 +674,52 @@ describe("parseExecServerMessage", () => {
       subagent_type: "explore",
     })
     expect(result?.localError).toBeUndefined()
+  })
+
+  it("routes native subagent exec through MiMo actor when actor is advertised", () => {
+    const parsed = parseExecServerMessage({
+      id: 35,
+      subagent_args: {
+        prompt: "Inspect the MCP import bridge",
+        subagent_type: "bugbot",
+        resume_agent_id: "actor_previous",
+        run_in_background: true,
+      },
+    })
+    expect(parsed).toBeDefined()
+    remapNativeSubagentForCatalog(parsed!, ["actor", "task", "read"])
+    expect(parsed).toMatchObject({
+      toolName: "actor",
+      resultField: "subagent_result",
+      args: {
+        operation: {
+          action: "spawn",
+          description: "Inspect the MCP import bridge",
+          prompt: "Inspect the MCP import bridge",
+          subagent_type: "explore",
+          actor_id: "actor_previous",
+        },
+      },
+    })
+  })
+
+  it("uses enabled Kilo scout for Cursor guide requests", () => {
+    const parsed = parseExecServerMessage({
+      id: 36,
+      subagent_args: {
+        prompt: "Inspect upstream package documentation",
+        subagent_type: "cursor-guide",
+      },
+    })
+    remapNativeSubagentForCatalog(parsed!, ["task"], {
+      executor: "task",
+      agents: [{ name: "general" }, { name: "explore" }, { name: "scout" }],
+      complete: true,
+    })
+    expect(parsed).toMatchObject({
+      toolName: "task",
+      args: { subagent_type: "scout" },
+    })
   })
 
   it("maps every canonical Pi exec request to its offset result field", () => {

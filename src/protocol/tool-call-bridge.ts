@@ -1,4 +1,4 @@
-import { mapCursorArgsToOpencode, mcpRealToolName } from "./tools.js"
+import { mapCursorArgsToOpencode, mapCursorSubagentTypeToOpenCode, mcpRealToolName } from "./tools.js"
 import { decodeStructEntriesToJson } from "./struct.js"
 
 /**
@@ -371,7 +371,17 @@ function openCodeSubagentType(raw: unknown): string | undefined {
   if (!subtype) return undefined
   const custom = asRecord(subtype.custom)
   if (typeof custom?.name === "string" && custom.name.length > 0) return custom.name
-  if (subtype.explore != null) return "explore"
+  if (subtype.explore != null) return mapCursorSubagentTypeToOpenCode("explore")
+  if (subtype.cursor_guide != null) return mapCursorSubagentTypeToOpenCode("cursor_guide")
+  if (subtype.bash != null) return mapCursorSubagentTypeToOpenCode("bash")
+  if (subtype.shell != null) return mapCursorSubagentTypeToOpenCode("shell")
+  if (subtype.debug != null) return mapCursorSubagentTypeToOpenCode("debug")
+  if (subtype.computer_use != null) return mapCursorSubagentTypeToOpenCode("computer_use")
+  if (subtype.browser_use != null) return mapCursorSubagentTypeToOpenCode("browser_use")
+  if (subtype.media_review != null) return mapCursorSubagentTypeToOpenCode("media_review")
+  if (subtype.watch_video != null) return mapCursorSubagentTypeToOpenCode("watch_video")
+  if (subtype.vm_setup_helper != null) return mapCursorSubagentTypeToOpenCode("vm_setup_helper")
+  if (subtype.unspecified != null) return mapCursorSubagentTypeToOpenCode("unspecified")
   return undefined
 }
 

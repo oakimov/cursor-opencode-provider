@@ -1,4 +1,6 @@
 import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
 import { encodeMessage } from "./messages.js"
 import { encodeJsonAsValue, decodeStructEntriesToJson, readAllFields } from "./struct.js"
 import { buildEnv } from "../context/env.js"
@@ -360,6 +362,228 @@ export function mapToolNameToExecField(toolName: string): string | undefined {
   return opencodeToolToCursor[toolName]
 }
 
+const CURSOR_SUBAGENT_TYPE_TO_OPENCODE: Record<string, string> = {
+  generalPurpose: "general",
+  "general-purpose": "general",
+  general_purpose: "general",
+  general: "general",
+  unspecified: "general",
+  "cursor-guide": "explore",
+  cursor_guide: "explore",
+  "best-of-n-runner": "general",
+  best_of_n_runner: "general",
+  bash: "general",
+  shell: "general",
+  debug: "general",
+  computer_use: "general",
+  computerUse: "general",
+  browser_use: "general",
+  browserUse: "general",
+  media_review: "general",
+  mediaReview: "general",
+  watch_video: "general",
+  watchVideo: "general",
+  vm_setup_helper: "general",
+  vmSetupHelper: "general",
+  explore: "explore",
+  bugbot: "explore",
+  "security-review": "explore",
+  security_review: "explore",
+}
+
+export type HostSubagentDefinition = {
+  name: string
+  description?: string
+}
+
+export type HostSubagentCatalog = {
+  executor?: "task" | "actor"
+  agents: HostSubagentDefinition[]
+  /** True when the host tool supplied its complete, permission-filtered catalog. */
+  complete: boolean
+}
+
+const SUBAGENT_CATALOG_MARKER = "Available agent types and the tools they have access to:"
+
+function parseSubagentDescriptionCatalog(description: string | undefined): {
+  found: boolean
+  agents: HostSubagentDefinition[]
+} {
+  if (!description) return { found: false, agents: [] }
+  const marker = description.indexOf(SUBAGENT_CATALOG_MARKER)
+  if (marker < 0) return { found: false, agents: [] }
+
+  const agents: HostSubagentDefinition[] = []
+  const lines = description.slice(marker + SUBAGENT_CATALOG_MARKER.length).split(/\r?\n/)
+  let started = false
+  for (const line of lines) {
+    const match = line.match(/^\s*-\s+([^:]+):\s*(.*)$/)
+    if (!match) {
+      if (started && line.trim()) break
+      continue
+    }
+    started = true
+    const name = match[1]!.trim().replace(/^`|`$/g, "")
+    if (!name) continue
+    const agentDescription = match[2]!.trim()
+    agents.push({
+      name,
+      ...(agentDescription ? { description: agentDescription } : {}),
+    })
+  }
+  return { found: true, agents }
+}
+
+function subagentTypeEnumValues(schema: unknown): string[] {
+  const out = new Set<string>()
+  const seen = new Set<object>()
+  const visit = (value: unknown, propertyName?: string): void => {
+    if (!value || typeof value !== "object") return
+    if (seen.has(value as object)) return
+    seen.add(value as object)
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, propertyName)
+      return
+    }
+
+    const record = value as Record<string, unknown>
+    if (propertyName === "subagent_type" && Array.isArray(record.enum)) {
+      for (const item of record.enum) {
+        if (typeof item === "string" && item) out.add(item)
+      }
+    }
+    for (const [key, child] of Object.entries(record)) visit(child, key)
+  }
+  visit(schema)
+  return [...out]
+}
+
+/** Extract the current host's permission-filtered Task/Actor recipient catalog. */
+export function extractHostSubagentCatalog(tools: OpencodeToolDef[]): HostSubagentCatalog {
+  const executorTool = tools.find((tool) => tool.name === "actor") ??
+    tools.find((tool) => tool.name === "task")
+  if (!executorTool) return { agents: [], complete: true }
+
+  const described = parseSubagentDescriptionCatalog(executorTool.description)
+  const enumNames = subagentTypeEnumValues(executorTool.inputSchema)
+  const descriptions = new Map(described.agents.map((agent) => [agent.name, agent.description]))
+  // MiMo's Actor enum is stricter than its prose catalog (`mode: subagent`
+  // rather than every non-primary agent), so structured names are authoritative.
+  const names = new Set(
+    enumNames.length > 0 ? enumNames : described.agents.map((agent) => agent.name),
+  )
+  return {
+    executor: executorTool.name as "task" | "actor",
+    agents: [...names].map((name) => ({
+      name,
+      ...(descriptions.get(name) ? { description: descriptions.get(name) } : {}),
+    })),
+    complete: enumNames.length > 0 || described.found,
+  }
+}
+
+const GENERIC_CURSOR_SUBAGENT_TYPES = new Set([
+  "generalPurpose",
+  "general-purpose",
+  "general_purpose",
+  "general",
+  "unspecified",
+])
+
+function cursorSubagentCandidates(subagentType: string): string[] {
+  if (GENERIC_CURSOR_SUBAGENT_TYPES.has(subagentType)) return ["general"]
+  if (subagentType === "cursor-guide" || subagentType === "cursor_guide") {
+    return ["scout", "explore", "general"]
+  }
+  if (
+    subagentType === "explore" ||
+    subagentType === "bugbot" ||
+    subagentType === "security-review" ||
+    subagentType === "security_review"
+  ) {
+    return ["explore", "general"]
+  }
+  return ["general"]
+}
+
+/** Resolve a Cursor subtype against the agents the host can spawn this turn. */
+export function resolveCursorSubagentType(
+  subagentType: string,
+  catalog?: HostSubagentCatalog,
+): string | undefined {
+  const available = new Set(catalog?.agents.map((agent) => agent.name) ?? [])
+
+  // Explicit host/custom names win. `unspecified` and general aliases are
+  // intentionally excluded so they always select the host's generic agent.
+  if (!GENERIC_CURSOR_SUBAGENT_TYPES.has(subagentType) && available.has(subagentType)) {
+    return subagentType
+  }
+
+  const candidates = cursorSubagentCandidates(subagentType)
+  for (const candidate of candidates) {
+    if (available.has(candidate)) return candidate
+  }
+  if (catalog?.complete) return undefined
+  return candidates[0]
+}
+
+/**
+ * Cursor's native Task/subagent protocol uses Cursor-owned subtype names while
+ * OpenCode-family hosts execute named agents. Map known Cursor built-ins to
+ * the closest host agent and preserve unknown values so user-defined OpenCode
+ * agents can still be called by exact name.
+ */
+export function mapCursorSubagentTypeToOpenCode(subagentType: string): string {
+  return CURSOR_SUBAGENT_TYPE_TO_OPENCODE[subagentType] ?? subagentType
+}
+
+/** Resolve a native Cursor subagent request to this turn's executor and catalog. */
+export function remapNativeSubagentForCatalog(
+  parsed: ParsedExecRequest,
+  advertisedToolNames: Iterable<string>,
+  catalog?: HostSubagentCatalog,
+): void {
+  if (parsed.resultField !== "subagent_result" || parsed.toolName !== "task") return
+  const advertised = new Set(advertisedToolNames)
+  const executor = advertised.has("actor") ? "actor" : advertised.has("task") ? "task" : undefined
+  if (!executor) return
+
+  const description = str(parsed.args.description) ?? ""
+  const prompt = str(parsed.args.prompt) ?? ""
+  const cursorSubagentType = str(parsed.resultMetadata?.cursor_subagent_type) ??
+    str(parsed.args.subagent_type) ?? ""
+  const subagentType = resolveCursorSubagentType(cursorSubagentType, catalog)
+  if (!subagentType) {
+    const available = catalog?.agents.map((agent) => agent.name).join(", ") || "none"
+    parsed.localError =
+      `Cursor subagent '${cursorSubagentType}' has no compatible host agent. ` +
+      `Available subagents: ${available}.`
+    return
+  }
+
+  const resumeAgentId = str(parsed.args.task_id)
+  parsed.toolName = executor
+  if (executor === "task") {
+    parsed.args = {
+      description,
+      prompt,
+      subagent_type: subagentType,
+      ...(resumeAgentId ? { task_id: resumeAgentId } : {}),
+      ...(parsed.args.background === true ? { background: true } : {}),
+    }
+    return
+  }
+  parsed.args = {
+    operation: {
+      action: parsed.args.background === true ? "spawn" : "run",
+      description,
+      prompt,
+      subagent_type: subagentType,
+      ...(resumeAgentId ? { actor_id: resumeAgentId } : {}),
+    },
+  }
+}
+
 // ── Extract exec args from ExecServerMessage ──
 
 export type ParsedExecRequest = {
@@ -453,6 +677,9 @@ export function parseExecServerMessage(
       toolName: "task",
       args,
       resultField,
+      resultMetadata: cursorSubagentType
+        ? { cursor_subagent_type: cursorSubagentType }
+        : undefined,
       localError:
         prompt && cursorSubagentType
           ? undefined
@@ -689,18 +916,6 @@ function describeSubagentTask(prompt?: string, subagentType?: string): string {
   return `${subagentType || "Delegated"} task`
 }
 
-function mapCursorSubagentTypeToOpenCode(subagentType: string): string {
-  // Cursor's built-in general agent uses a camelCase protocol identifier, and
-  // its native Bugbot reviewer has no OpenCode-specific agent definition.
-  // OpenCode `general` is the general-purpose equivalent; `explore` preserves
-  // Bugbot's review-only/read-oriented semantics while retaining grep/read/bash.
-  // Preserve every other value so `explore` and configured custom agents keep
-  // their exact advertised names.
-  if (subagentType === "generalPurpose") return "general"
-  if (subagentType === "bugbot") return "explore"
-  return subagentType
-}
-
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`
 }
@@ -767,6 +982,84 @@ function findOneOfVariant(
     }
   }
   return undefined
+}
+
+// ── Pre-execution read validation (Cursor LocalReadExecutor parity) ──
+
+/** Expand a leading `~` to the home directory, matching Cursor's untildify. */
+function untildify(input: string): string {
+  return input.replace(/^~(?=$|\/|\\)/, os.homedir())
+}
+
+/**
+ * Resolve a read target the way Cursor's LocalReadExecutor does before it
+ * stats the file: untildify, then resolve a relative path against the workspace
+ * root (`env.workspace_paths[0]`), else resolve as-is. Kept in lockstep with
+ * agent utils `resolvePath(path, workspaceRoot)`.
+ */
+export function resolveReadTargetPath(requested: string, workspaceRoot: string): string {
+  const expanded = untildify(requested)
+  if (workspaceRoot && !path.isAbsolute(expanded)) {
+    return path.resolve(workspaceRoot, expanded)
+  }
+  return path.resolve(expanded)
+}
+
+/**
+ * A typed ReadResult oneof case for a read target that fails Cursor's
+ * pre-execution validation, or undefined when the path is a readable file the
+ * tool should actually read. Mirrors LocalReadExecutor exactly:
+ *  - missing path (ENOENT/ENOTDIR)     → file_not_found
+ *  - directory                         → invalid_file "Path is a directory, not a file"
+ *  - socket/fifo/etc (not a file)      → invalid_file "Path is neither a file nor a directory"
+ * EACCES/EPERM (exists but unreadable) and any other stat error return undefined
+ * so the call proceeds to OpenCode and a genuine permission decision is never
+ * masked. Never rejects a non-existent *write/edit* target — this is read-only.
+ */
+export function classifyMissingReadTarget(
+  absolutePath: string,
+): Record<string, unknown> | undefined {
+  let stat: fs.Stats
+  try {
+    stat = fs.statSync(absolutePath)
+  } catch (e) {
+    const code = (e as { code?: string }).code
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      return { file_not_found: { path: absolutePath } }
+    }
+    return undefined
+  }
+  if (stat.isDirectory()) {
+    return { invalid_file: { path: absolutePath, reason: "Path is a directory, not a file" } }
+  }
+  if (!stat.isFile()) {
+    return {
+      invalid_file: { path: absolutePath, reason: "Path is neither a file nor a directory" },
+    }
+  }
+  return undefined
+}
+
+/**
+ * Encode a pre-execution read rejection as the exact frames Cursor's client
+ * emits: the ExecClientMessage carrying the typed ReadResult oneof case, then
+ * the ACM #5 stream_close for that id. `readResult` is the case object from
+ * classifyMissingReadTarget (e.g. `{ file_not_found: { path } }`).
+ */
+export function buildReadRejectionMessages(
+  execId: number,
+  readResult: Record<string, unknown>,
+): Uint8Array[] {
+  return [
+    encodeMessage("AgentClientMessage", {
+      exec_client_message: {
+        id: execId,
+        local_execution_time_ms: 0,
+        read_result: readResult,
+      },
+    }),
+    buildExecStreamClose(execId),
+  ]
 }
 
 // ── Build ExecClientMessage for a tool result ──

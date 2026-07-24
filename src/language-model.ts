@@ -17,12 +17,17 @@ import {
   parseExecServerMessage,
   buildToolCallPart,
   buildExecClientMessages,
+  buildReadRejectionMessages,
+  classifyMissingReadTarget,
+  resolveReadTargetPath,
   parseExecIdFromToolCallId,
   detectExecVariantField,
   buildRequestContextResult,
   buildMcpStateResult,
   buildCustomWebToolAliases,
+  extractHostSubagentCatalog,
   resolveCustomWebToolAlias,
+  remapNativeSubagentForCatalog,
   CUSTOM_WEBFETCH_TOOL,
   CUSTOM_WEBSEARCH_TOOL,
   type OpencodeToolDef,
@@ -570,6 +575,7 @@ async function startSession(
     trace(`web tool alias: ${alias} -> ${original}`)
   }
   const allowTools = toolState.allowTools
+  const discoveredSubagentCatalog = extractHostSubagentCatalog(cursorTools)
   const resetState = resolveTurnConversationReset({ sessionKey, isCompaction })
   const recovery = startOptions?.recovery
   const resuming = recovery?.kind === "resume"
@@ -642,6 +648,25 @@ async function startSession(
     headers: options.headers,
   })
   const requestContext = await buildRequestContext({ workspaceRoot, tools: cursorTools })
+  const contextSubagents = Array.isArray(requestContext.custom_subagents)
+    ? requestContext.custom_subagents
+        .map((agent) => agent && typeof agent === "object" && typeof (agent as Record<string, unknown>).name === "string"
+          ? {
+              name: (agent as Record<string, unknown>).name as string,
+              description: typeof (agent as Record<string, unknown>).description === "string"
+                ? (agent as Record<string, unknown>).description as string
+                : undefined,
+            }
+          : undefined)
+        .filter((agent): agent is { name: string; description: string | undefined } => !!agent)
+    : []
+  const subagentCatalog = {
+    ...discoveredSubagentCatalog,
+    agents: [...new Map(
+      [...discoveredSubagentCatalog.agents, ...contextSubagents]
+        .map((agent) => [agent.name, agent]),
+    ).values()],
+  }
   // Resolve descriptors once from the merged OpenCode config so MCP identity is
   // consistent across AgentRunRequest and both request_context reply paths.
   const toolDescriptors = Array.isArray(requestContext.tools)
@@ -722,6 +747,7 @@ async function startSession(
     blobs: new Map(),
     toolDescriptors,
     toolAliases: webToolAliases.aliases,
+    subagentCatalog,
     requestContext,
     allowTools,
     usageEstimate,
@@ -1138,6 +1164,50 @@ export async function pump(
     }
   }
 
+  /**
+   * A read of a path that does not exist would otherwise reach OpenCode as a
+   * real tool call and raise a permission prompt for a file the user never had.
+   * Cursor's own LocalReadExecutor instead resolves the target against the
+   * workspace, stats it, and returns a typed ReadResult (file_not_found /
+   * invalid_file) before execution. Mirror that here: reply on the held-open
+   * exec channel with the exact typed case so the model receives a structured
+   * observation and the host surfaces no prompt.
+   *
+   * Read-only by construction — write/edit targets are never checked, so
+   * legitimate file creation (path resolves, file absent) is never denied. Runs
+   * after recoverMissingEditRead, which has already converted the new-file edit
+   * handshake read into an empty-file success. EACCES/EPERM and other stat
+   * errors fall through to OpenCode so a genuine permission decision stands.
+   */
+  const rejectMissingReadTarget = (parsed: ParsedExecRequest): boolean => {
+    if (parsed.toolName !== "read") return false
+    const requested = typeof parsed.args.filePath === "string" ? parsed.args.filePath : ""
+    if (!requested) return false
+    const workspaceRoot = workspaceRootFromRequestContext(session.requestContext)
+    const absolutePath = resolveReadTargetPath(requested, workspaceRoot)
+    const readResult = classifyMissingReadTarget(absolutePath)
+    if (!readResult) return false
+    try {
+      for (const frame of buildReadRejectionMessages(parsed.id, readResult)) {
+        session.stream.write(frame)
+      }
+      const kind = Object.keys(readResult)[0]
+      trace(
+        `exec: rejected missing read target id=${parsed.id} kind=${kind} ` +
+          `path=${JSON.stringify(absolutePath)}`,
+      )
+      return true
+    } catch (e) {
+      const error = new Error(
+        `Failed to reject Cursor read of a missing path: ${(e as Error).message}`,
+      )
+      trace(`exec: missing read rejection FAILED ${error.message}`)
+      safeError(error)
+      sessionManager.close(session)
+      return true
+    }
+  }
+
   /** AI SDK V3 requires text-end / reasoning-end before finish or tool-call. */
   const closeOpenSpans = () => {
     for (const part of spanEndParts({ textStarted, reasoningStarted, textId, reasoningId })) {
@@ -1501,6 +1571,7 @@ export async function pump(
             trace(`web tool alias resolved: ${parsed.toolName} -> ${executableToolName}`)
             parsed.toolName = executableToolName
           }
+          remapNativeSubagentForCatalog(parsed, advertisedToolNameSet, session.subagentCatalog)
         }
         const displayCallId = extractExecDisplayCallId(esm)
         trace(`exec: id=${parsed?.id} variant=${parsed ? Object.keys(parsed).join(",") : "none"} toolName=${parsed?.toolName} resultField=${parsed?.resultField}`)
@@ -1540,6 +1611,10 @@ export async function pump(
             continue
           }
           if (recoverMissingEditRead(parsed, displayCallId)) continue
+          if (rejectMissingReadTarget(parsed)) {
+            if (displayCallId) session.displayToolCalls.delete(displayCallId)
+            continue
+          }
           if (displayCallId) {
             session.displayToolCalls.delete(displayCallId)
             trace(`exec: claimed display callId=${displayCallId}`)
@@ -1766,6 +1841,7 @@ export function buildOpenCodeInteractionGuidance(
   const names = new Set(tools.map((tool) => tool.name))
   if (names.size === 0) return undefined
   const instructions: string[] = []
+  const subagents = extractHostSubagentCatalog(tools)
 
   if (names.has("question")) {
     instructions.push(
@@ -1794,6 +1870,21 @@ export function buildOpenCodeInteractionGuidance(
       `- To fetch a known URL, call \`${CUSTOM_WEBFETCH_TOOL}\`; do not use Cursor's native WebFetch interaction.`,
     )
   }
+  if (names.has("task") || names.has("actor")) {
+    const target = names.has("actor") ? "`actor`" : "`task`"
+    const available = subagents.agents.map((agent) => `\`${agent.name}\``).join(", ")
+    instructions.push(
+      `- Native Cursor Task/subagent requests are executed through OpenCode ${target}. ` +
+        "Advertised custom subagent names are used exactly; otherwise `unspecified` and `generalPurpose` select host `general`, " +
+        "`bugbot`, `security-review`, and `explore` select host `explore` (then `general`), and other specialized Cursor types fall back to `general`." +
+        (available ? ` Spawnable host agents this turn: ${available}.` : ""),
+    )
+    if (subagents.agents.some((agent) => agent.name === "scout")) {
+      instructions.push(
+        "- Host `scout` is available for external documentation and dependency-source research. Use Cursor `cursor-guide` for that use case; local repository discovery still uses `bugbot`/`explore`.",
+      )
+    }
+  }
   if (names.has("write")) {
     instructions.push(
       names.has("edit")
@@ -1804,7 +1895,9 @@ export function buildOpenCodeInteractionGuidance(
   return [
     `OpenCode exposes exactly these executable tools for this turn: ${[...names].map((name) => `\`${name}\``).join(", ")}.`,
     `Workspace root: ${JSON.stringify(workspaceRoot)}. Resolve workspace paths against exactly this root; never invent an absolute prefix, and verify uncertain paths with an available tool before using them.`,
-    "Call only tools in that exact list. Cursor-native tools that are not listed—including Task/subagents—are unavailable; do not invoke them. If a capability is absent, complete the work directly with the listed tools or explain the limitation.",
+    subagents.executor
+      ? "Call only tools in that exact list. Cursor-native Task/subagent requests are permitted because a compatible host executor is listed; other unlisted Cursor-native tools remain unavailable."
+      : "Call only tools in that exact list. Cursor-native tools that are not listed—including Task/subagents—are unavailable; do not invoke them. If a capability is absent, complete the work directly with the listed tools or explain the limitation.",
     ...(instructions.length > 0
       ? ["Use these OpenCode tools instead of equivalent Cursor-native UI interactions:"]
       : []),
