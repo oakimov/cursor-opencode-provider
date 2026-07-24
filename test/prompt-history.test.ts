@@ -83,6 +83,30 @@ describe("buildOpenCodeInteractionGuidance", () => {
     expect(guidance).toContain("`write` to create files")
     expect(guidance).toContain("do not use shell, Python, or heredocs")
   })
+
+  it("documents Cursor-native Task subtype mapping when subagents are advertised", () => {
+    const guidance = buildOpenCodeInteractionGuidance([
+      {
+        name: "actor",
+        inputSchema: {
+          properties: {
+            operation: {
+              properties: {
+                subagent_type: { enum: ["general", "explore", "scout"] },
+              },
+            },
+          },
+        },
+      },
+      { name: "task" },
+    ], false, "/workspace/project")
+
+    expect(guidance).toContain("Native Cursor Task/subagent requests are executed through OpenCode `actor`")
+    expect(guidance).toContain("`generalPurpose`")
+    expect(guidance).toContain("`bugbot`, `security-review`, and `explore` select host `explore`")
+    expect(guidance).toContain("Host `scout` is available")
+    expect(guidance).toContain("local repository discovery still uses `bugbot`/`explore`")
+  })
 })
 
 describe("extractPromptHistory", () => {

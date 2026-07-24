@@ -426,14 +426,33 @@ export function createMessageTypes(): protobuf.Root {
     { id: 1, name: "path", type: "string" },
     { id: 2, name: "error", type: "string" },
   ])
+  // Cursor's LocalReadExecutor validates the target before execution and, for a
+  // missing / non-regular path, returns one of these typed ReadResult cases
+  // instead of running the tool. Mirroring the exact field ids/shapes lets this
+  // provider reply the same way so the model sees a structured file-not-found
+  // observation and the host never surfaces a permission prompt.
+  addType(root, "ReadFileNotFound", [{ id: 1, name: "path", type: "string" }])
+  addType(root, "ReadPermissionDenied", [{ id: 1, name: "path", type: "string" }])
+  addType(root, "ReadInvalidFile", [
+    { id: 1, name: "path", type: "string" },
+    { id: 2, name: "reason", type: "string" },
+  ])
   addType(
     root,
     "ReadResult",
     [
       { id: 1, name: "success", type: "ReadSuccess" },
       { id: 2, name: "error", type: "ReadError" },
+      { id: 4, name: "file_not_found", type: "ReadFileNotFound" },
+      { id: 5, name: "permission_denied", type: "ReadPermissionDenied" },
+      { id: 6, name: "invalid_file", type: "ReadInvalidFile" },
     ],
-    [{ name: "result", fields: ["success", "error"] }],
+    [
+      {
+        name: "result",
+        fields: ["success", "error", "file_not_found", "permission_denied", "invalid_file"],
+      },
+    ],
   )
 
   addType(root, "GrepArgs", [

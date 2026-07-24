@@ -2,7 +2,7 @@ import type { BidiStream, BidiTerminalEvent } from "./transport/connect.js"
 import { trace } from "./debug.js"
 import { CursorProtocolError, type CursorProviderError } from "./errors.js"
 import { sessionActivity, type SessionActivitySource } from "./activity.js"
-import type { ToolAliasRegistry } from "./protocol/tools.js"
+import type { HostSubagentCatalog, ToolAliasRegistry } from "./protocol/tools.js"
 
 export type Frame = { flags: number; payload: Uint8Array }
 
@@ -188,6 +188,8 @@ export type CursorSession = {
   toolDescriptors: Array<Record<string, unknown>>
   /** Cursor-facing web alias → exact executable host tool for this Run. */
   toolAliases?: ToolAliasRegistry
+  /** Spawnable host agents extracted from this turn's Task/Actor definition. */
+  subagentCatalog?: HostSubagentCatalog
   /** Full RequestContext for exec #10 replies. */
   requestContext: Record<string, unknown>
   /**

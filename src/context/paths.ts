@@ -7,6 +7,39 @@ import { trace } from "../debug.js"
 
 export type HostPathEnv = NodeJS.ProcessEnv
 
+/** Host-neutral bridge installed by OCP before an unchanged provider is loaded. */
+export const OPENCODE_PATH_BRIDGE = Symbol.for("opencode.compat.path-bridge")
+export type OpenCodePathBridge = {
+  projectConfigDirs: (workspaceRoot: string) => string[]
+  globalConfigDirs: () => string[]
+  configFileNames?: string[]
+}
+
+function pathBridge(): OpenCodePathBridge | undefined {
+  const value = (globalThis as Record<PropertyKey, unknown>)[OPENCODE_PATH_BRIDGE]
+  if (!value || typeof value !== "object") return undefined
+  const bridge = value as Partial<OpenCodePathBridge>
+  return typeof bridge.projectConfigDirs === "function" && typeof bridge.globalConfigDirs === "function"
+    ? bridge as OpenCodePathBridge
+    : undefined
+}
+
+export function opencodeProjectConfigDirs(workspaceRoot: string): string[] {
+  return pathBridge()?.projectConfigDirs(path.resolve(workspaceRoot)) ?? [
+    path.join(path.resolve(workspaceRoot), ".opencode"),
+  ]
+}
+
+export function opencodeGlobalConfigDirs(): string[] {
+  return pathBridge()?.globalConfigDirs() ?? [opencodeGlobalConfigDir()]
+}
+
+export function opencodeConfigFileNames(): string[] {
+  return pathBridge()?.configFileNames?.length
+    ? [...pathBridge()!.configFileNames!]
+    : ["opencode.json", "opencode.jsonc"]
+}
+
 type CompatDetectResult = {
   id: string
   supported: boolean

@@ -1,5 +1,11 @@
 import path from "node:path"
-import { toolsToDescriptors, toolsToMcpDescriptors, type OpencodeToolDef } from "../protocol/tools.js"
+import {
+  extractHostSubagentCatalog,
+  toolsToDescriptors,
+  toolsToMcpDescriptors,
+  type HostSubagentDefinition,
+  type OpencodeToolDef,
+} from "../protocol/tools.js"
 import { collectRules } from "./rules.js"
 import { collectSkills } from "./skills.js"
 import { collectAgents } from "./agents.js"
@@ -14,6 +20,48 @@ export type BuildRequestContextInput = {
   workspaceRoot: string
   tools?: OpencodeToolDef[]
   providerIdentifier?: string
+}
+
+const DEFAULT_HOST_SUBAGENTS: HostSubagentDefinition[] = [
+  {
+    name: "general",
+    description: "General-purpose agent for complex research and multi-step tasks.",
+  },
+  {
+    name: "explore",
+    description: "Read-only agent for searching and understanding the local codebase.",
+  },
+]
+
+type AdvertisedSubagentCatalog = {
+  agents: HostSubagentDefinition[]
+  complete: boolean
+}
+
+/**
+ * Convert the raw host executor catalog into the exact subagent list advertised
+ * to Cursor. `hostSubagents.complete` answers a narrow question: did the host's
+ * task/actor tool itself expose an exhaustive recipient list (schema enum or
+ * catalog marker)? OpenCode's task tool intentionally uses a plain string, so
+ * that raw flag is false even though we can still advertise a complete Cursor
+ * catalog by adding built-in defaults and discovered agent files.
+ *
+ * `custom_subagents_info_complete` must describe the final advertised list, not
+ * the raw extraction source. If there is no executor, the empty list is
+ * complete. If the host catalog is complete, use it verbatim. Otherwise we make
+ * the advertised set complete by augmenting with default host agents and all
+ * locally discovered agents.
+ */
+function buildAdvertisedSubagentCatalog(
+  hostSubagents: ReturnType<typeof extractHostSubagentCatalog>,
+  discoveredAgents: HostSubagentDefinition[],
+): AdvertisedSubagentCatalog {
+  if (!hostSubagents.executor) return { agents: [], complete: true }
+  if (hostSubagents.complete) return { agents: hostSubagents.agents, complete: true }
+  return {
+    agents: [...DEFAULT_HOST_SUBAGENTS, ...hostSubagents.agents, ...discoveredAgents],
+    complete: true,
+  }
 }
 
 /**
@@ -41,6 +89,25 @@ export async function buildRequestContext(
   const flat = toolsToDescriptors(tools, providerIdentifier, mcpServerNames)
   const nested = toolsToMcpDescriptors(tools, providerIdentifier, mcpServerNames)
   const projectDir = ensureOpencodeProjectDir(workspaceRoot)
+  const hostSubagents = extractHostSubagentCatalog(tools)
+  const advertisedSubagents = buildAdvertisedSubagentCatalog(hostSubagents, agents)
+  const discoveredByName = new Map(agents.map((agent) => [agent.name, agent]))
+  const advertisedByName = new Map<string, HostSubagentDefinition>()
+  for (const agent of advertisedSubagents.agents) {
+    if (!advertisedByName.has(agent.name)) advertisedByName.set(agent.name, agent)
+  }
+  const customSubagents = [...advertisedByName.values()].map((agent) => {
+    const discovered = discoveredByName.get(agent.name)
+    return {
+      full_path: discovered?.fullPath ?? "",
+      name: agent.name,
+      description: discovered?.description || agent.description || "Host-configured subagent.",
+      // The host applies the real configured prompt when Task/Actor executes.
+      // Cursor only needs enough context to select the recipient intentionally.
+      prompt: discovered?.prompt ||
+        `Delegate to the host-configured ${agent.name} subagent; its host instructions and tools apply.`,
+    }
+  })
 
   const ctx: Record<string, unknown> = {
     env: buildEnv(workspaceRoot),
@@ -57,12 +124,7 @@ export async function buildRequestContext(
       content: s.content,
       description: s.description,
     })),
-    custom_subagents: agents.map((a) => ({
-      full_path: a.fullPath,
-      name: a.name,
-      description: a.description,
-      prompt: a.prompt,
-    })),
+    custom_subagents: customSubagents,
     mcp_file_system_options: {
       enabled: true,
       // Cursor metadata root (mcps / agent-tools), not the git workspace.
@@ -86,7 +148,7 @@ export async function buildRequestContext(
     git_repo_info_complete: true,
     git_status_info_complete: true,
     agent_skills_info_complete: true,
-    custom_subagents_info_complete: true,
+    custom_subagents_info_complete: advertisedSubagents.complete,
     mcp_file_system_info_complete: true,
     mcp_info_complete: true,
   }
