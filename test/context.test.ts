@@ -56,6 +56,41 @@ describe("collectRules / buildRequestContext", () => {
     expect(skills.some((s) => s.name === "demo")).toBe(true)
   })
 
+  it("marks augmented custom subagents complete when the host exposes only string subagent_type", async () => {
+    const prevCache = process.env.XDG_CACHE_HOME
+    const cacheRoot = path.join(os.tmpdir(), `cursor-ctx-agents-string-${process.pid}-${Date.now()}`)
+    process.env.XDG_CACHE_HOME = cacheRoot
+    try {
+      const ctx = await buildRequestContext({
+        workspaceRoot: root,
+        tools: [{
+          name: "task",
+          description: "Launch a subagent with subagent_type.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              description: { type: "string" },
+              prompt: { type: "string" },
+              subagent_type: { type: "string" },
+            },
+          },
+        }],
+      })
+      const subagents = ctx.custom_subagents as Array<Record<string, unknown>>
+      expect(subagents.map((agent) => agent.name)).toEqual(["general", "explore", "reviewer"])
+      expect(String(subagents.find((agent) => agent.name === "reviewer")?.prompt).trim())
+        .toBe("Review carefully.")
+      // The raw host task schema is incomplete (subagent_type is a string, not an
+      // enum), but the provider augments it with defaults plus discovered agents.
+      // This flag describes the final advertised catalog, not the raw host parse.
+      expect(ctx.custom_subagents_info_complete).toBe(true)
+    } finally {
+      if (prevCache === undefined) delete process.env.XDG_CACHE_HOME
+      else process.env.XDG_CACHE_HOME = prevCache
+      await rm(cacheRoot, { recursive: true, force: true })
+    }
+  })
+
   it("advertises the host's complete spawnable-agent catalog to Cursor", async () => {
     const prevCache = process.env.XDG_CACHE_HOME
     const cacheRoot = path.join(os.tmpdir(), `cursor-ctx-agents-${process.pid}-${Date.now()}`)

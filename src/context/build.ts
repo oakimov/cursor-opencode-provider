@@ -33,6 +33,37 @@ const DEFAULT_HOST_SUBAGENTS: HostSubagentDefinition[] = [
   },
 ]
 
+type AdvertisedSubagentCatalog = {
+  agents: HostSubagentDefinition[]
+  complete: boolean
+}
+
+/**
+ * Convert the raw host executor catalog into the exact subagent list advertised
+ * to Cursor. `hostSubagents.complete` answers a narrow question: did the host's
+ * task/actor tool itself expose an exhaustive recipient list (schema enum or
+ * catalog marker)? OpenCode's task tool intentionally uses a plain string, so
+ * that raw flag is false even though we can still advertise a complete Cursor
+ * catalog by adding built-in defaults and discovered agent files.
+ *
+ * `custom_subagents_info_complete` must describe the final advertised list, not
+ * the raw extraction source. If there is no executor, the empty list is
+ * complete. If the host catalog is complete, use it verbatim. Otherwise we make
+ * the advertised set complete by augmenting with default host agents and all
+ * locally discovered agents.
+ */
+function buildAdvertisedSubagentCatalog(
+  hostSubagents: ReturnType<typeof extractHostSubagentCatalog>,
+  discoveredAgents: HostSubagentDefinition[],
+): AdvertisedSubagentCatalog {
+  if (!hostSubagents.executor) return { agents: [], complete: true }
+  if (hostSubagents.complete) return { agents: hostSubagents.agents, complete: true }
+  return {
+    agents: [...DEFAULT_HOST_SUBAGENTS, ...hostSubagents.agents, ...discoveredAgents],
+    complete: true,
+  }
+}
+
 /**
  * Full RequestContext payload for live UMA + exec #10 reply.
  * Sourced from OpenCode discovery (and .claude/.agents skill fallbacks).
@@ -59,15 +90,11 @@ export async function buildRequestContext(
   const nested = toolsToMcpDescriptors(tools, providerIdentifier, mcpServerNames)
   const projectDir = ensureOpencodeProjectDir(workspaceRoot)
   const hostSubagents = extractHostSubagentCatalog(tools)
+  const advertisedSubagents = buildAdvertisedSubagentCatalog(hostSubagents, agents)
   const discoveredByName = new Map(agents.map((agent) => [agent.name, agent]))
   const advertisedByName = new Map<string, HostSubagentDefinition>()
-  if (hostSubagents.executor) {
-    const source = hostSubagents.complete
-      ? hostSubagents.agents
-      : [...DEFAULT_HOST_SUBAGENTS, ...hostSubagents.agents, ...agents]
-    for (const agent of source) {
-      if (!advertisedByName.has(agent.name)) advertisedByName.set(agent.name, agent)
-    }
+  for (const agent of advertisedSubagents.agents) {
+    if (!advertisedByName.has(agent.name)) advertisedByName.set(agent.name, agent)
   }
   const customSubagents = [...advertisedByName.values()].map((agent) => {
     const discovered = discoveredByName.get(agent.name)
@@ -121,7 +148,7 @@ export async function buildRequestContext(
     git_repo_info_complete: true,
     git_status_info_complete: true,
     agent_skills_info_complete: true,
-    custom_subagents_info_complete: hostSubagents.complete,
+    custom_subagents_info_complete: advertisedSubagents.complete,
     mcp_file_system_info_complete: true,
     mcp_info_complete: true,
   }

@@ -1,6 +1,6 @@
 import { readdir, stat } from "node:fs/promises"
 import path from "node:path"
-import { opencodeGlobalConfigDir } from "./paths.js"
+import { opencodeGlobalConfigDirs, opencodeProjectConfigDirs } from "./paths.js"
 import type { OpencodeJson } from "./rules.js"
 
 export type CollectedPlugin = {
@@ -42,15 +42,19 @@ export async function collectPlugins(
     seen.add(id)
     out.push({ id, source: "npm" })
   }
-  for (const p of await listLocalPlugins(path.join(workspaceRoot, ".opencode", "plugins"))) {
-    if (seen.has(p.id)) continue
-    seen.add(p.id)
-    out.push(p)
+  for (const configDir of opencodeProjectConfigDirs(workspaceRoot)) {
+    for (const p of await listLocalPlugins(path.join(configDir, "plugins"))) {
+      if (seen.has(p.id)) continue
+      seen.add(p.id)
+      out.push(p)
+    }
   }
-  for (const p of await listLocalPlugins(path.join(opencodeGlobalConfigDir(), "plugins"))) {
-    if (seen.has(p.id)) continue
-    seen.add(p.id)
-    out.push(p)
+  for (const configDir of opencodeGlobalConfigDirs()) {
+    for (const p of await listLocalPlugins(path.join(configDir, "plugins"))) {
+      if (seen.has(p.id)) continue
+      seen.add(p.id)
+      out.push(p)
+    }
   }
   return out
 }

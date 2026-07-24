@@ -1,7 +1,7 @@
 import { readdir, readFile, stat } from "node:fs/promises"
 import path from "node:path"
 import { homedir } from "node:os"
-import { opencodeGlobalConfigDir } from "./paths.js"
+import { opencodeGlobalConfigDirs, opencodeProjectConfigDirs } from "./paths.js"
 
 export type CollectedSkill = {
   fullPath: string
@@ -94,8 +94,13 @@ export async function collectSkills(workspaceRoot: string, worktree: string): Pr
   const out = new Map<string, CollectedSkill>()
   const home = homedir()
 
-  await walkAncestorsFor(workspaceRoot, path.join(".opencode", "skills"), worktree, out)
-  await scanSkillsRoot(path.join(opencodeGlobalConfigDir(), "skills"), out)
+  for (const projectDir of opencodeProjectConfigDirs(workspaceRoot)) {
+    const relative = path.relative(workspaceRoot, projectDir)
+    await walkAncestorsFor(workspaceRoot, path.join(relative, "skills"), worktree, out)
+  }
+  for (const globalDir of opencodeGlobalConfigDirs()) {
+    await scanSkillsRoot(path.join(globalDir, "skills"), out)
+  }
 
   await walkAncestorsFor(workspaceRoot, path.join(".claude", "skills"), worktree, out)
   await scanSkillsRoot(path.join(home, ".claude", "skills"), out)

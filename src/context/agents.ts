@@ -1,6 +1,6 @@
-import { readdir, readFile, stat } from "node:fs/promises"
+import { readdir, readFile, realpath, stat } from "node:fs/promises"
 import path from "node:path"
-import { opencodeGlobalConfigDir } from "./paths.js"
+import { opencodeGlobalConfigDirs, opencodeProjectConfigDirs } from "./paths.js"
 
 export type CollectedAgent = {
   fullPath: string
@@ -46,38 +46,101 @@ function parseAgentMarkdown(raw: string, fallbackName: string): {
   return { name, description, prompt: body.slice(0, 20_000) }
 }
 
-async function scanAgentDir(dir: string, out: Map<string, CollectedAgent>): Promise<void> {
-  if (!(await exists(dir))) return
-  let entries: string[]
-  try {
-    entries = await readdir(dir)
-  } catch {
-    return
-  }
-  for (const name of entries) {
-    if (!name.endsWith(".md")) continue
-    const full = path.join(dir, name)
-    try {
-      const raw = await readFile(full, "utf-8")
-      const parsed = parseAgentMarkdown(raw, name.replace(/\.md$/, ""))
-      if (!out.has(parsed.name)) {
-        out.set(parsed.name, {
-          fullPath: path.resolve(full),
-          name: parsed.name,
-          description: parsed.description,
-          prompt: parsed.prompt,
-        })
-      }
-    } catch {
-      /* skip */
-    }
-  }
+function uniquePaths(paths: string[]): string[] {
+  const seen = new Set<string>()
+  return paths.filter((value) => {
+    const normalized = path.resolve(value)
+    if (seen.has(normalized)) return false
+    seen.add(normalized)
+    return true
+  })
 }
 
-/** Custom OpenCode agents from `.opencode/agents` and global config. */
+/**
+ * Read one host config root's `agent/` and `agents/` trees. Host loaders use
+ * both spellings and recurse through nested markdown files. Directory symlinks
+ * are followed with realpath cycle detection, matching host behavior without
+ * allowing a symlink loop to hang context construction.
+ */
+async function scanAgentRoot(
+  root: string,
+  out: Map<string, CollectedAgent>,
+): Promise<void> {
+  if (!(await exists(root))) return
+  const visitedDirs = new Set<string>()
+  const scanDir = async (dir: string, relativePrefix: string): Promise<void> => {
+    let canonical: string
+    try {
+      canonical = await realpath(dir)
+    } catch {
+      return
+    }
+    if (visitedDirs.has(canonical)) return
+    visitedDirs.add(canonical)
+
+    let entries: Array<import("node:fs").Dirent>
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+      entries.sort((a, b) => a.name.localeCompare(b.name))
+    } catch {
+      return
+    }
+
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name)
+      const relative = path.join(relativePrefix, entry.name)
+      let isDirectory = entry.isDirectory()
+      let isFile = entry.isFile()
+      if (entry.isSymbolicLink()) {
+        try {
+          const target = await stat(full)
+          isDirectory = target.isDirectory()
+          isFile = target.isFile()
+        } catch {
+          continue
+        }
+      }
+      if (isDirectory) {
+        await scanDir(full, relative)
+        continue
+      }
+      if (!isFile || !entry.name.endsWith(".md")) continue
+
+      try {
+        const raw = await readFile(full, "utf-8")
+        const fallbackName = relative.replace(/\\/g, "/").replace(/\.md$/, "")
+        const parsed = parseAgentMarkdown(raw, fallbackName)
+        if (!out.has(parsed.name)) {
+          out.set(parsed.name, {
+            fullPath: path.resolve(full),
+            name: parsed.name,
+            description: parsed.description,
+            prompt: parsed.prompt,
+          })
+        }
+      } catch {
+        /* skip unreadable or malformed files without failing context build */
+      }
+    }
+  }
+
+  // Scan singular before plural, then let root ordering establish host
+  // precedence. This is deterministic and mirrors the hosts' brace glob.
+  await scanDir(path.join(root, "agent"), "agent")
+  await scanDir(path.join(root, "agents"), "agents")
+}
+
+/**
+ * Custom agents from the active OpenCode-compatible config roots. OCP may
+ * install a host-neutral bridge before loading this module; without one this
+ * remains the direct OpenCode discovery path.
+ */
 export async function collectAgents(workspaceRoot: string): Promise<CollectedAgent[]> {
   const out = new Map<string, CollectedAgent>()
-  await scanAgentDir(path.join(workspaceRoot, ".opencode", "agents"), out)
-  await scanAgentDir(path.join(opencodeGlobalConfigDir(), "agents"), out)
+  const roots = uniquePaths([
+    ...opencodeProjectConfigDirs(workspaceRoot),
+    ...opencodeGlobalConfigDirs(),
+  ])
+  for (const root of roots) await scanAgentRoot(root, out)
   return [...out.values()]
 }

@@ -1,7 +1,7 @@
 import { readFile, readdir, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import path from "node:path"
-import { opencodeGlobalConfigDir, resolveHomeRelative } from "./paths.js"
+import { opencodeConfigFileNames, opencodeGlobalConfigDirs, opencodeProjectConfigDirs, resolveHomeRelative } from "./paths.js"
 
 export type CollectedRule = {
   fullPath: string
@@ -26,7 +26,7 @@ async function exists(file: string): Promise<boolean> {
 }
 
 async function readJsonConfig(dir: string): Promise<OpencodeJson> {
-  for (const name of ["opencode.json", "opencode.jsonc"]) {
+  for (const name of opencodeConfigFileNames()) {
     const file = path.join(dir, name)
     if (!(await exists(file))) continue
     try {
@@ -155,28 +155,30 @@ export async function fetchRemoteInstruction(
   }
 }
 
-export async function loadMergedConfig(workspaceRoot: string): Promise<OpencodeJson> {
-  const globalConfig = await readJsonConfig(opencodeGlobalConfigDir())
-  if (isProjectConfigDisabled()) {
-    return {
-      ...globalConfig,
-      instructions: [...(globalConfig.instructions ?? [])],
-      plugin: [...(globalConfig.plugin ?? [])],
-      plugins: [...(globalConfig.plugins ?? [])],
-      mcp: { ...(globalConfig.mcp ?? {}) },
-      permission: globalConfig.permission,
-    }
-  }
-  const projectConfig = await readJsonConfig(workspaceRoot)
+function mergeConfig(base: OpencodeJson, overlay: OpencodeJson): OpencodeJson {
   return {
-    ...globalConfig,
-    ...projectConfig,
-    instructions: [...(globalConfig.instructions ?? []), ...(projectConfig.instructions ?? [])],
-    plugin: [...new Set([...(globalConfig.plugin ?? []), ...(projectConfig.plugin ?? [])])],
-    plugins: [...new Set([...(globalConfig.plugins ?? []), ...(projectConfig.plugins ?? [])])],
-    mcp: { ...(globalConfig.mcp ?? {}), ...(projectConfig.mcp ?? {}) },
-    permission: projectConfig.permission ?? globalConfig.permission,
+    ...base,
+    ...overlay,
+    instructions: [...(base.instructions ?? []), ...(overlay.instructions ?? [])],
+    plugin: [...new Set([...(base.plugin ?? []), ...(overlay.plugin ?? [])])],
+    plugins: [...new Set([...(base.plugins ?? []), ...(overlay.plugins ?? [])])],
+    mcp: { ...(base.mcp ?? {}), ...(overlay.mcp ?? {}) },
+    permission: overlay.permission ?? base.permission,
   }
+}
+
+export async function loadMergedConfig(workspaceRoot: string): Promise<OpencodeJson> {
+  const globalConfig = await readJsonConfig(opencodeGlobalConfigDirs()[0] ?? "")
+  if (isProjectConfigDisabled()) return mergeConfig({}, globalConfig)
+
+  // The bridge supplies native project config roots for an unchanged plugin:
+  // .opencode on OpenCode, .mimocode on MiMo, and .kilo/.kilocode on Kilo.
+  // Later roots have higher precedence, matching the host's native ordering.
+  let projectConfig = await readJsonConfig(workspaceRoot)
+  for (const configDir of opencodeProjectConfigDirs(workspaceRoot)) {
+    projectConfig = mergeConfig(projectConfig, await readJsonConfig(configDir))
+  }
+  return mergeConfig(globalConfig, projectConfig)
 }
 
 /**
@@ -214,7 +216,9 @@ export async function collectRules(workspaceRoot: string): Promise<{
     }
   }
 
-  await add(path.join(opencodeGlobalConfigDir(), "AGENTS.md"))
+  for (const globalDir of opencodeGlobalConfigDirs()) {
+    await add(path.join(globalDir, "AGENTS.md"))
+  }
   await add(path.join(homedir(), ".claude", "CLAUDE.md"))
 
   for (const raw of config.instructions ?? []) {
