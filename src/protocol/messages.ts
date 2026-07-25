@@ -1492,6 +1492,72 @@ export function decodeMessage<T = Record<string, unknown>>(
   return type.toObject(decoded, { defaults: true, json: true, longs: Number }) as T
 }
 
+type RawField = {
+  field: number
+  wireType: number
+  varint?: string
+  fixed?: number | string
+  bytes?: Uint8Array
+}
+
+/** Schema-free walk of one message's top-level wire fields (no nested descent). */
+function readRawFields(buf: Uint8Array): RawField[] {
+  const reader = protobuf.Reader.create(buf)
+  const fields: RawField[] = []
+  while (reader.pos < reader.len) {
+    const tag = reader.uint32()
+    const field = tag >>> 3
+    const wireType = tag & 7
+    switch (wireType) {
+      case 0:
+        fields.push({ field, wireType, varint: reader.uint64().toString() })
+        break
+      case 1:
+        fields.push({ field, wireType, fixed: reader.fixed64().toString() })
+        break
+      case 2:
+        fields.push({ field, wireType, bytes: reader.bytes() })
+        break
+      case 5:
+        fields.push({ field, wireType, fixed: reader.fixed32() })
+        break
+      default:
+        // Groups (3/4) aren't used on this wire; bail rather than desync the reader.
+        return fields
+    }
+  }
+  return fields
+}
+
+/**
+ * Diagnostic-only: walk AgentServerMessage.interaction_update(1).turn_ended(14)
+ * without going through our hand-written TurnEnded schema, so a `cache_write`/
+ * `reasoning_tokens` question can be checked against the raw wire instead of
+ * guessed. Confirmed field ids 1-5 (input/output/cache_read/cache_write/
+ * reasoning) decode correctly. Live captures routinely include `f4` explicitly
+ * as `0` while `f3` (cache_read) and `f5` (reasoning) are non-zero — Cursor's
+ * agent TurnEnded populates the field but does not report write counts here.
+ */
+export function debugWalkTurnEnded(payload: Uint8Array): string {
+  try {
+    const top = readRawFields(payload)
+    const iuField = top.find((f) => f.field === 1 && f.wireType === 2)
+    if (!iuField?.bytes) return "(no interaction_update field)"
+    const iu = readRawFields(iuField.bytes)
+    const teField = iu.find((f) => f.field === 14 && f.wireType === 2)
+    if (!teField?.bytes) return "(no turn_ended field in interaction_update)"
+    const te = readRawFields(teField.bytes)
+    return te
+      .map(
+        (f) =>
+          `f${f.field}:wt${f.wireType}=${f.varint ?? f.fixed ?? (f.bytes ? `bytes[${f.bytes.length}]` : "?")}`,
+      )
+      .join(" ")
+  } catch (e) {
+    return `(walk failed: ${(e as Error).message})`
+  }
+}
+
 /**
  * Decode a protobuf sub-message from a frame payload that wraps it in
  * a top-level field key + length varint.  Skips the outer wrapper and

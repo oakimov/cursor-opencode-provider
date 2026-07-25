@@ -164,7 +164,7 @@ function fakeSession(
       tools,
       mcp_file_system_options: { enabled: true, mcp_descriptors: mcpDescriptors },
     },
-    usageEstimate: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0 },
+    usageEstimate: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0, reasoningTokens: 0 },
     allowTools: true,
     pumpActive: true,
     heartbeat: null,
@@ -1045,5 +1045,43 @@ describe("display-only ToolCall pump bridge", () => {
     }))
 
     expect(session.closed).toBe(true)
+  })
+
+  it("emits V3 usage from turn_ended on finish", async () => {
+    const parts: any[] = []
+    const session = fakeSession(
+      [
+        encodeMessage("AgentServerMessage", {
+          interaction_update: {
+            turn_ended: {
+              input_tokens: 100,
+              output_tokens: 40,
+              cache_read: 12,
+              cache_write: 3,
+              reasoning_tokens: 9,
+            },
+          },
+        }),
+      ],
+      [],
+    )
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error() {},
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    const finish = parts.find((part) => part.type === "finish")
+    expect(finish).toBeDefined()
+    expect(finish!.usage.inputTokens.total).toBe(115)
+    expect(finish!.usage.inputTokens.noCache).toBe(100)
+    expect(finish!.usage.inputTokens.cacheRead).toBe(12)
+    expect(finish!.usage.inputTokens.cacheWrite).toBe(3)
+    expect(finish!.usage.outputTokens.total).toBe(49)
+    expect(finish!.usage.outputTokens.text).toBe(40)
+    expect(finish!.usage.outputTokens.reasoning).toBe(9)
   })
 })

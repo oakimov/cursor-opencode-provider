@@ -30,6 +30,11 @@ export const DEFAULT_CONTINUATION_POLICY: Readonly<CursorContinuationPolicy> = {
 const MAX_TIMER_MS = 2_147_483_647
 const DEFAULT_TOMBSTONE_TTL_MS = 15 * 60_000
 const DEFAULT_TOMBSTONE_LIMIT = 1_024
+// Well below Cursor's server-side concurrent-Run ceiling per HTTP/2 connection,
+// so a caller that keeps abandoning Runs instead of delivering continuations
+// gets corrected here instead of piling up open streams until Cursor's server
+// force-closes the whole shared connection.
+const DEFAULT_MAX_OPEN_SESSIONS = 24
 
 function positiveInteger(name: string, value: unknown, fallback: number): number {
   const resolved = value === undefined ? fallback : value
@@ -130,6 +135,8 @@ export type ContinuationTerminalReason =
   | "heartbeat-write-failed"
   | "reply-write-failed"
   | "process-disposed"
+  | "superseded-by-new-run"
+  | "open-session-cap-exceeded"
 
 export type SessionCloseReason =
   | ContinuationTerminalReason
@@ -208,6 +215,7 @@ export type CursorSession = {
     outputTokens: number
     cacheRead: number
     cacheWrite: number
+    reasoningTokens: number
   }
   /**
    * True while a doStream pull() is actively reading this session's frames.
@@ -245,6 +253,7 @@ type SessionManagerOptions = {
   activitySource?: SessionActivitySource
   tombstoneTtlMs?: number
   tombstoneLimit?: number
+  maxOpenSessions?: number
 }
 
 export class SessionManager {
@@ -253,6 +262,10 @@ export class SessionManager {
   // counters per stream) coexist instead of overwriting each other.
   private byExecId = new Map<string, CursorSession>()
   private sessions = new Set<CursorSession>()
+  // Most recently registered open session per OpenCode session id. A second
+  // registration for the same id means the caller started a fresh Run instead
+  // of continuing the held-open one — the prior entry is stale and superseded.
+  private byOpenCodeSessionId = new Map<string, CursorSession>()
   private tombstones = new Map<string, Tombstone>()
   private readonly now: () => number
   private readonly setTimer: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>
@@ -260,6 +273,7 @@ export class SessionManager {
   private readonly activitySource: SessionActivitySource
   private readonly tombstoneTtlMs: number
   private readonly tombstoneLimit: number
+  private readonly maxOpenSessions: number
 
   constructor(options: SessionManagerOptions = {}) {
     this.now = options.now ?? Date.now
@@ -275,6 +289,11 @@ export class SessionManager {
       "tombstoneLimit",
       options.tombstoneLimit,
       DEFAULT_TOMBSTONE_LIMIT,
+    )
+    this.maxOpenSessions = positiveInteger(
+      "maxOpenSessions",
+      options.maxOpenSessions,
+      DEFAULT_MAX_OPEN_SESSIONS,
     )
   }
 
@@ -295,11 +314,72 @@ export class SessionManager {
     session.lastHeartbeatWriteAt ??= this.now()
     session.semanticDeadlineAt ??= this.now() + session.policy.semanticIdleMs
     this.sessions.add(session)
+    if (session.openCodeSessionId) {
+      const prior = this.byOpenCodeSessionId.get(session.openCodeSessionId)
+      if (prior && prior !== session && !prior.closed) {
+        if (this.isPumping(prior)) {
+          // A live pull() is mid-await on this stream (nextFrameWithSemanticDeadline
+          // or the raw frame iterator). Forcing close() here would reject that await
+          // and propagate a real error to whatever still holds the ReadableStream —
+          // exactly the kind of self-inflicted failure this cap is meant to prevent.
+          // Let it finish or expire on its own (hard deadline / heartbeat failure).
+          trace(
+            `sessionManager.registerSession: openCodeSessionId=${session.openCodeSessionId} ` +
+              `has a still-pumping prior session ${prior.sessionId} (pending=${prior.pending.size}) ` +
+              `— leaving it to finish or expire naturally instead of interrupting it`,
+          )
+        } else {
+          trace(
+            `sessionManager.registerSession: superseding stale session ${prior.sessionId} ` +
+              `(openCodeSessionId=${session.openCodeSessionId}, pending=${prior.pending.size}) ` +
+              `with new session ${session.sessionId}`,
+          )
+          this.close(prior, "superseded-by-new-run")
+        }
+      }
+      this.byOpenCodeSessionId.set(session.openCodeSessionId, session)
+    }
+    this.enforceOpenSessionCap(session)
     const unsubscribe = session.stream.onTerminal?.(
       (event) => this.onStreamTerminal(session, event),
     ) ?? (() => {})
     if (session.closed) unsubscribe()
     else session.terminalUnsubscribe = unsubscribe
+  }
+
+  private isPumping(session: CursorSession): boolean {
+    return session.pumpOwner != null || session.pumpActive
+  }
+
+  /**
+   * Force-close the oldest idle open session(s) once registration exceeds the
+   * cap. Never closes a session with a live pull() mid-await (see the same
+   * guard in the supersede check above) — an unclosable backlog of genuinely
+   * active sessions just means the cap can't be enforced until one finishes.
+   */
+  private enforceOpenSessionCap(justRegistered: CursorSession): void {
+    while (this.sessions.size > this.maxOpenSessions) {
+      let oldest: CursorSession | undefined
+      for (const candidate of this.sessions) {
+        if (candidate === justRegistered || this.isPumping(candidate)) continue
+        if (!oldest || candidate.createdAt < oldest.createdAt) oldest = candidate
+      }
+      if (!oldest) {
+        trace(
+          `sessionManager.registerSession: open session cap exceeded ` +
+            `(${this.sessions.size} > ${this.maxOpenSessions}) but no idle session is ` +
+            `available to close — all remaining sessions are actively pumping`,
+        )
+        return
+      }
+      trace(
+        `sessionManager.registerSession: open session cap exceeded ` +
+          `(${this.sessions.size} > ${this.maxOpenSessions}), force-closing oldest idle session ` +
+          `${oldest.sessionId} (openCodeSessionId=${oldest.openCodeSessionId ?? "-"}, ` +
+          `ageMs=${this.now() - oldest.createdAt}, pending=${oldest.pending.size})`,
+      )
+      this.close(oldest, "open-session-cap-exceeded")
+    }
   }
 
   recordSemanticProgress(session: CursorSession, at?: number): void {
@@ -516,6 +596,12 @@ export class SessionManager {
     session.displayToolCalls?.clear()
     session.blobs?.clear()
     this.sessions.delete(session)
+    if (
+      session.openCodeSessionId &&
+      this.byOpenCodeSessionId.get(session.openCodeSessionId) === session
+    ) {
+      this.byOpenCodeSessionId.delete(session.openCodeSessionId)
+    }
     try { session.stream.destroy() } catch { /* already closed */ }
   }
 
@@ -529,7 +615,7 @@ export class SessionManager {
    */
   closeUnlessPending(session: CursorSession): boolean {
     if (session.closed) return true
-    const pumpActive = session.pumpOwner != null || session.pumpActive
+    const pumpActive = this.isPumping(session)
     if (session.pending.size > 0 || pumpActive) {
       trace(
         `sessionManager.closeUnlessPending: KEEP open pendingCount=${session.pending.size} pumpActive=${pumpActive}`,

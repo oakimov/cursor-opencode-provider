@@ -16,7 +16,11 @@
       },
       "peerDependencies": {
         "@opencode-ai/plugin": "^1.17.13",
+        "@opencode-compat/profile": ">=0.1.0",
       },
+      "optionalPeers": [
+        "@opencode-compat/profile",
+      ],
     },
   },
   "packages": {

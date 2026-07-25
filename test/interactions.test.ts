@@ -198,7 +198,7 @@ function fakeSession(payloads: Uint8Array[], writes: Uint8Array[]): CursorSessio
     blobs: new Map(),
     toolDescriptors: [],
     requestContext: {},
-    usageEstimate: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0 },
+    usageEstimate: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0, reasoningTokens: 0 },
     allowTools: false,
     pumpActive: true,
     heartbeat: null,

@@ -38,7 +38,7 @@ function fakeSession(id: string, frames: Frame[], writes: Uint8Array[] = []): Cu
     toolDescriptors: [],
     requestContext: {},
     allowTools: true,
-    usageEstimate: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0 },
+    usageEstimate: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0, reasoningTokens: 0 },
     pumpActive: false,
     heartbeat: null,
     expiresAt: Date.now() + 10_000,
@@ -381,7 +381,7 @@ describe("interrupted Cursor Run handling", () => {
       " continuation",
     ])
     expect(parts.filter((part) => part.type === "finish")).toHaveLength(1)
-    expect(parts.find((part) => part.type === "finish").usage.outputTokens.total).toBe(5)
+    expect(parts.find((part) => part.type === "finish").usage.outputTokens.total).toBe(2)
   })
 
   it("does not retry a transport close after turn_ended", async () => {
@@ -403,7 +403,7 @@ describe("interrupted Cursor Run handling", () => {
     expect(parts.filter((part) => part.type === "finish")).toHaveLength(1)
   })
 
-  it("reports per-request usage while preserving cumulative Cursor counters as metadata", async () => {
+  it("emits TurnEnded counters as V3 usage while preserving raw values in metadata", async () => {
     const parts: any[] = []
     await pump(
       fakeSession("usage", [
@@ -424,8 +424,13 @@ describe("interrupted Cursor Run handling", () => {
       { textId: "t", reasoningId: "r", promptTokens: 25 },
     )
     const finish = parts.find((part) => part.type === "finish")
-    expect(finish.usage.inputTokens).toMatchObject({ total: 25, cacheRead: 0, cacheWrite: 0 })
-    expect(finish.usage.outputTokens.total).toBe(3)
+    expect(finish.usage.inputTokens).toMatchObject({
+      total: 5_954_572,
+      noCache: 120_000,
+      cacheRead: 5_810_572,
+      cacheWrite: 24_000,
+    })
+    expect(finish.usage.outputTokens.total).toBe(73_483)
     expect(finish.providerMetadata.cursor).toMatchObject({
       usageVersion: 2,
       inputTokensRaw: 120_000,

@@ -75,6 +75,7 @@ When changing rule/skill discovery, keep parity with OpenCode behavior and updat
 - **Telemetry:** `GetServerConfig` sends `telem_enabled: false` by default; opt in via `telemetryEnabled` or `CURSOR_GET_SERVER_CONFIG_TELEMETRY`.
 - **Tool results:** strip OpenCode’s `read` XML envelope before returning content to Cursor so the model cannot echo wrappers into writes.
 - **Device identity:** stable OS-derived device ids (CLI-shaped); inventing new fingerprints risks “too many devices” errors.
+- **Session lifecycle:** `SessionManager` holds a Cursor Run open past `doStream` returning whenever a tool exec is still pending, so a later continuation can resume it. Registering a *new* Run for the same `openCodeSessionId` closes any still-open prior Run for that id (`superseded-by-new-run`) — callers that abandon a Run and retry with a fresh one instead of delivering the continuation must not leak the old Run's stream. `maxOpenSessions` (default 24) is a hard backstop: exceeding it force-closes the oldest open session (`open-session-cap-exceeded`) rather than accumulating streams until Cursor's server closes the whole shared HTTP/2 connection.
 - **Personal use:** private Cursor agent protocol; account you own; API can change without notice.
 
 ## Env / paths (quick)

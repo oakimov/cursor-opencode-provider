@@ -12,7 +12,7 @@ import {
 import { trace, traceRequestContextPaths } from "./debug.js"
 import { buildRunRequest, buildHeartbeat } from "./protocol/request.js"
 import { decodeFramePayload } from "./protocol/framing.js"
-import { decodeMessage } from "./protocol/messages.js"
+import { debugWalkTurnEnded, decodeMessage } from "./protocol/messages.js"
 import {
   parseExecServerMessage,
   buildToolCallPart,
@@ -80,6 +80,11 @@ import {
 } from "./shell-timeout.js"
 import { analyzeReplayFrame, AttemptReplaySafety } from "./replay-safety.js"
 import { readAllFieldsStrict } from "./protocol/struct.js"
+import {
+  buildLanguageModelV3UsageFromEstimate,
+  buildLanguageModelV3UsageFromTurnEnded,
+  turnEndedCounter,
+} from "./usage.js"
 
 let _availableModels: ModelInfo[] | undefined
 // mtime of the cache file the last time we loaded it. Compared on each call
@@ -709,6 +714,7 @@ async function startSession(
     outputTokens: 0,
     cacheRead: 0,
     cacheWrite: 0,
+    reasoningTokens: 0,
   }
   trace(
     `outbound Run: model=${cursorModelId} opencodeModel=${modelId} conversationId=${conversationId} ` +
@@ -1254,33 +1260,33 @@ export async function pump(
     if (te) {
       // Authoritative TurnEnded counts — replace the running estimate.
       session.usageEstimate = {
-        inputTokens: Number(te.input_tokens ?? 0) || 0,
-        outputTokens: Number(te.output_tokens ?? 0) || 0,
-        cacheRead: Number(te.cache_read ?? 0) || 0,
-        cacheWrite: Number(te.cache_write ?? 0) || 0,
+        inputTokens: turnEndedCounter(te, "input_tokens"),
+        outputTokens: turnEndedCounter(te, "output_tokens"),
+        cacheRead: turnEndedCounter(te, "cache_read"),
+        cacheWrite: turnEndedCounter(te, "cache_write"),
+        reasoningTokens: turnEndedCounter(te, "reasoning_tokens"),
       }
     }
     const est = session.usageEstimate
-    const usage: LanguageModelV3Usage = {
-      inputTokens: {
-        total: promptTokens,
-        noCache: undefined,
-        cacheRead: 0,
-        cacheWrite: 0,
-      },
-      outputTokens: {
-        total: estimateTokens(requestUsage.outputChars),
-        text: undefined,
-        reasoning: undefined,
-      },
-    }
+    const usage: LanguageModelV3Usage = te
+      ? buildLanguageModelV3UsageFromTurnEnded(te)
+      : buildLanguageModelV3UsageFromEstimate(
+          est,
+          promptTokens,
+          requestUsage.outputChars,
+          estimateTokens,
+        )
     const providerMetadata = te ? cursorTurnEndedProviderMetadata(te) : undefined
     const reasonLabel = typeof reason === "object" && reason && "unified" in reason
       ? String((reason as { unified?: string }).unified ?? "unknown")
       : String(reason)
+    const inTotal = usage.inputTokens?.total ?? 0
+    const outTotal = usage.outputTokens?.total ?? 0
     trace(
       `finish: reason=${reasonLabel} ` +
-        `requestIn=${usage.inputTokens.total} requestOut=${usage.outputTokens.total} ` +
+        `v3In=${inTotal} v3Out=${outTotal} ` +
+        `v3CacheRead=${usage.inputTokens?.cacheRead ?? 0} v3CacheWrite=${usage.inputTokens?.cacheWrite ?? 0} ` +
+        `v3Reasoning=${usage.outputTokens?.reasoning ?? 0} ` +
         `rawIn=${est.inputTokens} rawOut=${est.outputTokens} ` +
         `rawCacheRead=${est.cacheRead} rawCacheWrite=${est.cacheWrite} ` +
         `source=${te ? "turn_ended" : "estimate"}`,
@@ -1436,6 +1442,7 @@ export async function pump(
     } else if (iu?.thinking_delta) {
       emitReasoning(((iu.thinking_delta as Record<string, unknown>).text as string) ?? "")
     } else if (iu?.turn_ended) {
+      trace(`turn_ended raw wire fields: ${debugWalkTurnEnded(payload)}`)
       emitFinish(iu.turn_ended as Record<string, unknown>, { unified: "stop", raw: undefined })
       sessionManager.close(session)
       return
@@ -1935,20 +1942,14 @@ export function cursorTurnEndedProviderMetadata(te: Record<string, unknown>): {
     reasoningTokensRaw: number
   }
 } {
-  const counter = (key: string): number => {
-    const value = te[key]
-    return typeof value === "number" && Number.isFinite(value) && value >= 0
-      ? Math.trunc(value)
-      : 0
-  }
   return {
     cursor: {
       usageVersion: 2,
-      inputTokensRaw: counter("input_tokens"),
-      outputTokensRaw: counter("output_tokens"),
-      cacheReadRaw: counter("cache_read"),
-      cacheWriteRaw: counter("cache_write"),
-      reasoningTokensRaw: counter("reasoning_tokens"),
+      inputTokensRaw: turnEndedCounter(te, "input_tokens"),
+      outputTokensRaw: turnEndedCounter(te, "output_tokens"),
+      cacheReadRaw: turnEndedCounter(te, "cache_read"),
+      cacheWriteRaw: turnEndedCounter(te, "cache_write"),
+      reasoningTokensRaw: turnEndedCounter(te, "reasoning_tokens"),
     },
   }
 }
