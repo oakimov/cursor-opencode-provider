@@ -1,4 +1,9 @@
-import { tool, type ToolContext, type ToolResult } from "@opencode-ai/plugin"
+// Type-only: these erase at build time. This module must stay free of *value*
+// imports from `@opencode-ai/plugin`, because the OpenCode 2.0 entrypoint pulls
+// it in and 2.0's root export has no `tool` — a value import here would throw at
+// plugin load under `opencode2`. The classic `tool(...)` registration therefore
+// lives in ./web-search-tool.ts.
+import type { ToolContext, ToolResult } from "@opencode-ai/plugin"
 
 const EXA_MCP_URL = "https://mcp.exa.ai/mcp"
 const WEB_SEARCH_TIMEOUT_MS = 25_000
@@ -59,29 +64,22 @@ export function parseOpenCodeWebSearchResponse(raw: string): string | undefined 
   return undefined
 }
 
-export async function executeOpenCodeWebSearch(
+/**
+ * Raw Exa web-search call: no host tool context, no permission prompt.
+ *
+ * Split out so both the classic plugin's `custom_websearch` tool and the
+ * OpenCode 2.0 plugin's tool registration share one implementation — 2.0's
+ * ToolContext has no `ask`, permissions being handled by the host instead.
+ */
+export async function fetchOpenCodeWebSearchText(
   args: OpenCodeWebSearchArgs,
-  context: ToolContext,
+  signal: AbortSignal | undefined,
   fetchImpl: typeof fetch = fetch,
-): Promise<ToolResult> {
-  await context.ask({
-    permission: "websearch",
-    patterns: [args.query],
-    always: ["*"],
-    metadata: {
-      query: args.query,
-      numResults: args.numResults,
-      livecrawl: args.livecrawl,
-      type: args.type,
-      contextMaxCharacters: args.contextMaxCharacters,
-      provider: "exa",
-    },
-  })
-
+): Promise<string> {
   const controller = new AbortController()
-  const abort = () => controller.abort(context.abort.reason)
-  if (context.abort.aborted) abort()
-  else context.abort.addEventListener("abort", abort, { once: true })
+  const abort = () => controller.abort(signal?.reason)
+  if (signal?.aborted) abort()
+  else signal?.addEventListener("abort", abort, { once: true })
   const timeout = setTimeout(() => controller.abort(new Error("Web search timed out")), WEB_SEARCH_TIMEOUT_MS)
 
   try {
@@ -110,26 +108,37 @@ export async function executeOpenCodeWebSearch(
     })
     const raw = await response.text()
     if (!response.ok) throw new Error(`Web search failed (${response.status}): ${raw.slice(0, 500)}`)
-    const output = parseOpenCodeWebSearchResponse(raw) ?? "No search results found. Please try a different query."
-    return {
-      title: `Exa Web Search: ${args.query}`,
-      output,
-      metadata: { provider: "exa" },
-    }
+    return parseOpenCodeWebSearchResponse(raw) ?? "No search results found. Please try a different query."
   } finally {
     clearTimeout(timeout)
-    context.abort.removeEventListener("abort", abort)
+    signal?.removeEventListener("abort", abort)
   }
 }
 
-export const openCodeWebSearchTool = tool({
-  description: "Search the web for current information using OpenCode's web search backend.",
-  args: {
-    query: tool.schema.string().describe("Web search query"),
-    numResults: tool.schema.number().int().min(1).max(20).optional(),
-    livecrawl: tool.schema.enum(["fallback", "preferred"]).optional(),
-    type: tool.schema.enum(["auto", "fast", "deep"]).optional(),
-    contextMaxCharacters: tool.schema.number().int().positive().optional(),
-  },
-  execute: executeOpenCodeWebSearch,
-})
+export async function executeOpenCodeWebSearch(
+  args: OpenCodeWebSearchArgs,
+  context: ToolContext,
+  fetchImpl: typeof fetch = fetch,
+): Promise<ToolResult> {
+  await context.ask({
+    permission: "websearch",
+    patterns: [args.query],
+    always: ["*"],
+    metadata: {
+      query: args.query,
+      numResults: args.numResults,
+      livecrawl: args.livecrawl,
+      type: args.type,
+      contextMaxCharacters: args.contextMaxCharacters,
+      provider: "exa",
+    },
+  })
+
+  const output = await fetchOpenCodeWebSearchText(args, context.abort, fetchImpl)
+  return {
+    title: `Exa Web Search: ${args.query}`,
+    output,
+    metadata: { provider: "exa" },
+  }
+}
+

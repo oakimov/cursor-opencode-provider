@@ -218,8 +218,8 @@ describe("resolveBearerToken", () => {
       },
     })
     const base = `http://localhost:${server.port}`
-    const a = await resolveBearerToken({ apiKey: "sk-cache-test", baseUrl: base })
-    const b = await resolveBearerToken({ apiKey: "sk-cache-test", baseUrl: base })
+    const a = await resolveBearerToken({ apiKey: "crsr_cache-test", baseUrl: base })
+    const b = await resolveBearerToken({ apiKey: "crsr_cache-test", baseUrl: base })
     expect(a).toBe(b)
     expect(exchanges).toBe(1)
   })
@@ -250,11 +250,29 @@ describe("resolveBearerToken", () => {
       },
     })
     const base = `http://localhost:${server.port}`
-    await resolveBearerToken({ apiKey: "sk-refresh-test", baseUrl: base })
-    const second = await resolveBearerToken({ apiKey: "sk-refresh-test", baseUrl: base })
+    await resolveBearerToken({ apiKey: "crsr_refresh-test", baseUrl: base })
+    const second = await resolveBearerToken({ apiKey: "crsr_refresh-test", baseUrl: base })
     expect(exchanges).toBe(1)
     expect(refreshes).toBe(1)
     expect(isExpiringSoon(second)).toBe(false)
+  })
+
+  it("uses a non-`crsr_` apiKey as-is without exchanging it", async () => {
+    clearBearerTokenCache()
+    let exchanges = 0
+    using server = Bun.serve({
+      port: 0,
+      fetch() {
+        exchanges++
+        return Response.json({ accessToken: makeJwt(3600), refreshToken: "refresh.jwt" })
+      },
+    })
+    const token = await resolveBearerToken({
+      apiKey: "already.a.jwt",
+      baseUrl: `http://localhost:${server.port}`,
+    })
+    expect(token).toBe("already.a.jwt")
+    expect(exchanges).toBe(0)
   })
 })
 

@@ -285,7 +285,11 @@ function ensureShellEnvWrap(
  * The classic hook replaces it with the original command (bash/zsh) or the
  * shorter wrapper-file command (sh/dash), avoiding duplicate execution.
  */
-export function prepareCursorShellArgs(toolCallId: string, args: Record<string, unknown>): void {
+export function prepareCursorShellArgs(
+  toolCallId: string,
+  args: Record<string, unknown>,
+  options: { preferWrapperCommand?: boolean } = {},
+): void {
   const policy = policies.get(toolCallId)
   if (!policy) return
   if (!policy.backgroundSpawn && policy.timeoutBehavior !== CURSOR_TIMEOUT_BACKGROUND) return
@@ -298,7 +302,12 @@ export function prepareCursorShellArgs(toolCallId: string, args: Record<string, 
   }
 
   const shellKind = resolveCursorShellKind()
-  if (process.platform === "win32" || shellKind === "bash" || shellKind === "zsh") {
+  // OpenCode 2.0 has no `shell.env` hook, so bash/zsh cannot be wrapped by
+  // sourcing an injector. Callers there opt into the wrapper-file command —
+  // the same mechanism sh/dash already use — which needs no env injection.
+  const envInjectable =
+    !options.preferWrapperCommand && (shellKind === "bash" || shellKind === "zsh")
+  if (process.platform === "win32" || envInjectable) {
     // Native Windows PowerShell/cmd wrapping remains unsupported; do not emit
     // a POSIX /bin/sh command there. Git Bash still uses the env path above.
     args.command = policy.command

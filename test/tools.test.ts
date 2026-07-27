@@ -1266,6 +1266,7 @@ describe("buildExecClientMessages", () => {
       execId: 0,
       resultField: "grep_result",
       output: "/workspace/project/README.md\n/workspace/project/src/index.ts",
+      workspaceRoot: "/workspace/project",
     })
     expect(frames).toHaveLength(2)
     const ec = decodeMessage<any>("AgentClientMessage", frames[0]).exec_client_message
@@ -1273,9 +1274,21 @@ describe("buildExecClientMessages", () => {
     expect(gs?.output_mode).toBe("files_with_matches")
     const wr = gs?.workspace_results
     expect(wr).toBeDefined()
-    const keys = Object.keys(wr)
-    expect(keys.length).toBe(1)
-    expect(wr[keys[0]].files.files).toContain("/workspace/project/README.md")
+    expect(Object.keys(wr)).toEqual(["/workspace/project"])
+    expect(wr["/workspace/project"].files.files).toContain("/workspace/project/README.md")
+  })
+
+  it("does not stamp process.cwd into grep_result when workspaceRoot is known", () => {
+    const frames = buildExecClientMessages({
+      execId: 1,
+      resultField: "grep_result",
+      output: "/proj/a.ts",
+      workspaceRoot: "/proj",
+    })
+    const ec = decodeMessage<any>("AgentClientMessage", frames[0]).exec_client_message
+    const keys = Object.keys(ec.grep_result?.success?.workspace_results ?? {})
+    expect(keys).toEqual(["/proj"])
+    expect(keys[0]).not.toBe(process.cwd())
   })
 })
 

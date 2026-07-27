@@ -32,7 +32,10 @@ OpenCode
 |------|------|--------|
 | Package entry | `src/index.ts` | `createCursor`; default export = classic `CursorPlugin` |
 | Classic plugin | `src/plugin.ts` | Auth, OAuth, model cache, provider registration |
-| V2 plugin | `src/plugin-v2.ts` | Effect/Promise API via `ctx.aisdk.*` — load **only** as `./plugin/v2` |
+| V2 plugin (1.18) | `src/plugin-v2.ts` | Effect/Promise API via `ctx.aisdk.*` — load **only** as `./plugin/v2` |
+| OpenCode 2.0 plugin | `src/plugin-opencode2.ts` | 2.0 beta API — load **only** as `./plugin/opencode2` |
+| 2.0 support modules | `src/opencode2/` | Catalog mapping, integration/auth, local 2.0 API types |
+| Host-neutral core | `src/plugin-core.ts`, `src/model-config.ts` | Shared by every plugin surface; must not import a host plugin API |
 | Language model | `src/language-model.ts` | AI SDK `LanguageModelV3` (`doStream` / `doGenerate`) |
 | Session | `src/session.ts` | Held-open agent Run + pending exec correlation |
 | Auth / models | `src/auth.ts`, `src/models.ts` | PKCE/API key, JWT refresh, `cursor-models.json` cache |
@@ -46,7 +49,40 @@ Package exports:
 
 - `cursor-opencode-provider` → `createCursor` + classic plugin
 - `cursor-opencode-provider/plugin` → classic Hooks (auth)
-- `cursor-opencode-provider/plugin/v2` → v2 plugin only (`CursorPluginV2` is **not** on the root export)
+- `cursor-opencode-provider/plugin/v2` → 1.18 v2 plugin only (`CursorPluginV2` is **not** on the root export)
+- `cursor-opencode-provider/plugin/opencode2` → OpenCode 2.0 beta plugin only
+
+## OpenCode 2.0 vs the 1.18 "v2" plugin API
+
+These are **source-incompatible APIs, not versions of one API**. Keep them in separate
+entrypoints; never try to unify them.
+
+| | 1.18 (`@opencode-ai/plugin@^1.17`, `/v2/promise`) | 2.0 beta (`@opencode-ai/plugin@next`) |
+|---|---|---|
+| Import | `define` from `.../v2/promise` | `Plugin.define` from the package root |
+| Hook shape | `ctx.aisdk.sdk(cb)` | `ctx.aisdk.hook("sdk", cb)` |
+| OAuth registration | Effect-valued | Promise-valued |
+| Domains | agent, aisdk, catalog, command, integration, plugin, reference, skill | + `app`, `event`, `session`, `tool`, `websearch` |
+| Provider schema | `api: { type: "aisdk", package }` | flat `package: "aisdk:…"` |
+
+`src/plugin-opencode2.ts` deliberately does **not** import `@opencode-ai/plugin` at
+runtime: the 2.0 types only exist on the `@next` dist-tag and cannot coexist with the
+`^1.17.13` dependency under the same specifier. It exports a plain `{ id, setup }`
+object (the host's `define` is an identity function) and types it from
+`src/opencode2/types.ts`. The aliased `@opencode-ai/plugin-next` devDependency exists
+solely so `test/opencode2-conformance.types.ts` can prove, at compile time, that the
+real 2.0 API still supports every call the plugin makes. That file is checked by
+`tsc -p tsconfig.test.json` (wired into `bun run typecheck`) — the rest of `test/` is
+not typechecked.
+
+Two 1.x hooks have no 2.0 equivalent and are emulated:
+- **`shell.env`** — gone. The bash command is rewritten to invoke the wrapper file
+  (`prepareCursorShellArgs(..., { preferWrapperCommand: true })`) instead of injecting
+  `BASH_ENV`/`ZDOTDIR`.
+- **`chat.params`** — gone. `ctx.session.hook("context")` is the only place the runtime
+  names the owning agent, so compaction turns are recorded there in
+  `src/compaction-marker.ts` and read back in `doStream` via the session id the
+  provider already derives from request headers.
 
 ## Working conventions
 
@@ -86,6 +122,7 @@ When changing rule/skill discovery, keep parity with OpenCode behavior and updat
 | `CURSOR_WEBSITE_URL` | OAuth login base |
 | `CURSOR_PROVIDER_DEBUG` | Wire debug log (`CURSOR_PROVIDER_DEBUG_FILE`; default under `$TMPDIR/cursor-provider-logs-<uid>/debug-<pid>.log`) |
 | `CURSOR_GET_SERVER_CONFIG_TELEMETRY` | Opt in GetServerConfig telemetry |
+| `CURSOR_OPENCODE2_DEV_ENTRY` | Local dev only: absolute path to a built entry file (e.g. `dist/index.js`). Points the 2.0 catalog's `aisdk:` package spec at `file://…` so OpenCode 2.0's built-in `DynamicProviderPlugin` fallback imports it directly instead of `npm install`-ing the published package into `<host-cache>/packages/cursor-opencode-provider/`. Unset in production. |
 | `createCursor({ cacheDir })` | Explicit host cache root (also Effect v2 `Path.cache` when the plugin passes it) |
 | `MIMOCODE_HOME` | When set → `$MIMOCODE_HOME/cache` (before XDG host dirs) |
 | `KILO_CONFIG_DIR` | When set → `$XDG_CACHE_HOME/kilo` |

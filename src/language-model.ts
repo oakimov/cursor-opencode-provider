@@ -73,6 +73,8 @@ import { workspaceRootFromRequestContext } from "./context/env.js"
 import { opencodeGlobalCacheDir, setHostCacheDirOverride } from "./context/paths.js"
 import { resolveAgentUrl } from "./agent-url.js"
 import { CURSOR_API_HOST, CURSOR_COMPACTION_OPTION } from "./shared.js"
+import { isCompactionSession } from "./compaction-marker.js"
+import { getSessionDirectory } from "./session-directory.js"
 import type { SeedHistoryMessage } from "./protocol/request.js"
 import {
   consumeCursorShellResult,
@@ -357,7 +359,7 @@ async function doStreamImpl(
   options: CreateCursorOptions,
   callOptions: LanguageModelV3CallOptions,
 ): Promise<LanguageModelV3StreamResult> {
-  // A raw `sk-...` API key must be exchanged for a JWT before it can be used
+  // A raw `crsr_...` API key must be exchanged for a JWT before it can be used
   // as a Bearer token (the plugin path does this in auth.ts). The accessToken
   // path is already a JWT from OAuth/key-exchange, so we use it as-is.
   // resolveBearerToken caches apiKey exchanges so we don't hit /auth/exchange
@@ -562,8 +564,11 @@ async function startSession(
   const sessionKey = opencodeSessionKey(callOptions)
   const providerOptions = callOptions.providerOptions?.cursor as Record<string, unknown> | undefined
   // The classic plugin marks OpenCode's agent="compaction" through chat.params.
+  // OpenCode 2.0 removed that hook, so its plugin records the same fact against
+  // the session id from session.hook("context") instead; consult both.
   // Do not infer this from tools/toolChoice: standalone no-tool calls are valid.
-  const isCompaction = providerOptions?.[CURSOR_COMPACTION_OPTION] === true
+  const isCompaction =
+    providerOptions?.[CURSOR_COMPACTION_OPTION] === true || isCompactionSession(sessionKey)
   const toolState = resolveTurnToolState({
     sessionKey,
     incomingTools,
@@ -602,7 +607,14 @@ async function startSession(
   const userText = recovery?.kind === "rebase"
     ? "Continue the interrupted turn from the conversation history above. Do not repeat completed work."
     : (extractUserText([...prompt].reverse().find((m) => m.role === "user")) || ".")
-  const workspaceRoot = path.resolve(options.workspaceRoot || process.cwd())
+  // v1 sets `options.workspaceRoot` correctly per invocation (`input.directory`,
+  // one plugin instance per project). OpenCode 2.0 runs one daemon across many
+  // projects, so its static `options.workspaceRoot` is only a last-resort
+  // fallback; `getSessionDirectory` carries the real per-session directory
+  // recorded from `session.hook("context")` in `plugin-opencode2.ts`.
+  const workspaceRoot = path.resolve(
+    getSessionDirectory(sessionKey) ?? (options.workspaceRoot || process.cwd()),
+  )
   const baseSystemPrompt = extractSystemPrompt(prompt)
   const interactionGuidance = buildOpenCodeInteractionGuidance(cursorTools, isCompaction, workspaceRoot)
   const systemPrompt = interactionGuidance
@@ -880,6 +892,7 @@ export function deliverContinuationResults(
           toolName: pending.toolName ?? r.toolName,
           resultMetadata: pending.resultMetadata,
           shellOutcome: shellResult?.outcome,
+          workspaceRoot: workspaceRootFromRequestContext(session.requestContext),
         })
       } catch (error) {
         trace(`continuation: result encode FAILED execId=${r.execId} err=${(error as Error).message}`)
@@ -1095,6 +1108,7 @@ export async function pump(
         error: reason,
         toolName: parsed.toolName,
         resultMetadata: parsed.resultMetadata,
+        workspaceRoot: workspaceRootFromRequestContext(session.requestContext),
       })) {
         session.stream.write(frame)
       }
@@ -1151,6 +1165,7 @@ export async function pump(
         output: "",
         toolName: parsed.toolName,
         resultMetadata: { path: requestedPath },
+        workspaceRoot,
       })) {
         session.stream.write(frame)
       }

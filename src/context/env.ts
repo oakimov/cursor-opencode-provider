@@ -21,6 +21,10 @@ export function buildEnv(workspaceRoot: string): Record<string, unknown> {
   // Cursor's project_folder is a metadata root (agent-tools, terminals, …),
   // not the git workspace. Keep dumps under OpenCode cache.
   const projectFolder = ensureOpencodeProjectDir(cwd)
+  // process_working_directory must match the workspace, not the host process
+  // cwd. OpenCode 2.0's daemon is long-lived and often started from $HOME, so
+  // process.cwd() would advertise the home folder to Cursor and the model would
+  // treat that as its shell cwd. workspace_paths already uses `cwd` above.
   const env = {
     os_version: osVersion,
     workspace_paths: [cwd],
@@ -31,8 +35,8 @@ export function buildEnv(workspaceRoot: string): Record<string, unknown> {
     project_folder: projectFolder,
     terminals_folder: path.join(projectFolder, "terminals"),
     agent_transcripts_folder: path.join(projectFolder, "agent-transcripts"),
-    process_working_directory: process.cwd(),
-    is_working_dir_home_dir: path.resolve(process.cwd()) === path.resolve(home),
+    process_working_directory: cwd,
+    is_working_dir_home_dir: cwd === path.resolve(home),
   }
   trace(
     `buildEnv: workspace_paths=${JSON.stringify(env.workspace_paths)} ` +

@@ -36,6 +36,10 @@
       "types": "./dist/plugin-v2.d.ts",
       "import": "./dist/plugin-v2.js"
     },
+    "./plugin/opencode2": {
+      "types": "./dist/plugin-opencode2.d.ts",
+      "import": "./dist/plugin-opencode2.js"
+    },
     "./errors": {
       "types": "./dist/errors.d.ts",
       "import": "./dist/errors.js"
@@ -50,7 +54,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "test": "bun test",
     "test:node-http2": "bun run build && node test/node-http2-cleanup.mjs",
     "test:watch": "bun test --watch",
@@ -71,6 +75,7 @@
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.17.13",
+    "@opencode-ai/plugin-next": "^0.0.0-next-16281",
     "@tsconfig/node22": "^22.0.1",
     "@types/node": "^22.15.3",
     "typescript": "^5.8.3"

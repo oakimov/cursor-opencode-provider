@@ -29,9 +29,9 @@ OpenCode driving a Cursor-routed Grok model through this provider:
 
 ## Installation
 
-### From npm (after publish)
+### From npm
 
-Add the package name to OpenCode config. OpenCode installs npm plugins with Bun at startup (cached under `~/.cache/opencode/node_modules/`):
+Add the package to OpenCode config. OpenCode installs npm plugins with Bun at startup (cached under `~/.cache/opencode/node_modules/`):
 
 ```json
 {
@@ -49,6 +49,13 @@ Add the package name to OpenCode config. OpenCode installs npm plugins with Bun 
 
 Pin a version if you want: `"cursor-opencode-provider@0.2.9"`.
 
+You can also install it yourself first:
+
+```bash
+npm install cursor-opencode-provider
+# or: bun add cursor-opencode-provider
+```
+
 ### From a local clone
 
 ```bash
@@ -58,7 +65,7 @@ bun install
 bun run build
 ```
 
-Point config at the built files with absolute `file://` URLs:
+Point classic OpenCode config at the built files with absolute `file://` URLs:
 
 ```json
 {
@@ -72,6 +79,8 @@ Point config at the built files with absolute `file://` URLs:
   }
 }
 ```
+
+For **OpenCode 2.0** local development, prefer the plugin path plus `CURSOR_OPENCODE2_DEV_ENTRY` — see [OpenCode 2.0 beta](#opencode-20-beta-opencode2).
 
 ## OpenCode setup
 
@@ -89,6 +98,108 @@ Local clone equivalent: `"file:///absolute/path/to/cursor-opencode-provider/dist
 
 That entry registers the provider via `ctx.aisdk.sdk` / `ctx.aisdk.language`. Keep the classic `plugin` entry for auth.
 
+### OpenCode 2.0 beta (`opencode2`)
+
+OpenCode 2.0 uses a different plugin API from the 1.18 `/v2/promise` one above — they
+are source-incompatible, so this package ships a **separate** entrypoint for it.
+Everything is registered by that one plugin. You do **not** need a `providers` entry,
+and there is no `enabled` flag. Do not also load `./plugin/v2` or the classic `plugin`
+entry under `opencode2`; they target the older APIs.
+
+Authenticate with `/connect` inside `opencode2`, choose **Cursor**, then either
+browser login or an API key. `CURSOR_API_KEY` is also picked up automatically.
+
+#### From npm
+
+```json
+{
+  "plugins": ["cursor-opencode-provider/plugin/opencode2"]
+}
+```
+
+Pin a version if you want: `"cursor-opencode-provider@0.2.9/plugin/opencode2"`.
+
+OpenCode 2.0 installs the published package into its host cache and loads the AI SDK
+entry from there (`aisdk:cursor-opencode-provider`). No extra env vars are required.
+
+#### From a local clone (`CURSOR_OPENCODE2_DEV_ENTRY`)
+
+Loading only the local plugin file is not enough for end-to-end local testing: OpenCode
+2.0's catalog still resolves the AI SDK package through `npm install` into
+`<host-cache>/packages/…` unless you override it. Point
+`CURSOR_OPENCODE2_DEV_ENTRY` at the built provider entry (`dist/index.js`, which exports
+`createCursor`) so the host imports that file directly.
+
+```bash
+cd /absolute/path/to/cursor-opencode-provider
+bun install && bun run build
+
+export CURSOR_OPENCODE2_DEV_ENTRY=/absolute/path/to/cursor-opencode-provider/dist/index.js
+# optional while debugging:
+# export CURSOR_PROVIDER_DEBUG=1
+```
+
+Example OpenCode 2.0 config (for example `~/.config/opencode/opencode.json` or a
+project `opencode.json`) that loads the built local plugin:
+
+```json
+{
+  "plugins": [
+    "/absolute/path/to/cursor-opencode-provider/dist/plugin-opencode2.js"
+  ]
+}
+```
+
+Equivalent forms for the same plugin entry:
+
+- `"file:///absolute/path/to/cursor-opencode-provider/dist/plugin-opencode2.js"`
+- `"../cursor-opencode-provider/dist/plugin-opencode2.js"` (relative to the config file; must start with `./` or `../`)
+
+You can also drop a symlink into `.opencode/plugins/` (or `~/.config/opencode/plugins/`),
+which OpenCode scans automatically:
+
+```bash
+mkdir -p .opencode/plugins
+ln -s /absolute/path/to/cursor-opencode-provider/dist/plugin-opencode2.js \
+      .opencode/plugins/cursor.js
+```
+
+Important for local 2.0 development:
+
+- **Export the env var before starting the daemon.** `opencode2 serve --service` inherits
+  env only at start time. After changing `CURSOR_OPENCODE2_DEV_ENTRY` or rebuilding
+  `dist/`, restart the service:
+
+  ```bash
+  opencode2 service stop
+  export CURSOR_OPENCODE2_DEV_ENTRY=/absolute/path/to/cursor-opencode-provider/dist/index.js
+  opencode2 service start
+  ```
+
+  `opencode2 service set` does **not** accept arbitrary env var names.
+- **Unset `CURSOR_OPENCODE2_DEV_ENTRY` in production** so the catalog uses the published
+  `aisdk:cursor-opencode-provider` package again.
+- **OpenCode does not install dependencies for local plugin files.** Keep the clone's
+  `bun install` intact and load the plugin from inside the clone (a copied-out file will
+  not resolve `protobufjs`).
+- **Rebuild after every change** (`bun run build`). The daemon reads `dist/`, not `src/`.
+
+Feature parity with the classic plugin, and the two places 2.0 differs:
+
+| Classic plugin | OpenCode 2.0 plugin |
+|---|---|
+| `config` hook registers provider + models | `ctx.catalog.transform` |
+| `auth` hook (OAuth + API key) | `ctx.integration.transform` + `/connect` |
+| `tool` hook (`custom_websearch`) | `ctx.tool.transform` |
+| `event` hook (session activity) | `ctx.event.subscribe` |
+| `tool.execute.before` / `.after` | `ctx.tool.hook(...)` |
+| `shell.env` injects the timeout wrapper | **No `shell.env` in 2.0** — the bash command is rewritten to call the wrapper file instead (same behavior, different mechanism) |
+| `chat.params` flags compaction turns | **No `chat.params` in 2.0** — the compaction agent is detected in `ctx.session.hook("context")` and correlated by session id |
+
+> **Beta.** OpenCode 2.0 and its plugin API are both beta and still changing. This
+> entrypoint is built against `@opencode-ai/plugin@next` (`0.0.0-next-16281`) and is
+> guarded by a compile-time conformance check, but expect churn.
+
 ### Authenticate
 
 ```bash
@@ -100,7 +211,7 @@ Choose the **cursor** provider, then one of:
 | Method | Description |
 |--------|-------------|
 | **Cursor account (browser login)** | PKCE OAuth — opens cursor.com to sign in |
-| **API key** | Paste a key from [cursor.com/settings](https://cursor.com/settings) (`sk-...`) |
+| **API key** | Paste a key from [cursor.com/settings](https://cursor.com/settings) (`crsr_...`) |
 
 After login, the plugin fetches your available models and writes them to `<host-cache>/cursor-models.json` (default `~/.cache/opencode/`). On later startups, a missing, empty, expired, or old-schema cache is refreshed during config load when Cursor auth is available; an existing stale cache remains usable if refresh fails.
 
@@ -177,7 +288,7 @@ const model = cursor.languageModel("composer-2.5")
 // model implements AI SDK LanguageModelV3 (doStream / doGenerate)
 ```
 
-Pass either `accessToken` (JWT from OAuth or key exchange) or `apiKey` (raw `sk-...` key). Optional: `apiBaseURL`, `agentBaseURL`, `cacheDir`, `headers`, `telemetryEnabled`, `retry`, and `continuation`. `cacheDir` pins the host cache root for model/version caches and Cursor project metadata; when omitted, the provider uses OCP `@opencode-compat/profile` detect (if installed) or the local MiMo/Kilo/OpenCode heuristic described in [Paths](#paths-host-cache). Transient failures resume from the latest checkpoint produced by that Run, matching Cursor CLI; without an eligible checkpoint, retries remain limited to replay-safe attempts so completed text or tool work is not duplicated. Pending-tool inactivity is renewed by OpenCode activity from the session or its descendants. The older `baseURL` option is still accepted as a legacy alias for `agentBaseURL`.
+Pass either `accessToken` (JWT from OAuth or key exchange) or `apiKey` (raw `crsr_...` key). Optional: `apiBaseURL`, `agentBaseURL`, `cacheDir`, `headers`, `telemetryEnabled`, `retry`, and `continuation`. `cacheDir` pins the host cache root for model/version caches and Cursor project metadata; when omitted, the provider uses OCP `@opencode-compat/profile` detect (if installed) or the local MiMo/Kilo/OpenCode heuristic described in [Paths](#paths-host-cache). Transient failures resume from the latest checkpoint produced by that Run, matching Cursor CLI; without an eligible checkpoint, retries remain limited to replay-safe attempts so completed text or tool work is not duplicated. Pending-tool inactivity is renewed by OpenCode activity from the session or its descendants. The older `baseURL` option is still accepted as a legacy alias for `agentBaseURL`.
 
 ## Environment variables
 
@@ -188,6 +299,7 @@ Pass either `accessToken` (JWT from OAuth or key exchange) or `apiKey` (raw `sk-
 | `CURSOR_GET_SERVER_CONFIG_TELEMETRY` | Set to `1` or `true` to opt the `GetServerConfig` lookup into telemetry in OpenCode/plugin usage |
 | `CURSOR_PROVIDER_DEBUG` | Set to `1` or `true` to enable wire-level debug logging |
 | `CURSOR_PROVIDER_DEBUG_FILE` | Debug log path (default: `debug-<pid>.log` under `$TMPDIR/cursor-provider-logs-<uid>/`) |
+| `CURSOR_OPENCODE2_DEV_ENTRY` | **Local OpenCode 2.0 only.** Absolute path to a built entry file (usually `dist/index.js`). Rewrites the catalog's AI SDK package to `aisdk:file://…` so the daemon imports your local build instead of `npm install`-ing the published package. Export it **before** `opencode2 service start`, then restart after rebuilds. Unset in production. |
 | `XDG_CACHE_HOME` | Base for host cache dirs (`$XDG_CACHE_HOME/opencode/`, `…/mimocode/`, or `…/kilo/`) when no explicit `cacheDir` / OCP detect override |
 | `MIMOCODE_HOME` | When set, host cache is `$MIMOCODE_HOME/cache` (MiMo) |
 | `KILO_CONFIG_DIR` | When set, host cache is `$XDG_CACHE_HOME/kilo` |
@@ -220,7 +332,11 @@ OpenCode
 | Module | Role |
 |--------|------|
 | `src/plugin.ts` | Classic OpenCode hooks: provider registration, OAuth, API key exchange, token refresh |
-| `src/plugin-v2.ts` | OpenCode Effect/Promise v2 plugin (`ctx.aisdk.*`); load via `./plugin/v2` only |
+| `src/plugin-v2.ts` | OpenCode 1.18 Effect/Promise v2 plugin (`ctx.aisdk.*`); load via `./plugin/v2` only |
+| `src/plugin-opencode2.ts` | OpenCode 2.0 beta plugin (catalog, integration, tools, aisdk); load via `./plugin/opencode2` only |
+| `src/opencode2/` | 2.0-only catalog mapping, integration/auth, and local API types |
+| `src/plugin-core.ts` | Host-neutral SDK factory, package matching, API base/telemetry resolution |
+| `src/model-config.ts` | Cursor model → OpenCode model mapping shared by every plugin surface |
 | `src/index.ts` | `createCursor` factory; default export is `CursorPlugin` |
 | `src/language-model.ts` | AI SDK `LanguageModelV3` adapter (`doStream`, `doGenerate`) |
 | `src/session.ts` | Held-open agent Run session and pending exec correlation |
@@ -256,7 +372,8 @@ Kilo `scout` is reserved for external documentation, dependency repositories, an
 |-------------|--------|
 | `cursor-opencode-provider` | `createCursor`, `CursorPlugin` (named + default) |
 | `cursor-opencode-provider/plugin` | `CursorPlugin` (classic Hooks — auth) |
-| `cursor-opencode-provider/plugin/v2` | OpenCode Effect/Promise v2 plugin (`ctx.aisdk.*`) |
+| `cursor-opencode-provider/plugin/v2` | OpenCode 1.18 Effect/Promise v2 plugin (`ctx.aisdk.*`) |
+| `cursor-opencode-provider/plugin/opencode2` | OpenCode 2.0 beta plugin (self-registering: catalog + auth + tools) |
 | `cursor-opencode-provider/errors` | Structured provider error classes |
 
 The package root intentionally stays plugin-safe for OpenCode's classic loader. `CursorPluginV2` and non-plugin runtime APIs are **not** re-exported from the package root; load them through their dedicated subpaths.
@@ -265,8 +382,9 @@ The package root intentionally stays plugin-safe for OpenCode's classic loader. 
 
 | Problem | What to try |
 |---------|-------------|
-| No Cursor models in the picker | Confirm Cursor auth (`opencode auth login` → **cursor**). Restart OpenCode — if auth is present and the cache is empty, models are fetched on startup. Confirm `provider.cursor.npm` is the package name (or a built `file://…/dist/index.js`). |
+| No Cursor models in the picker | Confirm Cursor auth (`opencode auth login` → **cursor**, or `/connect` in `opencode2`). Restart OpenCode — if auth is present and the cache is empty, models are fetched on startup. Confirm `provider.cursor.npm` is the package name (or a built `file://…/dist/index.js`). |
 | Auth / 401 errors mid-session | Re-login. OAuth and exchanged API-key JWTs refresh automatically when near expiry; a revoked refresh token needs a fresh login. |
+| Local OpenCode 2.0 still runs the published package | Set `CURSOR_OPENCODE2_DEV_ENTRY` to an absolute `…/dist/index.js` path **before** starting the daemon, rebuild (`bun run build`), then `opencode2 service stop && opencode2 service start`. Loading only `dist/plugin-opencode2.js` is not enough — without the env var, 2.0 still `npm install`s the published package into the host cache. |
 | “Too many connections from different devices” | Device IDs are derived from stable OS identifiers (same approach as the Cursor CLI). Avoid running multiple clients that invent different machine fingerprints for the same account. |
 | Empty or stale model list | Delete `<host-cache>/cursor-models.json` (default `~/.cache/opencode/`, or MiMo/Kilo host cache) and restart OpenCode. Existing Cursor auth is enough to refill the cache; re-login only if auth itself is broken. Cache TTL is 24h; a failed background refresh keeps serving the previous cache. |
 | Stream hangs or HTTP/2 errors | The provider keeps Cursor's Run open across OpenCode tool calls, rotates aged shared connections, resumes transient interruptions from the latest eligible Cursor checkpoint, and falls back to a fresh-history rebase only before stateful output when no checkpoint exists. Repeated interruption is surfaced as an error instead of a false successful stop; retry the turn after checking connectivity. With debug logging enabled, look for `Run interrupted`, `resuming … checkpoint`, or `rebasing fresh Run`. Restart OpenCode after rebuilding a local `file://` install. |

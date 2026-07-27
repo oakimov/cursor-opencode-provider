@@ -176,6 +176,13 @@ export function clearBearerTokenCache(): void {
  * Resolve a Bearer JWT for Cursor API calls. Prefer an already-exchanged
  * `accessToken`; otherwise exchange (and cache) from `apiKey`, refreshing
  * when the cached JWT is near expiry.
+ *
+ * `apiKey` is only ever a raw exchangeable secret when it has Cursor's
+ * `crsr_` prefix. Callers that generically forward whatever credential value
+ * they hold — e.g. a host's package-agnostic "aisdk:" SDK loader, which
+ * doesn't distinguish our OAuth vs. API-key connection methods and may pass
+ * an already-issued JWT through the `apiKey` field — hand us a token that's
+ * already good to use as-is; POSTing it to the exchange endpoint 401s.
  */
 export async function resolveBearerToken(input: {
   accessToken?: string
@@ -186,6 +193,7 @@ export async function resolveBearerToken(input: {
   if (!input.apiKey) {
     throw new Error("Cursor provider: no access token or API key provided")
   }
+  if (!input.apiKey.startsWith("crsr_")) return input.apiKey
 
   const baseUrl = input.baseUrl ?? API_BASE
   const cached = _apiKeyTokenCache.get(input.apiKey)

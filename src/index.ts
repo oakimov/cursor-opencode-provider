@@ -1,5 +1,4 @@
-import { CURSOR_PROVIDER_ID } from "./shared.js"
-import { createCursorLanguageModel } from "./language-model.js"
+import { createSdk } from "./plugin-core.js"
 import { CursorPlugin } from "./plugin.js"
 import type { CursorContinuationOptions } from "./session.js"
 
@@ -40,12 +39,7 @@ export type CreateCursorOptions = {
 }
 
 export function createCursor(options: CreateCursorOptions) {
-  const providerId = options.name || CURSOR_PROVIDER_ID
-  return {
-    languageModel(modelId: string) {
-      return createCursorLanguageModel(modelId, providerId, options)
-    },
-  }
+  return createSdk(options)
 }
 
 export { CursorPlugin }

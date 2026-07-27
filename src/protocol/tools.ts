@@ -1081,6 +1081,13 @@ export type ToolResultInput = {
   resultMetadata?: Record<string, unknown>
   /** Structured shell completion captured by the OpenCode plugin hook. */
   shellOutcome?: CursorShellOutcome
+  /**
+   * Workspace root for result shapes that must name a directory
+   * (grep_result workspace_results keys, ls_result directory_tree_root).
+   * Must not fall back to process.cwd() — the OpenCode 2.0 daemon's cwd is
+   * often $HOME and would re-advertise the wrong folder to the model.
+   */
+  workspaceRoot?: string
 }
 
 /**
@@ -1141,6 +1148,7 @@ export function buildExecClientMessages(input: ToolResultInput): Uint8Array[] {
       input.toolName,
       input.resultMetadata,
       input.shellOutcome,
+      input.workspaceRoot,
     )
     frames.push(
       encodeMessage("AgentClientMessage", {
@@ -1238,7 +1246,14 @@ export function buildTypedExecResult(
   toolName?: string,
   resultMetadata?: Record<string, unknown>,
   shellOutcome?: CursorShellOutcome,
+  workspaceRoot?: string,
 ): Record<string, unknown> {
+  // Prefer the session workspace; never advertise the host process cwd (daemon
+  // often starts in $HOME) as the path Cursor shows the model for glob/ls.
+  const resultRoot =
+    typeof workspaceRoot === "string" && workspaceRoot.trim()
+      ? path.resolve(workspaceRoot)
+      : undefined
   switch (resultField) {
     case "read_result": {
       const readPath = str(resultMetadata?.path) ?? extractPathTag(output) ?? ""
@@ -1267,7 +1282,7 @@ export function buildTypedExecResult(
       // Prefer files_with_matches: OpenCode glob/grep often returns path lists.
       // Content-mode GrepSuccess also works but needs GrepFileMatch nesting.
       const files = extractPathLines(output)
-      const cwd = process.cwd()
+      const cwd = resultRoot ?? ""
       return {
         success: {
           pattern: "",
@@ -1350,7 +1365,7 @@ export function buildTypedExecResult(
     }
     case "ls_result": {
       if (error) return { error: { path: "", error } }
-      const rootPath = process.cwd()
+      const rootPath = resultRoot ?? ""
       const entries = extractPathLines(output)
       return {
         success: {

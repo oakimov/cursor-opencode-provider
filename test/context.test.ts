@@ -165,6 +165,9 @@ describe("collectRules / buildRequestContext", () => {
       })
       const env = ctx.env as Record<string, unknown>
       expect(env.workspace_paths).toEqual([path.resolve(root)])
+      // Must track the workspace, not the host process cwd (daemon often starts in $HOME).
+      expect(env.process_working_directory).toBe(path.resolve(root))
+      expect(env.is_working_dir_home_dir).toBe(false)
       expect(env.project_folder).toBe(expectedProject)
       expect(env.project_folder).not.toBe(path.resolve(root))
       expect(env.terminals_folder).toBe(path.join(expectedProject, "terminals"))
