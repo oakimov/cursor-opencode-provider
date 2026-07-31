@@ -28,6 +28,7 @@ import {
   extractHostSubagentCatalog,
   resolveCustomWebToolAlias,
   remapNativeSubagentForCatalog,
+  remapEditToolsForCatalog,
   CUSTOM_WEBFETCH_TOOL,
   CUSTOM_WEBSEARCH_TOOL,
   type OpencodeToolDef,
@@ -1140,7 +1141,9 @@ export async function pump(
       !displayCallId ||
       parsed.resultField !== "read_result" ||
       parsed.toolName !== "read" ||
-      !advertisedToolNameSet.has("write")
+      // `apply_patch` is the substitute this host offers when it withholds
+      // `write` — the follow-up write_args is remapped onto it either way.
+      !(advertisedToolNameSet.has("write") || advertisedToolNameSet.has("apply_patch"))
     ) return false
 
     const stored = session.displayToolCalls.get(displayCallId)
@@ -1594,6 +1597,14 @@ export async function pump(
             parsed.toolName = executableToolName
           }
           remapNativeSubagentForCatalog(parsed, advertisedToolNameSet, session.subagentCatalog)
+          // Hosts that advertise `apply_patch` in place of `edit`/`write` (see
+          // protocol/apply-patch.ts) still receive Cursor's native write/edit
+          // exec requests. Translate before the unavailable-tool check below.
+          remapEditToolsForCatalog(
+            parsed,
+            advertisedToolNameSet,
+            workspaceRootFromRequestContext(session.requestContext),
+          )
         }
         const displayCallId = extractExecDisplayCallId(esm)
         trace(`exec: id=${parsed?.id} variant=${parsed ? Object.keys(parsed).join(",") : "none"} toolName=${parsed?.toolName} resultField=${parsed?.resultField}`)
@@ -1912,6 +1923,13 @@ export function buildOpenCodeInteractionGuidance(
       names.has("edit")
         ? "- For file changes, use OpenCode `edit` for targeted changes to existing files and `write` to create files or intentionally replace complete contents; do not use shell, Python, or heredocs to change file content while these tools are available."
         : "- Use OpenCode `write` for file-content changes; do not use shell, Python, or heredocs to change file content while it is available.",
+    )
+  } else if (names.has("apply_patch")) {
+    // This host withheld `edit`/`write` and offers `apply_patch` instead. Native
+    // Cursor write/edit requests are translated into it, so say so rather than
+    // leaving the turn with no file-editing guidance at all.
+    instructions.push(
+      "- Use OpenCode `apply_patch` for file-content changes; do not use shell, Python, or heredocs to change file content while it is available. Cursor-native write and edit requests are accepted and converted to `apply_patch` automatically.",
     )
   }
   return [

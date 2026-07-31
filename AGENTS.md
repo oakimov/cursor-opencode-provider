@@ -43,6 +43,7 @@ OpenCode
 | Request context | `src/context/` | Rules, skills, agents, plugins, git, layout, env |
 | Host paths | `src/context/paths.ts` | Host cache root (`cacheDir` / OCP detect / MiMo·Kilo·OpenCode heuristic); project metadata under `<host-cache>/projects/<slug>/` |
 | Wire protocol | `src/protocol/` | Framing, messages, tools, thinking, checksums, device id |
+| Patch synthesis | `src/protocol/apply-patch.ts` | `apply_patch` envelopes for hosts that withhold `edit`/`write` |
 | Transport | `src/transport/connect.ts` | HTTP/2 bidi + unary RPC |
 
 Package exports:
@@ -109,7 +110,9 @@ When changing rule/skill discovery, keep parity with OpenCode behavior and updat
 - **URL options:** `apiBaseURL` (auth/models/GetServerConfig) vs `agentBaseURL` (Run stream) are separate. Legacy `baseURL` aliases `agentBaseURL` only.
 - **Host validation:** explicit agent overrides and GetServerConfig results must be HTTPS `*.cursor.sh`; reject others.
 - **Telemetry:** `GetServerConfig` sends `telem_enabled: false` by default; opt in via `telemetryEnabled` or `CURSOR_GET_SERVER_CONFIG_TELEMETRY`.
-- **Tool results:** strip OpenCode’s `read` XML envelope before returning content to Cursor so the model cannot echo wrappers into writes.
+- **Tool results:** strip OpenCode’s `read` XML envelope before returning content to Cursor so the model cannot echo wrappers into writes. Stripping must not also drop the truncation footer's *meaning*: OpenCode caps reads at 50 KB (`tool/read.ts` `MAX_BYTES`), so re-state the cap or the model treats a capped read as the whole file. Native `read_args` → `read_result` is the path models actually use (verified live for `gpt-5.4-mini` and `grok-4.5`); its structured `truncated` flag is **not** sufficient on its own, so the content also carries a `[Partial read: …]` marker. `mcp_result` gets a separate notice item and Pi reads get structured `truncation`. Never mark a read the caller bounded itself with `offset`/`limit`.
+- **Write content:** `WriteArgs` has six fields. `file_bytes` (#5) carries the content whenever Cursor sends bytes instead of `file_text`, decoded per `encoding_hint` (#6); Cursor's own executor prefers bytes when non-empty. Never re-add those two to `CURSOR_INTERNAL_KEYS` — they are content, not transport metadata.
+- **Edit-tool substitution:** OpenCode 1.x drops `edit`/`write` from the catalog and advertises `apply_patch` for `gpt-*` model ids. `remapEditToolsForCatalog` translates Cursor's native write/edit exec requests into patch envelopes, keyed only off the advertised set — never off a model id or host version. Rationale and upstream citations live in `src/protocol/apply-patch.ts`; watch items of the same shape are 2.0's missing `task` tool and the pre-announced `bash` rename.
 - **Device identity:** stable OS-derived device ids (CLI-shaped); inventing new fingerprints risks “too many devices” errors.
 - **Session lifecycle:** `SessionManager` holds a Cursor Run open past `doStream` returning whenever a tool exec is still pending, so a later continuation can resume it. Registering a *new* Run for the same `openCodeSessionId` closes any still-open prior Run for that id (`superseded-by-new-run`) — callers that abandon a Run and retry with a fresh one instead of delivering the continuation must not leak the old Run's stream. `maxOpenSessions` (default 24) is a hard backstop: exceeding it force-closes the oldest open session (`open-session-cap-exceeded`) rather than accumulating streams until Cursor's server closes the whole shared HTTP/2 connection.
 - **Personal use:** private Cursor agent protocol; account you own; API can change without notice.

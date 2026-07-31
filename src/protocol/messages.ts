@@ -512,16 +512,23 @@ export function createMessageTypes(): protobuf.Root {
     [{ name: "result", fields: ["success", "error"] }],
   )
 
+  // agent.v1.WriteArgs. Cursor's own LocalWriteExecutor reads `file_bytes`
+  // first and only falls back to `file_text`, so a write whose content arrives
+  // as bytes decodes to an empty string unless field 5 is declared here.
   addType(root, "WriteArgs", [
     { id: 1, name: "path", type: "string" },
     { id: 2, name: "file_text", type: "string" },
     { id: 3, name: "tool_call_id", type: "string" },
+    { id: 4, name: "return_file_content_after_write", type: "bool" },
+    { id: 5, name: "file_bytes", type: "bytes" },
+    { id: 6, name: "encoding_hint", type: "string" },
   ])
 
   addType(root, "WriteSuccess", [
     { id: 1, name: "path", type: "string" },
     { id: 2, name: "lines_created", type: "int32" },
     { id: 3, name: "file_size", type: "int32" },
+    { id: 4, name: "file_content_after_write", type: "string" },
   ])
   addType(root, "WriteError", [
     { id: 1, name: "path", type: "string" },
@@ -566,7 +573,26 @@ export function createMessageTypes(): protobuf.Root {
     ],
     [{ name: "result", fields: ["success", "error", "rejected"] }],
   )
-  addType(root, "PiOutputSuccess", [{ id: 1, name: "output", type: "string" }])
+  // agent.v1.PiTruncation. Every Pi *ExecSuccess shares output(1)+truncation(2)
+  // and only diverges at field 3, so the shared PiOutputSuccess can carry it.
+  // Cursor's own CLI always reports truncation rather than silently shortening
+  // a payload; emitting this keeps a capped read distinguishable from a
+  // complete one.
+  addType(root, "PiTruncation", [
+    { id: 1, name: "truncated", type: "bool" },
+    { id: 2, name: "truncated_by", type: "string" },
+    { id: 3, name: "total_lines", type: "uint32" },
+    { id: 4, name: "output_lines", type: "uint32" },
+    { id: 5, name: "output_bytes", type: "uint32" },
+    { id: 6, name: "max_lines", type: "uint32" },
+    { id: 7, name: "max_bytes", type: "uint32" },
+    { id: 8, name: "first_line_exceeds_limit", type: "bool" },
+    { id: 9, name: "last_line_partial", type: "bool" },
+  ])
+  addType(root, "PiOutputSuccess", [
+    { id: 1, name: "output", type: "string" },
+    { id: 2, name: "truncation", type: "PiTruncation" },
+  ])
   addType(root, "PiExecError", [{ id: 1, name: "error", type: "string" }])
   addType(root, "PiExecRejected", [{ id: 1, name: "reason", type: "string" }])
   for (const resultType of [
