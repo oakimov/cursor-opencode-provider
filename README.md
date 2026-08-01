@@ -350,9 +350,17 @@ OpenCode
 
 ### Injected system guidance
 
-The provider adds OpenCode-specific system guidance to normal tool-capable conversations, including tool availability, canonical workspace-path grounding, and preferring `edit` / `write` over shell-based file mutation when those tools are available. Compaction keeps its dedicated prompt unchanged.
+The provider adds OpenCode-specific system guidance to normal tool-capable conversations, including tool availability, canonical workspace-path grounding, and preferring `edit` / `write` (or `apply_patch`, when the host advertises that instead) over shell-based file mutation when those tools are available. Compaction keeps its dedicated prompt unchanged.
 
 If this guidance causes issues, update `buildOpenCodeInteractionGuidance` in [`src/language-model.ts`](src/language-model.ts) and its focused coverage in [`test/prompt-history.test.ts`](test/prompt-history.test.ts).
+
+### `apply_patch` models (GPT-5 and friends)
+
+OpenCode 1.x does not simply add `apply_patch` for GPT-series models — it **removes** `edit` and `write` from the tool catalog and advertises `apply_patch` in their place (`ToolRegistry.tools`; the model id must contain `gpt-` and neither `oss` nor `gpt-4`). Cursor keeps sending its native write/edit requests regardless, so without translation every file change on a `gpt-5*` model is refused as an unavailable tool.
+
+The provider translates transparently: a native write becomes an `*** Add File:` patch, and a Pi edit becomes a minimal `*** Update File:` chunk widened to whole lines. This is keyed purely off what the host advertises — it is inert whenever `edit`/`write` are offered normally, and inert again when the host offers neither those nor `apply_patch`. An edit that cannot be expressed faithfully (target unreadable, or the text to replace is absent or ambiguous) is refused with a specific message rather than applied to the wrong region.
+
+OpenCode 2.0 does not perform this substitution, so the path is 1.x-only in practice. See [`src/protocol/apply-patch.ts`](src/protocol/apply-patch.ts) for the upstream references.
 
 ### Native subagent routing
 
@@ -412,6 +420,7 @@ Project `instructions` may reference absolute or `~/` paths (OpenCode parity). S
 - **Compaction resets Cursor conversation state** — the classic plugin marks OpenCode's `compaction` agent explicitly. On those turns the provider mints an isolated Cursor `conversation_id`, drops the prior checkpoint + KV blobs, preserves real tool outputs as OpenCode-host observations in the seed history, and re-advertises the session's last tool catalog while refusing execution during the summary itself. The first normal turn then rebases once more onto a fresh conversation seeded with OpenCode's compacted prompt and normal system instructions, so the summary-agent checkpoint cannot suppress later tool calls. Ordinary no-tool / `toolChoice:none` calls do not reset conversation state.
 - **Conversation bindings and compaction catalogs are bounded** — process-global per-session bindings, prior tool catalogs, and pending post-compaction rebases use a 256-session LRU bound. Evicting a conversation binding also drops its checkpoint and KV blobs.
 - **Interrupted Runs resume from checkpoints** — a remote EOF, Connect end-stream, or trailer error is never emitted as a successful `stop`. When the failed Run produced an eligible checkpoint, the provider opens a new RPC for the same conversation and sends that state with `ResumeAction`, so completed text and tool work are not replayed. Before any stateful output, an interruption without a checkpoint can still rebase from OpenCode history. Stateful interruptions without a checkpoint are surfaced because replay would be ambiguous; retry exhaustion remains explicit. A transport closure after `turn_ended` is treated as successful completion.
+- **Large reads are capped at 50 KB by OpenCode, and the cap is reported** — OpenCode's `read` tool stops at `MAX_BYTES = 50 * 1024`, cutting on a whole-line boundary, and appends `(Output capped at 50 KB. Showing lines X-Y. Use offset=N to continue.)`. The provider strips that envelope before returning content to Cursor so the model cannot echo wrappers into a later write, but it re-states the cap: a capped native read appends a `[Partial read: …]` marker after the content, a capped MCP read gets a separate notice content item, and a Pi read carries structured `PiReadExecSuccess.truncation`. The structured `truncated` flag alone is not enough — verified against live `gpt-5.4-mini` and `grok-4.5` sessions, both of which asserted "highly confident" that partial content was the whole file until the textual marker was added. Deliberately paged reads (explicit `offset`/`limit`) are not marked. Without that signal the model treats a capped read as the whole file and rewrites it truncated, discarding everything past the cap. The cap is hardcoded in OpenCode's read tool — it is not the configurable `tool_output.max_bytes`, which governs `Truncate.Service` and not read's line accumulation — so the only lever is paging with `offset`. Prefer `edit` over whole-file `write` on files above 50 KB.
 - **No fallback models** — if Cursor’s `AvailableModels` API is unreachable and there is no local cache, the provider exposes no models.
 
 ## License

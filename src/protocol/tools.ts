@@ -8,6 +8,12 @@ import { ensureOpencodeProjectDir } from "../context/paths.js"
 import { trace, traceRequestContextPaths } from "../debug.js"
 import { cursorExecVariantByRequestName } from "./exec-variants.js"
 import {
+  APPLY_PATCH_TOOL,
+  buildAddFilePatch,
+  buildUpdateFilePatch,
+  planSubstringEdit,
+} from "./apply-patch.js"
+import {
   BACKGROUND_SHELL_MARKER,
   buildBackgroundShellCommand,
   type CursorShellOutcome,
@@ -336,11 +342,15 @@ const CURSOR_INTERNAL_KEYS = new Set([
   "close_stdin",
   "output_notification",
   "file_output_threshold_bytes",
+  // WriteArgs #4. A request for WriteSuccess.file_content_after_write, which we
+  // do not populate; harmless to omit, but it is not tool input.
   "return_file_content_after_write",
-  "file_bytes",
-  "encoding_hint",
   "ignore",
 ])
+// WriteArgs #5/#6 are deliberately NOT internal: `file_bytes` carries the file
+// content itself whenever Cursor sends it instead of `file_text` (its own
+// LocalWriteExecutor prefers bytes when non-empty), and `encoding_hint` is how
+// that payload is decoded. The `write` mapping consumes both explicitly.
 
 /** Required content fields where an empty string is meaningful (for example, truncating a file). */
 const PRESERVE_EMPTY_STRING_KEYS = new Set([
@@ -582,6 +592,103 @@ export function remapNativeSubagentForCatalog(
       ...(resumeAgentId ? { actor_id: resumeAgentId } : {}),
     },
   }
+}
+
+/** Matches Cursor's own pre-write read threshold (`local-exec` 52428800). */
+const MAX_EDIT_SOURCE_BYTES = 50 * 1024 * 1024
+
+/**
+ * Express a native Cursor write/edit as `apply_patch` when the host swapped the
+ * edit-tool family out from under us.
+ *
+ * OpenCode 1.x removes `edit` and `write` from the catalog for GPT models and
+ * advertises `apply_patch` in their place — see the module comment in
+ * `./apply-patch.ts` for the upstream reasoning and citations. Cursor keeps
+ * using its native write/edit exec channel regardless, so without this the
+ * request is refused as an unavailable tool and the model loses the ability to
+ * change files at all.
+ *
+ * Keyed purely off the advertised set: this is inert whenever the host offers
+ * `write`/`edit` normally, and equally inert when it offers neither those nor
+ * `apply_patch` (the caller's unavailable-tool rejection still applies).
+ */
+export function remapEditToolsForCatalog(
+  parsed: ParsedExecRequest,
+  advertisedToolNames: Iterable<string>,
+  workspaceRoot?: string,
+): void {
+  if (parsed.toolName !== "write" && parsed.toolName !== "edit") return
+  const advertised = new Set(advertisedToolNames)
+  if (advertised.has(parsed.toolName) || !advertised.has(APPLY_PATCH_TOOL)) return
+
+  const requested = parsed.toolName
+  const filePath = str(parsed.args.filePath)
+  const refuse = (reason: string) => {
+    parsed.toolName = APPLY_PATCH_TOOL
+    parsed.args = {}
+    parsed.localError =
+      `Cursor ${requested} request cannot be expressed as an apply_patch call: ${reason}. ` +
+      "The host advertises `apply_patch` instead of `edit`/`write` for this model."
+  }
+
+  if (!filePath) {
+    refuse("no target path was provided")
+    return
+  }
+
+  let patchText: string
+  if (requested === "write") {
+    const content = stringValue(parsed.args.content)
+    if (content === undefined) {
+      refuse("no file content was provided")
+      return
+    }
+    // `*** Add File:` overwrites an existing target, so a whole-file write maps
+    // directly without reading the current contents or diffing.
+    patchText = buildAddFilePatch(filePath, content)
+  } else {
+    const oldString = stringValue(parsed.args.oldString)
+    const newString = stringValue(parsed.args.newString)
+    if (oldString === undefined || newString === undefined) {
+      refuse("the replacement is missing its old or new text")
+      return
+    }
+    // apply_patch matches whole lines, so a substring edit has to be widened to
+    // the lines it touches — which requires the file the model is editing.
+    const absolute = path.resolve(workspaceRoot ?? process.cwd(), filePath)
+    let source: string
+    try {
+      // Bounded because this read is synchronous on the Run pump. Cursor's own
+      // executor uses the same 50 MB threshold before reading a file it is
+      // about to write.
+      const size = fs.statSync(absolute).size
+      if (size > MAX_EDIT_SOURCE_BYTES) {
+        refuse(`the target file is ${Math.round(size / 1024 / 1024)} MB, too large to patch`)
+        return
+      }
+      source = fs.readFileSync(absolute, "utf8")
+    } catch (e) {
+      refuse(`the target file could not be read (${(e as Error).message})`)
+      return
+    }
+    const plan = planSubstringEdit(
+      source,
+      oldString,
+      newString,
+      parsed.args.replaceAll === true,
+    )
+    if (!plan.ok) {
+      refuse(plan.reason)
+      return
+    }
+    patchText = buildUpdateFilePatch(filePath, plan.chunks)
+  }
+
+  parsed.toolName = APPLY_PATCH_TOOL
+  parsed.args = { patchText }
+  // apply_patch's output does not carry opencode `write`'s <path> tag, so keep
+  // the requested path for the typed Cursor result.
+  parsed.resultMetadata = { ...parsed.resultMetadata, path: filePath }
 }
 
 // ── Extract exec args from ExecServerMessage ──
@@ -840,7 +947,13 @@ export function mapCursorArgsToOpencode(
       const args: Record<string, unknown> = {}
       const filePath = str(cleaned.filePath) ?? str(cleaned.path) ?? str(cleaned.file_path)
       if (filePath) args.filePath = filePath
-      const content = stringValue(cleaned.content) ?? stringValue(cleaned.file_text) ?? stringValue(cleaned.fileText)
+      // Cursor's LocalWriteExecutor prefers `file_bytes` whenever it is
+      // non-empty and only falls back to `file_text`; mirror that order so a
+      // byte-encoded write is not silently seen as empty content.
+      const bytes = bytesValue(cleaned.file_bytes) ?? bytesValue(cleaned.fileBytes)
+      const content = bytes !== undefined
+        ? decodeWriteBytes(bytes, str(cleaned.encoding_hint) ?? str(cleaned.encodingHint))
+        : stringValue(cleaned.content) ?? stringValue(cleaned.file_text) ?? stringValue(cleaned.fileText)
       if (content !== undefined) args.content = content
       return { toolName: "write", args }
     }
@@ -902,6 +1015,32 @@ function str(v: unknown): string | undefined {
 
 function stringValue(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined
+}
+
+/** A non-empty protobuf `bytes` field, or undefined when absent/empty. */
+function bytesValue(v: unknown): Uint8Array | undefined {
+  if (v instanceof Uint8Array) return v.length > 0 ? v : undefined
+  if (Array.isArray(v) && v.every((b) => typeof b === "number")) {
+    return v.length > 0 ? Uint8Array.from(v) : undefined
+  }
+  return undefined
+}
+
+/**
+ * Decode `WriteArgs.file_bytes`. `encoding_hint` names the file's original
+ * encoding; OpenCode's `write` takes a string, so anything Node cannot decode
+ * falls back to UTF-8 rather than dropping the write.
+ */
+function decodeWriteBytes(bytes: Uint8Array, encodingHint?: string): string {
+  const encoding = encodingHint?.trim().toLowerCase().replace(/[_ ]/g, "-")
+  if (encoding && encoding !== "utf-8" && encoding !== "utf8") {
+    try {
+      return new TextDecoder(encoding, { fatal: false }).decode(bytes)
+    } catch {
+      trace(`write: unsupported encoding_hint ${JSON.stringify(encodingHint)} — decoding as utf-8`)
+    }
+  }
+  return new TextDecoder("utf-8").decode(bytes)
 }
 
 function num(v: unknown): number | undefined {
@@ -1260,16 +1399,22 @@ export function buildTypedExecResult(
       if (error) return { error: { path: readPath, error } }
       // Strip opencode's <path>/<content> envelope so Cursor's model receives
       // raw file content and can't echo the wrapper into subsequent writes.
-      // reads route here only for native read_args; most arrive via mcp_result.
+      // Cursor's native read_args lands here; `mcp_args` reads land in
+      // mcp_result. Live captures show gpt-5.4-mini and grok-4.5 both use the
+      // native channel, so this is the path that matters in practice.
       const content = unwrapReadOutput(output)
       const statPath = extractPathTag(output) ?? readPath
       const outputMetadata = parseOpenCodeReadMetadata(output)
       const totalLines = outputMetadata.totalLines ?? readFileLineCount(statPath) ?? countLines(content)
       const rangeApplied = readRangeApplied(resultMetadata, totalLines)
+      // `truncated` alone is not enough: it is set here, and models still assert
+      // the partial content is the whole file. Cursor's own executor puts the
+      // limit marker in the output text for the same reason, so append one.
+      const notice = readTruncationNotice(output, resultMetadata)
       return {
         success: {
           path: readPath,
-          content,
+          content: notice ? `${content}\n\n${notice}` : content,
           total_lines: totalLines,
           file_size: readFileSize(statPath),
           truncated: readOutputTruncated(resultMetadata, outputMetadata, totalLines),
@@ -1300,22 +1445,31 @@ export function buildTypedExecResult(
         },
       }
     }
-    case "write_result":
-      if (error) return { error: { path: "", error } }
+    case "write_result": {
+      // `apply_patch` output carries no <path> tag, so prefer the path recorded
+      // when the request was remapped away from `write`.
+      const remappedPath = str(resultMetadata?.path)
+      if (error) return { error: { path: remappedPath ?? "", error } }
       return {
         success: {
-          path: extractPathTag(output) ?? "",
+          path: remappedPath ?? extractPathTag(output) ?? "",
           lines_created: countLines(output),
           file_size: output.length,
         },
       }
+    }
     case "pi_write_result":
       // PiWriteExecSuccess is just { output }; error is { error }.
       if (error) return { error: { error } }
       return { success: { output: output || "Wrote file successfully." } }
-    case "pi_read_result":
+    case "pi_read_result": {
       if (error) return { error: { error } }
-      return { success: { output: unwrapReadOutput(output) } }
+      // Pi results carry truncation structurally (PiReadExecSuccess field 2),
+      // which is how Cursor's own executors report a capped payload.
+      const content = unwrapReadOutput(output)
+      const truncation = readTruncationMessage(output, content)
+      return { success: { output: content, ...(truncation ? { truncation } : {}) } }
+    }
     case "pi_bash_result":
     case "pi_edit_result":
     case "pi_grep_result":
@@ -1380,20 +1534,28 @@ export function buildTypedExecResult(
         },
       }
     }
-    case "mcp_result":
+    case "mcp_result": {
       if (error) return { error: { error } }
       // opencode built-ins (read/write/grep/…) are advertised as MCP tools, so
       // a read call returns through mcp_result. Scope the unwrap to toolName
       // "read" so a non-read MCP tool whose output merely contains a
       // "<content>"-like block is never rewritten.
+      if (toolName !== "read") {
+        return { success: { content: [{ text: { text: output } }], is_error: false } }
+      }
+      // Carry the truncation notice as its own content item: the file content
+      // item stays byte-exact, so it can still never be echoed into a write.
+      const notice = readTruncationNotice(output)
       return {
         success: {
           content: [
-            { text: { text: toolName === "read" ? unwrapReadOutput(output) : output } },
+            { text: { text: unwrapReadOutput(output) } },
+            ...(notice ? [{ text: { text: notice } }] : []),
           ],
           is_error: false,
         },
       }
+    }
     case "subagent_result": {
       const task = parseOpenCodeTaskOutput(output)
       if (error || task.state === "error") {
@@ -1460,21 +1622,122 @@ type OpenCodeReadMetadata = {
   outputCapped?: boolean
 }
 
+/**
+ * Isolate opencode's read footer: the last blank-line-separated block before
+ * the closing `</content>`. Scanning the whole envelope would let a file that
+ * merely *quotes* a footer (this repository's own docs and tests do) pass for a
+ * truncated read. The body can never contain a blank line — every source line
+ * is rendered as `N: …`, so even an empty line keeps its `N: ` prefix.
+ *
+ * Falls back to the full string when the envelope is absent, preserving
+ * behavior for non-standard read output.
+ */
+function readEnvelopeFooter(output: string): string {
+  const close = output.lastIndexOf("\n</content>")
+  if (close === -1) return output
+  const start = output.lastIndexOf("\n\n", close)
+  if (start === -1) return output
+  return output.slice(start + 2, close)
+}
+
 /** Recover full-file metadata before unwrapReadOutput removes OpenCode's footer. */
 function parseOpenCodeReadMetadata(output: string): OpenCodeReadMetadata {
-  const showing = /Showing lines (\d+)-(\d+)(?: of (\d+))?\./.exec(output)
+  const footer = readEnvelopeFooter(output)
+  const showing = /Showing lines (\d+)-(\d+)(?: of (\d+))?\./.exec(footer)
   if (showing) {
     return {
       startLine: Number(showing[1]),
       endLine: Number(showing[2]),
       ...(showing[3] ? { totalLines: Number(showing[3]) } : {}),
-      outputCapped: output.includes("(Output capped at "),
+      outputCapped: footer.includes("(Output capped at "),
     }
   }
-  const complete = /\(End of file - total (\d+) lines?\)/.exec(output)
+  const complete = /\(End of file - total (\d+) lines?\)/.exec(footer)
   if (complete) return { totalLines: Number(complete[1]) }
   return {}
 }
+
+/**
+ * OpenCode's `read` caps output at 50 KB (`tool/read.ts` MAX_BYTES = 50 * 1024)
+ * and cuts on a whole-line boundary, then appends
+ * "(Output capped at 50 KB. Showing lines X-Y. Use offset=N to continue.)".
+ *
+ * `unwrapReadOutput` strips that footer along with the envelope, deliberately:
+ * Cursor's model echoes whatever it is handed straight back into the next
+ * write, so anything left in the content stream can end up written into the
+ * file. But dropping the notice with no replacement is worse — the model then
+ * believes a capped read is the complete file, rewrites it from what it has,
+ * and everything past the cap is destroyed.
+ *
+ * Cursor's own CLI never truncates silently. Its local executor annotates every
+ * capped payload ("50KB limit reached", "[Showing last …KB of line N (50KB
+ * limit). Full output: …]") and returns structured truncation metadata. Mirror
+ * that, keeping the signal out of the file content itself so it still cannot be
+ * echoed into a write.
+ */
+function readTruncationSummary(
+  output: string,
+): { startLine: number; endLine: number; nextOffset: number; capped: boolean; totalLines?: number } | undefined {
+  const meta = parseOpenCodeReadMetadata(output)
+  if (meta.startLine === undefined || meta.endLine === undefined) return undefined
+  // A complete read reports "(End of file …)" and never reaches this shape.
+  if (meta.totalLines !== undefined && meta.endLine >= meta.totalLines && !meta.outputCapped) return undefined
+  return {
+    startLine: meta.startLine,
+    endLine: meta.endLine,
+    nextOffset: meta.endLine + 1,
+    capped: meta.outputCapped === true,
+    ...(meta.totalLines !== undefined ? { totalLines: meta.totalLines } : {}),
+  }
+}
+
+/**
+ * Model-visible replacement for the stripped footer.
+ *
+ * Only for reads the model did not ask to bound. A caller that passed an
+ * explicit offset/limit already knows it asked for a slice — warning there
+ * would cry wolf on every deliberate paged read.
+ */
+function readTruncationNotice(
+  output: string,
+  resultMetadata?: Record<string, unknown>,
+): string | undefined {
+  const summary = readTruncationSummary(output)
+  if (!summary) return undefined
+  const rangeRequested =
+    num(resultMetadata?.offset) !== undefined || num(resultMetadata?.limit) !== undefined
+  if (rangeRequested && !summary.capped) return undefined
+  const range = summary.totalLines !== undefined
+    ? `lines ${summary.startLine}-${summary.endLine} of ${summary.totalLines}`
+    : `lines ${summary.startLine}-${summary.endLine}`
+  return (
+    `[Partial read: the content above is ${range}` +
+    (summary.capped ? ", capped at the host's 50 KB output limit" : "") +
+    `. It is NOT the complete file. Continue with offset=${summary.nextOffset} before ` +
+    `acting on the whole file; writing the content above back would delete everything ` +
+    `after line ${summary.endLine}.]`
+  )
+}
+
+/** agent.v1.PiTruncation for a capped OpenCode read. */
+function readTruncationMessage(
+  output: string,
+  content: string,
+): Record<string, unknown> | undefined {
+  const summary = readTruncationSummary(output)
+  if (!summary) return undefined
+  return {
+    truncated: true,
+    truncated_by: summary.capped ? "bytes" : "lines",
+    ...(summary.totalLines !== undefined ? { total_lines: summary.totalLines } : {}),
+    output_lines: Math.max(0, summary.endLine - summary.startLine + 1),
+    output_bytes: Buffer.byteLength(content, "utf8"),
+    ...(summary.capped ? { max_bytes: OPENCODE_READ_MAX_BYTES } : {}),
+  }
+}
+
+/** `tool/read.ts` MAX_BYTES — mirrored only to report the cap, never to apply it. */
+const OPENCODE_READ_MAX_BYTES = 50 * 1024
 
 function readRangeApplied(
   resultMetadata: Record<string, unknown> | undefined,
