@@ -305,6 +305,24 @@ describe("modelInfoToConfig (context window selection)", () => {
     } as any, { contextTier: "long" })
     expect(cfg.limit).toEqual({ context: 1_000_000, output: 128_000 })
   })
+
+  it("keeps inner text while stripping markup from display names", () => {
+    const cfg = modelInfoToConfig({
+      ...base,
+      id: "marked-up-model",
+      displayName: '<span style="color:red">Medium</span> & <script',
+    } as any)
+    expect(cfg.name).toBe("Medium script")
+  })
+
+  it("sanitizes long unterminated markup without backtracking", () => {
+    const cfg = modelInfoToConfig({
+      ...base,
+      id: "pathological-label",
+      displayName: `${"<".repeat(50_000)}Visible`,
+    } as any)
+    expect(cfg.name).toBe("Visible")
+  })
 })
 
 describe("modelsToConfig (context-tier materialization)", () => {

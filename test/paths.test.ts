@@ -174,6 +174,11 @@ describe("opencodeProjectDir", () => {
   it("slugifies workspace paths like Cursor", () => {
     expect(slugifyWorkspacePath("/Users/a/b")).toBe("Users-a-b")
     expect(slugifyWorkspacePath("/tmp/foo_bar/baz")).toBe("tmp-foo-bar-baz")
+    expect(slugifyWorkspacePath("/Users/foo_bar//baz--qux")).toBe("Users-foo-bar-baz-qux")
+  })
+
+  it("collapses long separator runs without backtracking", () => {
+    expect(slugifyWorkspacePath(`/${"-".repeat(50_000)}`)).toBe("")
   })
 
   it("lives under ~/.cache/opencode/projects/<slug>", () => {

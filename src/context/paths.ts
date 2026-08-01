@@ -176,8 +176,9 @@ export function slugifyWorkspacePath(workspaceRoot: string): string {
   const resolved = path.resolve(workspaceRoot)
   return resolved
     .replace(/[^a-zA-Z0-9]/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "")
+    .split("-")
+    .filter(Boolean)
+    .join("-")
 }
 
 /**

@@ -55,6 +55,25 @@ describe("Cursor shell timeout translation", () => {
     })
   })
 
+  it("ignores repeated timeout headers without a closing metadata tag", () => {
+    const id = "cursor_session_timeout_headers"
+    registerCursorShellCall(id, metadata())
+    const raw = "<shell_metadata>\nshell tool terminated command after exceeding timeout 9 ms.\n".repeat(20_000)
+    expect(captureCursorShellResult(id, raw)).toBe(raw)
+  })
+
+  it("strips a timeout envelope after large stdout", () => {
+    const id = "cursor_session_large_timeout"
+    registerCursorShellCall(id, metadata())
+    const raw = `${"progress\n".repeat(20_000)}<shell_metadata>\nshell tool terminated command after exceeding timeout 30000 ms. Retry.\n</shell_metadata>`
+    const clean = captureCursorShellResult(id, raw)
+    expect(clean).toBe(`${"progress\n".repeat(20_000)}Timed out after 30000ms.\n`)
+    expect(consumeCursorShellResult(id, clean).outcome).toEqual({
+      kind: "timeout",
+      timeoutMs: 30_000,
+    })
+  })
+
   it("records ordinary Bash exit metadata without rewriting output", () => {
     const id = "cursor_session_3"
     registerCursorShellCall(id, metadata())

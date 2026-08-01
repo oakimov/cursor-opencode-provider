@@ -27,10 +27,29 @@ import {
  * Dots and unicode letters are preserved so names stay readable.
  * Fixes https://github.com/oakimov/cursor-opencode-provider/issues/2.
  */
+function stripMarkupTags(value: string): string {
+  const chunks: string[] = []
+  let cursor = 0
+  while (cursor < value.length) {
+    const start = value.indexOf("<", cursor)
+    if (start === -1) {
+      chunks.push(value.slice(cursor))
+      break
+    }
+    chunks.push(value.slice(cursor, start))
+    const end = value.indexOf(">", start + 1)
+    if (end === -1) {
+      chunks.push(value.slice(start))
+      break
+    }
+    cursor = end + 1
+  }
+  return chunks.join("")
+}
+
 function safeLabel(value: string): string {
   return (
-    value
-      .replace(/<[^>]+>/g, "")
+    stripMarkupTags(value)
       .replace(/[()<>&"'`]/g, "")
       .replace(/\s+/g, " ")
       .trim() || "default"

@@ -30,6 +30,8 @@ type AgentUrlOptions = {
 }
 
 function resolveCacheKey(token: string, options: AgentUrlOptions): string {
+  // codeql[js/insufficient-password-hash] -- The token is a high-entropy JWT/API key,
+  // and this digest is only an ephemeral memoization key, never a password verifier.
   const tokenHash = createHash("sha256").update(token).digest("hex").slice(0, 16)
   return `${tokenHash}|${normalizeApiBaseURL(options.apiBaseURL ?? options.baseURL)}|telem:${options.telemetryEnabled === true}`
 }

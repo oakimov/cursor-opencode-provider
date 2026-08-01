@@ -401,8 +401,12 @@ function lastPrivateMarker(
 }
 
 function parseOpenCodeTimeout(output: string): { output: string; timeoutMs: number } | undefined {
-  const re = /<shell_metadata>\r?\nshell tool terminated command after exceeding timeout (\d+) ms\.[\s\S]*?<\/shell_metadata>\s*$/
-  const match = re.exec(output)
+  const closeTag = "</shell_metadata>"
+  const closeAt = output.lastIndexOf(closeTag)
+  if (closeAt === -1 || output.slice(closeAt + closeTag.length).trim() !== "") return undefined
+
+  const header = /<shell_metadata>\r?\nshell tool terminated command after exceeding timeout (\d+) ms\./
+  const match = header.exec(output.slice(0, closeAt))
   if (!match || match.index === undefined) return undefined
   return { output: withoutMarker(output, match.index), timeoutMs: Number(match[1]) }
 }
