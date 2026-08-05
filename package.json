@@ -1,6 +1,6 @@
 {
   "name": "cursor-opencode-provider",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Use Cursor subscription models from OpenCode via Cursor's Connect-RPC agent protocol",
   "type": "module",
   "license": "MIT",
@@ -61,8 +61,8 @@
     "prepublishOnly": "bun run build"
   },
   "dependencies": {
-    "@ai-sdk/provider": "3.0.8",
-    "protobufjs": "^7.4.0"
+    "@ai-sdk/provider": "3.0.14",
+    "protobufjs": "^7.6.5"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": "^1.17.13",
@@ -74,10 +74,10 @@
     }
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.17.13",
-    "@opencode-ai/plugin-next": "^0.0.0-next-16281",
-    "@tsconfig/node22": "^22.0.1",
-    "@types/node": "^22.15.3",
-    "typescript": "^5.8.3"
+    "@opencode-ai/plugin": "^1.18.13",
+    "@opencode-ai/plugin-next": "npm:@opencode-ai/plugin@0.0.0-next-16281",
+    "@tsconfig/node22": "^22.0.5",
+    "@types/node": "^22.20.1",
+    "typescript": "^5.9.3"
   }
 }
