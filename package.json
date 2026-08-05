@@ -58,7 +58,10 @@
     "test": "bun test",
     "test:node-http2": "bun run build && node test/node-http2-cleanup.mjs",
     "test:watch": "bun test --watch",
-    "prepublishOnly": "bun run build"
+    "generate:pricing": "bun run scripts/generate-cursor-pricing.ts",
+    "generate:pricing:check": "bun run scripts/generate-cursor-pricing.ts -- --check",
+    "check:pricing": "bun run scripts/check-cursor-pricing-coverage.ts",
+    "prepublishOnly": "bun run generate:pricing && bun run build"
   },
   "dependencies": {
     "@ai-sdk/provider": "3.0.14",

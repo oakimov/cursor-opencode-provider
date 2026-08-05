@@ -62,7 +62,13 @@ export type ModelInfo2 = {
   capabilities: { tools: boolean; input: readonly string[]; output: readonly string[] }
   variants: readonly ModelVariantInfo[]
   time: { released: number }
-  cost: readonly unknown[]
+  /** OpenCode 2.0 tiered $/1M rates; empty when Cursor does not publish a price. */
+  cost: readonly {
+    tier?: { type: "context"; size: number }
+    input: number
+    output: number
+    cache: { read: number; write: number }
+  }[]
   status: "alpha" | "beta" | "deprecated" | "active"
   enabled: boolean
   limit: { context: number; input?: number; output: number }

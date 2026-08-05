@@ -2,6 +2,7 @@ import { pathToFileURL } from "node:url"
 import { CURSOR_PROVIDER_ID } from "../shared.js"
 import { CURSOR_WIRE_MODEL_ID_KEY, type ModelInfo } from "../models.js"
 import { modelsToConfig } from "../model-config.js"
+import { toOpenCode2Costs, type OpenCodeModelCost } from "../pricing.js"
 import type { CatalogDraft, ModelVariantInfo } from "./types.js"
 
 /**
@@ -80,7 +81,7 @@ function applyModelEntry(draft: CatalogDraft, id: string, entry: Record<string, 
     model.status = "active"
     model.enabled = true
     model.time = { released: 0 }
-    model.cost = []
+    model.cost = toOpenCode2Costs(entry.cost as OpenCodeModelCost | undefined)
     // Carries the default variant parameters (and the wire id) through to
     // doStream as provider options, matching the classic plugin.
     if (options) model.settings = { ...options }

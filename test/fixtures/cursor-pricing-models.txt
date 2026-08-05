@@ -1,0 +1,40 @@
+# Cursor wire / catalog model ids used for pricing coverage checks.
+# Intentionally unpriced first-party ids (Auto / Composer / Grok) are listed too;
+# checkCursorPricingCoverage treats them as covered.
+default
+composer-2.5
+grok-4.5
+claude-fable-5
+claude-haiku-4-5
+claude-opus-4-5
+claude-opus-4-6
+claude-opus-4-7
+claude-opus-4-8
+claude-opus-5
+claude-sonnet-4
+claude-sonnet-4-1m
+claude-sonnet-4-5
+claude-sonnet-4-6
+claude-sonnet-5
+gemini-2.5-flash
+gemini-3-flash
+gemini-3.1-pro
+gemini-3.5-flash
+gemini-3.6-flash
+glm-5.2
+gpt-5-mini
+gpt-5.1
+gpt-5.2
+gpt-5.3-codex
+gpt-5.4
+gpt-5.4-1m
+gpt-5.4-mini
+gpt-5.4-nano
+gpt-5.5
+gpt-5.5-1m
+gpt-5.6-luna
+gpt-5.6-sol
+gpt-5.6-sol-1m
+gpt-5.6-terra
+kimi-k2.7-code
+kimi-k3

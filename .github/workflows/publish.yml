@@ -21,7 +21,11 @@
 # Publish flow (after setup):
 #   - Bump "version" in package.json, commit to main.
 #   - Push a tag matching the version (e.g. git tag v0.1.2 && git push --tags).
-#   - This workflow runs install → typecheck → test → build → npm publish (OIDC).
+#   - This workflow runs install → refresh Cursor pricing → coverage check →
+#     typecheck → test → build → npm publish (OIDC).
+#   - Pricing is regenerated from https://cursor.com/docs/models-and-pricing.md
+#     in CI so the published dist/ snapshot matches current docs. The refreshed
+#     src/pricing-data.ts is used for that release build only (not committed).
 #
 # If OIDC publish fails with ENEEDAUTH, check that the workflow filename
 # (publish.yml), repository (oakimov/cursor-opencode-provider), and the
@@ -66,6 +70,14 @@ jobs:
       # injector integration test needs /bin/zsh (absent on stock ubuntu-latest).
       - name: Install zsh
         run: sudo apt-get update && sudo apt-get install -y zsh
+
+      # Refresh bundled token rates from Cursor docs before validating/building
+      # so npm releases do not ship a stale pricing-data.ts snapshot.
+      - name: Refresh Cursor pricing
+        run: bun run generate:pricing
+
+      - name: Check pricing coverage
+        run: bun run check:pricing
 
       - name: Typecheck
         run: bun run typecheck

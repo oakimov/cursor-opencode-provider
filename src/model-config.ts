@@ -5,6 +5,7 @@ import {
   type ModelInfo,
   type ModelVariant,
 } from "./models.js"
+import { applyCursorModelCost } from "./pricing.js"
 
 /**
  * Cursor `ModelInfo` → OpenCode model-config mapping.
@@ -202,12 +203,19 @@ export function modelsToConfig(models: ModelInfo[]): Record<string, any> {
     const longVariants = variantsForTier(m, "long")
 
     if (baseVariants.length > 0 || longVariants.length === 0) {
-      out[m.id] = modelInfoToConfig(m, { thinkingSuffix, contextTier: "base" })
+      out[m.id] = applyCursorModelCost(
+        m.id,
+        modelInfoToConfig(m, { thinkingSuffix, contextTier: "base" }),
+      )
     }
     if (longVariants.length === 0) continue
 
     if (baseVariants.length === 0) {
-      out[m.id] = modelInfoToConfig(m, { thinkingSuffix, contextTier: "long" })
+      // No separate base tier — the wire id itself is the long-context entry.
+      out[m.id] = applyCursorModelCost(
+        `${m.id}-1m`,
+        modelInfoToConfig(m, { thinkingSuffix, contextTier: "long" }),
+      )
       continue
     }
 
@@ -215,7 +223,10 @@ export function modelsToConfig(models: ModelInfo[]): Record<string, any> {
     let suffix = 2
     while (usedIds.has(longId)) longId = `${m.id}-1m-${suffix++}`
     usedIds.add(longId)
-    out[longId] = modelInfoToConfig(m, { thinkingSuffix, contextTier: "long" })
+    out[longId] = applyCursorModelCost(
+      longId,
+      modelInfoToConfig(m, { thinkingSuffix, contextTier: "long" }),
+    )
   }
   return out
 }

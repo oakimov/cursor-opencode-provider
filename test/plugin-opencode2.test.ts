@@ -98,6 +98,28 @@ describe("opencode2 catalog", () => {
     expect(model!.capabilities.input).toEqual(["text"])
     expect(model!.limit.context).toBe(200_000)
     expect(model!.enabled).toBe(true)
+    // Test fixture uses a legacy id that is not in the current pricing table.
+    expect(model!.cost).toEqual([])
+  })
+
+  test("attaches published Cursor token rates to catalog cost tiers", () => {
+    const { draft, models } = fakeCatalogDraft()
+    applyCursorModels(draft, [
+      {
+        ...baseModel,
+        id: "claude-sonnet-4-5",
+        displayName: "Sonnet 4.5",
+      },
+    ])
+
+    const model = models.get("cursor/claude-sonnet-4-5")
+    expect(model!.cost).toEqual([
+      {
+        input: 3,
+        output: 15,
+        cache: { read: 0.3, write: 3.75 },
+      },
+    ])
   })
 
   test("long-context entries keep a distinct id but address the same wire model", () => {

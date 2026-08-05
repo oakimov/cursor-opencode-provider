@@ -12,9 +12,11 @@ bun run build        # tsc → dist/
 bun run typecheck
 bun test
 bun run test:watch
+bun run generate:pricing   # refresh src/pricing-data.ts from Cursor docs
+bun run check:pricing      # fixture coverage for known model ids
 ```
 
-Publish surface is `dist/` only (`files` in `package.json`). Always rebuild before testing a local `file://` OpenCode install.
+Publish surface is `dist/` only (`files` in `package.json`). Always rebuild before testing a local `file://` OpenCode install. Tagged npm publishes (`.github/workflows/publish.yml`) and local `npm publish` (`prepublishOnly`) refresh Cursor pricing from the docs before build so released packages carry current rates.
 
 ## Architecture
 
@@ -36,6 +38,7 @@ OpenCode
 | OpenCode 2.0 plugin | `src/plugin-opencode2.ts` | 2.0 beta API — load **only** as `./plugin/opencode2` |
 | 2.0 support modules | `src/opencode2/` | Catalog mapping, integration/auth, local 2.0 API types |
 | Host-neutral core | `src/plugin-core.ts`, `src/model-config.ts` | Shared by every plugin surface; must not import a host plugin API |
+| Model pricing | `src/pricing.ts`, `src/pricing-data.ts` | Cursor docs → classic `cost` + OpenCode 2.0 cost tiers; regenerate via `bun run generate:pricing` |
 | Language model | `src/language-model.ts` | AI SDK `LanguageModelV3` (`doStream` / `doGenerate`) |
 | Session | `src/session.ts` | Held-open agent Run + pending exec correlation |
 | Auth / models | `src/auth.ts`, `src/models.ts` | PKCE/API key, JWT refresh, `cursor-models.json` cache |

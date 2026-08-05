@@ -337,6 +337,7 @@ OpenCode
 | `src/opencode2/` | 2.0-only catalog mapping, integration/auth, and local API types |
 | `src/plugin-core.ts` | Host-neutral SDK factory, package matching, API base/telemetry resolution |
 | `src/model-config.ts` | Cursor model → OpenCode model mapping shared by every plugin surface |
+| `src/pricing.ts` / `src/pricing-data.ts` | Cursor docs token rates → classic `cost` and OpenCode 2.0 cost tiers |
 | `src/index.ts` | `createCursor` factory; default export is `CursorPlugin` |
 | `src/language-model.ts` | AI SDK `LanguageModelV3` adapter (`doStream`, `doGenerate`) |
 | `src/session.ts` | Held-open agent Run session and pending exec correlation |
