@@ -47,7 +47,7 @@ Add the package to OpenCode config. OpenCode installs npm plugins with Bun at st
 }
 ```
 
-Pin a version if you want: `"cursor-opencode-provider@0.3.1"`.
+Pin a version if you want: `"cursor-opencode-provider@0.3.2"`.
 
 You can also install it yourself first:
 
@@ -117,7 +117,7 @@ browser login or an API key. `CURSOR_API_KEY` is also picked up automatically.
 }
 ```
 
-Pin a version if you want: `"cursor-opencode-provider@0.3.1/plugin/opencode2"`.
+Pin a version if you want: `"cursor-opencode-provider@0.3.2/plugin/opencode2"`.
 
 OpenCode 2.0 installs the published package into its host cache and loads the AI SDK
 entry from there (`aisdk:cursor-opencode-provider`). No extra env vars are required.
