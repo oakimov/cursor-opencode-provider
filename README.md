@@ -1,10 +1,38 @@
 # cursor-opencode-provider
 
-Use [Cursor](https://cursor.com) subscription models from [OpenCode](https://opencode.ai) by speaking Cursor's Connect-RPC agent protocol.
+Use [Cursor](https://cursor.com) subscription models from [OpenCode](https://opencode.ai) and compatible coding agents by speaking Cursor's Connect-RPC agent protocol.
 
 This project is a custom **AI SDK provider** (`LanguageModelV3`) plus an **OpenCode plugin** that handles authentication and model discovery. Instead of calling a generic chat-completions API, it encodes and decodes Cursor's protobuf agent protocol over HTTP/2 to Cursor's agent backend.
 
-> **Status:** Usable end-to-end in OpenCode (auth, models, streaming, tools). See [Known limitations](#known-limitations).
+> **Runs unchanged across OpenCode, OpenCode 2.0, and four additional coding agents.** OpenCode loads this plugin natively, including through the dedicated OpenCode 2.0 entrypoint. [OCP — OpenCode Plugin Compatibility](https://github.com/oakimov/opencode-plugin-compat) runs the same published plugin, without a provider fork, in **Kilo Code, MiMo Code, pi, and oh-my-pi**. See [Coding-agent compatibility](#coding-agent-compatibility).
+>
+> **Status:** Usable end-to-end for authentication, model discovery, streaming, and tools. See [Known limitations](#known-limitations).
+
+## Coding-agent compatibility
+
+This package remains one OpenCode plugin and AI SDK provider. The external
+**[OCP compatibility layer](https://github.com/oakimov/opencode-plugin-compat)**
+adapts other hosts around that unchanged package: it translates their plugin
+surfaces, model catalogs, tool vocabulary, authentication, and streaming events
+instead of requiring a host-specific Cursor provider.
+
+| Coding agent | How this package runs |
+|---|---|
+| **OpenCode** | Native plugin and AI SDK provider |
+| **OpenCode 2.0** | Native dedicated `cursor-opencode-provider/plugin/opencode2` entrypoint |
+| **Kilo Code** | Unchanged through OCP's OpenCode-clone compatibility layer |
+| **MiMo Code** | Unchanged through OCP's OpenCode-clone compatibility layer |
+| **pi** | Unchanged through `@opencode-compat/pi-bridge` and pi's provider extension API |
+| **oh-my-pi (omp)** | Unchanged through the same Pi-family bridge |
+
+Start with OCP's host guides:
+
+- [OpenCode clones: Kilo Code and MiMo Code](https://github.com/oakimov/opencode-plugin-compat/blob/main/docs/hosts/opencode-clones.md)
+- [Pi family: pi and oh-my-pi](https://github.com/oakimov/opencode-plugin-compat/blob/main/docs/hosts/pi-family.md)
+
+OCP is designed to grow by adding host profiles and narrow adapters or bridges,
+so support for other coding agents can be added there while this provider and
+its package remain unchanged.
 
 ## Demo
 
@@ -14,6 +42,7 @@ OpenCode driving a Cursor-routed Grok model through this provider:
 
 ## Features
 
+- **Multi-host compatibility** — the same plugin package runs natively in OpenCode and OpenCode 2.0, and unchanged through OCP in Kilo Code, MiMo Code, pi, and oh-my-pi; new host support belongs in the compatibility layer rather than a provider fork
 - **OpenCode integration** — registers a `cursor` provider with auth hooks and cached model list
 - **Authentication** — browser OAuth (PKCE), or API key from [cursor.com/settings](https://cursor.com/settings)
 - **Model discovery** — fetches available models from Cursor's API and caches them locally
@@ -25,7 +54,7 @@ OpenCode driving a Cursor-routed Grok model through this provider:
 ## Requirements
 
 - [Bun](https://bun.sh) (for development and tests)
-- [OpenCode](https://opencode.ai) with plugin support
+- [OpenCode](https://opencode.ai), or a supported host configured through [OCP](https://github.com/oakimov/opencode-plugin-compat)
 - An active Cursor account with API access
 
 ## Installation
