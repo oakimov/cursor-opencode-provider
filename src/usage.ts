@@ -9,8 +9,9 @@ export function turnEndedCounter(te: Record<string, unknown>, key: string): numb
 }
 
 /**
- * Map authoritative Cursor TurnEnded counters to AI SDK V3 usage (Kilo/OpenCode
- * flatten via input total = noCache + cacheRead + cacheWrite).
+ * Map request-local Cursor TurnEnded counters to AI SDK V3 usage (Kilo/OpenCode
+ * flatten via input total = noCache + cacheRead + cacheWrite). Only use this
+ * for a Run with no prior tool boundary; multi-step TurnEnded is cumulative.
  *
  * Contract: `input_tokens` is non-cached input; cache fields are separate.
  * Cursor's agent wire currently sends `cache_write=0` even when later turns
@@ -48,34 +49,35 @@ export type CursorUsageEstimate = {
   reasoningTokens: number
 }
 
-/** Mid-turn finish (e.g. tool-calls) before `turn_ended` — keep non-zero estimates. */
+/**
+ * Request-local usage for a held Cursor Run.
+ *
+ * `est.inputTokens` tracks the seed plus delivered tool results, while
+ * `est.outputTokens` accumulates model output across earlier tool boundaries.
+ * Move prior output into the current input estimate and report only this
+ * doStream request's output. Cache counters are intentionally absent: the
+ * only counters Cursor exposes at TurnEnded are cumulative for the whole Run.
+ */
 export function buildLanguageModelV3UsageFromEstimate(
   est: CursorUsageEstimate,
   promptTokens: number,
   outputChars: number,
   estimateCharsToTokens: (chars: number) => number,
 ): LanguageModelV3Usage {
-  const hasInputBreakdown =
-    est.cacheRead > 0 || est.cacheWrite > 0 || est.inputTokens > 0
-  const inputNoCache = hasInputBreakdown ? est.inputTokens : promptTokens
-  const cacheRead = est.cacheRead
-  const cacheWrite = est.cacheWrite
-  const outputFromChars = estimateCharsToTokens(outputChars)
-  const outputText =
-    est.outputTokens > 0 ? est.outputTokens : outputFromChars
-  const reasoning = est.reasoningTokens
-  const outputTotal = outputText + reasoning
+  const outputText = estimateCharsToTokens(outputChars)
+  const priorOutput = Math.max(0, est.outputTokens - outputText)
+  const inputNoCache = Math.max(promptTokens, est.inputTokens + priorOutput)
   return {
     inputTokens: {
-      total: inputNoCache + cacheRead + cacheWrite,
+      total: inputNoCache,
       noCache: inputNoCache,
-      cacheRead,
-      cacheWrite,
+      cacheRead: 0,
+      cacheWrite: 0,
     },
     outputTokens: {
-      total: outputTotal,
+      total: outputText,
       text: outputText,
-      reasoning: reasoning > 0 ? reasoning : undefined,
+      reasoning: undefined,
     },
   }
 }

@@ -439,6 +439,53 @@ describe("interrupted Cursor Run handling", () => {
     })
   })
 
+  it("does not expose cumulative multi-step TurnEnded usage as final-request context", async () => {
+    const parts: any[] = []
+    const session = fakeSession("multi-step-usage", [
+      serverFrame({ interaction_update: { text_delta: { text: "answer" } } }),
+      serverFrame({
+        interaction_update: {
+          turn_ended: {
+            input_tokens: 101_753,
+            output_tokens: 1_391,
+            cache_read: 79_872,
+            cache_write: 0,
+            reasoning_tokens: 525,
+          },
+        },
+      }),
+    ])
+    session.hadToolCallBoundary = true
+    session.usageEstimate = {
+      inputTokens: 30_000,
+      outputTokens: 500,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoningTokens: 0,
+    }
+
+    await pump(
+      session,
+      controller(parts),
+      { textId: "t", reasoningId: "r", promptTokens: 25_000 },
+    )
+
+    const finish = parts.find((part) => part.type === "finish")
+    expect(finish.usage.inputTokens).toEqual({
+      total: 30_500,
+      noCache: 30_500,
+      cacheRead: 0,
+      cacheWrite: 0,
+    })
+    expect(finish.usage.outputTokens.total).toBe(2)
+    expect(finish.providerMetadata.cursor).toMatchObject({
+      inputTokensRaw: 101_753,
+      outputTokensRaw: 1_391,
+      cacheReadRaw: 79_872,
+      reasoningTokensRaw: 525,
+    })
+  })
+
   it("preserves the live user request when rebasing recovery history", () => {
     const prompt = [
       { role: "system", content: "system" },

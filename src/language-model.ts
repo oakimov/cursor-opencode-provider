@@ -28,6 +28,7 @@ import {
   extractHostSubagentCatalog,
   resolveCustomWebToolAlias,
   remapNativeSubagentForCatalog,
+  remapCorrelatedEditWriteForCatalog,
   remapEditToolsForCatalog,
   CUSTOM_WEBFETCH_TOOL,
   CUSTOM_WEBSEARCH_TOOL,
@@ -566,15 +567,19 @@ export async function pumpWithRecovery(input: {
       const delayMs = retryDelayMs(failure, attempt + 1, retryPolicy)
       trace(`Run retry backoff: attempt=${attempt + 1}/${maxRecoveries} delayMs=${delayMs}`)
       await sleepForRetry(delayMs, input.abortSignal)
-      session = await input.recover(
-        checkpoint
-          ? {
-              kind: "resume",
-              conversationId: pumpedSession.conversationId,
-              checkpoint: Uint8Array.from(checkpoint),
-            }
-          : { kind: "rebase" },
-      )
+      const recovery: CursorRunRecovery = checkpoint
+        ? {
+            kind: "resume",
+            conversationId: pumpedSession.conversationId,
+            checkpoint: Uint8Array.from(checkpoint),
+          }
+        : { kind: "rebase" }
+      session = await input.recover(recovery)
+      if (recovery.kind === "resume") {
+        session.hadToolCallBoundary = pumpedSession.hadToolCallBoundary
+        session.usageEstimate = { ...pumpedSession.usageEstimate }
+        session.editToolCalls = new Map(pumpedSession.editToolCalls)
+      }
       input.onSession?.(session)
     } finally {
       sessionManager.endPump(pumpedSession, pumpOwner)
@@ -834,6 +839,7 @@ async function startSession(
     frames: stream.frames()[Symbol.asyncIterator](),
     pending: new Map(),
     displayToolCalls: new Map(),
+    editToolCalls: new Map(),
     nextBridgedExecId: 900_000,
     blobs: new Map(),
     toolDescriptors,
@@ -1347,8 +1353,12 @@ export async function pump(
     reason: LanguageModelV3FinishReason,
   ) => {
     closeOpenSpans()
-    if (te) {
-      // Authoritative TurnEnded counts — replace the running estimate.
+    // TurnEnded is request-local only when this Run did not previously stop at
+    // a tool boundary. On a held multi-step Run Cursor aggregates every model
+    // invocation into these counters; treating that billed total as the final
+    // request's prompt size makes OpenCode compact after ordinary tasks.
+    const cumulativeTurnEnded = !!te && session.hadToolCallBoundary === true
+    if (te && !cumulativeTurnEnded) {
       session.usageEstimate = {
         inputTokens: turnEndedCounter(te, "input_tokens"),
         outputTokens: turnEndedCounter(te, "output_tokens"),
@@ -1358,7 +1368,7 @@ export async function pump(
       }
     }
     const est = session.usageEstimate
-    const usage: LanguageModelV3Usage = te
+    const usage: LanguageModelV3Usage = te && !cumulativeTurnEnded
       ? buildLanguageModelV3UsageFromTurnEnded(te)
       : buildLanguageModelV3UsageFromEstimate(
           est,
@@ -1366,6 +1376,7 @@ export async function pump(
           requestUsage.outputChars,
           estimateTokens,
         )
+    if (!te) session.hadToolCallBoundary = true
     const providerMetadata = te ? cursorTurnEndedProviderMetadata(te) : undefined
     const reasonLabel = typeof reason === "object" && reason && "unified" in reason
       ? String((reason as { unified?: string }).unified ?? "unknown")
@@ -1377,9 +1388,11 @@ export async function pump(
         `v3In=${inTotal} v3Out=${outTotal} ` +
         `v3CacheRead=${usage.inputTokens?.cacheRead ?? 0} v3CacheWrite=${usage.inputTokens?.cacheWrite ?? 0} ` +
         `v3Reasoning=${usage.outputTokens?.reasoning ?? 0} ` +
-        `rawIn=${est.inputTokens} rawOut=${est.outputTokens} ` +
-        `rawCacheRead=${est.cacheRead} rawCacheWrite=${est.cacheWrite} ` +
-        `source=${te ? "turn_ended" : "estimate"}`,
+        `rawIn=${te ? turnEndedCounter(te, "input_tokens") : est.inputTokens} ` +
+        `rawOut=${te ? turnEndedCounter(te, "output_tokens") : est.outputTokens} ` +
+        `rawCacheRead=${te ? turnEndedCounter(te, "cache_read") : est.cacheRead} ` +
+        `rawCacheWrite=${te ? turnEndedCounter(te, "cache_write") : est.cacheWrite} ` +
+        `source=${te ? (cumulativeTurnEnded ? "estimate-cumulative-turn-ended" : "turn_ended") : "estimate"}`,
     )
     safeEnqueue({
       type: "finish",
@@ -1544,6 +1557,15 @@ export async function pump(
       if (callId && toolCall) {
         session.displayToolCalls.set(callId, toolCall)
         const variant = Object.keys(toolCall).find((k) => k.endsWith("_tool_call")) ?? "?"
+        const display = parseDisplayToolCall(callId, toolCall)
+        const editPath = display?.variant === "edit_tool_call"
+          && typeof display.args.path === "string"
+          ? display.args.path
+          : undefined
+        if (editPath) {
+          const editToolCalls = session.editToolCalls ?? (session.editToolCalls = new Map())
+          editToolCalls.set(callId, { path: editPath })
+        }
         const callIdLog = callId.replace(/\r?\n/g, "\\n")
         let wireFields = ""
         if (variant === "?") {
@@ -1557,6 +1579,7 @@ export async function pump(
     } else if (iu?.tool_call_completed) {
       const completed = iu.tool_call_completed as Record<string, unknown>
       const callId = typeof completed.call_id === "string" ? completed.call_id : ""
+      if (callId) session.editToolCalls?.delete(callId)
       // If exec already claimed this call_id, display map entry is gone — skip.
       if (!callId || !session.displayToolCalls.has(callId)) {
         if (callId) {
@@ -1661,6 +1684,7 @@ export async function pump(
         }
       } else {
         replaySafety.markBarrier("non-control-exec")
+        const displayCallId = extractExecDisplayCallId(esm)
         const parsed = parseExecServerMessage(esm)
         if (parsed) {
           const executableToolName = resolveCustomWebToolAlias(parsed.toolName, session.toolAliases)
@@ -1669,6 +1693,26 @@ export async function pump(
             parsed.toolName = executableToolName
           }
           remapNativeSubagentForCatalog(parsed, advertisedToolNameSet, session.subagentCatalog)
+          const editCall = displayCallId
+            ? session.editToolCalls?.get(displayCallId)
+            : undefined
+          if (editCall) {
+            const remapped = remapCorrelatedEditWriteForCatalog(
+              parsed,
+              advertisedToolNameSet,
+              editCall.path,
+              workspaceRootFromRequestContext(session.requestContext),
+            )
+            if (parsed.resultField === "write_result" && displayCallId) {
+              session.editToolCalls?.delete(displayCallId)
+            }
+            if (remapped) {
+              trace(
+                `exec: preserved edit intent callId=${displayCallId} ` +
+                  `path=${JSON.stringify(editCall.path)}`,
+              )
+            }
+          }
           // Hosts that advertise `apply_patch` in place of `edit`/`write` (see
           // protocol/apply-patch.ts) still receive Cursor's native write/edit
           // exec requests. Translate before the unavailable-tool check below.
@@ -1678,7 +1722,6 @@ export async function pump(
             workspaceRootFromRequestContext(session.requestContext),
           )
         }
-        const displayCallId = extractExecDisplayCallId(esm)
         trace(`exec: id=${parsed?.id} variant=${parsed ? Object.keys(parsed).join(",") : "none"} toolName=${parsed?.toolName} resultField=${parsed?.resultField}`)
         if (parsed) {
           if (parsed.localError) {
@@ -2038,7 +2081,7 @@ export function estimatePromptTokens(prompt: LanguageModelV3CallOptions["prompt"
   return estimateTokens(serializedContent.length)
 }
 
-/** Preserve cumulative Cursor counters as diagnostics, never as AI SDK request usage. */
+/** Preserve exact Cursor counters as diagnostics when they are cumulative across a multi-step Run. */
 export function cursorTurnEndedProviderMetadata(te: Record<string, unknown>): {
   cursor: {
     usageVersion: number

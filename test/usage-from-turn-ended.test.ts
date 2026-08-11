@@ -70,4 +70,24 @@ describe("buildLanguageModelV3UsageFromEstimate", () => {
     expect(usage.inputTokens?.total).toBe(42)
     expect(usage.outputTokens?.total).toBe(estimateTokens(8))
   })
+
+  it("reports the current context without cumulative prior output", () => {
+    const usage = buildLanguageModelV3UsageFromEstimate(
+      { inputTokens: 30_000, outputTokens: 500, cacheRead: 80_000, cacheWrite: 2_000, reasoningTokens: 0 },
+      25_000,
+      12,
+      estimateTokens,
+    )
+    expect(usage.inputTokens).toEqual({
+      total: 30_497,
+      noCache: 30_497,
+      cacheRead: 0,
+      cacheWrite: 0,
+    })
+    expect(usage.outputTokens).toEqual({
+      total: 3,
+      text: 3,
+      reasoning: undefined,
+    })
+  })
 })

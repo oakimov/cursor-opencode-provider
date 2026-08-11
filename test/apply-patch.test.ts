@@ -9,6 +9,7 @@ import {
 } from "../src/protocol/apply-patch.js"
 import {
   parseExecServerMessage,
+  remapCorrelatedEditWriteForCatalog,
   remapEditToolsForCatalog,
   buildTypedExecResult,
 } from "../src/protocol/tools.js"
@@ -179,6 +180,81 @@ describe("remapEditToolsForCatalog", () => {
       path: "a.txt",
     })
     expect(result).toMatchObject({ success: { path: "a.txt" } })
+  })
+})
+
+describe("correlated legacy edit writes", () => {
+  it("converts Cursor's whole-file write into one targeted OpenCode edit", () => {
+    fs.writeFileSync(path.join(workspace, "edit.txt"), "line one\nline two\nline three\nline four\n")
+    const parsed = parseExecServerMessage({
+      id: 11,
+      write_args: {
+        path: "edit.txt",
+        file_text: "edited one\nedited two\nedited three\nline four\n",
+      },
+    })!
+
+    expect(remapCorrelatedEditWriteForCatalog(parsed, ["read", "edit", "write"], "edit.txt", workspace)).toBe(true)
+    expect(parsed).toMatchObject({
+      toolName: "edit",
+      resultField: "write_result",
+      args: {
+        filePath: "edit.txt",
+        oldString: "line one\nline two\nline three\n",
+        newString: "edited one\nedited two\nedited three\n",
+      },
+      resultMetadata: { path: "edit.txt" },
+    })
+  })
+
+  it("uses unique adjacent context for a pure append", () => {
+    fs.writeFileSync(path.join(workspace, "append.txt"), "same\ntail\n")
+    const parsed = parseExecServerMessage({
+      id: 12,
+      write_args: { path: "append.txt", file_text: "same\ntail\nadded\n" },
+    })!
+
+    expect(remapCorrelatedEditWriteForCatalog(parsed, ["edit", "write"], "append.txt", workspace)).toBe(true)
+    expect(parsed.args).toEqual({
+      filePath: "append.txt",
+      oldString: "tail\n",
+      newString: "tail\nadded\n",
+    })
+  })
+
+  it("feeds the targeted edit through an apply_patch-only catalog", () => {
+    fs.writeFileSync(path.join(workspace, "patch.txt"), "before\nkeep\n")
+    const parsed = parseExecServerMessage({
+      id: 14,
+      write_args: { path: "patch.txt", file_text: "after\nkeep\n" },
+    })!
+
+    expect(remapCorrelatedEditWriteForCatalog(parsed, ["read", "apply_patch"], "patch.txt", workspace)).toBe(true)
+    remapEditToolsForCatalog(parsed, ["read", "apply_patch"], workspace)
+    expect(parsed.toolName).toBe("apply_patch")
+    expect(parsed.args).toEqual({
+      patchText: [
+        "*** Begin Patch",
+        "*** Update File: patch.txt",
+        "@@",
+        "-before",
+        "-keep",
+        "+after",
+        "+keep",
+        "*** End Patch",
+      ].join("\n"),
+    })
+  })
+
+  it("leaves unadvertised, mismatched, and new-file writes unchanged", () => {
+    const parsed = parseExecServerMessage({
+      id: 13,
+      write_args: { path: "new.txt", file_text: "new\n" },
+    })!
+    expect(remapCorrelatedEditWriteForCatalog(parsed, ["edit", "write"], "new.txt", workspace)).toBe(false)
+    expect(remapCorrelatedEditWriteForCatalog(parsed, ["write"], "new.txt", workspace)).toBe(false)
+    expect(remapCorrelatedEditWriteForCatalog(parsed, ["edit", "write"], "other.txt", workspace)).toBe(false)
+    expect(parsed.toolName).toBe("write")
   })
 })
 

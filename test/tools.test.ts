@@ -1425,6 +1425,34 @@ describe("unwrapReadOutput", () => {
 })
 
 describe("buildTypedExecResult read-envelope unwrap", () => {
+  it("restores the trailing newline required by Cursor's exact edit handshake", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-read-terminator-"))
+    const filePath = path.join(root, "edit.txt")
+    try {
+      fs.writeFileSync(filePath, "line one\nline two\n")
+      const output = [
+        `<path>${filePath}</path>`,
+        "<type>file</type>",
+        "<content>",
+        "1: line one",
+        "2: line two",
+        "",
+        "(End of file - total 2 lines)",
+        "</content>",
+      ].join("\n")
+      const r = buildTypedExecResult(
+        "read_result",
+        output,
+        undefined,
+        "read",
+        { path: filePath },
+      ) as { success: { content: string } }
+      expect(r.success.content).toBe("line one\nline two\n")
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it("read_result.content is raw content (no <path>/<content>/N: prefixes)", () => {
     const r = buildTypedExecResult("read_result", OPENCODE_READ_FULL) as {
       success: { path: string; content: string; total_lines: number }

@@ -187,6 +187,12 @@ export type CursorSession = {
    * or when we bridge the completed display call into an OpenCode tool-call.
    */
   displayToolCalls: Map<string, Record<string, unknown>>
+  /**
+   * Legacy edit calls whose authoritative exec path is still in progress.
+   * Cursor implements these as read -> whole-file write; retaining the path
+   * lets the pump expose the final mutation to OpenCode as a targeted edit.
+   */
+  editToolCalls?: Map<string, { path: string }>
   /** Monotonic synthetic exec ids for bridged (display-only) OpenCode tool calls. */
   nextBridgedExecId: number
   /** KV blob store: blob_id (hex) → data, for Cursor's out-of-band payload channel. */
@@ -207,8 +213,8 @@ export type CursorSession = {
   allowTools: boolean
   /**
    * Best-effort token usage for this held-open Run. Updated from text/tool
-   * activity and replaced by TurnEnded when the turn completes. Emitted on
-   * tool-calls finishes so OpenCode does not store all-zero usage mid-loop.
+   * activity and replaced by TurnEnded only for a single-step Run. Emitted on
+   * tool-call finishes so OpenCode does not store all-zero usage mid-loop.
    */
   usageEstimate: {
     inputTokens: number
@@ -217,6 +223,13 @@ export type CursorSession = {
     cacheWrite: number
     reasoningTokens: number
   }
+  /**
+   * True after this held Run has already crossed an OpenCode tool-call
+   * boundary. Cursor's eventual TurnEnded counters then cover the whole Run,
+   * not only the final doStream request, so they cannot be used as that
+   * request's context usage.
+   */
+  hadToolCallBoundary?: boolean
   /**
    * True while a doStream pull() is actively reading this session's frames.
    * Prevents a late cancel/abort from a prior ReadableStream from destroying

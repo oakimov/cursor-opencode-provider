@@ -5,6 +5,7 @@ import {
   ensureOpencodeProjectDir,
   adoptCompatHostCacheDir,
   getHostCacheDirOverride,
+  hostCacheDirFromProcess,
   opencodeGlobalCacheDir,
   opencodeGlobalConfigDir,
   opencodeGlobalDataDir,
@@ -122,6 +123,51 @@ describe("resolveHostCacheDir", () => {
       "/Users/dev/Projects/cursor-opencode-provider/dist/context/paths.js",
     )
     expect(dir).toBe(path.join("/tmp/xdg-cache", "opencode"))
+  })
+
+  it("resolves the MiMo cache for a source checkout running as mimo", () => {
+    const dir = resolveHostCacheDir(
+      { HOME: "/tmp/fake-home", XDG_CACHE_HOME: "/tmp/xdg-cache" },
+      "/Users/dev/Projects/cursor-opencode-provider/dist/context/paths.js",
+      { argv: ["/opt/mimo/bin/mimo"], execPath: "/opt/mimo/bin/mimo" },
+    )
+    expect(dir).toBe(path.join("/tmp/xdg-cache", "mimocode"))
+  })
+
+  it("resolves the Kilo cache for a source checkout running as the .kilo binary", () => {
+    const dir = resolveHostCacheDir(
+      { HOME: "/tmp/fake-home", XDG_CACHE_HOME: "/tmp/xdg-cache" },
+      "/Users/dev/Projects/cursor-opencode-provider/dist/context/paths.js",
+      { argv: ["/opt/kilo/bin/.kilo"], execPath: "/opt/kilo/bin/.kilo" },
+    )
+    expect(dir).toBe(path.join("/tmp/xdg-cache", "kilo"))
+  })
+
+  it("keeps the OpenCode cache for a source checkout running as opencode", () => {
+    const dir = resolveHostCacheDir(
+      { HOME: "/tmp/fake-home", XDG_CACHE_HOME: "/tmp/xdg-cache" },
+      "/Users/dev/Projects/cursor-opencode-provider/dist/context/paths.js",
+      { argv: ["/opt/local/bin/opencode"], execPath: "/opt/local/bin/opencode" },
+    )
+    expect(dir).toBe(path.join("/tmp/xdg-cache", "opencode"))
+  })
+
+  it("ignores non-binary argv entries when matching the running host", () => {
+    const dir = resolveHostCacheDir(
+      { HOME: "/tmp/fake-home", XDG_CACHE_HOME: "/tmp/xdg-cache" },
+      "/Users/dev/Projects/cursor-opencode-provider/dist/context/paths.js",
+      { argv: ["bun", "--opencode-config=/tmp/x"], execPath: "/opt/local/bin/bun" },
+    )
+    expect(dir).toBe(path.join("/tmp/xdg-cache", "opencode"))
+  })
+
+  it("hostCacheDirFromProcess maps binary names to host cache dirs", () => {
+    expect(hostCacheDirFromProcess(["/opt/mimo/bin/mimo"], "/opt/mimo/bin/mimo")).toBe("mimocode")
+    expect(hostCacheDirFromProcess(["/opt/kilo/bin/.kilo"], "/opt/kilo/bin/.kilo")).toBe("kilo")
+    expect(hostCacheDirFromProcess(["/opt/local/bin/opencode"], "/opt/local/bin/opencode")).toBe(
+      "opencode",
+    )
+    expect(hostCacheDirFromProcess(["/opt/local/bin/bun"], "/opt/local/bin/bun")).toBeUndefined()
   })
 })
 

@@ -597,6 +597,133 @@ export function remapNativeSubagentForCatalog(
 /** Matches Cursor's own pre-write read threshold (`local-exec` 52428800). */
 const MAX_EDIT_SOURCE_BYTES = 50 * 1024 * 1024
 
+type WholeFileEditReplacement = {
+  oldString: string
+  newString: string
+}
+
+/** Return the number of non-overlapping occurrences, stopping after ambiguity. */
+function replacementOccurrenceCount(source: string, needle: string): number {
+  if (!needle) return 0
+  const first = source.indexOf(needle)
+  if (first === -1) return 0
+  return source.indexOf(needle, first + needle.length) === -1 ? 1 : 2
+}
+
+function previousLineStart(source: string, start: number): number {
+  if (start <= 0) return 0
+  const before = source[start - 1] === "\n" ? start - 2 : start - 1
+  return source.lastIndexOf("\n", before) + 1
+}
+
+function followingLineEnd(source: string, end: number): number {
+  if (end >= source.length) return source.length
+  const newline = source.indexOf("\n", end)
+  return newline === -1 ? source.length : newline + 1
+}
+
+/**
+ * Collapse a whole-file replacement into one unique, line-bounded substring
+ * edit. Cursor's legacy edit executor computes a complete new file internally;
+ * OpenCode's `edit` tool instead wants old/new substrings.
+ */
+function planWholeFileEdit(source: string, target: string): WholeFileEditReplacement | undefined {
+  if (!source || source === target) return undefined
+
+  let prefix = 0
+  const shared = Math.min(source.length, target.length)
+  while (prefix < shared && source[prefix] === target[prefix]) prefix++
+
+  let suffix = 0
+  while (
+    suffix < source.length - prefix
+    && suffix < target.length - prefix
+    && source[source.length - suffix - 1] === target[target.length - suffix - 1]
+  ) suffix++
+
+  const sourceChangeEnd = source.length - suffix
+  const targetChangeEnd = target.length - suffix
+  let start = prefix === 0 ? 0 : source.lastIndexOf("\n", prefix - 1) + 1
+  let end = sourceChangeEnd >= source.length
+    ? source.length
+    : followingLineEnd(source, sourceChangeEnd)
+
+  // A pure insertion can initially select no source text. Include an adjacent
+  // line because OpenCode edit deliberately rejects an empty oldString.
+  if (start === end) {
+    if (start > 0) start = previousLineStart(source, start)
+    else end = followingLineEnd(source, end)
+  }
+
+  const replacement = (): WholeFileEditReplacement => ({
+    oldString: source.slice(start, end),
+    newString:
+      source.slice(start, prefix)
+      + target.slice(prefix, targetChangeEnd)
+      + source.slice(sourceChangeEnd, end),
+  })
+
+  let result = replacement()
+  while (replacementOccurrenceCount(source, result.oldString) !== 1) {
+    const priorStart = start
+    const priorEnd = end
+    if (start > 0) start = previousLineStart(source, start)
+    if (end < source.length) end = followingLineEnd(source, end)
+    if (start === priorStart && end === priorEnd) return undefined
+    result = replacement()
+  }
+  return result
+}
+
+/**
+ * Preserve a legacy Cursor edit's intent when its internal executor follows
+ * `edit_tool_call` with a whole-file `write_args` request.
+ *
+ * The result field intentionally remains `write_result`: that is the response
+ * Cursor is awaiting even though OpenCode executes the mutation via `edit`.
+ */
+export function remapCorrelatedEditWriteForCatalog(
+  parsed: ParsedExecRequest,
+  advertisedToolNames: Iterable<string>,
+  editPath: string,
+  workspaceRoot?: string,
+): boolean {
+  if (parsed.resultField !== "write_result" || parsed.toolName !== "write") return false
+  const advertised = new Set(advertisedToolNames)
+  if (!advertised.has("edit") && !advertised.has(APPLY_PATCH_TOOL)) return false
+
+  const filePath = str(parsed.args.filePath)
+  const content = stringValue(parsed.args.content)
+  if (!filePath || content === undefined || !editPath) return false
+
+  const root = workspaceRoot ?? process.cwd()
+  const absolute = path.resolve(root, filePath)
+  if (absolute !== path.resolve(root, editPath)) return false
+
+  let source: string
+  try {
+    const stat = fs.statSync(absolute)
+    if (!stat.isFile() || stat.size > MAX_EDIT_SOURCE_BYTES) return false
+    if (Buffer.byteLength(content, "utf8") > MAX_EDIT_SOURCE_BYTES) return false
+    source = fs.readFileSync(absolute, "utf8")
+  } catch {
+    // Missing targets are creations and must stay writes. Other read failures
+    // also fall back to the original host permission path without guessing.
+    return false
+  }
+
+  const replacement = planWholeFileEdit(source, content)
+  if (!replacement) return false
+  parsed.toolName = "edit"
+  parsed.args = {
+    filePath,
+    oldString: replacement.oldString,
+    newString: replacement.newString,
+  }
+  parsed.resultMetadata = { ...parsed.resultMetadata, path: filePath }
+  return true
+}
+
 /**
  * Express a native Cursor write/edit as `apply_patch` when the host swapped the
  * edit-tool family out from under us.
@@ -1402,9 +1529,15 @@ export function buildTypedExecResult(
       // Cursor's native read_args lands here; `mcp_args` reads land in
       // mcp_result. Live captures show gpt-5.4-mini and grok-4.5 both use the
       // native channel, so this is the path that matters in practice.
-      const content = unwrapReadOutput(output)
       const statPath = extractPathTag(output) ?? readPath
       const outputMetadata = parseOpenCodeReadMetadata(output)
+      const content = restoreCompleteReadTerminator(
+        unwrapReadOutput(output),
+        statPath,
+        outputMetadata,
+        resultMetadata,
+        resultRoot,
+      )
       const totalLines = outputMetadata.totalLines ?? readFileLineCount(statPath) ?? countLines(content)
       const rangeApplied = readRangeApplied(resultMetadata, totalLines)
       // `truncated` alone is not enough: it is set here, and models still assert
@@ -1655,6 +1788,55 @@ function parseOpenCodeReadMetadata(output: string): OpenCodeReadMetadata {
   const complete = /\(End of file - total (\d+) lines?\)/.exec(footer)
   if (complete) return { totalLines: Number(complete[1]) }
   return {}
+}
+
+/**
+ * OpenCode's numbered read envelope cannot represent the terminator after the
+ * final line. Cursor's legacy edit executor performs exact replacement against
+ * this content, so dropping a real LF/CRLF makes otherwise-valid edits fail and
+ * encourages a whole-file rewrite. Restore only that final terminator for an
+ * unbounded, confirmed-complete read; paged/capped reads stay untouched.
+ */
+function restoreCompleteReadTerminator(
+  content: string,
+  readPath: string,
+  metadata: OpenCodeReadMetadata,
+  resultMetadata?: Record<string, unknown>,
+  workspaceRoot?: string,
+): string {
+  if (
+    !readPath
+    || metadata.totalLines === undefined
+    || metadata.startLine !== undefined
+    || metadata.endLine !== undefined
+    || num(resultMetadata?.offset) !== undefined
+    || num(resultMetadata?.limit) !== undefined
+    || content.endsWith("\n")
+  ) return content
+
+  const absolute = path.isAbsolute(readPath)
+    ? readPath
+    : path.resolve(workspaceRoot ?? process.cwd(), readPath)
+  let fd: number | undefined
+  try {
+    fd = fs.openSync(absolute, "r")
+    const size = fs.fstatSync(fd).size
+    if (size === 0) return content
+    const tail = Buffer.alloc(Math.min(2, size))
+    fs.readSync(fd, tail, 0, tail.length, size - tail.length)
+    if (tail.length >= 2 && tail[tail.length - 2] === 0x0d && tail[tail.length - 1] === 0x0a) {
+      return `${content}\r\n`
+    }
+    if (tail[tail.length - 1] === 0x0a) return `${content}\n`
+  } catch {
+    // The host read result remains authoritative when the local path cannot be
+    // inspected (deleted/raced/permission changed after the tool completed).
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd) } catch { /* already closed */ }
+    }
+  }
+  return content
 }
 
 /**

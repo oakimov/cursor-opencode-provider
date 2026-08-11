@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test"
+import fs from "node:fs"
 import path from "node:path"
 import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
 import { toolsToDescriptors, toolsToMcpDescriptors } from "../src/protocol/tools.js"
@@ -234,25 +235,45 @@ describe("display-only ToolCall pump bridge", () => {
       content: "# New file\n",
     })
     expect(session.displayToolCalls.has(callId)).toBe(false)
+    expect(session.hadToolCallBoundary).toBe(true)
     sessionManager.resolve(session.sessionId, 16)
   })
 
-  it("keeps the normal read step for an existing-file edit", async () => {
+  it("keeps the read step but exposes a correlated existing-file write as edit", async () => {
     const writes: Uint8Array[] = []
-    const parts: any[] = []
+    const readParts: any[] = []
+    const editParts: any[] = []
     const callId = "edit-existing-file"
-    const target = path.join(process.cwd(), "README.md")
+    const target = path.join(
+      "/tmp",
+      `cursor-opencode-edit-${process.pid}-${Date.now()}.txt`,
+    )
+    fs.writeFileSync(target, "line one\nline two\nline three\nline four\n")
     const session = fakeSession(
       [
         displayPayload("started", callId, {
           edit_tool_call: {
-            args: { path: target, stream_content: "replacement" },
+            args: {
+              path: target,
+              // Some started frames arrive before streamed content is present;
+              // the correlated write_args remains authoritative.
+            },
           },
         }),
         encodeMessage("AgentServerMessage", {
           exec_server_message: {
             id: 17,
             read_args: { path: target, tool_call_id: callId },
+          },
+        }),
+        encodeMessage("AgentServerMessage", {
+          exec_server_message: {
+            id: 18,
+            write_args: {
+              path: target,
+              file_text: "edited one\nedited two\nedited three\nline four\n",
+              tool_call_id: callId,
+            },
           },
         }),
       ],
@@ -265,20 +286,40 @@ describe("display-only ToolCall pump bridge", () => {
     )
     const controller = {
       enqueue(part: unknown) {
-        parts.push(part)
+        readParts.push(part)
       },
       error(error: Error) {
         throw error
       },
     } as ReadableStreamDefaultController<any>
 
-    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+    try {
+      await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
 
-    expect(writes).toHaveLength(0)
-    const toolCall = parts.find((part) => part.type === "tool-call")
-    expect(toolCall?.toolName).toBe("read")
-    expect(JSON.parse(toolCall.input)).toEqual({ filePath: target })
-    sessionManager.resolve(session.sessionId, 17)
+      expect(writes).toHaveLength(0)
+      const readCall = readParts.find((part) => part.type === "tool-call")
+      expect(readCall?.toolName).toBe("read")
+      expect(JSON.parse(readCall.input)).toEqual({ filePath: target })
+      expect(session.editToolCalls?.has(callId)).toBe(true)
+      sessionManager.resolve(session.sessionId, 17)
+
+      await pump(session, {
+        enqueue(part: unknown) { editParts.push(part) },
+        error(error: Error) { throw error },
+      } as ReadableStreamDefaultController<any>, { textId: "text-2", reasoningId: "reasoning-2" })
+
+      const editCall = editParts.find((part) => part.type === "tool-call")
+      expect(editCall?.toolName).toBe("edit")
+      expect(JSON.parse(editCall.input)).toEqual({
+        filePath: target,
+        oldString: "line one\nline two\nline three\n",
+        newString: "edited one\nedited two\nedited three\n",
+      })
+      expect(session.editToolCalls?.has(callId)).toBe(false)
+      sessionManager.resolve(session.sessionId, 18)
+    } finally {
+      fs.rmSync(target, { force: true })
+    }
   })
 
   it("rejects a read of a missing path with a typed file_not_found before OpenCode sees it", async () => {

@@ -48,7 +48,7 @@ Add the package to OpenCode config. OpenCode installs npm plugins with Bun at st
 }
 ```
 
-Pin a version if you want: `"cursor-opencode-provider@0.4.0"`.
+Pin a version if you want: `"cursor-opencode-provider@0.4.1"`.
 
 You can also install it yourself first:
 
@@ -118,7 +118,7 @@ browser login or an API key. `CURSOR_API_KEY` is also picked up automatically.
 }
 ```
 
-Pin a version if you want: `"cursor-opencode-provider@0.4.0/plugin/opencode2"`.
+Pin a version if you want: `"cursor-opencode-provider@0.4.1/plugin/opencode2"`.
 
 OpenCode 2.0 installs the published package into its host cache and loads the AI SDK
 entry from there (`aisdk:cursor-opencode-provider`). No extra env vars are required.
@@ -379,11 +379,17 @@ The provider adds OpenCode-specific system guidance to normal tool-capable conve
 
 If this guidance causes issues, update `buildOpenCodeInteractionGuidance` in [`src/language-model.ts`](src/language-model.ts) and its focused coverage in [`test/prompt-history.test.ts`](test/prompt-history.test.ts).
 
+### Cursor edit handshakes
+
+Cursor's legacy `edit_tool_call` is implemented internally as a correlated `read_args` followed by a whole-file `write_args`; the write is transport mechanics, not a new decision to replace OpenCode's `edit` tool. The provider retains that correlation and exposes an existing-file mutation as one unique, line-bounded OpenCode `edit`. It still returns Cursor's expected typed `write_result`. New-file creation remains a `write`, and an `apply_patch`-only catalog receives the same targeted change as an `*** Update File:` patch.
+
+The prerequisite native read also preserves an existing final LF/CRLF. OpenCode's numbered read envelope cannot represent that terminator, and dropping it made Cursor's exact edit matcher reject valid replacements, retry reads, and eventually rewrite the file. This restoration applies only to confirmed-complete, unbounded reads; paged and capped reads keep their existing truncation behavior.
+
 ### `apply_patch` models (GPT-5 and friends)
 
 OpenCode 1.x does not simply add `apply_patch` for GPT-series models — it **removes** `edit` and `write` from the tool catalog and advertises `apply_patch` in their place (`ToolRegistry.tools`; the model id must contain `gpt-` and neither `oss` nor `gpt-4`). Cursor keeps sending its native write/edit requests regardless, so without translation every file change on a `gpt-5*` model is refused as an unavailable tool.
 
-The provider translates transparently: a native write becomes an `*** Add File:` patch, and a Pi edit becomes a minimal `*** Update File:` chunk widened to whole lines. This is keyed purely off what the host advertises — it is inert whenever `edit`/`write` are offered normally, and inert again when the host offers neither those nor `apply_patch`. An edit that cannot be expressed faithfully (target unreadable, or the text to replace is absent or ambiguous) is refused with a specific message rather than applied to the wrong region.
+The provider translates transparently: an uncorrelated native write becomes an `*** Add File:` patch, while a correlated legacy edit or Pi edit becomes a minimal `*** Update File:` chunk widened to whole lines. This is keyed purely off what the host advertises — it is inert whenever `edit`/`write` are offered normally, and inert again when the host offers neither those nor `apply_patch`. An edit that cannot be expressed faithfully (target unreadable, or the text to replace is absent or ambiguous) is refused with a specific message rather than applied to the wrong region.
 
 OpenCode 2.0 does not perform this substitution, so the path is 1.x-only in practice. See [`src/protocol/apply-patch.ts`](src/protocol/apply-patch.ts) for the upstream references.
 
@@ -425,7 +431,8 @@ The package root intentionally stays plugin-safe for OpenCode's classic loader. 
 | Visible `<shell_metadata>` timeout text | Rebuild and restart a local install. Cursor's shell timeout is carried on its exec request; the provider now removes OpenCode's internal timeout envelope before it is rendered or stored, then returns Cursor's typed timeout or background-handoff event instead of treating the text as successful stdout. |
 | `Unsupported Cursor exec variant …` | The error names the canonical Cursor CLI request field, its expected result field, and this provider's handling classification. `handling=unsupported` is a known Cursor-native capability without a safe OpenCode AI SDK bridge; `unknown request field` indicates new protocol drift; `handling=opencode-tool` or `provider-control` indicates a provider decoder/dispatch regression. Enable the debug log and report the full named error. |
 | Need wire-level logs | Set `CURSOR_PROVIDER_DEBUG=1` (optional `CURSOR_PROVIDER_DEBUG_FILE`; the default is `debug-<pid>.log` under `$TMPDIR/cursor-provider-logs-<uid>/`) and reproduce the issue. |
-| Cache **write** tokens always show as `0` | Not a mapping bug in this provider. Cursor's `TurnEnded` protobuf includes `cache_write` (field 4) and this package forwards it as AI SDK `inputTokens.cacheWrite` / OpenCode `cache.write`. Real agent sessions send field 4 as `0` even when `cache_read` is large on later turns. With debug logging, confirm `turn_ended raw wire fields: … f4:wt0=0` and `v3CacheWrite=0 source=turn_ended`. Cache **read** counts from the same message do populate correctly. |
+| OpenCode compacts immediately after a tool-heavy task | Upgrade to a version containing the cumulative-usage fix. Cursor's final `TurnEnded` counters cover the entire held multi-step Run; older provider versions exposed that aggregate as the final request's context size, which made OpenCode compact far too early. Fixed versions keep the raw counters in `providerMetadata.cursor` and report a request-local context estimate instead. |
+| Cache **write** tokens always show as `0` | Cursor's `TurnEnded` protobuf includes `cache_write` (field 4), but captured Runs set it to `0` even when `cache_read` is large. Single-step Runs expose those counters directly. For multi-step Runs they remain in `providerMetadata.cursor` because Cursor reports only a cumulative whole-Run total, which cannot safely be used as one OpenCode request's context usage. With debug logging, confirm `turn_ended raw wire fields: … f4:wt0=0`. |
 
 ## Security
 
@@ -434,7 +441,7 @@ Project `instructions` may reference absolute or `~/` paths (OpenCode parity). S
 ## Known limitations
 
 - **Personal use / ToS** — this provider speaks Cursor’s private agent protocol (CLI-shaped client identity). Use only with an account you own; Cursor may change or restrict the API without notice.
-- **`TurnEnded.cache_write` is unused by Cursor's agent** — usage comes from `interaction_update.turn_ended` (`input_tokens`, `output_tokens`, `cache_read`, `cache_write`, `reasoning_tokens`). The provider maps those 1:1 into AI SDK V3 nested usage. Captured live Runs consistently set `cache_write=0` on the wire while still reporting non-zero `cache_read` and `reasoning_tokens`; there is no alternate agent-stream field today that supplies write counts, so OpenCode/Kilo cannot show cache-write tokens for this provider until Cursor populates that counter.
+- **`TurnEnded` usage is whole-Run usage** — on a held multi-step Cursor Run, the final `interaction_update.turn_ended` counters aggregate every model invocation across tool boundaries. OpenCode usage is request-local and uses the latest assistant message to decide compaction, so publishing the aggregate there both double-counts earlier steps and causes premature compaction. The provider therefore uses a current-context estimate for multi-step AI SDK usage and preserves the exact cumulative counters in `providerMetadata.cursor`; single-step Runs still map the counters directly. Cursor also consistently sends `cache_write=0` in captured Runs, so no alternate write count is available.
 - **`request_context` from OpenCode** — each Run sends Cursor `RequestContext` built from OpenCode project context (workspace env, `AGENTS.md` / `instructions`, `.opencode` agents/skills/plugins, git, layout, plus `.claude`/`.agents` skill fallbacks). Its canonical root is also used by the [injected system guidance](#injected-system-guidance). Same discovery as OpenCode — including `.cursor/` paths only when listed in `instructions`. Cursor-only cloud/sandbox marketplace surfaces are omitted. `env.workspace_paths` / `process_working_directory` stay on the real git workspace; Cursor's metadata root (`project_folder`, MCP `workspace_project_dir`, terminals/transcripts) is advertised under `<host-cache>/projects/<slug>/` (default `~/.cache/opencode/projects/…`) so dumps like `agent-tools/` do not land in the repo. OpenCode remains the permission authority: its coarse allow/ask/deny configuration is not fabricated into Cursor's unrelated allow/block instruction-list messages.
 - **Configured MCP tools keep their upstream server id** — OpenCode builtins and plugin/custom tools are advertised under a synthetic `opencode` MCP server. Tools whose flattened name matches an MCP server in merged `opencode.json` configuration (`github_create_pull_request`, …) are grouped into that server's `mcp_descriptors` / `provider_identifier` (`github`, …). Unknown underscore-containing names stay under `opencode` rather than being guessed incorrectly. Cursor's MCP-state exec probe is answered from the same advertised descriptors before the actual tool request, using the full canonical tool-definition identity required by native `get_mcp_tools`; exec still reconstructs the full OpenCode tool id.
 - **Display completions are notifications, not execution requests** — Cursor `tool_call_*` frames use a typed `ToolCall` oneof. The provider decodes them for diagnostics but only mirrors finalized todo/plan state (`update_todos_tool_call` / `create_plan_tool_call`) into advertised OpenCode `todowrite`; the completed payload already contains the authoritative final list. Interactive, data-returning, and side-effecting completions are never replayed as new tools because their result could not be returned to Cursor. Exec-backed native subagent/Task and Pi read/bash/edit/write/grep/find/ls calls use their typed request/result fields instead. Unknown display variants are logged. All 37 Cursor CLI exec request/result pairs are inventoried by field and name; known-but-unsupported and future unknown exec variants fail explicitly rather than receiving a guessed response that could deadlock the Run.

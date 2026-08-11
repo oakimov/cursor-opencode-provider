@@ -73,17 +73,66 @@ export function getHostCacheDirOverride(): string | undefined {
   return hostCacheDirOverride
 }
 
+const HOST_CACHE_DIRS = ["mimocode", "kilo", "opencode"] as const
+export type HostCacheDir = (typeof HOST_CACHE_DIRS)[number]
+
+/**
+ * Host cache-dir name inferred from the running binary (`argv[0]` /
+ * `process.execPath`). A source-checkout provider can't be located by install
+ * path, but the binary that loaded it is authoritative: when this process IS
+ * `mimo` / `kilocode`, the cache root is that host's, not OpenCode's. Mirrors
+ * OCP `detect()` binaryHint semantics and tolerates the leading-dot Kilo binary
+ * (`.kilo`). Only `argv[0]` is inspected — later argv entries are arguments,
+ * not binary identity, and could otherwise cause false positives (e.g. an
+ * `--opencode-config=…` flag under a fork).
+ */
+export function hostCacheDirFromProcess(
+  argv: readonly string[] = process.argv,
+  execPath: string = process.execPath,
+): HostCacheDir | undefined {
+  for (const raw of [argv[0], execPath]) {
+    if (!raw) continue
+    const name = path.basename(String(raw)).toLowerCase().replace(/^\.+/, "")
+    if (
+      name === "mimo" ||
+      name === "mimocode" ||
+      name.startsWith("mimo-") ||
+      name.includes("mimocode")
+    ) {
+      return "mimocode"
+    }
+    if (
+      name === "kilo" ||
+      name === "kilocode" ||
+      name.startsWith("kilo-") ||
+      name.includes("kilocode")
+    ) {
+      return "kilo"
+    }
+    if (
+      name === "opencode" ||
+      name.startsWith("opencode-") ||
+      name.includes("opencode")
+    ) {
+      return "opencode"
+    }
+  }
+  return undefined
+}
+
 /**
  * Resolve the host cache directory without an override.
  *
  * Explicit host environment wins. Otherwise, an installed provider inherits
- * the host-named cache containing its module. A source checkout or otherwise
- * unidentifiable install defaults to OpenCode. Merely having another host's
- * config directory installed is not evidence that it owns this process.
+ * the host-named cache containing its module; a source checkout is attributed
+ * by the running binary identity (see {@link hostCacheDirFromProcess}). Merely
+ * having another host's config directory installed is not evidence that it
+ * owns this process.
  */
 export function resolveHostCacheDir(
   env: HostPathEnv = process.env,
   moduleUrl: string = import.meta.url,
+  processIdentity: { argv?: readonly string[]; execPath?: string } = {},
 ): string {
   const mimoHome = env.MIMOCODE_HOME
   if (mimoHome && mimoHome.length > 0) {
@@ -103,11 +152,19 @@ export function resolveHostCacheDir(
     modulePath = undefined
   }
   if (modulePath) {
-    for (const host of ["mimocode", "kilo", "opencode"] as const) {
+    for (const host of HOST_CACHE_DIRS) {
       const root = path.resolve(cacheHome, host)
       if (modulePath === root || modulePath.startsWith(`${root}${path.sep}`)) return root
     }
   }
+
+  // Source checkout: the module path can't name the host, but the binary that
+  // loaded us can (running as `mimo` / `kilocode` / `opencode`).
+  const host = hostCacheDirFromProcess(
+    processIdentity.argv ?? process.argv,
+    processIdentity.execPath ?? process.execPath,
+  )
+  if (host) return path.join(cacheHome, host)
 
   return path.join(cacheHome, "opencode")
 }
