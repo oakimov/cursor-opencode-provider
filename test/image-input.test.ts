@@ -32,6 +32,28 @@ describe("Cursor image input", () => {
     }])
   })
 
+  it("parses data-URL parameters in linear delimiter passes", async () => {
+    const images = await extractCursorUserImages({
+      role: "user",
+      content: [{
+        type: "file",
+        mediaType: "image/png",
+        data: "data:image/png;charset=utf-8;base64,AQID",
+      }],
+    })
+    expect(images[0]?.data).toEqual(Uint8Array.from([1, 2, 3]))
+
+    const malformed = extractCursorUserImages({
+      role: "user",
+      content: [{
+        type: "file",
+        mediaType: "image/png",
+        data: `data:;${";".repeat(100_000)},AQID`,
+      }],
+    })
+    expect(malformed).rejects.toBeInstanceOf(UnsupportedFunctionalityError)
+  })
+
   it("accepts byte data and infers wildcard image types", async () => {
     const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
     const images = await extractCursorUserImages({

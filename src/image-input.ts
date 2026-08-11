@@ -60,14 +60,33 @@ function decodeBase64(value: string): Uint8Array {
 }
 
 function decodeDataUrl(value: string): { data: Uint8Array; mimeType?: string } {
-  const match = /^data:([^;,]+)?(?:;[^,]*)*;base64,(.*)$/s.exec(value)
-  if (!match) {
+  if (!value.startsWith("data:")) {
     return unsupported(
       "image input",
       "Cursor provider supports base64-encoded image data URLs only",
     )
   }
-  return { data: decodeBase64(match[2]!), mimeType: match[1] || undefined }
+  const commaIndex = value.indexOf(",", 5)
+  if (commaIndex < 0) {
+    return unsupported(
+      "image input",
+      "Cursor provider supports base64-encoded image data URLs only",
+    )
+  }
+  const metadata = value.slice(5, commaIndex)
+  const finalSeparator = metadata.lastIndexOf(";")
+  if (finalSeparator < 0 || metadata.slice(finalSeparator + 1) !== "base64") {
+    return unsupported(
+      "image input",
+      "Cursor provider supports base64-encoded image data URLs only",
+    )
+  }
+  const firstSeparator = metadata.indexOf(";")
+  const mimeType = metadata.slice(0, firstSeparator)
+  return {
+    data: decodeBase64(value.slice(commaIndex + 1)),
+    mimeType: mimeType || undefined,
+  }
 }
 
 function inferImageMimeType(data: Uint8Array): string | undefined {
