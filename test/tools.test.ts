@@ -27,6 +27,11 @@ import {
   remapNativeSubagentForCatalog,
   resolveCursorSubagentType,
   REQUEST_CONTEXT_RESULT_FIELD,
+  isUriReadTarget,
+  buildListMcpResourcesFallback,
+  buildReadMcpResourceFallback,
+  CUSTOM_LIST_MCP_RESOURCES_TOOL,
+  CUSTOM_READ_MCP_RESOURCE_TOOL,
 } from "../src/protocol/tools.js"
 import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
 import { encodeJsonAsValue } from "../src/protocol/struct.js"
@@ -281,6 +286,56 @@ describe("custom web tool aliases", () => {
       "custom_websearch",
       "brave_brave_web_search",
     ])
+  })
+
+  it("aliases list_mcp_resources/read_mcp_resource to break the Cursor-native collision (Option B)", () => {
+    const catalog = buildCustomWebToolAliases([
+      { name: "list_mcp_resources", description: "List MCP resources" },
+      { name: "read_mcp_resource", description: "Read an MCP resource" },
+      { name: "list_mcp_resource_templates", description: "No Cursor field for this one" },
+    ])
+    expect(catalog.advertisedTools.map((tool) => tool.name)).toEqual([
+      CUSTOM_LIST_MCP_RESOURCES_TOOL,
+      CUSTOM_READ_MCP_RESOURCE_TOOL,
+      "list_mcp_resource_templates",
+    ])
+    expect(resolveCustomWebToolAlias(CUSTOM_LIST_MCP_RESOURCES_TOOL, catalog.aliases)).toBe(
+      "list_mcp_resources",
+    )
+    expect(resolveCustomWebToolAlias(CUSTOM_READ_MCP_RESOURCE_TOOL, catalog.aliases)).toBe(
+      "read_mcp_resource",
+    )
+
+    const flat = toolsToDescriptors(catalog.advertisedTools)
+    expect(flat.map((tool) => tool.name)).toContain(CUSTOM_LIST_MCP_RESOURCES_TOOL)
+    expect(flat.map((tool) => tool.name)).toContain(CUSTOM_READ_MCP_RESOURCE_TOOL)
+  })
+})
+
+describe("MCP resource exec typed fallback (fields 17/18, Option B)", () => {
+  it("answers list_mcp_resources with an empty success", () => {
+    const decoded = decodeMessage<any>(
+      "AgentClientMessage",
+      buildListMcpResourcesFallback(13),
+    )
+    expect(decoded.exec_client_message.id).toBe(13)
+    expect(decoded.exec_client_message.list_mcp_resources_exec_result).toMatchObject({
+      success: { resources: [] },
+    })
+  })
+
+  it("answers read_mcp_resource with a server-not-found error, echoing uri", () => {
+    const decoded = decodeMessage<any>(
+      "AgentClientMessage",
+      buildReadMcpResourceFallback(13, "everything", "demo://resource/static/document/1"),
+    )
+    expect(decoded.exec_client_message.id).toBe(13)
+    expect(decoded.exec_client_message.read_mcp_resource_exec_result).toMatchObject({
+      error: {
+        uri: "demo://resource/static/document/1",
+        error: 'Server "everything" not found',
+      },
+    })
   })
 })
 
@@ -1893,5 +1948,35 @@ describe("exec safety net (unmapped variants)", () => {
     expect(rc.tools[0].name).toBe("opencode-read")
     expect(rc.web_search_enabled).toBe(false)
     expect(rc.web_fetch_enabled).toBe(false)
+  })
+})
+
+describe("isUriReadTarget", () => {
+  it("treats scheme-addressed targets as the host's to resolve", () => {
+    for (const target of [
+      "xd://everything_echo",
+      "xd://mcp/everything/get-resource-reference",
+      "https://example.com/spec.json",
+      "http://localhost:3000/x",
+      "file:///etc/hosts",
+      "attachment://1",
+    ]) {
+      expect(isUriReadTarget(target), target).toBe(true)
+    }
+  })
+
+  it("keeps local paths — including Windows drive letters — on the filesystem path", () => {
+    for (const target of [
+      "README.md",
+      "./src/index.ts",
+      "/abs/path/file.ts",
+      "~/notes.md",
+      "C:\\Users\\me\\file.ts",
+      "C:/Users/me/file.ts",
+      "no-scheme:not-a-uri",
+      "",
+    ]) {
+      expect(isUriReadTarget(target), target).toBe(false)
+    }
   })
 })

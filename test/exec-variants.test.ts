@@ -84,8 +84,8 @@ describe("canonical Cursor exec variant map", () => {
     expect(new Set(CURSOR_EXEC_VARIANTS.map((variant) => variant.requestField)).size).toBe(37)
     expect(new Set(CURSOR_EXEC_VARIANTS.map((variant) => variant.requestName)).size).toBe(37)
     expect(CURSOR_EXEC_VARIANTS.filter((variant) => variant.handling === "opencode-tool")).toHaveLength(16)
-    expect(CURSOR_EXEC_VARIANTS.filter((variant) => variant.handling === "provider-control")).toHaveLength(2)
-    expect(CURSOR_EXEC_VARIANTS.filter((variant) => variant.handling === "unsupported")).toHaveLength(19)
+    expect(CURSOR_EXEC_VARIANTS.filter((variant) => variant.handling === "provider-control")).toHaveLength(4)
+    expect(CURSOR_EXEC_VARIANTS.filter((variant) => variant.handling === "unsupported")).toHaveLength(17)
   })
 
   it("keeps OpenCode tool classifications synchronized with executable mappings", () => {

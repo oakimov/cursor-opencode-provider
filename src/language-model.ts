@@ -19,11 +19,14 @@ import {
   buildExecClientMessages,
   buildReadRejectionMessages,
   classifyMissingReadTarget,
+  isUriReadTarget,
   resolveReadTargetPath,
   parseExecIdFromToolCallId,
   detectExecVariantField,
   buildRequestContextResult,
   buildMcpStateResult,
+  buildListMcpResourcesFallback,
+  buildReadMcpResourceFallback,
   buildCustomWebToolAliases,
   extractHostSubagentCatalog,
   resolveCustomWebToolAlias,
@@ -32,6 +35,8 @@ import {
   remapEditToolsForCatalog,
   CUSTOM_WEBFETCH_TOOL,
   CUSTOM_WEBSEARCH_TOOL,
+  CUSTOM_LIST_MCP_RESOURCES_TOOL,
+  CUSTOM_READ_MCP_RESOURCE_TOOL,
   type OpencodeToolDef,
   type ParsedExecRequest,
 } from "./protocol/tools.js"
@@ -1285,6 +1290,14 @@ export async function pump(
     if (parsed.toolName !== "read") return false
     const requested = typeof parsed.args.filePath === "string" ? parsed.args.filePath : ""
     if (!requested) return false
+    // A scheme-addressed target is the host's to resolve, not a local file to
+    // stat. Rejecting it here makes host-mounted capabilities (oh-my-pi's
+    // `xd://` device URLs, which is how every MCP tool is exposed by default)
+    // permanently unreachable through this provider.
+    if (isUriReadTarget(requested)) {
+      trace(`exec: forwarding URI read target id=${parsed.id} target=${JSON.stringify(requested)}`)
+      return false
+    }
     const workspaceRoot = workspaceRootFromRequestContext(session.requestContext)
     const absolutePath = resolveReadTargetPath(requested, workspaceRoot)
     const readResult = classifyMissingReadTarget(absolutePath)
@@ -1682,6 +1695,29 @@ export async function pump(
         } catch {
           failRunProtocol("Cursor MCP-state reply failed", RUN_REPLY_FAILED)
         }
+      } else if (esm.list_mcp_resources_exec_args) {
+        // Native Cursor exec (agent.v1 field 17), no OpenCode route under
+        // Option B — see tasks/plans/fix-cursor-mcp-resource-exec.md. Answer
+        // with Cursor's own no-client-qualifies shape and keep pumping.
+        const args = esm.list_mcp_resources_exec_args as Record<string, unknown>
+        const server = typeof args.server === "string" ? args.server : ""
+        try {
+          session.stream.write(buildListMcpResourcesFallback(esmId))
+          trace(`exec list_mcp_resources: replied id=${esmId} server=${server || "(all)"} success{resources:[]}`)
+        } catch {
+          failRunProtocol("Cursor list_mcp_resources reply failed", RUN_REPLY_FAILED)
+        }
+      } else if (esm.read_mcp_resource_exec_args) {
+        // Native Cursor exec (agent.v1 field 18) — same rationale as above.
+        const args = esm.read_mcp_resource_exec_args as Record<string, unknown>
+        const server = typeof args.server === "string" ? args.server : ""
+        const uri = typeof args.uri === "string" ? args.uri : ""
+        try {
+          session.stream.write(buildReadMcpResourceFallback(esmId, server, uri))
+          trace(`exec read_mcp_resource: replied id=${esmId} server=${server} uri=${uri} error{server not found}`)
+        } catch {
+          failRunProtocol("Cursor read_mcp_resource reply failed", RUN_REPLY_FAILED)
+        }
       } else {
         replaySafety.markBarrier("non-control-exec")
         const displayCallId = extractExecDisplayCallId(esm)
@@ -2018,6 +2054,16 @@ export function buildOpenCodeInteractionGuidance(
   if (names.has(CUSTOM_WEBFETCH_TOOL)) {
     instructions.push(
       `- To fetch a known URL, call \`${CUSTOM_WEBFETCH_TOOL}\`; do not use Cursor's native WebFetch interaction.`,
+    )
+  }
+  if (names.has(CUSTOM_LIST_MCP_RESOURCES_TOOL)) {
+    instructions.push(
+      `- To list MCP resources, call \`${CUSTOM_LIST_MCP_RESOURCES_TOOL}\`; do not use Cursor's native resource-listing interaction.`,
+    )
+  }
+  if (names.has(CUSTOM_READ_MCP_RESOURCE_TOOL)) {
+    instructions.push(
+      `- To read an MCP resource, call \`${CUSTOM_READ_MCP_RESOURCE_TOOL}\`; do not use Cursor's native resource-reading interaction.`,
     )
   }
   if (names.has("task") || names.has("actor")) {

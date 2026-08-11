@@ -36,6 +36,8 @@ export type OpencodeToolDef = {
 
 export const CUSTOM_WEBSEARCH_TOOL = "custom_websearch"
 export const CUSTOM_WEBFETCH_TOOL = "custom_webfetch"
+export const CUSTOM_LIST_MCP_RESOURCES_TOOL = "custom_list_mcp_resources"
+export const CUSTOM_READ_MCP_RESOURCE_TOOL = "custom_read_mcp_resource"
 
 /** Cursor-facing alias → exact host tool name accepted by the AI SDK call. */
 export type ToolAliasRegistry = ReadonlyMap<string, string>
@@ -107,13 +109,13 @@ export function toolsToDescriptors(
 ): Array<Record<string, unknown>> {
   return tools.map((t) => {
     const id = resolveToolServerIdentity(t.sourceName ?? t.name, providerIdentifier, knownMcpServers)
-    const collisionSafeWebAlias =
-      t.name === CUSTOM_WEBSEARCH_TOOL || t.name === CUSTOM_WEBFETCH_TOOL
+    const collisionSafeAlias = COLLISION_SAFE_ALIASES.has(t.name)
     return {
       // Keep the collision-safe public name exact. Prefixing it with the
       // synthetic default server weakens the distinction from Cursor-native
-      // web tools in the model-visible catalog.
-      name: collisionSafeWebAlias ? t.name : `${id.server}-${id.toolName}`,
+      // capabilities (web search/fetch, MCP resource list/read) in the
+      // model-visible catalog.
+      name: collisionSafeAlias ? t.name : `${id.server}-${id.toolName}`,
       description: t.description ?? "",
       input_schema: encodeJsonAsValue(normalizeInputSchema(t.inputSchema)),
       provider_identifier: id.server,
@@ -135,6 +137,10 @@ type WebAliasRule = {
   suffixes: readonly string[]
 }
 
+// Despite the name, these rules cover any advertised OpenCode tool whose bare
+// name collides with a Cursor-native capability, not only web search/fetch —
+// see the MCP resource entries below and
+// tasks/plans/fix-cursor-mcp-resource-exec.md Phase 0/2.
 const WEB_ALIAS_RULES: readonly WebAliasRule[] = [
   {
     alias: CUSTOM_WEBSEARCH_TOOL,
@@ -146,7 +152,24 @@ const WEB_ALIAS_RULES: readonly WebAliasRule[] = [
     exact: ["webfetch", "web_fetch"],
     suffixes: ["_web_fetch", "-web_fetch", "_webfetch", "-webfetch"],
   },
+  {
+    alias: CUSTOM_LIST_MCP_RESOURCES_TOOL,
+    exact: ["list_mcp_resources"],
+    suffixes: ["_list_mcp_resources", "-list_mcp_resources"],
+  },
+  {
+    alias: CUSTOM_READ_MCP_RESOURCE_TOOL,
+    exact: ["read_mcp_resource"],
+    suffixes: ["_read_mcp_resource", "-read_mcp_resource"],
+  },
 ]
+
+const COLLISION_SAFE_ALIASES = new Set([
+  CUSTOM_WEBSEARCH_TOOL,
+  CUSTOM_WEBFETCH_TOOL,
+  CUSTOM_LIST_MCP_RESOURCES_TOOL,
+  CUSTOM_READ_MCP_RESOURCE_TOOL,
+])
 
 /**
  * Give collision-prone web capabilities names Cursor will not confuse with its
@@ -1258,10 +1281,33 @@ function untildify(input: string): string {
 }
 
 /**
+ * A read target addressed by URI scheme rather than by local filesystem path.
+ *
+ * Cursor's LocalReadExecutor only ever reads local files, so this provider
+ * mirrors its pre-execution validation. Host read tools are not so limited:
+ * oh-my-pi's `read` accepts "a path, URL, or internal URI", and mounts every
+ * discoverable tool — including all MCP server tools — under `xd://<tool>`
+ * device URLs that are read for their schema and written to for execution
+ * (`tools.xdev`, on by default). Resolving those against the workspace root
+ * mangles `xd://everything_echo` into `<root>/xd:/everything_echo`, which stats
+ * as missing and gets refused as `file_not_found` — so the host's read tool is
+ * never called and every xd://-mounted MCP tool is unreachable through this
+ * provider. Such targets must be forwarded untouched and left to the host.
+ *
+ * Requires a scheme of two or more characters followed by `://`, so Windows
+ * drive letters (`C:\src`, `C:/src`) stay local paths.
+ */
+export function isUriReadTarget(requested: string): boolean {
+  return /^[a-zA-Z][a-zA-Z0-9+.-]+:\/\//.test(requested)
+}
+
+/**
  * Resolve a read target the way Cursor's LocalReadExecutor does before it
  * stats the file: untildify, then resolve a relative path against the workspace
  * root (`env.workspace_paths[0]`), else resolve as-is. Kept in lockstep with
  * agent utils `resolvePath(path, workspaceRoot)`.
+ *
+ * Only meaningful for local paths; check {@link isUriReadTarget} first.
  */
 export function resolveReadTargetPath(requested: string, workspaceRoot: string): string {
   const expanded = untildify(requested)
@@ -2176,6 +2222,41 @@ function mcpStateToolDefinition(
     provider_identifier: serverIdentifier,
     tool_name: toolName,
   }
+}
+
+/**
+ * Total fallback for Cursor's native MCP-resource exec channel (agent.v1
+ * fields #17/#18, tasks/plans/fix-cursor-mcp-resource-exec.md). Under Option B
+ * `list_mcp_resources`/`read_mcp_resource` execute through the ordinary
+ * field-11 MCP path via the alias rules above, so any 17/18 that still reaches
+ * this provider is Cursor emitting the native variant unsolicited (its own
+ * client owns both executors unconditionally — there is no descriptor to
+ * un-advertise). Cursor's executors are total; mirror that here rather than
+ * guessing a generic success, which risks an endless heartbeat loop.
+ */
+export function buildListMcpResourcesFallback(execId: number): Uint8Array {
+  return encodeMessage("AgentClientMessage", {
+    exec_client_message: {
+      id: execId,
+      list_mcp_resources_exec_result: { success: { resources: [] } },
+    },
+  })
+}
+
+/** See buildListMcpResourcesFallback. Always an `error`, even for `download_path`. */
+export function buildReadMcpResourceFallback(
+  execId: number,
+  server: string,
+  uri: string,
+): Uint8Array {
+  return encodeMessage("AgentClientMessage", {
+    exec_client_message: {
+      id: execId,
+      read_mcp_resource_exec_result: {
+        error: { uri, error: `Server "${server}" not found` },
+      },
+    },
+  })
 }
 
 function recordValue(value: unknown): Record<string, unknown> | undefined {

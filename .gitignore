@@ -35,8 +35,7 @@ coverage/
 *.lcov
 
 # Local planning / scratch / agent dumps
-plans/
-tasks/
+tasks/plans/
 scratch/
 agent-tools/
 

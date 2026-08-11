@@ -363,6 +363,48 @@ describe("display-only ToolCall pump bridge", () => {
     })
   })
 
+  it("forwards a scheme-addressed read target to the host instead of refusing it", async () => {
+    // oh-my-pi mounts every discoverable tool — all MCP server tools included —
+    // under `xd://<tool>` device URLs read for their schema and written to for
+    // execution. Resolving those as workspace-relative paths stats them as
+    // missing, so refusing here would make every xd://-mounted MCP tool
+    // permanently unreachable through this provider.
+    for (const target of ["xd://everything_echo", "https://example.com/spec.json"]) {
+      const writes: Uint8Array[] = []
+      const parts: any[] = []
+      const session = fakeSession(
+        [
+          encodeMessage("AgentServerMessage", {
+            exec_server_message: { id: 22, read_args: { path: target } },
+          }),
+        ],
+        writes,
+        [{ name: "read", description: "Read" }],
+      )
+      const controller = {
+        enqueue(part: unknown) {
+          parts.push(part)
+        },
+        error(error: Error) {
+          throw error
+        },
+      } as ReadableStreamDefaultController<any>
+
+      await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+      // The host executes it: a tool-call is emitted and no typed rejection is written.
+      const toolCall = parts.find((part) => part.type === "tool-call")
+      expect(toolCall?.toolName, target).toBe("read")
+      expect(JSON.parse(toolCall.input), target).toEqual({ filePath: target })
+      expect(writes, target).toHaveLength(0)
+      expect(sessionManager.pendingFor(session.sessionId, 22), target).toMatchObject({
+        resultField: "read_result",
+        toolName: "read",
+      })
+      sessionManager.resolve(session.sessionId, 22)
+    }
+  })
+
   it("rejects a read of a directory with a typed invalid_file", async () => {
     const writes: Uint8Array[] = []
     const parts: any[] = []
@@ -979,6 +1021,94 @@ describe("display-only ToolCall pump bridge", () => {
     expect(toolCall?.toolName).toBe("write")
     expect(JSON.parse(toolCall.input)).toEqual({ filePath: "/tmp/result.txt", content: "done" })
     sessionManager.resolve(session.sessionId, 1)
+  })
+
+  it("answers native list_mcp_resources exec (field 17) with an empty success and keeps pumping", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    const session = fakeSession(
+      [
+        encodeMessage("AgentServerMessage", {
+          exec_server_message: { id: 13, list_mcp_resources_exec_args: { server: "everything" } },
+        }),
+        turnEndedPayload(),
+      ],
+      writes,
+    )
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error(error: Error) {
+        throw error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    expect(writes).toHaveLength(1)
+    const result = decodeMessage<any>("AgentClientMessage", writes[0]!)
+      .exec_client_message.list_mcp_resources_exec_result
+    expect(result.error).toBeUndefined()
+    expect(result.success.resources).toEqual([])
+    expect(parts.some((part) => part.type === "finish")).toBe(true)
+  })
+
+  it("answers native read_mcp_resource exec (field 18) with a not-found-server error and keeps pumping", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    const session = fakeSession(
+      [
+        encodeMessage("AgentServerMessage", {
+          exec_server_message: {
+            id: 13,
+            read_mcp_resource_exec_args: {
+              server: "everything",
+              uri: "demo://resource/static/document/1",
+            },
+          },
+        }),
+        turnEndedPayload(),
+      ],
+      writes,
+    )
+    const controller = {
+      enqueue(part: unknown) {
+        parts.push(part)
+      },
+      error(error: Error) {
+        throw error
+      },
+    } as ReadableStreamDefaultController<any>
+
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+    expect(writes).toHaveLength(1)
+    const result = decodeMessage<any>("AgentClientMessage", writes[0]!)
+      .exec_client_message.read_mcp_resource_exec_result
+    expect(result.success).toBeUndefined()
+    expect(result.error).toMatchObject({
+      uri: "demo://resource/static/document/1",
+      error: 'Server "everything" not found',
+    })
+    expect(parts.some((part) => part.type === "finish")).toBe(true)
+  })
+
+  it("no longer fails the Run for fields 17/18 (regression for the original CURSOR_RUN_REQUEST_UNSUPPORTED crash)", async () => {
+    for (const field of [17, 18]) {
+      const writes: Uint8Array[] = []
+      const session = fakeSession([rawExecPayload(42, field), turnEndedPayload()], writes)
+      const controller = {
+        enqueue() {},
+        error(error: Error) {
+          throw error
+        },
+      } as ReadableStreamDefaultController<any>
+
+      await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+      expect(writes).toHaveLength(1)
+    }
   })
 
   it("translates a custom web alias back to the executable host tool", async () => {

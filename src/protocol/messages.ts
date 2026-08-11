@@ -823,6 +823,100 @@ export function createMessageTypes(): protobuf.Root {
     { id: 5, name: "tool_name", type: "string" },
   ])
 
+  // ── MCP resource exec (fields 17/18) ──
+  // agent.v1 ListMcpResourcesExecArgs/Result, ReadMcpResourceExecArgs/Result.
+  // Native Cursor exec variants: no descriptor, no advertisement, and Cursor
+  // may emit either unsolicited regardless of what this provider advertises
+  // (tasks/plans/fix-cursor-mcp-resource-exec.md, Correction 2). Under Option
+  // B, list_mcp_resources/read_mcp_resource execute through the ordinary
+  // field-11 MCP path via the alias rules below, so any 17/18 that still
+  // reaches this provider gets the total fallback built in tools.ts.
+  addType(root, "SmartModeApproval", [
+    { id: 1, name: "request_id", type: "string" },
+    { id: 2, name: "reason", type: "string" },
+  ])
+  addType(root, "OutputLocation", [
+    { id: 1, name: "file_path", type: "string" },
+    { id: 2, name: "size_bytes", type: "int64" },
+    { id: 3, name: "line_count", type: "int64" },
+  ])
+
+  addType(root, "ListMcpResourcesExecArgs", [
+    { id: 1, name: "server", type: "string" },
+  ])
+  {
+    const t = new protobuf.Type("ListMcpResourcesExecResult_McpResource")
+    t.add(new protobuf.Field("uri", 1, "string"))
+    t.add(new protobuf.Field("name", 2, "string"))
+    t.add(new protobuf.Field("description", 3, "string"))
+    t.add(new protobuf.Field("mime_type", 4, "string"))
+    t.add(new protobuf.Field("server", 5, "string"))
+    t.add(new protobuf.MapField("annotations", 6, "string", "string"))
+    root.add(t)
+  }
+  addType(root, "ListMcpResourcesSuccess", [
+    { id: 1, name: "resources", type: "ListMcpResourcesExecResult_McpResource", repeated: true },
+  ])
+  addType(root, "ListMcpResourcesError", [{ id: 1, name: "error", type: "string" }])
+  addType(root, "ListMcpResourcesRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(
+    root,
+    "ListMcpResourcesExecResult",
+    [
+      { id: 1, name: "success", type: "ListMcpResourcesSuccess" },
+      { id: 2, name: "error", type: "ListMcpResourcesError" },
+      { id: 3, name: "rejected", type: "ListMcpResourcesRejected" },
+    ],
+    [{ name: "result", fields: ["success", "error", "rejected"] }],
+  )
+
+  addType(root, "ReadMcpResourceExecArgs", [
+    { id: 1, name: "server", type: "string" },
+    { id: 2, name: "uri", type: "string" },
+    { id: 3, name: "download_path", type: "string" },
+    { id: 4, name: "tool_call_id", type: "string" },
+    { id: 5, name: "smart_mode_approval", type: "SmartModeApproval" },
+  ])
+  {
+    // Interleaved field order matches agent.proto exactly: the text/blob oneof
+    // (5/6) sits between the shared metadata (1-4) and the trailing
+    // annotations/download/output fields (7-9).
+    const t = new protobuf.Type("ReadMcpResourceSuccess")
+    t.add(new protobuf.Field("uri", 1, "string"))
+    t.add(new protobuf.Field("name", 2, "string"))
+    t.add(new protobuf.Field("description", 3, "string"))
+    t.add(new protobuf.Field("mime_type", 4, "string"))
+    t.add(new protobuf.Field("text", 5, "string"))
+    t.add(new protobuf.Field("blob", 6, "bytes"))
+    t.add(new protobuf.MapField("annotations", 7, "string", "string"))
+    t.add(new protobuf.Field("download_path", 8, "string"))
+    t.add(new protobuf.Field("output_location", 9, "OutputLocation"))
+    t.add(new protobuf.OneOf("content", ["text", "blob"]))
+    root.add(t)
+  }
+  addType(root, "ReadMcpResourceError", [
+    { id: 1, name: "uri", type: "string" },
+    { id: 2, name: "error", type: "string" },
+  ])
+  // Cursor quirk: on `rejected` only `reason` is set — `uri` (field 1) is
+  // deliberately left empty. Mirror this; do not backfill uri on encode.
+  addType(root, "ReadMcpResourceRejected", [
+    { id: 1, name: "uri", type: "string" },
+    { id: 2, name: "reason", type: "string" },
+  ])
+  addType(root, "ReadMcpResourceNotFound", [{ id: 1, name: "uri", type: "string" }])
+  addType(
+    root,
+    "ReadMcpResourceExecResult",
+    [
+      { id: 1, name: "success", type: "ReadMcpResourceSuccess" },
+      { id: 2, name: "error", type: "ReadMcpResourceError" },
+      { id: 3, name: "rejected", type: "ReadMcpResourceRejected" },
+      { id: 4, name: "not_found", type: "ReadMcpResourceNotFound" },
+    ],
+    [{ name: "result", fields: ["success", "error", "rejected", "not_found"] }],
+  )
+
   // ── request_context (#10): server-initiated setup probe ──
   // At the start of an agent turn the server sends ExecServerMessage
   // {request_context_args} to ask the client for workspace/env/tool context.
@@ -1009,6 +1103,8 @@ export function createMessageTypes(): protobuf.Root {
       { id: 11, name: "mcp_args", type: "McpArgs" },
       { id: 14, name: "shell_stream_args", type: "ShellArgs" },
       { id: 16, name: "background_shell_spawn_args", type: "BackgroundShellSpawnArgs" },
+      { id: 17, name: "list_mcp_resources_exec_args", type: "ListMcpResourcesExecArgs" },
+      { id: 18, name: "read_mcp_resource_exec_args", type: "ReadMcpResourceExecArgs" },
       { id: 28, name: "subagent_args", type: "SubagentArgs" },
       { id: 36, name: "mcp_state_exec_args", type: "McpStateExecArgs" },
       { id: 45, name: "pi_read_args", type: "PiReadToolArgs" },
@@ -1021,7 +1117,8 @@ export function createMessageTypes(): protobuf.Root {
     ],
     [{ name: "args", fields: [
       "write_args", "delete_args", "grep_args", "read_args", "ls_args",
-      "request_context_args", "mcp_args", "shell_stream_args", "background_shell_spawn_args", "mcp_state_exec_args",
+      "request_context_args", "mcp_args", "shell_stream_args", "background_shell_spawn_args",
+      "list_mcp_resources_exec_args", "read_mcp_resource_exec_args", "mcp_state_exec_args",
       "subagent_args",
       "pi_read_args", "pi_bash_args", "pi_edit_args", "pi_write_args",
       "pi_grep_args", "pi_find_args", "pi_ls_args",
@@ -1045,6 +1142,8 @@ export function createMessageTypes(): protobuf.Root {
       { id: 11, name: "mcp_result", type: "McpResult" },
       { id: 14, name: "shell_stream", type: "ShellStream" },
       { id: 16, name: "background_shell_spawn_result", type: "BackgroundShellSpawnResult" },
+      { id: 17, name: "list_mcp_resources_exec_result", type: "ListMcpResourcesExecResult" },
+      { id: 18, name: "read_mcp_resource_exec_result", type: "ReadMcpResourceExecResult" },
       { id: 28, name: "subagent_result", type: "SubagentResult" },
       { id: 36, name: "mcp_state_exec_result", type: "McpStateExecResult" },
       { id: 46, name: "pi_read_result", type: "PiReadExecResult" },
@@ -1057,7 +1156,8 @@ export function createMessageTypes(): protobuf.Root {
     ],
     [{ name: "result", fields: [
       "write_result", "delete_result", "grep_result", "read_result", "ls_result",
-      "request_context_result", "mcp_result", "shell_stream", "background_shell_spawn_result", "mcp_state_exec_result",
+      "request_context_result", "mcp_result", "shell_stream", "background_shell_spawn_result",
+      "list_mcp_resources_exec_result", "read_mcp_resource_exec_result", "mcp_state_exec_result",
       "subagent_result",
       "pi_read_result", "pi_bash_result", "pi_edit_result", "pi_write_result",
       "pi_grep_result", "pi_find_result", "pi_ls_result",
