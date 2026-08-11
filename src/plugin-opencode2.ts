@@ -45,6 +45,12 @@ async function loadModels(cacheDir: string, accessToken: string | undefined): Pr
   return cached?.models ?? []
 }
 
+function toolExecutionID(event: { readonly id?: string; readonly callID?: string }): string {
+  const id = event.id ?? event.callID
+  if (!id) throw new Error("OpenCode 2.0 tool hook did not provide an execution id")
+  return id
+}
+
 const plugin: Plugin2 = {
   id: "cursor.provider",
 
@@ -163,8 +169,9 @@ const plugin: Plugin2 = {
     await track(
       ctx.tool.hook("execute.before", (event) => {
         if (event.tool !== "bash") return
+        const executionID = toolExecutionID(event)
         // No `shell.env` in 2.0 → always use the wrapper-file command form.
-        prepareCursorShellArgs(event.callID, event.input as Record<string, unknown>, {
+        prepareCursorShellArgs(executionID, event.input as Record<string, unknown>, {
           preferWrapperCommand: true,
         })
       }),
@@ -173,23 +180,24 @@ const plugin: Plugin2 = {
     await track(
       ctx.tool.hook("execute.after", (event) => {
         if (event.tool !== "bash") return
+        const executionID = toolExecutionID(event)
         try {
           if (event.status !== "completed") return
           const result = event.result as Record<string, any>
-          result.title = cursorShellOriginalCommand(event.callID) ?? result.title
+          result.title = cursorShellOriginalCommand(executionID) ?? result.title
           result.output = captureCursorShellResult(
-            event.callID,
+            executionID,
             result.output,
             result.metadata as Record<string, unknown> | undefined,
           )
           if (result.metadata && typeof result.metadata === "object") {
             const metadata = result.metadata as Record<string, unknown>
             if (typeof metadata.output === "string") {
-              metadata.output = sanitizeRegisteredCursorShellOutput(event.callID, metadata.output)
+              metadata.output = sanitizeRegisteredCursorShellOutput(executionID, metadata.output)
             }
           }
         } finally {
-          releaseCursorShellEnv(event.callID)
+          releaseCursorShellEnv(executionID)
         }
       }),
     )

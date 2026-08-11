@@ -6,6 +6,10 @@ import {
   type ModelVariant,
 } from "./models.js"
 import { applyCursorModelCost } from "./pricing.js"
+import {
+  getDocumentedCursorModelContext,
+  resolveCursorModelSupportsImages,
+} from "./model-metadata.js"
 
 /**
  * Cursor `ModelInfo` → OpenCode model-config mapping.
@@ -161,19 +165,26 @@ export function modelInfoToConfig(
   // OpenCode's context limit is static per model entry, while Cursor's context
   // tier is a variant parameter. Long-context choices are therefore emitted as
   // separate OpenCode entries by modelsToConfig.
+  const documentedContext = getDocumentedCursorModelContext(mi.id)
   const context = contextTier === "long"
-    ? (mi.maxContextForMaxMode ?? 1_000_000)
-    : (mi.maxContext ?? 200_000)
+    ? (mi.maxContextForMaxMode ?? documentedContext?.maxContextForMaxMode ?? 1_000_000)
+    : (mi.maxContext ?? documentedContext?.maxContext ?? 200_000)
   // OpenCode's overflow/compaction/UI use limit.context; generation and
   // thinking budgets use limit.output. models.dev 1M peers advertise
   // 64k–128k output — a tiny cap makes long-context sessions feel broken
   // even when the 1M input window is correct.
   const output = contextTier === "long" ? 128_000 : 32_000
+  const supportsImages = resolveCursorModelSupportsImages(mi.id, mi.supportsImages)
   const config: Record<string, any> = {
     name,
+    attachment: supportsImages,
     reasoning: mi.supportsThinking ?? false,
     tool_call: mi.supportsAgent ?? true,
     temperature: false,
+    modalities: {
+      input: supportsImages ? ["text", "image"] : ["text"],
+      output: ["text"],
+    },
     limit: {
       context,
       output,

@@ -1,5 +1,6 @@
 import { encodeMessage, getMessageTypes } from "./messages.js"
 import { toolsToDescriptors, type OpencodeToolDef } from "./tools.js"
+import type { CursorImageInput } from "../image-input.js"
 
 export type SeedHistoryMessage = {
   role: "system" | "user" | "assistant"
@@ -8,6 +9,7 @@ export type SeedHistoryMessage = {
 
 export type RunRequestInput = {
   text: string
+  images?: CursorImageInput[]
   modelId: string
   conversationId: string
   systemPrompt?: string
@@ -87,12 +89,21 @@ export function buildRunRequest(input: RunRequestInput): Uint8Array {
   const mcpTools = input.toolDescriptors ?? (tools.length > 0 ? toolsToDescriptors(tools) : [])
   const requestContext = input.requestContext
 
-  const userMessageAction: Record<string, unknown> = {
-    user_message: {
-      text: input.text,
-      message_id: msgId,
-    },
+  const userMessage: Record<string, unknown> = {
+    text: input.text,
+    message_id: msgId,
   }
+  if (input.images?.length) {
+    userMessage.selected_context = {
+      selected_images: input.images.map((image) => ({
+        data: image.data,
+        uuid: crypto.randomUUID(),
+        path: image.filename,
+        mime_type: image.mimeType,
+      })),
+    }
+  }
+  const userMessageAction: Record<string, unknown> = { user_message: userMessage }
   if (requestContext) userMessageAction.request_context = requestContext
   const action = input.action === "resume"
     ? { resume_action: {} }

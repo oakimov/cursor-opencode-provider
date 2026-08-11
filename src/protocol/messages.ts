@@ -1105,9 +1105,36 @@ export function createMessageTypes(): protobuf.Root {
     { id: 3, name: "parameters", type: "ParameterValue", repeated: true },
   ])
 
+  addType(root, "SelectedImageDimension", [
+    { id: 1, name: "width", type: "int32" },
+    { id: 2, name: "height", type: "int32" },
+  ])
+  addType(root, "SelectedImageBlobIdWithData", [
+    { id: 1, name: "blob_id", type: "bytes" },
+    { id: 2, name: "data", type: "bytes" },
+  ])
+  addType(
+    root,
+    "SelectedImage",
+    [
+      { id: 1, name: "blob_id", type: "bytes" },
+      { id: 8, name: "data", type: "bytes" },
+      { id: 9, name: "blob_id_with_data", type: "SelectedImageBlobIdWithData" },
+      { id: 2, name: "uuid", type: "string" },
+      { id: 3, name: "path", type: "string" },
+      { id: 4, name: "dimension", type: "SelectedImageDimension" },
+      { id: 7, name: "mime_type", type: "string" },
+    ],
+    [{ name: "data_or_blob_id", fields: ["blob_id", "data", "blob_id_with_data"] }],
+  )
+  addType(root, "SelectedContext", [
+    { id: 1, name: "selected_images", type: "SelectedImage", repeated: true },
+  ])
+
   addType(root, "UserMessage", [
     { id: 1, name: "text", type: "string" },
     { id: 2, name: "message_id", type: "string" },
+    { id: 3, name: "selected_context", type: "SelectedContext" },
   ])
 
   // RequestContext — UserMessageAction #2. Live per-turn tools go here

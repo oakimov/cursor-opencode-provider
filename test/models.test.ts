@@ -50,6 +50,7 @@ describe("mapAvailableModelsResponse", () => {
           client_display_name: "Default",
           supports_thinking: true,
           supports_agent: true,
+          supports_images: true,
           context_token_limit: 200000,
           supports_max_mode: false,
           variants: [
@@ -70,6 +71,7 @@ describe("mapAvailableModelsResponse", () => {
     expect(models[0].displayName).toBe("Default")
     expect(models[0].supportsThinking).toBe(true)
     expect(models[0].supportsAgent).toBe(true)
+    expect(models[0].supportsImages).toBe(true)
     expect(models[0].maxContext).toBe(200000)
     expect(models[0].variants).toHaveLength(1)
     expect(models[0].variants[0].parameterValues[0].id).toBe("effort")
@@ -83,6 +85,17 @@ describe("mapAvailableModelsResponse", () => {
         variants: [{ parameter_values: [{ id: "effort", value: true }] }],
       }],
     })).toThrow(/invalid parameter values/)
+  })
+
+  it("preserves explicit image support in camel and snake case", () => {
+    const models = mapAvailableModelsResponse({
+      models: [
+        { name: "vision", supportsImages: true, variants: [] },
+        { name: "text", supports_images: false, variants: [] },
+        { name: "unknown", variants: [] },
+      ],
+    })
+    expect(models.map((model) => model.supportsImages)).toEqual([true, false, undefined])
   })
 
   it("maps multiple model entries with multiple variants", () => {
@@ -296,6 +309,36 @@ describe("modelInfoToConfig (context window selection)", () => {
     expect(cfg.limit.context).toBe(200000)
   })
 
+  it("falls back to generated Cursor docs metadata before 200000", () => {
+    const grok = modelInfoToConfig({ ...base, id: "grok-4.5" } as any)
+    const gpt = modelInfoToConfig({ ...base, id: "gpt-5.2" } as any)
+    expect(grok.limit.context).toBe(256000)
+    expect(gpt.limit.context).toBe(272000)
+  })
+
+  it("prefers AvailableModels context over generated docs metadata", () => {
+    const cfg = modelInfoToConfig({
+      ...base,
+      id: "grok-4.5",
+      maxContext: 300000,
+    } as any)
+    expect(cfg.limit.context).toBe(300000)
+  })
+
+  it("advertises image input from AvailableModels, then docs, then false", () => {
+    const liveTrue = modelInfoToConfig({ ...base, id: "grok-4.5", supportsImages: true } as any)
+    const liveFalse = modelInfoToConfig({ ...base, id: "composer-2.5", supportsImages: false } as any)
+    const docs = modelInfoToConfig({ ...base, id: "gpt-5.2" } as any)
+    const unknown = modelInfoToConfig({ ...base, id: "unknown-model" } as any)
+
+    expect(liveTrue.attachment).toBe(true)
+    expect(liveTrue.modalities).toEqual({ input: ["text", "image"], output: ["text"] })
+    expect(liveFalse.attachment).toBe(false)
+    expect(liveFalse.modalities.input).toEqual(["text"])
+    expect(docs.attachment).toBe(true)
+    expect(unknown.attachment).toBe(false)
+  })
+
   it("advertises a models.dev-parity output cap for the long-context tier", () => {
     const cfg = modelInfoToConfig({
       ...base,
@@ -438,7 +481,7 @@ describe("modelsToConfig (context-tier materialization)", () => {
 
 describe("isCacheFresh", () => {
   it("returns true for recently fetched cache with current schema", () => {
-    const cache = { models: [], fetchedAt: Date.now(), schemaVersion: 2 }
+    const cache = { models: [], fetchedAt: Date.now(), schemaVersion: 3 }
     expect(isCacheFresh(cache)).toBe(true)
   })
 
@@ -448,12 +491,12 @@ describe("isCacheFresh", () => {
   })
 
   it("returns false for expired cache", () => {
-    const cache = { models: [], fetchedAt: Date.now() - 86400_000 - 1000, schemaVersion: 2 }
+    const cache = { models: [], fetchedAt: Date.now() - 86400_000 - 1000, schemaVersion: 3 }
     expect(isCacheFresh(cache)).toBe(false)
   })
 
   it("respects custom TTL", () => {
-    const cache = { models: [], fetchedAt: Date.now() - 5000, schemaVersion: 2 }
+    const cache = { models: [], fetchedAt: Date.now() - 5000, schemaVersion: 3 }
     expect(isCacheFresh(cache, 10000)).toBe(true)
     expect(isCacheFresh(cache, 1000)).toBe(false)
   })
@@ -711,7 +754,7 @@ describe("parseCursorContextLimit", () => {
 function testCache(id = "cached"): ModelCache {
   return {
     fetchedAt: Date.now(),
-    schemaVersion: 2,
+    schemaVersion: 3,
     models: [{
       id,
       variants: [{

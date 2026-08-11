@@ -108,17 +108,17 @@ void (async () => {
 void (() =>
   ctx.tool.hook("execute.before", (event) => {
     const _tool: string = event.tool
-    const _callID: string = event.callID
+    const _id: string = event.id
     // We rewrite the bash command here because 2.0 has no `shell.env`.
     event.input = {}
-    void [_tool, _callID]
+    void [_tool, _id]
   }))
 
 void (() =>
   ctx.tool.hook("execute.after", (event) => {
-    const _callID: string = event.callID
+    const _id: string = event.id
     if (event.status === "completed") void event.result
-    void _callID
+    void _id
   }))
 
 // ── session: the only place the owning agent is named (compaction marker),

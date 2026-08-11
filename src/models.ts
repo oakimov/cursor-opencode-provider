@@ -27,6 +27,7 @@ export type ModelInfo = {
   family?: string
   supportsThinking?: boolean
   supportsAgent?: boolean
+  supportsImages?: boolean
   maxContext?: number
   /** Context window when max-mode is on (proto field 16). */
   maxContextForMaxMode?: number
@@ -158,6 +159,7 @@ function normalizeModelInfo(value: unknown): ModelInfo | null {
   const family = optionalString(value, ["family"])
   const supportsThinking = optionalBoolean(value, ["supportsThinking", "supports_thinking"])
   const supportsAgent = optionalBoolean(value, ["supportsAgent", "supports_agent"])
+  const supportsImages = optionalBoolean(value, ["supportsImages", "supports_images"])
   const supportsMaxMode = optionalBoolean(value, ["supportsMaxMode", "supports_max_mode"])
   const maxContext = optionalPositiveNumber(
     value,
@@ -172,6 +174,7 @@ function normalizeModelInfo(value: unknown): ModelInfo | null {
     family === null ||
     supportsThinking === null ||
     supportsAgent === null ||
+    supportsImages === null ||
     supportsMaxMode === null ||
     maxContext === null ||
     maxContextForMaxMode === null
@@ -184,6 +187,7 @@ function normalizeModelInfo(value: unknown): ModelInfo | null {
     ...(family === undefined ? {} : { family }),
     ...(supportsThinking === undefined ? {} : { supportsThinking }),
     ...(supportsAgent === undefined ? {} : { supportsAgent }),
+    ...(supportsImages === undefined ? {} : { supportsImages }),
     ...(maxContext === undefined ? {} : { maxContext }),
     ...(maxContextForMaxMode === undefined ? {} : { maxContextForMaxMode }),
     ...(supportsMaxMode === undefined ? {} : { supportsMaxMode }),
@@ -382,12 +386,17 @@ export function mapAvailableModelsResponse(
       ) ??
       variantContextTokens(variants.find((v) => v.parameterValues.some((p) => p.id === "context")))
     const variantMaxContext = variantContextTokens(variants.find((v) => v.isDefaultMax))
+    const supportsImages = optionalBoolean(e, ["supportsImages", "supports_images"])
+    if (supportsImages === null) {
+      throw new Error(`AvailableModels returned invalid supportsImages for ${name}`)
+    }
 
     models.push({
       id: name,
       displayName: (e.clientDisplayName ?? e.client_display_name ?? name) as string,
       supportsThinking: apiBoolean(e, ["supportsThinking", "supports_thinking"]),
       supportsAgent: apiBoolean(e, ["supportsAgent", "supports_agent"]),
+      ...(supportsImages === undefined ? {} : { supportsImages }),
       maxContext: variantBaseContext ?? positiveNumber(e.contextTokenLimit ?? e.context_token_limit),
       maxContextForMaxMode:
         variantMaxContext ??

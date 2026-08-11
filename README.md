@@ -17,6 +17,7 @@ OpenCode driving a Cursor-routed Grok model through this provider:
 - **OpenCode integration** — registers a `cursor` provider with auth hooks and cached model list
 - **Authentication** — browser OAuth (PKCE), or API key from [cursor.com/settings](https://cursor.com/settings)
 - **Model discovery** — fetches available models from Cursor's API and caches them locally
+- **Image input** — advertises vision only for supported models and forwards OpenCode image attachments to Cursor
 - **Streaming** — bidirectional Connect-RPC Runs with stale-session rotation, health checks, semantic/read-idle deadlines, bounded replay-safe recovery, and activity-aware held tool continuations
 - **Tool calls** — maps Cursor exec-server messages to AI SDK / OpenCode tool-call parts, including catalog-aware native subagent execution: exact advertised custom agents win, `unspecified` / `generalPurpose` select `general`, read-oriented `bugbot` / `security-review` select `explore`, and `cursor-guide` selects enabled Kilo `scout` before `explore`; MiMo `actor` is used instead of its work-item `task` tool when advertised. The bridge also covers the Pi read/bash/edit/write/grep/find/ls request/result range, enforces the exact current OpenCode tool catalog, mirrors finalized display-only todo/plan state, and strips OpenCode's `read` XML envelope before returning content to Cursor.
 - **Thinking / reasoning** — surfaces extended-thinking deltas where the model supports it
@@ -197,7 +198,7 @@ Feature parity with the classic plugin, and the two places 2.0 differs:
 | `chat.params` flags compaction turns | **No `chat.params` in 2.0** — the compaction agent is detected in `ctx.session.hook("context")` and correlated by session id |
 
 > **Beta.** OpenCode 2.0 and its plugin API are both beta and still changing. This
-> entrypoint is built against `@opencode-ai/plugin@next` (`0.0.0-next-16281`) and is
+> entrypoint is built against `@opencode-ai/plugin@next` (`0.0.0-next-17155`) and is
 > guarded by a compile-time conformance check, but expect churn.
 
 ### Authenticate
@@ -258,6 +259,28 @@ OpenCode’s context limit is static per model entry, while Cursor’s long-cont
 - the real Cursor model id carried in `options.cursorModelId` (not `config.id`, which would make OpenCode merge base variants into the 1M entry)
 
 The Run still uses Cursor’s original model id; OpenCode’s synthetic `-1m` id is only for picking and limits.
+
+#### Context limit sources
+
+The provider resolves each catalog context limit in this order:
+
+1. Live `AvailableModels` metadata (variant `context` parameters first, then context-limit fields)
+2. Cursor’s published model table, generated from [`docs.md`](https://cursor.com/docs.md) alongside pricing data
+3. A conservative `200000` fallback when neither source publishes a limit
+
+The docs fallback only fills static catalog metadata. It does not invent Cursor variants or enable a long-context tier that `AvailableModels` did not advertise.
+
+#### Image input
+
+The provider advertises `text` + `image` input only when the selected Cursor model supports images; model output remains text. This works in the classic plugin, the 1.18 v2 plugin, and OpenCode 2.0.
+
+Image support is resolved in this order:
+
+1. Live `AvailableModels.supportsImages` metadata, including authoritative `false` values
+2. The `Capabilities` column in Cursor's [`docs.md`](https://cursor.com/docs.md), generated alongside context and pricing metadata
+3. Text-only when neither source describes the model
+
+OpenCode image file parts are decoded from bytes, base64/data URLs, local file URLs, or HTTP(S) URLs and sent through Cursor's `UserMessage.selected_context.selected_images` field. On fresh or rebased Runs, the provider also harvests image `file-data` from tool results and `file` parts from assistant history; previously sent history images are deduplicated by content hash per OpenCode session. Held-open continuation results remain text-only because Cursor's exec-result channel has no image field. Attachments are limited to 20 MiB total, matching OpenCode's desktop attachment budget. PDF, audio, and video inputs are not advertised or silently discarded.
 
 #### Max mode
 
@@ -337,6 +360,7 @@ OpenCode
 | `src/opencode2/` | 2.0-only catalog mapping, integration/auth, and local API types |
 | `src/plugin-core.ts` | Host-neutral SDK factory, package matching, API base/telemetry resolution |
 | `src/model-config.ts` | Cursor model → OpenCode model mapping shared by every plugin surface |
+| `src/image-input.ts` | AI SDK image attachment validation, decoding, and size limits |
 | `src/pricing.ts` / `src/pricing-data.ts` | Cursor docs token rates → classic `cost` and OpenCode 2.0 cost tiers |
 | `src/index.ts` | `createCursor` factory; default export is `CursorPlugin` |
 | `src/language-model.ts` | AI SDK `LanguageModelV3` adapter (`doStream`, `doGenerate`) |

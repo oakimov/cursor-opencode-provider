@@ -12,7 +12,7 @@ export const SERVER_CONFIG_PATH = "/aiserver.v1.ServerConfigService/GetServerCon
 
 export const MODEL_CACHE_FILE = "cursor-models.json"
 /** Bumped when the on-disk model cache shape/semantics change (forces refetch). */
-export const MODEL_CACHE_SCHEMA_VERSION = 2
+export const MODEL_CACHE_SCHEMA_VERSION = 3
 export const MODEL_CACHE_TTL_MS = 86_400_000
 export const VERSION_CACHE_FILE = "cursor-client-version.json"
 

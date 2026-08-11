@@ -69,12 +69,16 @@ function applyModelEntry(draft: CatalogDraft, id: string, entry: Record<string, 
     model.modelID = wireId
     model.providerID = CURSOR_PROVIDER_ID
     model.name = entry.name
+    const inputModalities = Array.isArray(entry.modalities?.input)
+      ? entry.modalities.input.filter((modality: unknown): modality is string => typeof modality === "string")
+      : ["text"]
+    const outputModalities = Array.isArray(entry.modalities?.output)
+      ? entry.modalities.output.filter((modality: unknown): modality is string => typeof modality === "string")
+      : ["text"]
     model.capabilities = {
       tools: entry.tool_call !== false,
-      // The provider does not convert file/image prompt parts, so text-only is
-      // the honest declaration. Revisit alongside Cursor's `supports_images`.
-      input: ["text"],
-      output: ["text"],
+      input: inputModalities,
+      output: outputModalities,
     }
     model.limit = { context: entry.limit.context, output: entry.limit.output }
     model.variants = variants

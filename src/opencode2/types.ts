@@ -9,7 +9,7 @@
  *     we touch is more stable than pinning a moving target.
  *
  * These mirror `@opencode-ai/plugin@next` `dist/promise/*.d.ts` as of
- * `0.0.0-next-16281`. `test/opencode2-conformance.test-d.ts` asserts our
+ * `0.0.0-next-17155`. `test/opencode2-conformance.types.ts` asserts our
  * default export still satisfies the real 2.0 `Plugin` interface.
  *
  * Effect `Schema` brands (Provider.ID, Model.ID, …) are modelled as plain
@@ -233,13 +233,18 @@ export type ToolDefinition = {
 
 export type ToolDraft = { add(tool: ToolDefinition): void }
 
-export type ToolHookBase = {
+export type ToolHookBaseFields = {
   readonly tool: string
   readonly sessionID: string
   readonly agent: string
   readonly messageID: string
-  readonly callID: string
 }
+
+export type ToolHookBase = ToolHookBaseFields &
+  (
+    | { readonly id: string; readonly callID?: string }
+    | { readonly id?: string; readonly callID: string }
+  )
 
 export type ToolHooks = {
   readonly "execute.before": ToolHookBase & { input: unknown }

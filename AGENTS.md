@@ -2,7 +2,7 @@
 
 OpenCode plugin + AI SDK provider that runs Cursor subscription models by speaking Cursor’s Connect-RPC agent protocol (not a generic chat-completions API).
 
-**Stack:** TypeScript (ESM), Bun for install/test, `tsc` for build. Peer: `@opencode-ai/plugin@^1.17.13` (devDependency pinned to `^1.18.13`). Optional peer: `@opencode-compat/profile` (host cache via OCP `detect()`). Deps: `@ai-sdk/provider@3.0.14`, `protobufjs@^7.6.5`. OpenCode 2.0 conformance types: `@opencode-ai/plugin-next` → `npm:@opencode-ai/plugin@0.0.0-next-16281`.
+**Stack:** TypeScript (ESM), Bun for install/test, `tsc` for build. Peer: `@opencode-ai/plugin@^1.17.13` (devDependency pinned to `^1.18.16`). Optional peer: `@opencode-compat/profile` (host cache via OCP `detect()`). Deps: `@ai-sdk/provider@3.0.15`, `protobufjs@^7.6.5`. OpenCode 2.0 conformance types: `@opencode-ai/plugin-next` → `npm:@opencode-ai/plugin@0.0.0-next-17155`.
 
 ## Commands
 
@@ -61,7 +61,7 @@ Package exports:
 These are **source-incompatible APIs, not versions of one API**. Keep them in separate
 entrypoints; never try to unify them.
 
-| | 1.18 (`@opencode-ai/plugin@^1.17.13`, `/v2/promise`) | 2.0 beta (`@opencode-ai/plugin@next` / `0.0.0-next-16281`) |
+| | 1.18 (`@opencode-ai/plugin@^1.17.13`, `/v2/promise`) | 2.0 beta (`@opencode-ai/plugin@next` / `0.0.0-next-17155`) |
 |---|---|---|
 | Import | `define` from `.../v2/promise` | `Plugin.define` from the package root |
 | Hook shape | `ctx.aisdk.sdk(cb)` | `ctx.aisdk.hook("sdk", cb)` |

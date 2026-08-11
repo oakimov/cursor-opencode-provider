@@ -664,7 +664,7 @@ describe("loadModels on cache miss", () => {
     expect(config.provider?.cursor?.models).not.toHaveProperty("stale-model")
     expect(availableModelsCalls).toBe(1)
     expect(await readCache(cacheDir)).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       models: [{ id: "fetched-model" }],
     })
   })

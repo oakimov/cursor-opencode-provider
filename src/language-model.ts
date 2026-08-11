@@ -77,6 +77,8 @@ import { CURSOR_API_HOST, CURSOR_COMPACTION_OPTION } from "./shared.js"
 import { isCompactionSession } from "./compaction-marker.js"
 import { getSessionDirectory } from "./session-directory.js"
 import type { SeedHistoryMessage } from "./protocol/request.js"
+import { assertCursorUserImageSupport, extractCursorPromptImages } from "./image-input.js"
+import { resolveCursorModelSupportsImages } from "./model-metadata.js"
 import {
   consumeCursorShellResult,
   registerCursorShellCall,
@@ -98,12 +100,14 @@ let _availableModelsMtimeMs = -1
 // session so the new Cursor conversation is still born with tool definitions;
 // execution remains disabled for the summary turn itself.
 const toolCatalogBySession = new Map<string, OpencodeToolDef[]>()
+const sentHistoryImageHashesBySession = new Map<string, Set<string>>()
 // A compaction Run uses its own summary-agent system prompt. Its opaque Cursor
 // checkpoint must never become the base for the resumed normal agent: doing so
 // suppresses OpenCode's compacted prompt/system seed and makes Cursor narrate
 // tool use instead of emitting exec requests. Rebase once on the next turn.
 const postCompactionRebaseBySession = new Set<string>()
 export const MAX_TURN_STATE_SESSIONS = 256
+const MAX_SENT_HISTORY_IMAGES_PER_SESSION = 256
 const DEFAULT_RETRY_POLICY = {
   maxAttempts: 3,
   baseDelayMs: 500,
@@ -319,6 +323,36 @@ function rememberPostCompactionRebase(sessionKey: string): void {
     const oldest = postCompactionRebaseBySession.values().next().value as string | undefined
     if (!oldest) break
     postCompactionRebaseBySession.delete(oldest)
+  }
+}
+
+function sentHistoryImageHashes(sessionKey: string | undefined): ReadonlySet<string> | undefined {
+  if (!sessionKey) return undefined
+  const hashes = sentHistoryImageHashesBySession.get(sessionKey)
+  if (!hashes) return undefined
+  sentHistoryImageHashesBySession.delete(sessionKey)
+  sentHistoryImageHashesBySession.set(sessionKey, hashes)
+  return hashes
+}
+
+function rememberSentHistoryImageHashes(sessionKey: string | undefined, hashes: readonly string[]): void {
+  if (!sessionKey || hashes.length === 0) return
+  const remembered = sentHistoryImageHashesBySession.get(sessionKey) ?? new Set<string>()
+  for (const hash of hashes) {
+    remembered.delete(hash)
+    remembered.add(hash)
+    while (remembered.size > MAX_SENT_HISTORY_IMAGES_PER_SESSION) {
+      const oldest = remembered.values().next().value as string | undefined
+      if (!oldest) break
+      remembered.delete(oldest)
+    }
+  }
+  sentHistoryImageHashesBySession.delete(sessionKey)
+  sentHistoryImageHashesBySession.set(sessionKey, remembered)
+  while (sentHistoryImageHashesBySession.size > MAX_TURN_STATE_SESSIONS) {
+    const oldest = sentHistoryImageHashesBySession.keys().next().value as string | undefined
+    if (!oldest) break
+    sentHistoryImageHashesBySession.delete(oldest)
   }
 }
 
@@ -605,9 +639,10 @@ async function startSession(
     )
   }
 
+  const lastUser = [...prompt].reverse().find((message) => message.role === "user")
   const userText = recovery?.kind === "rebase"
     ? "Continue the interrupted turn from the conversation history above. Do not repeat completed work."
-    : (extractUserText([...prompt].reverse().find((m) => m.role === "user")) || ".")
+    : (extractUserText(lastUser) || ".")
   // v1 sets `options.workspaceRoot` correctly per invocation (`input.directory`,
   // one plugin instance per project). OpenCode 2.0 runs one daemon across many
   // projects, so its static `options.workspaceRoot` is only a last-resort
@@ -649,6 +684,40 @@ async function startSession(
   const hintMaxMode = !!(providerOptions?.maxMode ?? false)
 
   const modelInfo = _availableModels?.find((m) => m.id === cursorModelId)
+  const supportsImages = resolveCursorModelSupportsImages(cursorModelId, modelInfo?.supportsImages)
+  if (!resuming) {
+    assertCursorUserImageSupport(
+      lastUser as unknown as Record<string, unknown> | undefined,
+      supportsImages,
+      cursorModelId,
+    )
+  }
+  const imageExtraction = resuming
+    ? { images: [], hashes: [], candidateCount: 0, duplicateCount: 0, userImageCount: 0 }
+    : await extractCursorPromptImages(
+        prompt as readonly unknown[],
+        lastUser as unknown as Record<string, unknown> | undefined,
+        {
+          supportsImages,
+          // Content hashes are retained for the OpenCode session so growing
+          // history does not re-upload old screenshots. A recovery rebase opens
+          // a new Cursor conversation, so it must resend the same payload.
+          seenHistoryHashes: recovery?.kind === "rebase"
+            ? undefined
+            : sentHistoryImageHashes(sessionKey),
+          signal: callOptions.abortSignal,
+        },
+      )
+  if (!supportsImages && imageExtraction.candidateCount > 0) {
+    trace(
+      `image input: dropped ${imageExtraction.candidateCount} tool/assistant history image(s); ` +
+      `model=${cursorModelId} does not support images`,
+    )
+  }
+  if (imageExtraction.duplicateCount > 0) {
+    trace(`image input: skipped ${imageExtraction.duplicateCount} previously sent history image(s)`)
+  }
+  const images = imageExtraction.images
   const parameterValues = resolveVariantParameters(modelInfo, {
     reasoningEffort,
     maxMode: hintMaxMode,
@@ -697,6 +766,7 @@ async function startSession(
     : (bound.reset ? undefined : getCheckpoint(conversationId))
   const reqBytes = buildRunRequest({
     text: userText,
+    images,
     modelId: cursorModelId,
     conversationId,
     systemPrompt: conversationState ? undefined : systemPrompt,
@@ -736,6 +806,7 @@ async function startSession(
       `tools=${tools.length} incomingTools=${incomingTools.length} compaction=${isCompaction} ` +
       `skills=${skillsCount} hooks=${hooksCtx ? hooksCtx.split("\n").length : 0} ` +
       `availableModels=${_availableModels?.length ?? 0} userTextLen=${userText.length} ` +
+      `images=${images.length} imageBytes=${images.reduce((total, image) => total + image.data.length, 0)} ` +
       `historyMsgs=${history.length} historyChars=${historyChars} ` +
       `checkpointLen=${conversationState?.length ?? 0} reset=${bound.reset} ` +
       `resume=${resuming} ` +
@@ -748,6 +819,7 @@ async function startSession(
 
   try {
     await writeWithBackpressure(stream, reqBytes, "initial Run request")
+    rememberSentHistoryImageHashes(sessionKey, imageExtraction.hashes)
   } catch (error) {
     stream.destroy()
     throw error
@@ -1841,6 +1913,8 @@ function toolResultOutputToText(output: unknown): { text: string; isError: boole
     return { text: JSON.stringify(o.value ?? null), isError }
   }
   if (o.type === "content" && Array.isArray(o.value)) {
+    // Held-open continuation exec frames are text-only. Media is intentionally
+    // omitted here and harvested from the full prompt when a fresh Run opens.
     const text = o.value
       .map((c) => {
         const cp = c as Record<string, unknown>

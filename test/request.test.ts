@@ -27,6 +27,26 @@ describe("buildRunRequest", () => {
     expect(rr.requested_model?.model_id).toBe("test-model")
   })
 
+  it("encodes image attachments in the live user selected context", () => {
+    const data = buildRunRequest({
+      text: "Describe this",
+      images: [{
+        data: Uint8Array.from([0x89, 0x50, 0x4e, 0x47]),
+        filename: "sample.png",
+        mimeType: "image/png",
+      }],
+      modelId: "vision-model",
+      conversationId: "conv-image",
+    })
+    const decoded = decodeMessage<any>("AgentClientMessage", data)
+    const image = decoded.run_request.action.user_message_action.user_message
+      .selected_context.selected_images[0]
+    expect(Array.from(image.data)).toEqual([0x89, 0x50, 0x4e, 0x47])
+    expect(image.path).toBe("sample.png")
+    expect(image.mime_type).toBe("image/png")
+    expect(image.uuid).toBeTruthy()
+  })
+
   it("does not populate selected_subagent_models from the available-model catalog", () => {
     const data = buildRunRequest({
       text: "Hello",

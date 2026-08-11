@@ -4,6 +4,7 @@ import { applyCursorModels, applyCursorProvider, CURSOR_AISDK_PACKAGE } from "..
 import { applyCursorIntegration, accessTokenFromCredential } from "../src/opencode2/integration.js"
 import { clearCompactionSessions, isCompactionSession, markCompactionSession } from "../src/compaction-marker.js"
 import { clearSessionDirectories, getSessionDirectory } from "../src/session-directory.js"
+import { registerCursorShellCall } from "../src/shell-timeout.js"
 import type {
   CatalogDraft,
   IntegrationDraft,
@@ -68,6 +69,7 @@ const baseModel: ModelInfo = {
   displayName: "Sonnet 4.5",
   supportsAgent: true,
   supportsThinking: false,
+  supportsImages: true,
   maxContext: 200_000,
   variants: [],
 }
@@ -94,8 +96,8 @@ describe("opencode2 catalog", () => {
     expect(model!.name).toBe("Sonnet 4.5")
     expect(model!.modelID).toBe("claude-4.5-sonnet")
     expect(model!.capabilities.tools).toBe(true)
-    // The provider does not convert file/image parts.
-    expect(model!.capabilities.input).toEqual(["text"])
+    expect(model!.capabilities.input).toEqual(["text", "image"])
+    expect(model!.capabilities.output).toEqual(["text"])
     expect(model!.limit.context).toBe(200_000)
     expect(model!.enabled).toBe(true)
     // Test fixture uses a legacy id that is not in the current pricing table.
@@ -383,6 +385,42 @@ describe("opencode2 setup", () => {
     expect(registered).toContain("tool.execute.after")
     expect(registered).toContain("session.context")
     expect(typeof cleanup).toBe("function")
+  })
+
+  test.each(["id", "callID"] as const)("accepts the %s tool execution identifier", async (field) => {
+    const { ctx, hooks } = fakeContext()
+    await plugin.setup(ctx)
+
+    const executionID = `cursor_shell_${field}`
+    registerCursorShellCall(executionID, {
+      background_shell_spawn: true,
+      command: "echo hello",
+      working_directory: "/tmp",
+    })
+    const input = { command: "echo hello" }
+    await hooks.get("tool.execute.before")!({
+      tool: "bash",
+      sessionID: "session",
+      agent: "agent",
+      messageID: "message",
+      [field]: executionID,
+      input,
+    })
+    expect(input.command).not.toBe("echo hello")
+
+    const result = { title: "bash", output: "hello\n", metadata: {} }
+    await hooks.get("tool.execute.after")!({
+      tool: "bash",
+      sessionID: "session",
+      agent: "agent",
+      messageID: "message",
+      [field]: executionID,
+      input,
+      status: "completed",
+      result,
+    })
+    expect(result.title).toBe("echo hello")
+    expect(result.output).toBe("hello\n")
   })
 
   test("cleanup disposes every registration", async () => {

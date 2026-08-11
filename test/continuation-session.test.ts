@@ -121,6 +121,33 @@ describe("extractTrailingToolResults", () => {
   it("returns empty for an empty prompt", () => {
     expect(extractTrailingToolResults([])).toEqual([])
   })
+
+  it("keeps continuation output text-only when content also carries an image", () => {
+    const prompt = [{
+      role: "tool",
+      content: [{
+        type: "tool-result",
+        toolCallId: "cursor_live_3",
+        toolName: "screenshot",
+        output: {
+          type: "content",
+          value: [
+            { type: "text", text: "captured" },
+            { type: "file-data", mediaType: "image/png", data: "AQID" },
+          ],
+        },
+      }],
+    }] as LanguageModelV3CallOptions["prompt"]
+
+    expect(extractTrailingToolResults(prompt)).toEqual([{
+      toolCallId: "cursor_live_3",
+      sessionId: "live",
+      execId: 3,
+      toolName: "screenshot",
+      output: "captured",
+      error: undefined,
+    }])
+  })
 })
 
 describe("deliverContinuationResults", () => {

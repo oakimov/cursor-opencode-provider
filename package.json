@@ -43,6 +43,18 @@
     "./errors": {
       "types": "./dist/errors.d.ts",
       "import": "./dist/errors.js"
+    },
+    "./models": {
+      "types": "./dist/models.d.ts",
+      "import": "./dist/models.js"
+    },
+    "./pricing": {
+      "types": "./dist/pricing.d.ts",
+      "import": "./dist/pricing.js"
+    },
+    "./auth": {
+      "types": "./dist/auth.d.ts",
+      "import": "./dist/auth.js"
     }
   },
   "files": [
@@ -64,7 +76,7 @@
     "prepublishOnly": "bun run generate:pricing && bun run build"
   },
   "dependencies": {
-    "@ai-sdk/provider": "3.0.14",
+    "@ai-sdk/provider": "3.0.15",
     "protobufjs": "^7.6.5"
   },
   "peerDependencies": {
@@ -77,8 +89,8 @@
     }
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.18.13",
-    "@opencode-ai/plugin-next": "npm:@opencode-ai/plugin@0.0.0-next-16281",
+    "@opencode-ai/plugin": "^1.18.16",
+    "@opencode-ai/plugin-next": "npm:@opencode-ai/plugin@0.0.0-next-17155",
     "@tsconfig/node22": "^22.0.5",
     "@types/node": "^22.20.1",
     "typescript": "^5.9.3"
