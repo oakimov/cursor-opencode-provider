@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test"
 import {
   buildLanguageModelV3UsageFromEstimate,
   buildLanguageModelV3UsageFromTurnEnded,
+  exceedsRequestLocalBudget,
   kiloShapedUsageFromV3,
   turnEndedCounter,
 } from "../src/usage.js"
@@ -13,6 +14,23 @@ describe("turnEndedCounter", () => {
     expect(turnEndedCounter({ x: -1 }, "x")).toBe(0)
     expect(turnEndedCounter({ x: NaN }, "x")).toBe(0)
     expect(turnEndedCounter({}, "x")).toBe(0)
+  })
+})
+
+describe("exceedsRequestLocalBudget", () => {
+  it("allows modest counters and detects cumulative totals", () => {
+    expect(
+      exceedsRequestLocalBudget(
+        { input_tokens: 100, cache_read: 10, cache_write: 5 },
+        { inputTokens: 100, outputTokens: 50 },
+      ),
+    ).toBe(false)
+    expect(
+      exceedsRequestLocalBudget(
+        { input_tokens: 120_000, cache_read: 5_810_572, cache_write: 24_000 },
+        { inputTokens: 25, outputTokens: 4 },
+      ),
+    ).toBe(true)
   })
 })
 

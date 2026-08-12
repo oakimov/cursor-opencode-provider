@@ -50,6 +50,38 @@ export type CursorUsageEstimate = {
 }
 
 /**
+ * A single-step trust path for TurnEnded counters is only safe when the
+ * totals are close to the request-local budget. Cursor reports cumulative
+ * conversation/Run totals even on Runs that never crossed an OpenCode tool
+ * boundary: single-step follow-up turns and parallel no-tools side calls
+ * carry the whole conversation's `cache_read`. Treating those totals as
+ * request-local inflates OpenCode's context usage and triggers premature
+ * compaction (issue #20).
+ */
+export const CUMULATIVE_TURN_ENDED_RATIO = 3
+export const MIN_TRUSTED_TURN_ENDED_TOTAL = 1024
+
+export function exceedsRequestLocalBudget(
+  te: Record<string, unknown>,
+  budget: { inputTokens: number; outputTokens: number },
+): boolean {
+  const total =
+    turnEndedCounter(te, "input_tokens") +
+    turnEndedCounter(te, "cache_read") +
+    turnEndedCounter(te, "cache_write")
+  const requestLocal = budget.inputTokens + budget.outputTokens
+  // Skip when the request-local seed is unknown; otherwise compare against
+  // max(ratio × request-local, absolute floor) so tiny prompts still reject
+  // multi-million-token conversation cache totals.
+  if (requestLocal <= 0) return false
+  const trustCeiling = Math.max(
+    requestLocal * CUMULATIVE_TURN_ENDED_RATIO,
+    MIN_TRUSTED_TURN_ENDED_TOTAL,
+  )
+  return total > trustCeiling
+}
+
+/**
  * Request-local usage for a held Cursor Run.
  *
  * `est.inputTokens` tracks the seed plus delivered tool results, while

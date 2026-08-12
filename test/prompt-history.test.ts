@@ -82,6 +82,8 @@ describe("buildOpenCodeInteractionGuidance", () => {
     expect(guidance).toContain("OpenCode `edit` for targeted changes")
     expect(guidance).toContain("`write` to create files")
     expect(guidance).toContain("do not use shell, Python, or heredocs")
+    expect(guidance).toContain("Never use a read result as complete file content")
+    expect(guidance).toContain("output is capped, partial")
   })
 
   it("documents Cursor-native Task subtype mapping when subagents are advertised", () => {

@@ -94,6 +94,7 @@ import { readAllFieldsStrict } from "./protocol/struct.js"
 import {
   buildLanguageModelV3UsageFromEstimate,
   buildLanguageModelV3UsageFromTurnEnded,
+  exceedsRequestLocalBudget,
   turnEndedCounter,
 } from "./usage.js"
 
@@ -1370,7 +1371,12 @@ export async function pump(
     // a tool boundary. On a held multi-step Run Cursor aggregates every model
     // invocation into these counters; treating that billed total as the final
     // request's prompt size makes OpenCode compact after ordinary tasks.
-    const cumulativeTurnEnded = !!te && session.hadToolCallBoundary === true
+    const cumulativeByBoundary = !!te && session.hadToolCallBoundary === true
+    const cumulativeByBudget = !!te && !cumulativeByBoundary && exceedsRequestLocalBudget(te, {
+      inputTokens: session.usageEstimate.inputTokens,
+      outputTokens: session.usageEstimate.outputTokens,
+    })
+    const cumulativeTurnEnded = cumulativeByBoundary || cumulativeByBudget
     if (te && !cumulativeTurnEnded) {
       session.usageEstimate = {
         inputTokens: turnEndedCounter(te, "input_tokens"),
@@ -1405,6 +1411,7 @@ export async function pump(
         `rawOut=${te ? turnEndedCounter(te, "output_tokens") : est.outputTokens} ` +
         `rawCacheRead=${te ? turnEndedCounter(te, "cache_read") : est.cacheRead} ` +
         `rawCacheWrite=${te ? turnEndedCounter(te, "cache_write") : est.cacheWrite} ` +
+        `guard=${cumulativeByBoundary ? "boundary" : cumulativeByBudget ? "over-budget" : "none"} ` +
         `source=${te ? (cumulativeTurnEnded ? "estimate-cumulative-turn-ended" : "turn_ended") : "estimate"}`,
     )
     safeEnqueue({
@@ -2093,6 +2100,11 @@ export function buildOpenCodeInteractionGuidance(
     // leaving the turn with no file-editing guidance at all.
     instructions.push(
       "- Use OpenCode `apply_patch` for file-content changes; do not use shell, Python, or heredocs to change file content while it is available. Cursor-native write and edit requests are accepted and converted to `apply_patch` automatically.",
+    )
+  }
+  if (names.has("edit") || names.has("write") || names.has("apply_patch")) {
+    instructions.push(
+      "- Never use a read result as complete file content when it says the output is capped, partial, or requires another offset. Read the remaining ranges first, or make a targeted edit/patch from complete context; do not pass a partial read back as a whole-file replacement.",
     )
   }
   return [
