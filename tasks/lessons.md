@@ -71,3 +71,8 @@
 - A host can withhold tools from the model without withholding them from itself. oh-my-pi's `tools.xdev` mounts every non-essential tool — all MCP servers included — behind `xd://` device URLs and ships only ~11 entries in `Context.tools`; the devices remain fully executable and are catalogued in the system prompt, so nothing in the provider or bridge is broken and neither can advertise what the host never puts in the tool list. When a model reports that tools are missing, separate "absent from the callable schema" from "absent from the host", and look for a host presentation setting before changing wire code.
 - A model's account of its own system prompt is not evidence about the system prompt. Asked directly, the model denied any `xd://` or GitHub content while that same prompt carried 63 device lines and it could execute those devices on request. Verify prompt contents by dumping what the provider actually sends, and verify capability by invoking it.
 - A 50 KB read cap can still cause data loss when a model turns the partial result into a whole-file edit; an explicit model-visible warning must be paired with guidance to page before replacing complete contents, and large `TurnEnded` counters need a request-local sanity check even without a visible tool boundary.
+- TypeScript editor diagnostics can use the root `tsconfig.json` even when the
+  repository's test typecheck intentionally excludes runtime tests. Keep
+  `@types/bun` installed and include `bun` in `compilerOptions.types` so Bun's
+  `bun:test` imports resolve in OpenCode's LSP without widening the build's
+  source/test inclusion.

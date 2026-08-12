@@ -34,7 +34,7 @@ export type CursorPricingCoverage = {
  * Models we expose that Cursor does not currently publish numeric rates for
  * on the Other Models table (Auto / first-party Cursor Models pool).
  */
-export const CURSOR_UNPRICED_MODEL_IDS = ["default", "composer-2.5", "grok-4.5"] as const
+export const CURSOR_UNPRICED_MODEL_IDS = ["default", "composer-2.5", "grok-4.5", "grok-4.6"] as const
 
 const UNPRICED = new Set<string>(CURSOR_UNPRICED_MODEL_IDS)
 

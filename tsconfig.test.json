@@ -6,6 +6,6 @@
     "declaration": false,
     "rootDir": "."
   },
-  "//": "Narrow on purpose: the bun:test suite is not typechecked (it would need @types/bun and a cleanup pass). Only the type-only conformance guard is.",
+  "//": "Narrow on purpose: the bun:test suite is not typechecked by this project config; @types/bun is still included in the base config so editors can resolve bun:test.",
   "include": ["src", "test/opencode2-conformance.types.ts"]
 }

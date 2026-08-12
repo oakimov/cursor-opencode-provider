@@ -311,8 +311,10 @@ describe("modelInfoToConfig (context window selection)", () => {
 
   it("falls back to generated Cursor docs metadata before 200000", () => {
     const grok = modelInfoToConfig({ ...base, id: "grok-4.5" } as any)
+    const grok46 = modelInfoToConfig({ ...base, id: "grok-4.6" } as any)
     const gpt = modelInfoToConfig({ ...base, id: "gpt-5.2" } as any)
     expect(grok.limit.context).toBe(256000)
+    expect(grok46.limit.context).toBe(256000)
     expect(gpt.limit.context).toBe(272000)
   })
 

@@ -71,6 +71,7 @@ describe("pricing", () => {
     expect(getCursorModelCost("default")).toBeUndefined()
     expect(getCursorModelCost("composer-2.5")).toBeUndefined()
     expect(getCursorModelCost("grok-4.5")).toBeUndefined()
+    expect(getCursorModelCost("grok-4.6")).toBeUndefined()
     expect(applyCursorModelCost("default", { name: "Auto" })).toEqual({ name: "Auto" })
   })
 

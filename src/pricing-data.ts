@@ -306,6 +306,9 @@ export const CURSOR_MODEL_CONTEXTS = {
   "grok-4.5": {
     "maxContext": 256000
   },
+  "grok-4.6": {
+    "maxContext": 256000
+  },
   "kimi-k2.7-code": {
     "maxContext": 262000
   },
@@ -407,6 +410,9 @@ export const CURSOR_MODEL_CAPABILITIES = {
     "supportsImages": true
   },
   "grok-4.5": {
+    "supportsImages": false
+  },
+  "grok-4.6": {
     "supportsImages": false
   },
   "kimi-k2.7-code": {

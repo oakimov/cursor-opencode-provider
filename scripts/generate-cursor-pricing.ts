@@ -82,6 +82,7 @@ const DISPLAY_NAME_TO_MODEL_ID: Record<string, string> = {
   "GPT-5.6 Sol": "gpt-5.6-sol",
   "GPT-5.6 Terra": "gpt-5.6-terra",
   "Grok 4.5": "grok-4.5",
+  "Grok 4.6": "grok-4.6",
   "Kimi K2.7 Code": "kimi-k2.7-code",
   "Kimi K3": "kimi-k3",
 }
@@ -105,7 +106,7 @@ const SKIP_DISPLAY_NAMES = new Set([
  * Leave empty until the docs publish numbers (or a maintainer verifies rates).
  */
 const CURSOR_PRICING_OVERRIDES: Record<string, OpenCodeModelCost> = {
-  // default (Auto), composer-2.5, grok-4.5 — no numeric rates on the markdown page.
+  // default (Auto), composer-2.5, grok-4.5, grok-4.6 — no numeric rates on the markdown page.
 }
 
 type ParsedRow = {
