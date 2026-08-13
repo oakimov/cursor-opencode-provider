@@ -1364,6 +1364,8 @@ describe("display-only ToolCall pump bridge", () => {
       ],
       [],
     )
+    session.tokenDetails = { usedTokens: 140, maxTokens: 256_000 }
+    session.tokenDetailsFresh = false
     const controller = {
       enqueue(part: unknown) {
         parts.push(part)

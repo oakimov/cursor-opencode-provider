@@ -437,7 +437,13 @@ describe("interrupted Cursor Run handling", () => {
       " continuation",
     ])
     expect(parts.filter((part) => part.type === "finish")).toHaveLength(1)
-    expect(parts.find((part) => part.type === "finish").usage.outputTokens.total).toBe(2)
+    const finish = parts.find((part) => part.type === "finish")
+    expect(finish.usage.outputTokens.total).toBe(0)
+    expect(finish.providerMetadata.cursor).toMatchObject({
+      inputTokensRaw: 4,
+      outputTokensRaw: 2,
+    })
+    expect(finish.providerMetadata.cursor.context).toBeUndefined()
   })
 
   it("does not retry a transport close after turn_ended", async () => {
@@ -459,7 +465,7 @@ describe("interrupted Cursor Run handling", () => {
     expect(parts.filter((part) => part.type === "finish")).toHaveLength(1)
   })
 
-  it("clamps malformed cache subsets without hiding the raw Cursor counters", async () => {
+  it("leaves context unavailable without hiding malformed raw Cursor counters", async () => {
     const parts: any[] = []
     await pump(
       fakeSession("usage", [
@@ -481,14 +487,14 @@ describe("interrupted Cursor Run handling", () => {
     )
     const finish = parts.find((part) => part.type === "finish")
     expect(finish.usage.inputTokens).toEqual({
-      total: 120_000,
+      total: 0,
       noCache: 0,
-      cacheRead: 120_000,
+      cacheRead: 0,
       cacheWrite: 0,
     })
     expect(finish.usage.outputTokens).toEqual({
-      total: 73_483,
-      text: 73_483,
+      total: 0,
+      text: 0,
       reasoning: 0,
     })
     expect(finish.providerMetadata.cursor).toMatchObject({
@@ -497,12 +503,12 @@ describe("interrupted Cursor Run handling", () => {
       outputTokensRaw: 73_483,
       cacheReadRaw: 5_810_572,
     })
+    expect(finish.providerMetadata.cursor.context).toBeUndefined()
   })
 
   it("maps total and subset TurnEnded counters without double counting", async () => {
     const parts: any[] = []
-    await pump(
-      fakeSession("small-usage", [
+    const session = fakeSession("small-usage", [
         serverFrame({
           interaction_update: {
             turn_ended: {
@@ -514,7 +520,11 @@ describe("interrupted Cursor Run handling", () => {
             },
           },
         }),
-      ]),
+      ])
+    session.tokenDetails = { usedTokens: 150, maxTokens: 256_000 }
+    session.tokenDetailsFresh = false
+    await pump(
+      session,
       controller(parts),
       { textId: "t", reasoningId: "r" },
     )
@@ -530,6 +540,87 @@ describe("interrupted Cursor Run handling", () => {
       total: 50,
       text: 43,
       reasoning: 7,
+    })
+    expect(finish.providerMetadata.cursor.context).toMatchObject({
+      source: "checkpoint-previous-turn",
+      stale: true,
+      usedTokens: 150,
+    })
+  })
+
+  it("uses checkpoint context occupancy for totals and retains raw TurnEnded usage", async () => {
+    const parts: any[] = []
+    const checkpoint = encodeMessage("ConversationStateStructure", {
+      token_details: {
+        used_tokens: 30_450,
+        max_tokens: 256_000,
+        breakdown: {
+          total_used_tokens: 30_450,
+          max_tokens: 256_000,
+          categories: [
+            { id: "system_prompt", label: "System prompt", estimated_tokens: 14_976 },
+            { id: "conversation", label: "Conversation", estimated_tokens: 15_474 },
+          ],
+        },
+      },
+    })
+    await pump(
+      fakeSession("context-usage", [
+        serverFrame({ conversation_checkpoint_update: checkpoint }),
+        serverFrame({
+          interaction_update: {
+            turn_ended: {
+              input_tokens: 330_222,
+              output_tokens: 3_206,
+              cache_read: 230_400,
+              cache_write: 0,
+              reasoning_tokens: 480,
+            },
+          },
+        }),
+      ]),
+      controller(parts),
+      { textId: "t", reasoningId: "r" },
+    )
+
+    const finish = parts.find((part) => part.type === "finish")
+    expect(finish.usage.inputTokens.total + finish.usage.outputTokens.total).toBe(30_450)
+    expect(
+      finish.usage.inputTokens.noCache
+        + finish.usage.inputTokens.cacheRead
+        + finish.usage.inputTokens.cacheWrite,
+    ).toBe(finish.usage.inputTokens.total)
+    expect(finish.usage.inputTokens.cacheRead / finish.usage.inputTokens.total).toBeCloseTo(
+      230_400 / 330_222,
+      4,
+    )
+    expect(finish.usage.outputTokens).toEqual({
+      total: 3_206,
+      text: 2_726,
+      reasoning: 480,
+    })
+    expect(finish.providerMetadata.cursor).toMatchObject({
+      inputTokensRaw: 330_222,
+      outputTokensRaw: 3_206,
+      cacheReadRaw: 230_400,
+      reasoningTokensRaw: 480,
+    })
+    expect(finish.providerMetadata.cursor.context).toEqual({
+      contextUsageVersion: 2,
+      source: "checkpoint-current-run",
+      stale: false,
+      usedTokens: 30_450,
+      maxTokens: 256_000,
+      remainingTokens: 225_550,
+      usedPercent: 11.9,
+      breakdown: {
+        totalUsedTokens: 30_450,
+        maxTokens: 256_000,
+        categories: [
+          { id: "system_prompt", label: "System prompt", estimatedTokens: 14_976 },
+          { id: "conversation", label: "Conversation", estimatedTokens: 15_474 },
+        ],
+      },
     })
   })
 
@@ -556,6 +647,8 @@ describe("interrupted Cursor Run handling", () => {
       cacheWrite: 0,
       reasoningTokens: 0,
     }
+    session.tokenDetails = { usedTokens: 103_144, maxTokens: 256_000 }
+    session.tokenDetailsFresh = false
 
     await pump(
       session,
@@ -580,6 +673,11 @@ describe("interrupted Cursor Run handling", () => {
       outputTokensRaw: 1_391,
       cacheReadRaw: 79_872,
       reasoningTokensRaw: 525,
+      context: {
+        source: "checkpoint-previous-turn",
+        stale: true,
+        usedTokens: 103_144,
+      },
     })
   })
 

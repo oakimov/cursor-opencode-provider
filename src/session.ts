@@ -7,6 +7,7 @@ import type {
   OpencodeToolDef,
   ToolAliasRegistry,
 } from "./protocol/tools.js"
+import type { CursorConversationTokenDetails } from "./protocol/token-details.js"
 
 export type Frame = { flags: number; payload: Uint8Array }
 
@@ -182,6 +183,34 @@ export type CursorSession = {
   cacheDir?: string
   /** Latest eligible checkpoint emitted by this Run attempt. */
   resumeCheckpoint?: Uint8Array
+  /** Last checkpoint-derived context snapshot, independent of retry eligibility. */
+  tokenDetails?: CursorConversationTokenDetails
+  /** True only after this Run receives a checkpoint containing token details. */
+  tokenDetailsFresh?: boolean
+  /**
+   * Run-lifetime cache evidence. Cursor exposes only aggregate cache counters at
+   * TurnEnded, so retain the inputs and protocol activity needed to explain
+   * whether a low ratio came from a cold/rebased prefix, context growth, or a
+   * multi-step agent Run.
+   */
+  cacheDiagnostics?: {
+    sessionKey?: string
+    conversationId: string
+    conversationGroupId?: string
+    modelId?: string
+    priorTokenDetails?: CursorConversationTokenDetails
+    startedWithCheckpoint: boolean
+    requestContextReused: boolean
+    requestContextHash: string
+    systemPromptHash?: string
+    checkpointUpdates: number
+    tokenDetailUpdates: number
+    pumpPasses: number
+    stepStarts: number
+    stepCompletes: number
+    displayToolCalls: number
+    execRequests: number
+  }
   /** OpenCode session whose own or descendant activity renews tool leases. */
   openCodeSessionId?: string
   /** Completed compaction must rebase once before resuming a normal agent. */

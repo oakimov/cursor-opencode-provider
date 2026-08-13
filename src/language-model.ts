@@ -55,6 +55,12 @@ import { handleKvServerMessage } from "./protocol/kv.js"
 import { handleInteractionQuery } from "./protocol/interactions.js"
 import { clearCheckpoint, getCheckpoint, setCheckpoint } from "./protocol/checkpoint.js"
 import {
+  cursorContextUsageMetadata,
+  decodeConversationTokenDetails,
+  type CursorContextUsageSource,
+  type CursorConversationTokenDetails,
+} from "./protocol/token-details.js"
+import {
   clearConversationBlobs,
   conversationBlobCount,
   inspectConversationBlobGraph,
@@ -110,6 +116,9 @@ import {
   buildLanguageModelV3UsageFromCounters,
   cursorUsageCountersFromTurnEnded,
   emptyLanguageModelV3Usage,
+  formatCursorCacheDiagnostics,
+  formatCursorTokenCategories,
+  formatTurnUsageValidation,
   turnEndedCounter,
 } from "./usage.js"
 
@@ -895,6 +904,9 @@ async function startSession(
     : 0
   const runRequestWireEstimateIn = estimateTokens(reqBytes.length)
   const encodedRequestContext = encodeMessage("RequestContext", requestContext)
+  const priorTokenDetails = decodeConversationTokenDetails(conversationState)
+  const requestContextHash = sha(encodedRequestContext)
+  const systemPromptHash = systemPrompt ? sha(systemPrompt) : undefined
   const usageEstimate = {
     // This is used only before Cursor supplies authoritative TurnEnded usage.
     // Estimate the actual protobuf request, not history/system text omitted by
@@ -928,7 +940,7 @@ async function startSession(
   if (hooksCtx) trace(`outbound Run hooks_additional_context: ${hooksCtx}`)
   trace(`hash run_request sha256=${sha(reqBytes)}`)
   if (systemPrompt) trace(`hash systemPrompt sha256=${sha(systemPrompt)}`)
-  trace(`hash requestContext sha256=${sha(encodedRequestContext)}`)
+  trace(`hash requestContext sha256=${requestContextHash}`)
   if (conversationState) trace(`hash checkpoint sha256=${sha(conversationState)}`)
 
   try {
@@ -944,6 +956,26 @@ async function startSession(
     conversationId,
     cacheDir,
     resumeCheckpoint: undefined,
+    tokenDetails: priorTokenDetails,
+    tokenDetailsFresh: false,
+    cacheDiagnostics: {
+      sessionKey,
+      conversationId,
+      conversationGroupId,
+      modelId: cursorModelId,
+      priorTokenDetails,
+      startedWithCheckpoint: !!conversationState,
+      requestContextReused,
+      requestContextHash,
+      systemPromptHash,
+      checkpointUpdates: 0,
+      tokenDetailUpdates: 0,
+      pumpPasses: 0,
+      stepStarts: 0,
+      stepCompletes: 0,
+      displayToolCalls: 0,
+      execRequests: 0,
+    },
     openCodeSessionId: sessionKey,
     postCompactionRebase: isCompaction,
     toolCatalog: snapshotToolCatalog(sessionKey),
@@ -1292,6 +1324,22 @@ export async function pump(
   abortSignal?: AbortSignal,
 ): Promise<void> {
   sessionManager.registerSession(session)
+  const cacheDiagnostics = session.cacheDiagnostics ??= {
+    sessionKey: session.openCodeSessionId,
+    conversationId: session.conversationId,
+    priorTokenDetails: session.tokenDetails,
+    startedWithCheckpoint: !!session.tokenDetails,
+    requestContextReused: false,
+    requestContextHash: "unavailable",
+    checkpointUpdates: 0,
+    tokenDetailUpdates: 0,
+    pumpPasses: 0,
+    stepStarts: 0,
+    stepCompletes: 0,
+    displayToolCalls: 0,
+    execRequests: 0,
+  }
+  cacheDiagnostics.pumpPasses++
   const { textId, reasoningId } = ids
   const advertisedToolNames = advertisedToolNamesFromDescriptors(session.toolDescriptors)
   const advertisedToolNameSet = new Set(
@@ -1563,17 +1611,34 @@ export async function pump(
     te: Record<string, unknown> | undefined,
     reason: LanguageModelV3FinishReason,
     settledUsage?: LanguageModelV3Usage,
-    settledSource = "turn_ended-request-local",
+    settledSource?: string,
   ) => {
     closeOpenSpans()
     const est = session.usageEstimate
     // OpenCode persists and sums every AI SDK finish. Cursor does not expose a
-    // cache-aware request-local counter at tool boundaries, so charging the
-    // growing estimate there multiplies one held Run across all of its steps.
-    // Emit zero at intermediate boundaries and settle the request-local
-    // TurnEnded exactly once when it closes the held Run.
-    const usage = settledUsage ?? emptyLanguageModelV3Usage()
-    const providerMetadata = te ? cursorTurnEndedProviderMetadata(te) : undefined
+    // final context total at tool boundaries, so charging the growing estimate
+    // there multiplies one held Run across all of its steps. Emit zero at
+    // intermediate boundaries, then prefer checkpoint tokenDetails exactly once
+    // when TurnEnded closes the held Run. Cursor CLI keeps context occupancy in
+    // agentStore tokenDetails; it does not reinterpret TurnEnded as occupancy.
+    const tokenDetails = te ? session.tokenDetails : undefined
+    const contextSource: CursorContextUsageSource | undefined = tokenDetails
+      ? session.tokenDetailsFresh
+        ? "checkpoint-current-run"
+        : "checkpoint-previous-turn"
+      : undefined
+    const counters = te ? cursorUsageCountersFromTurnEnded(te) : undefined
+    const usage = settledUsage ?? (te
+      ? tokenDetails
+        ? buildLanguageModelV3UsageFromCounters(
+            counters!,
+            { contextTotalTokens: tokenDetails.usedTokens },
+          )
+        : emptyLanguageModelV3Usage()
+      : emptyLanguageModelV3Usage())
+    const providerMetadata = te
+      ? cursorTurnEndedProviderMetadata(te, tokenDetails, contextSource)
+      : undefined
     const reasonLabel = typeof reason === "object" && reason && "unified" in reason
       ? String((reason as { unified?: string }).unified ?? "unknown")
       : String(reason)
@@ -1588,8 +1653,19 @@ export async function pump(
         `rawOut=${te ? turnEndedCounter(te, "output_tokens") : est.outputTokens} ` +
         `rawCacheRead=${te ? turnEndedCounter(te, "cache_read") : est.cacheRead} ` +
         `rawCacheWrite=${te ? turnEndedCounter(te, "cache_write") : est.cacheWrite} ` +
-        `source=${te ? settledSource : "intermediate-zero"}`,
+        `source=${te
+          ? settledSource ?? (contextSource ?? "unavailable")
+          : "intermediate-zero"}`,
     )
+    if (counters) {
+      trace(formatTurnUsageValidation(counters, usage, tokenDetails, contextSource))
+      trace(formatCursorCacheDiagnostics(
+        counters,
+        tokenDetails,
+        cacheDiagnostics.priorTokenDetails,
+        cacheDiagnostics,
+      ))
+    }
     safeEnqueue({
       type: "finish",
       usage,
@@ -1728,10 +1804,21 @@ export async function pump(
     if (checkpointRaw != null) {
       const bytes = normalizeCheckpointBytes(checkpointRaw)
       if (bytes && bytes.length > 0) {
+        cacheDiagnostics.checkpointUpdates++
         setCheckpoint(session.conversationId, bytes)
         session.resumeCheckpoint = Uint8Array.from(bytes)
+        const tokenDetails = decodeConversationTokenDetails(bytes)
+        if (tokenDetails) {
+          cacheDiagnostics.tokenDetailUpdates++
+          session.tokenDetails = tokenDetails
+          session.tokenDetailsFresh = true
+        }
+        const context = tokenDetails
+          ? ` context=${tokenDetails.usedTokens}/${tokenDetails.maxTokens} ` +
+            `categories=${formatCursorTokenCategories(tokenDetails)}`
+          : " context=unavailable"
         trace(
-          `checkpoint: stored ${bytes.length}B for conversationId=${session.conversationId}`,
+          `checkpoint: stored ${bytes.length}B for conversationId=${session.conversationId}${context}`,
         )
       }
     }
@@ -1743,8 +1830,6 @@ export async function pump(
     } else if (iu?.turn_ended) {
       trace(`turn_ended raw wire fields: ${debugWalkTurnEnded(payload)}`)
       const turnEnded = iu.turn_ended as Record<string, unknown>
-      const currentUsage = cursorUsageCountersFromTurnEnded(turnEnded)
-      const settledUsage = buildLanguageModelV3UsageFromCounters(currentUsage)
       if (session.openCodeSessionId) {
         await persistConversationState(
           session.cacheDir ?? opencodeGlobalCacheDir(),
@@ -1765,11 +1850,11 @@ export async function pump(
       emitFinish(
         turnEnded,
         { unified: "stop", raw: undefined },
-        settledUsage,
       )
       sessionManager.close(session)
       return
     } else if (iu?.tool_call_started) {
+      cacheDiagnostics.displayToolCalls++
       // Stash Cursor display ToolCall until exec claims it, or completed bridges it.
       const started = iu.tool_call_started as Record<string, unknown>
       const callId = typeof started.call_id === "string" ? started.call_id : ""
@@ -1862,7 +1947,12 @@ export async function pump(
           }
         }
       }
+    } else if (iu?.step_started) {
+      cacheDiagnostics.stepStarts++
+    } else if (iu?.step_completed) {
+      cacheDiagnostics.stepCompletes++
     } else if (esm) {
+      cacheDiagnostics.execRequests++
       const esmId = (esm.id as number) ?? 0
       if (esm.request_context_args) {
         // Server turn-setup probe (#10). Reply with full OpenCode-sourced context.
@@ -2363,7 +2453,11 @@ export function estimateTokens(chars: number): number {
 }
 
 /** Preserve exact request-local Cursor counters as diagnostics. */
-export function cursorTurnEndedProviderMetadata(te: Record<string, unknown>): {
+export function cursorTurnEndedProviderMetadata(
+  te: Record<string, unknown>,
+  tokenDetails?: CursorConversationTokenDetails,
+  contextSource?: CursorContextUsageSource,
+): {
   cursor: {
     usageVersion: number
     inputTokensRaw: number
@@ -2371,6 +2465,7 @@ export function cursorTurnEndedProviderMetadata(te: Record<string, unknown>): {
     cacheReadRaw: number
     cacheWriteRaw: number
     reasoningTokensRaw: number
+    context?: ReturnType<typeof cursorContextUsageMetadata>
   }
 } {
   return {
@@ -2381,6 +2476,9 @@ export function cursorTurnEndedProviderMetadata(te: Record<string, unknown>): {
       cacheReadRaw: turnEndedCounter(te, "cache_read"),
       cacheWriteRaw: turnEndedCounter(te, "cache_write"),
       reasoningTokensRaw: turnEndedCounter(te, "reasoning_tokens"),
+      ...(tokenDetails
+        ? { context: cursorContextUsageMetadata(tokenDetails, contextSource) }
+        : {}),
     },
   }
 }
@@ -2625,6 +2723,7 @@ function foldStreamParts(parts: V3Part[]): LanguageModelV3GenerateResult {
   let reasoning = ""
   const content: LanguageModelV3GenerateResult["content"] = []
   let finishReason: LanguageModelV3FinishReason = { unified: "stop", raw: undefined }
+  let providerMetadata: LanguageModelV3GenerateResult["providerMetadata"]
   let usage: LanguageModelV3Usage = {
     inputTokens: { total: undefined, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
     outputTokens: { total: undefined, text: undefined, reasoning: undefined },
@@ -2643,11 +2742,18 @@ function foldStreamParts(parts: V3Part[]): LanguageModelV3GenerateResult {
     } else if (part.type === "finish") {
       finishReason = part.finishReason
       usage = part.usage
+      providerMetadata = part.providerMetadata
     }
   }
 
   if (reasoning) content.unshift({ type: "reasoning", text: reasoning })
   if (text) content.unshift({ type: "text", text })
 
-  return { content, finishReason, usage, warnings: [] }
+  return {
+    content,
+    finishReason,
+    usage,
+    warnings: [],
+    ...(providerMetadata ? { providerMetadata } : {}),
+  }
 }

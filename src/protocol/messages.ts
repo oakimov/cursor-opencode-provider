@@ -1322,10 +1322,31 @@ export function createMessageTypes(): protobuf.Root {
     [{ name: "turn", fields: ["agent_conversation_turn"] }],
   )
 
-  // Seed-only schema (JSON strings). Checkpoint bytes are never decoded here —
-  // AgentRunRequest.conversation_state is typed as bytes and carries them opaque.
+  // Cursor checkpoints carry authoritative context occupancy in field #5. The
+  // provider still transports the complete checkpoint as opaque bytes; these
+  // declarations support targeted diagnostics/tests without a re-encode.
+  addType(root, "PromptTokenBreakdownCategory", [
+    { id: 1, name: "id", type: "string" },
+    { id: 2, name: "label", type: "string" },
+    { id: 3, name: "estimated_tokens", type: "uint32" },
+    { id: 4, name: "character_count", type: "uint32" },
+  ])
+  addType(root, "PromptTokenBreakdownSnapshot", [
+    { id: 1, name: "total_used_tokens", type: "uint32" },
+    { id: 2, name: "max_tokens", type: "uint32" },
+    { id: 3, name: "categories", type: "PromptTokenBreakdownCategory", repeated: true },
+  ])
+  addType(root, "ConversationTokenDetails", [
+    { id: 1, name: "used_tokens", type: "uint32" },
+    { id: 2, name: "max_tokens", type: "uint32" },
+    { id: 3, name: "breakdown", type: "PromptTokenBreakdownSnapshot" },
+  ])
+
+  // Seed schema (JSON strings). AgentRunRequest.conversation_state remains
+  // bytes, so live checkpoints are never decoded/re-encoded on transport.
   addType(root, "ConversationStateStructure", [
     { id: 1, name: "root_prompt_messages_json", type: "string", repeated: true },
+    { id: 5, name: "token_details", type: "ConversationTokenDetails" },
     { id: 8, name: "turns", type: "ConversationTurn", repeated: true },
   ])
 
