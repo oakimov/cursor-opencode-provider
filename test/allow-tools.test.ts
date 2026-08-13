@@ -3,6 +3,7 @@ import {
   computeAllowTools,
   MAX_TURN_STATE_SESSIONS,
   resetTurnStateForTests,
+  restoreTurnToolCatalog,
   resolveTurnConversationReset,
   resolveTurnToolState,
 } from "../src/language-model.js"
@@ -58,6 +59,22 @@ describe("compaction tool catalog", () => {
       toolChoice: { type: "none" },
       isCompaction: false,
     })).toEqual({ advertisedTools: [], allowTools: false })
+  })
+
+  it("uses a restored catalog for compaction only", () => {
+    const tools = [{ name: "read", inputSchema: { type: "object" } }]
+    restoreTurnToolCatalog("ses_restored_catalog", tools)
+
+    expect(resolveTurnToolState({
+      sessionKey: "ses_restored_catalog",
+      incomingTools: [],
+      isCompaction: false,
+    })).toEqual({ advertisedTools: [], allowTools: false })
+    expect(resolveTurnToolState({
+      sessionKey: "ses_restored_catalog",
+      incomingTools: [],
+      isCompaction: true,
+    })).toEqual({ advertisedTools: tools, allowTools: false })
   })
 
   it("rebases after the summary checkpoint, restores execution, then stays stable", () => {

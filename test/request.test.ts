@@ -60,18 +60,32 @@ describe("buildRunRequest", () => {
     expect(decoded.run_request.selected_subagent_models ?? []).toHaveLength(0)
   })
 
-  it("does not fabricate a conversation_group_id from the conversation id", () => {
+  it("sends conversation_group_id + run_id (CLI parity: run-agent.tsx headless.ts)", () => {
     const data = buildRunRequest({
       text: "Hello",
       modelId: "test-model",
-      conversationId: "conv-not-a-group",
+      conversationId: "conv-after-rebase",
+      conversationGroupId: "stable-session-group",
+      messageId: "msg-request-42",
     })
     const runRequest = readAllFields(data).find((field) => field.fn === 1)?.bytes
     expect(runRequest).toBeDefined()
-    expect(readAllFields(runRequest!).some((field) => field.fn === 16)).toBe(false)
+    expect(readAllFields(runRequest!).some((field) => field.fn === 16)).toBe(true)
+    expect(readAllFields(runRequest!).some((field) => field.fn === 25)).toBe(true)
     const decoded = decodeMessage<any>("AgentClientMessage", data)
-    expect(decoded.run_request.conversation_id).toBe("conv-not-a-group")
-    expect(decoded.run_request.conversation_group_id ?? "").toBe("")
+    expect(decoded.run_request.conversation_id).toBe("conv-after-rebase")
+    expect(decoded.run_request.conversation_group_id).toBe("stable-session-group")
+    expect(decoded.run_request.run_id).toBe("msg-request-42")
+  })
+
+  it("falls back to the conversation id when no group is supplied", () => {
+    const data = buildRunRequest({
+      text: "Hello",
+      modelId: "test-model",
+      conversationId: "standalone-conversation",
+    })
+    const decoded = decodeMessage<any>("AgentClientMessage", data)
+    expect(decoded.run_request.conversation_group_id).toBe("standalone-conversation")
   })
 
   it("injects opencode tools into AgentRunRequest #4 mcp_tools", () => {

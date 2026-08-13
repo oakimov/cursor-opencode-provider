@@ -30,7 +30,15 @@ function hex(b: Uint8Array): string {
 export function handleKvServerMessage(
   ksm: Record<string, unknown>,
   session: CursorSession,
-): { reply: Uint8Array; kind: "set" | "get"; id: number; blobIdHex: string; found: boolean; echoed?: boolean } | null {
+): {
+  reply: Uint8Array
+  replyBlobBytes: number
+  kind: "set" | "get"
+  id: number
+  blobIdHex: string
+  found: boolean
+  echoed?: boolean
+} | null {
   const id = (ksm.id as number) ?? 0
   const setArgs = ksm.set_blob_args as { blob_id?: Uint8Array; blob_data?: Uint8Array } | undefined
   const getArgs = ksm.get_blob_args as { blob_id?: Uint8Array } | undefined
@@ -48,6 +56,7 @@ export function handleKvServerMessage(
       id,
       blobIdHex: key,
       found: true,
+      replyBlobBytes: 0,
       reply: encodeMessage("AgentClientMessage", {
         kv_client_message: { id, set_blob_result: {} },
       }),
@@ -84,6 +93,7 @@ export function handleKvServerMessage(
       blobIdHex: key,
       found,
       echoed,
+      replyBlobBytes: blobData.length,
       reply: encodeMessage("AgentClientMessage", {
         kv_client_message: { id, get_blob_result: { blob_data: blobData } },
       }),

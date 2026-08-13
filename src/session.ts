@@ -2,7 +2,11 @@ import type { BidiStream, BidiTerminalEvent } from "./transport/connect.js"
 import { trace } from "./debug.js"
 import { CursorProtocolError, type CursorProviderError } from "./errors.js"
 import { sessionActivity, type SessionActivitySource } from "./activity.js"
-import type { HostSubagentCatalog, ToolAliasRegistry } from "./protocol/tools.js"
+import type {
+  HostSubagentCatalog,
+  OpencodeToolDef,
+  ToolAliasRegistry,
+} from "./protocol/tools.js"
 
 export type Frame = { flags: number; payload: Uint8Array }
 
@@ -174,10 +178,16 @@ export type CursorSession = {
    * conversation_checkpoint_update (CLI parity).
   */
   conversationId: string
+  /** Cache root owning this conversation's durable restart state. */
+  cacheDir?: string
   /** Latest eligible checkpoint emitted by this Run attempt. */
   resumeCheckpoint?: Uint8Array
   /** OpenCode session whose own or descendant activity renews tool leases. */
   openCodeSessionId?: string
+  /** Completed compaction must rebase once before resuming a normal agent. */
+  postCompactionRebase?: boolean
+  /** Last real host catalog, retained only as a lifecycle-turn fallback. */
+  toolCatalog?: OpencodeToolDef[]
   stream: BidiStream
   frames: AsyncIterator<Frame>
   pending: Map<number, PendingExec>
@@ -192,7 +202,7 @@ export type CursorSession = {
    * Cursor implements these as read -> whole-file write; retaining the path
    * lets the pump expose the final mutation to OpenCode as a targeted edit.
    */
-  editToolCalls?: Map<string, { path: string }>
+  editToolCalls?: Map<string, { path: string; completeRead?: boolean }>
   /** Monotonic synthetic exec ids for bridged (display-only) OpenCode tool calls. */
   nextBridgedExecId: number
   /** KV blob store: blob_id (hex) → data, for Cursor's out-of-band payload channel. */
@@ -212,9 +222,8 @@ export type CursorSession = {
    */
   allowTools: boolean
   /**
-   * Best-effort token usage for this held-open Run. Updated from text/tool
-   * activity and replaced by TurnEnded only for a single-step Run. Emitted on
-   * tool-call finishes so OpenCode does not store all-zero usage mid-loop.
+   * Best-effort held-Run activity counters used only for diagnostics. AI SDK
+   * accounting comes from the request-local final TurnEnded, never this estimate.
    */
   usageEstimate: {
     inputTokens: number
@@ -223,13 +232,6 @@ export type CursorSession = {
     cacheWrite: number
     reasoningTokens: number
   }
-  /**
-   * True after this held Run has already crossed an OpenCode tool-call
-   * boundary. Cursor's eventual TurnEnded counters then cover the whole Run,
-   * not only the final doStream request, so they cannot be used as that
-   * request's context usage.
-   */
-  hadToolCallBoundary?: boolean
   /**
    * True while a doStream pull() is actively reading this session's frames.
    * Prevents a late cancel/abort from a prior ReadableStream from destroying

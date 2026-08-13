@@ -12,7 +12,7 @@ import {
 import { trace, traceRequestContextPaths } from "./debug.js"
 import { buildRunRequest, buildHeartbeat } from "./protocol/request.js"
 import { decodeFramePayload } from "./protocol/framing.js"
-import { debugWalkTurnEnded, decodeMessage } from "./protocol/messages.js"
+import { debugWalkTurnEnded, decodeMessage, encodeMessage } from "./protocol/messages.js"
 import {
   parseExecServerMessage,
   buildToolCallPart,
@@ -33,6 +33,8 @@ import {
   remapNativeSubagentForCatalog,
   remapCorrelatedEditWriteForCatalog,
   remapEditToolsForCatalog,
+  buildCompleteEditReadMessages,
+  rejectPartialReadMutation,
   CUSTOM_WEBFETCH_TOOL,
   CUSTOM_WEBSEARCH_TOOL,
   CUSTOM_LIST_MCP_RESOURCES_TOOL,
@@ -51,11 +53,24 @@ import {
 } from "./protocol/tool-call-bridge.js"
 import { handleKvServerMessage } from "./protocol/kv.js"
 import { handleInteractionQuery } from "./protocol/interactions.js"
-import { getCheckpoint, setCheckpoint } from "./protocol/checkpoint.js"
-import { conversationBlobCount } from "./protocol/blob-store.js"
+import { clearCheckpoint, getCheckpoint, setCheckpoint } from "./protocol/checkpoint.js"
+import {
+  clearConversationBlobs,
+  conversationBlobCount,
+  inspectConversationBlobGraph,
+  type ConversationBlobGraphStats,
+} from "./protocol/blob-store.js"
 import {
   bindConversationId,
+  isActiveConversationBinding,
+  resolveConversationGroupId,
 } from "./protocol/conversation-bind.js"
+import {
+  clearPersistedConversationState,
+  hydrateConversationState,
+  persistConversationState,
+} from "./protocol/conversation-state.js"
+import { initializeConversationPersistence } from "./protocol/conversation-persistence.js"
 import {
   resolveContinuationPolicy,
   sessionManager,
@@ -75,7 +90,7 @@ import {
   toCursorProviderError,
 } from "./errors.js"
 import { readCache, cacheFilePath, resolveVariantParameters, paramsImplyMaxMode, extractCursorVariantParameters, resolveCursorWireModelId, type ModelInfo } from "./models.js"
-import { buildRequestContext } from "./context/build.js"
+import { getOrBuildRequestContext } from "./context/frozen.js"
 import { workspaceRootFromRequestContext } from "./context/env.js"
 import { opencodeGlobalCacheDir, setHostCacheDirOverride } from "./context/paths.js"
 import { resolveAgentUrl } from "./agent-url.js"
@@ -92,9 +107,9 @@ import {
 import { analyzeReplayFrame, AttemptReplaySafety } from "./replay-safety.js"
 import { readAllFieldsStrict } from "./protocol/struct.js"
 import {
-  buildLanguageModelV3UsageFromEstimate,
-  buildLanguageModelV3UsageFromTurnEnded,
-  exceedsRequestLocalBudget,
+  buildLanguageModelV3UsageFromCounters,
+  cursorUsageCountersFromTurnEnded,
+  emptyLanguageModelV3Usage,
   turnEndedCounter,
 } from "./usage.js"
 
@@ -125,6 +140,15 @@ const MAX_RETRY_DELAY_MS = 30_000
 const RUN_REQUEST_DECODE_FAILED = "CURSOR_RUN_REQUEST_DECODE_FAILED"
 const RUN_REQUEST_UNSUPPORTED = "CURSOR_RUN_REQUEST_UNSUPPORTED"
 const RUN_REPLY_FAILED = "CURSOR_RUN_REPLY_FAILED"
+/** Cursor's own conversation export path treats state above 100 MiB as large. */
+export const MAX_CHECKPOINT_BLOB_GRAPH_BYTES = 100 * 1024 * 1024
+
+export function checkpointBlobGraphRequiresRebase(
+  stats: ConversationBlobGraphStats,
+  maxBytes = MAX_CHECKPOINT_BLOB_GRAPH_BYTES,
+): boolean {
+  return !stats.complete || stats.bytes > maxBytes
+}
 
 type ResponseRequiredChannel = "exec" | "kv" | "interaction" | "multiple"
 const RESPONSE_REQUIRED_CHANNEL_BY_FIELD = new Map<
@@ -315,12 +339,23 @@ export function connectFrameError(payload: string): CursorProviderError {
 
 function rememberToolCatalog(sessionKey: string, tools: OpencodeToolDef[]): void {
   toolCatalogBySession.delete(sessionKey)
-  toolCatalogBySession.set(sessionKey, tools)
+  toolCatalogBySession.set(sessionKey, structuredClone(tools))
   while (toolCatalogBySession.size > MAX_TURN_STATE_SESSIONS) {
     const oldest = toolCatalogBySession.keys().next().value as string | undefined
     if (!oldest) break
     toolCatalogBySession.delete(oldest)
   }
+}
+
+/** Restore the last real catalog solely for lifecycle turns such as compaction. */
+export function restoreTurnToolCatalog(sessionKey: string, tools: OpencodeToolDef[]): void {
+  if (!sessionKey || tools.length === 0) return
+  rememberToolCatalog(sessionKey, tools)
+}
+
+function snapshotToolCatalog(sessionKey: string | undefined): OpencodeToolDef[] {
+  if (!sessionKey) return []
+  return structuredClone(toolCatalogBySession.get(sessionKey) ?? [])
 }
 
 function rememberPostCompactionRebase(sessionKey: string): void {
@@ -372,6 +407,11 @@ export function createCursorLanguageModel(
 ): LanguageModelV3 {
   // Host Path.cache / explicit override wins over XDG heuristics for this process.
   if (options.cacheDir) setHostCacheDirOverride(options.cacheDir)
+  // Start loading and pruning restart state as soon as the provider is built.
+  // startSession awaits this same per-cache-root initialization before binding.
+  void initializeConversationPersistence(opencodeGlobalCacheDir()).catch((error) => {
+    trace(`conversation persistence: startup load failed: ${String(error)}`)
+  })
   return {
     specificationVersion: "v3",
     provider: providerId,
@@ -414,7 +454,6 @@ async function doStreamImpl(
   })
 
   const prompt = callOptions.prompt
-  const promptTokens = estimatePromptTokens(prompt)
   const retryPolicy = resolveRetryPolicy(options.retry)
   // pumpWithRecovery owns the complete per-turn attempt budget.  Opening a
   // replacement session here must be a single attempt; otherwise setup retry
@@ -480,7 +519,6 @@ async function doStreamImpl(
             initialSession: activeSession,
             controller,
             abortSignal: callOptions.abortSignal,
-            promptTokens,
             retryPolicy,
             recover: (recovery) => openSession({ recovery }),
             onSession: (next) => { activeSession = next },
@@ -515,7 +553,6 @@ export async function pumpWithRecovery(input: {
   initialSession: CursorSession
   controller: ReadableStreamDefaultController<V3Part>
   abortSignal?: AbortSignal
-  promptTokens?: number
   retryPolicy?: CursorRetryPolicy
   recover: (recovery: CursorRunRecovery) => Promise<CursorSession>
   onSession?: (session: CursorSession) => void
@@ -527,7 +564,6 @@ export async function pumpWithRecovery(input: {
     maxAttempts: (input.maxRecoveries ?? 1) + 1,
   }
   const maxRecoveries = retryPolicy.maxAttempts - 1
-  const requestUsage = { outputChars: 0 }
   input.onSession?.(session)
 
   for (let attempt = 0; ; attempt++) {
@@ -541,8 +577,6 @@ export async function pumpWithRecovery(input: {
         {
           textId: crypto.randomUUID(),
           reasoningId: crypto.randomUUID(),
-          promptTokens: input.promptTokens ?? 0,
-          requestUsage,
         },
         input.abortSignal,
       )
@@ -582,7 +616,6 @@ export async function pumpWithRecovery(input: {
         : { kind: "rebase" }
       session = await input.recover(recovery)
       if (recovery.kind === "resume") {
-        session.hadToolCallBoundary = pumpedSession.hadToolCallBoundary
         session.usageEstimate = { ...pumpedSession.usageEstimate }
         session.editToolCalls = new Map(pumpedSession.editToolCalls)
       }
@@ -608,6 +641,15 @@ async function startSession(
   const prompt = callOptions.prompt
   const incomingTools = extractTools(callOptions)
   const sessionKey = opencodeSessionKey(callOptions)
+  const cacheDir = opencodeGlobalCacheDir()
+  if (sessionKey) {
+    const restored = await hydrateConversationState(cacheDir, sessionKey).catch((error) => {
+      trace(`conversation persistence: restore failed sessionKey=${sessionKey}: ${String(error)}`)
+      return undefined
+    })
+    if (restored?.postCompactionRebase) rememberPostCompactionRebase(sessionKey)
+    if (restored?.toolCatalog.length) restoreTurnToolCatalog(sessionKey, restored.toolCatalog)
+  }
   const providerOptions = callOptions.providerOptions?.cursor as Record<string, unknown> | undefined
   // The classic plugin marks OpenCode's agent="compaction" through chat.params.
   // OpenCode 2.0 removed that hook, so its plugin records the same fact against
@@ -633,18 +675,57 @@ async function startSession(
   const allowTools = toolState.allowTools
   const discoveredSubagentCatalog = extractHostSubagentCatalog(cursorTools)
   const resetState = resolveTurnConversationReset({ sessionKey, isCompaction })
-  const recovery = startOptions?.recovery
-  const resuming = recovery?.kind === "resume"
+  let recovery = startOptions?.recovery
+  let resumeRecovery = recovery?.kind === "resume" ? recovery : undefined
+  let resuming = !!resumeRecovery
   // Compaction must not reuse the prior conversation; its first normal turn
   // must also rebase so the summary-agent checkpoint cannot replace the normal
   // system prompt and OpenCode's newly compacted history.
-  const bound = resuming
-    ? { conversationId: recovery.conversationId, reset: false, previousId: undefined }
+  let bound = resuming
+    ? { conversationId: resumeRecovery!.conversationId, reset: false, previousId: undefined }
     : bindConversationId(sessionKey, { reset: resetState.reset || recovery?.kind === "rebase" })
-  const conversationId = bound.conversationId
-  if (bound.reset) {
+  let conversationState = resuming
+    ? resumeRecovery!.checkpoint
+    : (bound.reset ? undefined : getCheckpoint(bound.conversationId))
+  let checkpointGraph: ConversationBlobGraphStats = conversationState
+    ? inspectConversationBlobGraph(bound.conversationId, conversationState)
+    : { count: 0, bytes: 0, complete: true }
+  let forcedResetReason: string | undefined
+  if (conversationState && checkpointBlobGraphRequiresRebase(checkpointGraph)) {
+    const previousConversationId = bound.conversationId
+    forcedResetReason = checkpointGraph.complete
+      ? "oversized-checkpoint-graph"
+      : "incomplete-checkpoint-graph"
     trace(
-      `conversation reset: reason=${recovery?.kind === "rebase" ? "interrupted-run" : (resetState.reason ?? "unknown")} ` +
+      `checkpoint state rejected: reason=${forcedResetReason} ` +
+        `conversationId=${previousConversationId} checkpointBytes=${conversationState.length} ` +
+        `blobCount=${checkpointGraph.count} blobBytes=${checkpointGraph.bytes} ` +
+        `limitBytes=${MAX_CHECKPOINT_BLOB_GRAPH_BYTES} ` +
+        `detail=${checkpointGraph.fallbackReason ?? "-"} action=rebase`,
+    )
+    // A recovery resume must become a history rebase so the interrupted user
+    // request remains in the seed. An ordinary turn keeps its normal user text.
+    if (recovery?.kind === "resume") recovery = { kind: "rebase" }
+    resumeRecovery = undefined
+    resuming = false
+    if (!sessionKey) {
+      clearCheckpoint(previousConversationId)
+      clearConversationBlobs(previousConversationId)
+    }
+    bound = bindConversationId(sessionKey, { reset: true })
+    conversationState = undefined
+    checkpointGraph = { count: 0, bytes: 0, complete: true }
+  }
+  const conversationId = bound.conversationId
+  const conversationGroupId = resolveConversationGroupId(sessionKey, conversationId)
+  if (bound.reset) {
+    if (sessionKey) {
+      await clearPersistedConversationState(cacheDir, sessionKey, bound.previousId).catch((error) => {
+        trace(`conversation persistence: reset cleanup failed sessionKey=${sessionKey}: ${String(error)}`)
+      })
+    }
+    trace(
+      `conversation reset: reason=${forcedResetReason ?? (recovery?.kind === "rebase" ? "interrupted-run" : (resetState.reason ?? "unknown"))} ` +
         `sessionKey=${sessionKey ?? "(none)"} ` +
         `previousId=${bound.previousId ?? "-"} → conversationId=${conversationId}`,
     )
@@ -745,7 +826,12 @@ async function startSession(
     baseURL: agentBaseUrl,
     headers: options.headers,
   })
-  const requestContext = await buildRequestContext({ workspaceRoot, tools: cursorTools })
+  // Freeze RequestContext per conversation_id (CLI parity). Rebuilding every
+  // Run mutates volatile slices (git porcelain, layout) and breaks prompt cache.
+  const { context: requestContext, reused: requestContextReused } = await getOrBuildRequestContext(
+    conversationId,
+    { workspaceRoot, tools: cursorTools },
+  )
   const contextSubagents = Array.isArray(requestContext.custom_subagents)
     ? requestContext.custom_subagents
         .map((agent) => agent && typeof agent === "object" && typeof (agent as Record<string, unknown>).name === "string"
@@ -771,15 +857,14 @@ async function startSession(
     ? requestContext.tools as Array<Record<string, unknown>>
     : []
   // CLI parity: echo the last conversation_checkpoint_update as conversation_state.
-  // After compaction reset there is no checkpoint — seed from OpenCode history.
-  const conversationState = resuming
-    ? recovery.checkpoint
-    : (bound.reset ? undefined : getCheckpoint(conversationId))
+  // After compaction or an unsafe checkpoint reset there is no checkpoint —
+  // seed a new Cursor conversation from OpenCode's authoritative history.
   const reqBytes = buildRunRequest({
     text: userText,
     images,
     modelId: cursorModelId,
     conversationId,
+    conversationGroupId,
     systemPrompt: conversationState ? undefined : systemPrompt,
     history: conversationState ? undefined : history,
     conversationState,
@@ -801,17 +886,29 @@ async function startSession(
       ? requestContext.hooks_additional_context
       : ""
   const historyChars = history.reduce((n, m) => n + m.content.length, 0)
+  const seedChars = conversationState
+    ? 0
+    : (systemPrompt?.length ?? 0) + userText.length + historyChars
+  const seedEstimateIn = estimateTokens(seedChars)
+  const checkpointEnvelopeEstimateIn = conversationState
+    ? estimateTokens(userText.length + conversationState.length)
+    : 0
+  const runRequestWireEstimateIn = estimateTokens(reqBytes.length)
+  const encodedRequestContext = encodeMessage("RequestContext", requestContext)
   const usageEstimate = {
-    inputTokens: estimateTokens(
-      (systemPrompt?.length ?? 0) + userText.length + historyChars + (conversationState?.length ?? 0),
-    ),
+    // This is used only before Cursor supplies authoritative TurnEnded usage.
+    // Estimate the actual protobuf request, not history/system text omitted by
+    // checkpoint Runs. The opaque remote interpretation of KV blobs is logged
+    // separately and deliberately is not mislabeled as a token count.
+    inputTokens: runRequestWireEstimateIn,
     outputTokens: 0,
     cacheRead: 0,
     cacheWrite: 0,
     reasoningTokens: 0,
   }
   trace(
-    `outbound Run: model=${cursorModelId} opencodeModel=${modelId} conversationId=${conversationId} ` +
+    `outbound Run: model=${cursorModelId} opencodeModel=${modelId} ` +
+      `conversationId=${conversationId} conversationGroupId=${conversationGroupId} ` +
       `params=${JSON.stringify(parameterValues ?? [])} ` +
       `maxMode=${maxMode} systemPromptLen=${systemPrompt?.length ?? 0} ` +
       `tools=${tools.length} incomingTools=${incomingTools.length} compaction=${isCompaction} ` +
@@ -819,13 +916,19 @@ async function startSession(
       `availableModels=${_availableModels?.length ?? 0} userTextLen=${userText.length} ` +
       `images=${images.length} imageBytes=${images.reduce((total, image) => total + image.data.length, 0)} ` +
       `historyMsgs=${history.length} historyChars=${historyChars} ` +
-      `checkpointLen=${conversationState?.length ?? 0} reset=${bound.reset} ` +
-      `resume=${resuming} ` +
-      `usageEstimateIn=${usageEstimate.inputTokens} runRequestBytes=${reqBytes.length}`,
+      `checkpointLen=${conversationState?.length ?? 0} checkpointBlobCount=${checkpointGraph.count} ` +
+      `checkpointBlobBytes=${checkpointGraph.bytes} checkpointGraphComplete=${checkpointGraph.complete} ` +
+      `seedChars=${seedChars} seedEstimateIn=${seedEstimateIn} ` +
+      `checkpointEnvelopeEstimateIn=${checkpointEnvelopeEstimateIn} ` +
+      `reset=${bound.reset} ` +
+      `resume=${resuming} requestContextReused=${requestContextReused} ` +
+      `usageEstimateMode=run-request-wire usageEstimateIn=${usageEstimate.inputTokens} ` +
+      `runRequestBytes=${reqBytes.length} requestContextBytes=${encodedRequestContext.length}`,
   )
   if (hooksCtx) trace(`outbound Run hooks_additional_context: ${hooksCtx}`)
   trace(`hash run_request sha256=${sha(reqBytes)}`)
   if (systemPrompt) trace(`hash systemPrompt sha256=${sha(systemPrompt)}`)
+  trace(`hash requestContext sha256=${sha(encodedRequestContext)}`)
   if (conversationState) trace(`hash checkpoint sha256=${sha(conversationState)}`)
 
   try {
@@ -839,8 +942,11 @@ async function startSession(
   const session: CursorSession = {
     sessionId: crypto.randomUUID(),
     conversationId,
+    cacheDir,
     resumeCheckpoint: undefined,
     openCodeSessionId: sessionKey,
+    postCompactionRebase: isCompaction,
+    toolCatalog: snapshotToolCatalog(sessionKey),
     stream,
     frames: stream.frames()[Symbol.asyncIterator](),
     pending: new Map(),
@@ -875,15 +981,10 @@ async function startSession(
   session.heartbeat = setInterval(() => {
     if (session.closed) return
     if (heartbeatWritePending) {
-      sessionManager.close(
-        session,
-        "heartbeat-write-failed",
-        new CursorTransportError("Cursor heartbeat write remained backpressured", {
-          transient: false,
-          replaySafe: false,
-          code: "CURSOR_HEARTBEAT_BACKPRESSURE",
-        }),
-      )
+      // The pending write has its own bounded drain wait and will close the
+      // session with the actual failing operation. Do not race it with another
+      // heartbeat or misattribute an existing KV backlog to the heartbeat.
+      trace(`heartbeat skipped: prior heartbeat write is still pending sessionId=${session.sessionId}`)
       return
     }
     heartbeatWritePending = true
@@ -969,16 +1070,42 @@ export function deliverContinuationResults(
           || pending.resultField === "background_shell_spawn_result"
             ? consumeCursorShellResult(r.toolCallId, r.output)
             : undefined
-        frames = buildExecClientMessages({
-          execId: r.execId,
-          resultField: pending.resultField,
-          output: shellResult?.output ?? r.output,
-          error: r.error,
-          toolName: pending.toolName ?? r.toolName,
-          resultMetadata: pending.resultMetadata,
-          shellOutcome: shellResult?.outcome,
-          workspaceRoot: workspaceRootFromRequestContext(session.requestContext),
-        })
+        const workspaceRoot = workspaceRootFromRequestContext(session.requestContext)
+        const correlatedEditCallId = pending.resultMetadata?.correlatedEditCallId
+        const requestedPath = pending.resultMetadata?.path
+        const correlatedEdit =
+          !r.error
+          && pending.resultField === "read_result"
+          && pending.toolName === "read"
+          && typeof correlatedEditCallId === "string"
+          && typeof requestedPath === "string"
+            ? session.editToolCalls?.get(correlatedEditCallId)
+            : undefined
+        if (correlatedEdit) {
+          const absolutePath = path.resolve(workspaceRoot, requestedPath as string)
+          if (absolutePath === path.resolve(workspaceRoot, correlatedEdit.path)) {
+            frames = buildCompleteEditReadMessages(r.execId, absolutePath, requestedPath as string) ?? []
+            if (frames.length > 0) {
+              correlatedEdit.completeRead = true
+              trace(
+                `continuation: upgraded authorized correlated edit read execId=${r.execId} ` +
+                  `path=${JSON.stringify(requestedPath)}`,
+              )
+            }
+          }
+        }
+        if (frames.length === 0) {
+          frames = buildExecClientMessages({
+            execId: r.execId,
+            resultField: pending.resultField,
+            output: shellResult?.output ?? r.output,
+            error: r.error,
+            toolName: pending.toolName ?? r.toolName,
+            resultMetadata: pending.resultMetadata,
+            shellOutcome: shellResult?.outcome,
+            workspaceRoot,
+          })
+        }
       } catch (error) {
         trace(`continuation: result encode FAILED execId=${r.execId} err=${(error as Error).message}`)
         sessionManager.close(session, "result-write-failed")
@@ -1050,7 +1177,31 @@ function isTruthyEnv(value: string | undefined): boolean {
   return value === "1" || value === "true"
 }
 
+const streamWriteChains = new WeakMap<BidiStream, Promise<void>>()
+
+/**
+ * Keep awaited protocol writes ordered per Run stream. In particular, a large
+ * KV get_blob reply must drain before another KV reply or heartbeat is queued;
+ * otherwise one heartbeat observes the backlog created by dozens of ignored
+ * false write() results and reports the wrong operation as the failure.
+ */
 async function writeWithBackpressure(
+  stream: BidiStream,
+  message: Uint8Array,
+  operation: string,
+): Promise<void> {
+  const previous = streamWriteChains.get(stream)
+  const current = (previous ? previous.catch(() => undefined) : Promise.resolve())
+    .then(() => writeWithBackpressureNow(stream, message, operation))
+  streamWriteChains.set(stream, current)
+  try {
+    await current
+  } finally {
+    if (streamWriteChains.get(stream) === current) streamWriteChains.delete(stream)
+  }
+}
+
+async function writeWithBackpressureNow(
   stream: BidiStream,
   message: Uint8Array,
   operation: string,
@@ -1065,6 +1216,7 @@ async function writeWithBackpressure(
     })
   }
   if (accepted !== false) return
+  trace(`stream write backpressured: operation=${operation} bytes=${message.length}`)
   if (!stream.waitForDrain) {
     throw new CursorTransportError(`Cursor ${operation} write was backpressured`, {
       transient: false,
@@ -1074,6 +1226,7 @@ async function writeWithBackpressure(
   }
   try {
     await stream.waitForDrain(5_000)
+    trace(`stream write drained: operation=${operation} bytes=${message.length}`)
   } catch (cause) {
     throw toCursorProviderError(cause, {
       replaySafe: false,
@@ -1135,27 +1288,26 @@ export async function pump(
   ids: {
     textId: string
     reasoningId: string
-    promptTokens?: number
-    requestUsage?: { outputChars: number }
   },
   abortSignal?: AbortSignal,
 ): Promise<void> {
   sessionManager.registerSession(session)
   const { textId, reasoningId } = ids
-  const promptTokens = ids.promptTokens ?? 0
   const advertisedToolNames = advertisedToolNamesFromDescriptors(session.toolDescriptors)
   const advertisedToolNameSet = new Set(
     advertisedToolNames.map((name) => resolveCustomWebToolAlias(name, session.toolAliases)),
   )
   let textStarted = false
   let reasoningStarted = false
-  const requestUsage = ids.requestUsage ?? { outputChars: 0 }
   const replaySafety = new AttemptReplaySafety(session.sessionId)
   const failRunProtocol = (message: string, code: string): never => {
     replaySafety.markBarrier("unknown-or-malformed-frame")
     const error = new CursorProtocolError(message, { code })
     sessionManager.close(session, "remote-error", error)
     throw error
+  }
+  const rethrowTransportWriteFailure = (error: unknown): void => {
+    if (error instanceof CursorProviderError && error.origin !== "protocol") throw error
   }
   // OpenCode cancels the ReadableStream between turns (see the cancel handler
   // in doStreamImpl). The frames iterator can still yield a final `done` after
@@ -1211,13 +1363,17 @@ export async function pump(
   }
 
   /**
-   * Cursor's streamed edit handshake reads the target before it sends the
-   * replacement through write_args. For a new file that read naturally fails,
-   * which makes the model abandon the edit and fall back to a shell heredoc.
-   * Treat only a missing target correlated to an edit_tool_call as an empty
-   * file, allowing Cursor to continue to the ordinary OpenCode write call.
+   * Cursor's streamed edit handshake needs the complete target before it sends
+   * the replacement through write_args. OpenCode's ordinary read tool caps at
+   * 50 KB, so forwarding this private prerequisite read teaches Cursor's editor
+   * that a large file ends at the cap and produces a destructive replacement.
+   *
+   * Answer a correlated workspace-file read directly up to Cursor's own 50 MB
+   * edit limit. Missing targets remain empty-file successes so creation can
+   * continue. External and otherwise ineligible reads retain OpenCode's normal
+   * permission-aware path.
    */
-  const recoverMissingEditRead = (
+  const recoverCorrelatedEditRead = (
     parsed: ParsedExecRequest,
     displayCallId: string | undefined,
   ): boolean => {
@@ -1243,7 +1399,52 @@ export async function pump(
     const workspaceRoot = workspaceRootFromRequestContext(session.requestContext)
     const resolvePath = (value: string) => path.resolve(workspaceRoot, value)
     const absolutePath = resolvePath(requestedPath)
-    if (absolutePath !== resolvePath(editPath) || fs.existsSync(absolutePath)) return false
+    if (absolutePath !== resolvePath(editPath)) return false
+
+    let exists = true
+    try {
+      fs.lstatSync(absolutePath)
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined
+      if (code !== "ENOENT") return false
+      exists = false
+    }
+
+    if (exists) {
+      // Do not bypass OpenCode's external-directory permission boundary, even
+      // through a symlink rooted in the workspace.
+      try {
+        const realRoot = fs.realpathSync(workspaceRoot)
+        const realTarget = fs.realpathSync(absolutePath)
+        const relative = path.relative(realRoot, realTarget)
+        if (relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+          parsed.resultMetadata = {
+            ...parsed.resultMetadata,
+            correlatedEditCallId: displayCallId,
+          }
+          return false
+        }
+
+        const frames = buildCompleteEditReadMessages(parsed.id, absolutePath, requestedPath)
+        if (!frames) return false
+        for (const frame of frames) session.stream.write(frame)
+        const editCall = session.editToolCalls?.get(displayCallId)
+        if (editCall) editCall.completeRead = true
+        trace(
+          `exec: correlated edit read completed directly id=${parsed.id} ` +
+            `path=${JSON.stringify(requestedPath)}; awaiting write_args`,
+        )
+        return true
+      } catch {
+        parsed.resultMetadata = {
+          ...parsed.resultMetadata,
+          correlatedEditCallId: displayCallId,
+        }
+        return false
+      }
+    }
 
     try {
       for (const frame of buildExecClientMessages({
@@ -1263,7 +1464,7 @@ export async function pump(
       return true
     } catch (e) {
       const error = new Error(
-        `Failed to recover Cursor edit read for a new file: ${(e as Error).message}`,
+        `Failed to recover Cursor edit read: ${(e as Error).message}`,
       )
       trace(`exec: edit read recovery FAILED ${error.message}`)
       safeError(error)
@@ -1283,7 +1484,7 @@ export async function pump(
    *
    * Read-only by construction — write/edit targets are never checked, so
    * legitimate file creation (path resolves, file absent) is never denied. Runs
-   * after recoverMissingEditRead, which has already converted the new-file edit
+   * after recoverCorrelatedEditRead, which has already converted the edit
    * handshake read into an empty-file success. EACCES/EPERM and other stat
    * errors fall through to OpenCode so a genuine permission decision stands.
    */
@@ -1346,9 +1547,7 @@ export async function pump(
       textStarted = true
     }
     session.usageEstimate.outputTokens += estimateTokens(text.length)
-    if (safeEnqueue({ type: "text-delta", id: textId, delta: text } as V3Part)) {
-      requestUsage.outputChars += text.length
-    }
+    safeEnqueue({ type: "text-delta", id: textId, delta: text } as V3Part)
   }
   const emitReasoning = (text: string) => {
     if (!text) return
@@ -1358,44 +1557,22 @@ export async function pump(
       reasoningStarted = true
     }
     session.usageEstimate.outputTokens += estimateTokens(text.length)
-    if (safeEnqueue({ type: "reasoning-delta", id: reasoningId, delta: text } as V3Part)) {
-      requestUsage.outputChars += text.length
-    }
+    safeEnqueue({ type: "reasoning-delta", id: reasoningId, delta: text } as V3Part)
   }
   const emitFinish = (
     te: Record<string, unknown> | undefined,
     reason: LanguageModelV3FinishReason,
+    settledUsage?: LanguageModelV3Usage,
+    settledSource = "turn_ended-request-local",
   ) => {
     closeOpenSpans()
-    // TurnEnded is request-local only when this Run did not previously stop at
-    // a tool boundary. On a held multi-step Run Cursor aggregates every model
-    // invocation into these counters; treating that billed total as the final
-    // request's prompt size makes OpenCode compact after ordinary tasks.
-    const cumulativeByBoundary = !!te && session.hadToolCallBoundary === true
-    const cumulativeByBudget = !!te && !cumulativeByBoundary && exceedsRequestLocalBudget(te, {
-      inputTokens: session.usageEstimate.inputTokens,
-      outputTokens: session.usageEstimate.outputTokens,
-    })
-    const cumulativeTurnEnded = cumulativeByBoundary || cumulativeByBudget
-    if (te && !cumulativeTurnEnded) {
-      session.usageEstimate = {
-        inputTokens: turnEndedCounter(te, "input_tokens"),
-        outputTokens: turnEndedCounter(te, "output_tokens"),
-        cacheRead: turnEndedCounter(te, "cache_read"),
-        cacheWrite: turnEndedCounter(te, "cache_write"),
-        reasoningTokens: turnEndedCounter(te, "reasoning_tokens"),
-      }
-    }
     const est = session.usageEstimate
-    const usage: LanguageModelV3Usage = te && !cumulativeTurnEnded
-      ? buildLanguageModelV3UsageFromTurnEnded(te)
-      : buildLanguageModelV3UsageFromEstimate(
-          est,
-          promptTokens,
-          requestUsage.outputChars,
-          estimateTokens,
-        )
-    if (!te) session.hadToolCallBoundary = true
+    // OpenCode persists and sums every AI SDK finish. Cursor does not expose a
+    // cache-aware request-local counter at tool boundaries, so charging the
+    // growing estimate there multiplies one held Run across all of its steps.
+    // Emit zero at intermediate boundaries and settle the request-local
+    // TurnEnded exactly once when it closes the held Run.
+    const usage = settledUsage ?? emptyLanguageModelV3Usage()
     const providerMetadata = te ? cursorTurnEndedProviderMetadata(te) : undefined
     const reasonLabel = typeof reason === "object" && reason && "unified" in reason
       ? String((reason as { unified?: string }).unified ?? "unknown")
@@ -1411,8 +1588,7 @@ export async function pump(
         `rawOut=${te ? turnEndedCounter(te, "output_tokens") : est.outputTokens} ` +
         `rawCacheRead=${te ? turnEndedCounter(te, "cache_read") : est.cacheRead} ` +
         `rawCacheWrite=${te ? turnEndedCounter(te, "cache_write") : est.cacheWrite} ` +
-        `guard=${cumulativeByBoundary ? "boundary" : cumulativeByBudget ? "over-budget" : "none"} ` +
-        `source=${te ? (cumulativeTurnEnded ? "estimate-cumulative-turn-ended" : "turn_ended") : "estimate"}`,
+        `source=${te ? settledSource : "intermediate-zero"}`,
     )
     safeEnqueue({
       type: "finish",
@@ -1566,7 +1742,31 @@ export async function pump(
       emitReasoning(((iu.thinking_delta as Record<string, unknown>).text as string) ?? "")
     } else if (iu?.turn_ended) {
       trace(`turn_ended raw wire fields: ${debugWalkTurnEnded(payload)}`)
-      emitFinish(iu.turn_ended as Record<string, unknown>, { unified: "stop", raw: undefined })
+      const turnEnded = iu.turn_ended as Record<string, unknown>
+      const currentUsage = cursorUsageCountersFromTurnEnded(turnEnded)
+      const settledUsage = buildLanguageModelV3UsageFromCounters(currentUsage)
+      if (session.openCodeSessionId) {
+        await persistConversationState(
+          session.cacheDir ?? opencodeGlobalCacheDir(),
+          {
+            sessionKey: session.openCodeSessionId,
+            conversationId: session.conversationId,
+            requestContext: session.requestContext,
+            toolCatalog: session.toolCatalog ?? [],
+            postCompactionRebase: session.postCompactionRebase,
+          },
+        ).catch((error) => {
+          trace(
+            `conversation persistence: TurnEnded save failed ` +
+              `sessionKey=${session.openCodeSessionId}: ${String(error)}`,
+          )
+        })
+      }
+      emitFinish(
+        turnEnded,
+        { unified: "stop", raw: undefined },
+        settledUsage,
+      )
       sessionManager.close(session)
       return
     } else if (iu?.tool_call_started) {
@@ -1683,9 +1883,14 @@ export async function pump(
             `exec request_context reply id=${esmId}`,
             session.requestContext,
           )
-          session.stream.write(buildRequestContextResult(esmId, session.requestContext))
+          await writeWithBackpressure(
+            session.stream,
+            buildRequestContextResult(esmId, session.requestContext),
+            `request-context reply id=${esmId}`,
+          )
           trace(`exec request_context: replied`)
-        } catch {
+        } catch (error) {
+          rethrowTransportWriteFailure(error)
           failRunProtocol("Cursor request-context reply failed", RUN_REPLY_FAILED)
         }
       } else if (esm.mcp_state_exec_args) {
@@ -1697,9 +1902,14 @@ export async function pump(
           ? stateArgs.server_identifiers.join(",")
           : ""
         try {
-          session.stream.write(buildMcpStateResult(esmId, stateArgs, session.requestContext))
+          await writeWithBackpressure(
+            session.stream,
+            buildMcpStateResult(esmId, stateArgs, session.requestContext),
+            `MCP-state reply id=${esmId}`,
+          )
           trace(`exec mcp_state: replied id=${esmId} requested=[${requested}]`)
-        } catch {
+        } catch (error) {
+          rethrowTransportWriteFailure(error)
           failRunProtocol("Cursor MCP-state reply failed", RUN_REPLY_FAILED)
         }
       } else if (esm.list_mcp_resources_exec_args) {
@@ -1709,9 +1919,14 @@ export async function pump(
         const args = esm.list_mcp_resources_exec_args as Record<string, unknown>
         const server = typeof args.server === "string" ? args.server : ""
         try {
-          session.stream.write(buildListMcpResourcesFallback(esmId))
+          await writeWithBackpressure(
+            session.stream,
+            buildListMcpResourcesFallback(esmId),
+            `list-MCP-resources reply id=${esmId}`,
+          )
           trace(`exec list_mcp_resources: replied id=${esmId} server=${server || "(all)"} success{resources:[]}`)
-        } catch {
+        } catch (error) {
+          rethrowTransportWriteFailure(error)
           failRunProtocol("Cursor list_mcp_resources reply failed", RUN_REPLY_FAILED)
         }
       } else if (esm.read_mcp_resource_exec_args) {
@@ -1720,9 +1935,14 @@ export async function pump(
         const server = typeof args.server === "string" ? args.server : ""
         const uri = typeof args.uri === "string" ? args.uri : ""
         try {
-          session.stream.write(buildReadMcpResourceFallback(esmId, server, uri))
+          await writeWithBackpressure(
+            session.stream,
+            buildReadMcpResourceFallback(esmId, server, uri),
+            `read-MCP-resource reply id=${esmId}`,
+          )
           trace(`exec read_mcp_resource: replied id=${esmId} server=${server} uri=${uri} error{server not found}`)
-        } catch {
+        } catch (error) {
+          rethrowTransportWriteFailure(error)
           failRunProtocol("Cursor read_mcp_resource reply failed", RUN_REPLY_FAILED)
         }
       } else {
@@ -1739,6 +1959,10 @@ export async function pump(
           const editCall = displayCallId
             ? session.editToolCalls?.get(displayCallId)
             : undefined
+          // A complete correlated edit read is trusted provenance: unlike an
+          // ordinary capped read it cannot have appended our warning marker,
+          // and the source itself may legitimately contain the marker text.
+          if (!editCall?.completeRead) rejectPartialReadMutation(parsed)
           if (editCall) {
             const remapped = remapCorrelatedEditWriteForCatalog(
               parsed,
@@ -1801,7 +2025,7 @@ export async function pump(
             if (!rejectExec(parsed, reason, "unavailable tool")) return
             continue
           }
-          if (recoverMissingEditRead(parsed, displayCallId)) continue
+          if (recoverCorrelatedEditRead(parsed, displayCallId)) continue
           if (rejectMissingReadTarget(parsed)) {
             if (displayCallId) session.displayToolCalls.delete(displayCallId)
             continue
@@ -1872,12 +2096,17 @@ export async function pump(
         if (handled.outcome === "acknowledged") {
           replaySafety.markBarrier("stateful-interaction")
         }
-        session.stream.write(handled.reply)
+        await writeWithBackpressure(
+          session.stream,
+          handled.reply,
+          `interaction reply id=${handled.id}`,
+        )
         trace(
           `interaction_query: replied id=${handled.id} variant=${handled.variantName} ` +
             `field=${handled.variantField} outcome=${handled.outcome}`,
         )
-      } catch {
+      } catch (error) {
+        rethrowTransportWriteFailure(error)
         failRunProtocol("Cursor interaction reply failed", RUN_REPLY_FAILED)
       }
     } else if (kv) {
@@ -1893,13 +2122,19 @@ export async function pump(
       const handled = handleKvServerMessage(kv, session)
       if (handled) {
         try {
-          session.stream.write(handled.reply)
+          await writeWithBackpressure(
+            session.stream,
+            handled.reply,
+            `KV ${handled.kind}_blob reply id=${handled.id}`,
+          )
           trace(
             `kv replied: kind=${handled.kind} id=${handled.id} blobId=${handled.blobIdHex.slice(0, 16)}… ` +
               `found=${handled.found} echoed=${!!handled.echoed} ` +
+              `replyBytes=${handled.reply.length} replyBlobBytes=${handled.replyBlobBytes} ` +
               `sessionBlobs=${session.blobs.size} convBlobs=${conversationBlobCount(session.conversationId)}`,
           )
-        } catch {
+        } catch (error) {
+          rethrowTransportWriteFailure(error)
           failRunProtocol("Cursor KV reply failed", RUN_REPLY_FAILED)
         }
       } else {
@@ -1907,7 +2142,7 @@ export async function pump(
       }
     }
     } catch (e) {
-      if (e instanceof CursorProtocolError) throw e
+      if (e instanceof CursorProviderError) throw e
       if (requiredChannel) {
         failRunProtocol(`Cursor ${requiredChannel} request could not be handled`, RUN_REQUEST_UNSUPPORTED)
       }
@@ -2127,19 +2362,7 @@ export function estimateTokens(chars: number): number {
   return Math.ceil(chars / 4)
 }
 
-/** Estimate current-request prompt tokens from the complete serialized V3 prompt. */
-export function estimatePromptTokens(prompt: LanguageModelV3CallOptions["prompt"]): number {
-  const serializedContent = prompt
-    .map((message) =>
-      typeof message.content === "string"
-        ? message.content
-        : (JSON.stringify(message.content) ?? ""),
-    )
-    .join("\n")
-  return estimateTokens(serializedContent.length)
-}
-
-/** Preserve exact Cursor counters as diagnostics when they are cumulative across a multi-step Run. */
+/** Preserve exact request-local Cursor counters as diagnostics. */
 export function cursorTurnEndedProviderMetadata(te: Record<string, unknown>): {
   cursor: {
     usageVersion: number
@@ -2152,7 +2375,7 @@ export function cursorTurnEndedProviderMetadata(te: Record<string, unknown>): {
 } {
   return {
     cursor: {
-      usageVersion: 2,
+      usageVersion: 3,
       inputTokensRaw: turnEndedCounter(te, "input_tokens"),
       outputTokensRaw: turnEndedCounter(te, "output_tokens"),
       cacheReadRaw: turnEndedCounter(te, "cache_read"),

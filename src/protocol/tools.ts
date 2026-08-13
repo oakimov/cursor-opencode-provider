@@ -620,6 +620,48 @@ export function remapNativeSubagentForCatalog(
 /** Matches Cursor's own pre-write read threshold (`local-exec` 52428800). */
 const MAX_EDIT_SOURCE_BYTES = 50 * 1024 * 1024
 
+/**
+ * Complete the private read inside Cursor's legacy edit transaction without
+ * routing it through OpenCode's user-facing `read` tool. The latter caps every
+ * result at 50 KB, while Cursor's editor needs the complete file to calculate
+ * the correlated whole-file `write_args` that follows.
+ *
+ * The caller is responsible for proving that `filePath` is the same regular
+ * file named by an active `edit_tool_call` and is contained by the workspace.
+ */
+export function buildCompleteEditReadMessages(
+  execId: number,
+  sourcePath: string,
+  resultPath = sourcePath,
+): Uint8Array[] | undefined {
+  try {
+    const stat = fs.statSync(sourcePath)
+    if (!stat.isFile() || stat.size > MAX_EDIT_SOURCE_BYTES) return undefined
+    const content = fs.readFileSync(sourcePath, "utf8")
+    return [
+      encodeMessage("AgentClientMessage", {
+        exec_client_message: {
+          id: execId,
+          local_execution_time_ms: 0,
+          read_result: {
+            success: {
+              path: resultPath,
+              content,
+              total_lines: countLines(content),
+              file_size: stat.size,
+              truncated: false,
+              range_applied: false,
+            },
+          },
+        },
+      }),
+      buildExecStreamClose(execId),
+    ]
+  } catch {
+    return undefined
+  }
+}
+
 type WholeFileEditReplacement = {
   oldString: string
   newString: string
@@ -854,6 +896,44 @@ export type ParsedExecRequest = {
   localError?: string
   /** Original request values needed by typed Cursor result messages. */
   resultMetadata?: Record<string, unknown>
+}
+
+/**
+ * A partial-read notice is for Cursor's model, never for a file. Refuse only
+ * whole-file mutation forms that echo it. A targeted edit or Update File patch
+ * cannot truncate an unseen tail, and may legitimately edit source that quotes
+ * this provider's warning text.
+ */
+export function rejectPartialReadMutation(parsed: ParsedExecRequest): void {
+  if (parsed.localError) return
+
+  let content: unknown
+  if (parsed.toolName === "write") {
+    content = parsed.args.content
+  } else if (parsed.toolName === APPLY_PATCH_TOOL) {
+    const patchText = parsed.args.patchText
+    if (typeof patchText !== "string" || !patchText.includes("*** Add File:")) return
+    content = patchText
+  } else {
+    return
+  }
+
+  if (
+    typeof content !== "string"
+    || !content.includes("[Partial read:")
+    || !content.includes("It is NOT the complete file.")
+  ) return
+
+  const filePath = typeof parsed.args.filePath === "string"
+    ? parsed.args.filePath
+    : "the target file"
+  const nextOffset = /Continue with offset=(\d+)/.exec(content)?.[1]
+  parsed.localError =
+    `NO FILE CHANGE WAS MADE. Refusing a whole-file mutation of ${JSON.stringify(filePath)} ` +
+    "because it contains the provider's partial-read notice. Do not retry the same mutation. " +
+    (nextOffset
+      ? `Read the file from offset=${nextOffset}, then use a targeted edit or Update File patch.`
+      : "Read the remaining file ranges, then use a targeted edit or Update File patch.")
 }
 
 export function parseExecServerMessage(

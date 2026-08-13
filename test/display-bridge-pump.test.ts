@@ -235,14 +235,12 @@ describe("display-only ToolCall pump bridge", () => {
       content: "# New file\n",
     })
     expect(session.displayToolCalls.has(callId)).toBe(false)
-    expect(session.hadToolCallBoundary).toBe(true)
     sessionManager.resolve(session.sessionId, 16)
   })
 
-  it("keeps the read step but exposes a correlated existing-file write as edit", async () => {
+  it("answers the private read directly and exposes a correlated existing-file write as edit", async () => {
     const writes: Uint8Array[] = []
-    const readParts: any[] = []
-    const editParts: any[] = []
+    const parts: any[] = []
     const callId = "edit-existing-file"
     const target = path.join(
       "/tmp",
@@ -284,9 +282,10 @@ describe("display-only ToolCall pump bridge", () => {
         { name: "write", description: "Write" },
       ],
     )
+    session.requestContext.env = { workspace_paths: [path.dirname(target)] }
     const controller = {
       enqueue(part: unknown) {
-        readParts.push(part)
+        parts.push(part)
       },
       error(error: Error) {
         throw error
@@ -296,19 +295,18 @@ describe("display-only ToolCall pump bridge", () => {
     try {
       await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
 
-      expect(writes).toHaveLength(0)
-      const readCall = readParts.find((part) => part.type === "tool-call")
-      expect(readCall?.toolName).toBe("read")
-      expect(JSON.parse(readCall.input)).toEqual({ filePath: target })
-      expect(session.editToolCalls?.has(callId)).toBe(true)
-      sessionManager.resolve(session.sessionId, 17)
+      expect(writes).toHaveLength(2)
+      const read = decodeMessage<any>("AgentClientMessage", writes[0]!)
+        .exec_client_message.read_result.success
+      expect(read).toMatchObject({
+        path: target,
+        content: "line one\nline two\nline three\nline four\n",
+        truncated: false,
+        range_applied: false,
+      })
+      expect(parts.some((part) => part.type === "tool-call" && part.toolName === "read")).toBe(false)
 
-      await pump(session, {
-        enqueue(part: unknown) { editParts.push(part) },
-        error(error: Error) { throw error },
-      } as ReadableStreamDefaultController<any>, { textId: "text-2", reasoningId: "reasoning-2" })
-
-      const editCall = editParts.find((part) => part.type === "tool-call")
+      const editCall = parts.find((part) => part.type === "tool-call")
       expect(editCall?.toolName).toBe("edit")
       expect(JSON.parse(editCall.input)).toEqual({
         filePath: target,
@@ -319,6 +317,131 @@ describe("display-only ToolCall pump bridge", () => {
       sessionManager.resolve(session.sessionId, 18)
     } finally {
       fs.rmSync(target, { force: true })
+    }
+  })
+
+  it("edits a file above OpenCode's 50 KB read cap without a partial replacement", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    const callId = "edit-large-file"
+    const root = fs.mkdtempSync(path.join("/tmp", "cursor-opencode-large-edit-"))
+    const target = path.join(root, "large.ts")
+    const prefix = Array.from(
+      { length: 1800 },
+      (_, index) => `export const line${index} = "${"x".repeat(32)}"`,
+    ).join("\n") + "\n"
+    const source = `${prefix}export const target = 1\nexport const trailer = true\n`
+    const replacement = `${prefix}export const target = 2\nexport const trailer = true\n`
+    expect(Buffer.byteLength(source)).toBeGreaterThan(50 * 1024)
+    fs.writeFileSync(target, source)
+
+    const session = fakeSession(
+      [
+        displayPayload("started", callId, {
+          edit_tool_call: { args: { path: target } },
+        }),
+        encodeMessage("AgentServerMessage", {
+          exec_server_message: {
+            id: 25,
+            read_args: { path: target, tool_call_id: callId },
+          },
+        }),
+        encodeMessage("AgentServerMessage", {
+          exec_server_message: {
+            id: 26,
+            write_args: {
+              path: target,
+              file_text: replacement,
+              tool_call_id: callId,
+            },
+          },
+        }),
+      ],
+      writes,
+      [
+        { name: "read", description: "Read" },
+        { name: "edit", description: "Edit" },
+        { name: "write", description: "Write" },
+      ],
+    )
+    session.requestContext.env = { workspace_paths: [root] }
+
+    try {
+      await pump(session, {
+        enqueue(part: unknown) { parts.push(part) },
+        error(error: Error) { throw error },
+      } as ReadableStreamDefaultController<any>, { textId: "text", reasoningId: "reasoning" })
+
+      const read = decodeMessage<any>("AgentClientMessage", writes[0]!)
+        .exec_client_message.read_result.success
+      expect(read.content).toBe(source)
+      expect(read.truncated).toBe(false)
+      expect(read.content).not.toContain("[Partial read:")
+
+      const editCall = parts.find((part) => part.type === "tool-call")
+      expect(editCall?.toolName).toBe("edit")
+      const input = JSON.parse(editCall.input)
+      expect(input.oldString).toContain("export const target = 1")
+      expect(input.newString).toContain("export const target = 2")
+      expect(input.newString.length).toBeLessThan(500)
+      expect(session.editToolCalls?.has(callId)).toBe(false)
+      sessionManager.resolve(session.sessionId, 26)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps a correlated edit read on OpenCode's permission path when a workspace symlink escapes", async () => {
+    const writes: Uint8Array[] = []
+    const parts: any[] = []
+    const callId = "edit-external-symlink"
+    const root = fs.mkdtempSync(path.join("/tmp", "cursor-opencode-edit-root-"))
+    const externalRoot = fs.mkdtempSync(path.join("/tmp", "cursor-opencode-edit-external-"))
+    const external = path.join(externalRoot, "external.ts")
+    const target = path.join(root, "linked.ts")
+    fs.writeFileSync(external, "export const external = true\n")
+    fs.symlinkSync(external, target)
+
+    const session = fakeSession(
+      [
+        displayPayload("started", callId, {
+          edit_tool_call: { args: { path: target } },
+        }),
+        encodeMessage("AgentServerMessage", {
+          exec_server_message: {
+            id: 27,
+            read_args: { path: target, tool_call_id: callId },
+          },
+        }),
+      ],
+      writes,
+      [
+        { name: "read", description: "Read" },
+        { name: "edit", description: "Edit" },
+        { name: "write", description: "Write" },
+      ],
+    )
+    session.requestContext.env = { workspace_paths: [root] }
+
+    try {
+      await pump(session, {
+        enqueue(part: unknown) { parts.push(part) },
+        error(error: Error) { throw error },
+      } as ReadableStreamDefaultController<any>, { textId: "text", reasoningId: "reasoning" })
+
+      expect(writes).toHaveLength(0)
+      const readCall = parts.find((part) => part.type === "tool-call")
+      expect(readCall?.toolName).toBe("read")
+      expect(JSON.parse(readCall.input)).toEqual({ filePath: target })
+      expect(session.editToolCalls?.get(callId)?.completeRead).not.toBe(true)
+      expect(sessionManager.pendingFor(session.sessionId, 27)?.resultMetadata).toMatchObject({
+        path: target,
+        correlatedEditCallId: callId,
+      })
+      sessionManager.resolve(session.sessionId, 27)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+      fs.rmSync(externalRoot, { recursive: true, force: true })
     }
   })
 
@@ -785,9 +908,14 @@ describe("display-only ToolCall pump bridge", () => {
       prompt: "Investigate why the conversation stopped",
       subagent_type: "general",
     })
-    expect(parts.some((part) =>
+    const finish = parts.find((part) =>
       part.type === "finish" && part.finishReason?.unified === "tool-calls"
-    )).toBe(true)
+    )
+    expect(finish).toBeDefined()
+    expect(finish.usage).toEqual({
+      inputTokens: { total: 0, noCache: 0, cacheRead: 0, cacheWrite: 0 },
+      outputTokens: { total: 0, text: 0, reasoning: 0 },
+    })
     expect(sessionManager.pendingFor(session.sessionId, 34)?.resultField).toBe("subagent_result")
     sessionManager.resolve(session.sessionId, 34)
   })
@@ -1247,12 +1375,12 @@ describe("display-only ToolCall pump bridge", () => {
 
     const finish = parts.find((part) => part.type === "finish")
     expect(finish).toBeDefined()
-    expect(finish!.usage.inputTokens.total).toBe(115)
-    expect(finish!.usage.inputTokens.noCache).toBe(100)
+    expect(finish!.usage.inputTokens.total).toBe(100)
+    expect(finish!.usage.inputTokens.noCache).toBe(85)
     expect(finish!.usage.inputTokens.cacheRead).toBe(12)
     expect(finish!.usage.inputTokens.cacheWrite).toBe(3)
-    expect(finish!.usage.outputTokens.total).toBe(49)
-    expect(finish!.usage.outputTokens.text).toBe(40)
+    expect(finish!.usage.outputTokens.total).toBe(40)
+    expect(finish!.usage.outputTokens.text).toBe(31)
     expect(finish!.usage.outputTokens.reasoning).toBe(9)
   })
 })

@@ -6,7 +6,12 @@ import {
   type HostSubagentDefinition,
   type OpencodeToolDef,
 } from "../protocol/tools.js"
-import { collectRules } from "./rules.js"
+import {
+  collectRules,
+  findGitWorktree,
+  loadMergedConfig,
+  type OpencodeJson,
+} from "./rules.js"
 import { collectSkills } from "./skills.js"
 import { collectAgents } from "./agents.js"
 import { collectPlugins } from "./plugins.js"
@@ -21,6 +26,23 @@ export type BuildRequestContextInput = {
   tools?: OpencodeToolDef[]
   providerIdentifier?: string
 }
+
+export const DYNAMIC_REQUEST_CONTEXT_KEYS = [
+  "tools",
+  "agent_skills",
+  "custom_subagents",
+  "mcp_file_system_options",
+  "mcp_meta_tool_options",
+  "web_search_enabled",
+  "web_fetch_enabled",
+  "agent_skills_info_complete",
+  "custom_subagents_info_complete",
+  "mcp_file_system_info_complete",
+  "mcp_info_complete",
+  "hooks_additional_context",
+] as const
+
+export type DynamicRequestContextKey = typeof DYNAMIC_REQUEST_CONTEXT_KEYS[number]
 
 const DEFAULT_HOST_SUBAGENTS: HostSubagentDefinition[] = [
   {
@@ -73,16 +95,46 @@ export async function buildRequestContext(
   input: BuildRequestContextInput,
 ): Promise<Record<string, unknown>> {
   const workspaceRoot = path.resolve(input.workspaceRoot || process.cwd())
+  const { rules, config, worktree } = await collectRules(workspaceRoot)
+  const [dynamic, git, layout] = await Promise.all([
+    buildDynamicRequestContextFromDiscovery(input, workspaceRoot, worktree, config),
+    collectGit(workspaceRoot),
+    collectProjectLayout(workspaceRoot),
+  ])
+
+  const base: Record<string, unknown> = {
+    env: buildEnv(workspaceRoot),
+    rules: rules.map((r) => ({
+      full_path: r.fullPath,
+      content: r.content,
+    })),
+    repository_info: git.repositoryInfo,
+    git_repos: git.gitRepos,
+    project_layouts: [layout],
+    rules_info_complete: true,
+    env_info_complete: true,
+    repository_info_complete: true,
+    git_repo_info_complete: true,
+    git_status_info_complete: true,
+  }
+  const ctx = materializeRequestContext(base, dynamic)
+
+  traceRequestContextPaths("buildRequestContext", ctx)
+  return ctx
+}
+
+async function buildDynamicRequestContextFromDiscovery(
+  input: BuildRequestContextInput,
+  workspaceRoot: string,
+  worktree: string,
+  config: OpencodeJson,
+): Promise<Record<string, unknown>> {
   const providerIdentifier = input.providerIdentifier ?? "opencode"
   const tools = input.tools ?? []
-
-  const { rules, config, worktree } = await collectRules(workspaceRoot)
-  const [skills, agents, plugins, git, layout] = await Promise.all([
+  const [skills, agents, plugins] = await Promise.all([
     collectSkills(workspaceRoot, worktree),
     collectAgents(workspaceRoot),
     collectPlugins(workspaceRoot, config),
-    collectGit(workspaceRoot),
-    collectProjectLayout(workspaceRoot),
   ])
 
   const mcpServerNames = Object.keys(config.mcp ?? {})
@@ -109,16 +161,8 @@ export async function buildRequestContext(
     }
   })
 
-  const ctx: Record<string, unknown> = {
-    env: buildEnv(workspaceRoot),
+  const dynamic: Record<string, unknown> = {
     tools: flat,
-    rules: rules.map((r) => ({
-      full_path: r.fullPath,
-      content: r.content,
-    })),
-    repository_info: git.repositoryInfo,
-    git_repos: git.gitRepos,
-    project_layouts: [layout],
     agent_skills: skills.map((s) => ({
       full_path: s.fullPath,
       content: s.content,
@@ -141,12 +185,6 @@ export async function buildRequestContext(
     // custom_web* aliases instead of routing through a query doomed to fail.
     web_search_enabled: false,
     web_fetch_enabled: false,
-    // Completeness: true only for sections we actually gathered.
-    rules_info_complete: true,
-    env_info_complete: true,
-    repository_info_complete: true,
-    git_repo_info_complete: true,
-    git_status_info_complete: true,
     agent_skills_info_complete: true,
     custom_subagents_info_complete: advertisedSubagents.complete,
     mcp_file_system_info_complete: true,
@@ -154,11 +192,44 @@ export async function buildRequestContext(
   }
 
   if (plugins.length > 0) {
-    ctx.hooks_additional_context = plugins
+    dynamic.hooks_additional_context = plugins
       .map((p) => `opencode-plugin:${p.source}:${p.id}`)
       .join("\n")
   }
 
-  traceRequestContextPaths("buildRequestContext", ctx)
-  return ctx
+  return dynamic
+}
+
+/** Rediscover only capability/plugin sections that may change during a chat. */
+export async function buildDynamicRequestContext(
+  input: BuildRequestContextInput,
+): Promise<Record<string, unknown>> {
+  const workspaceRoot = path.resolve(input.workspaceRoot || process.cwd())
+  const [worktree, config] = await Promise.all([
+    findGitWorktree(workspaceRoot),
+    loadMergedConfig(workspaceRoot),
+  ])
+  return buildDynamicRequestContextFromDiscovery(input, workspaceRoot, worktree, config)
+}
+
+/** Keep expensive workspace state frozen while replacing every live capability field. */
+export function materializeRequestContext(
+  base: Record<string, unknown>,
+  dynamic: Record<string, unknown>,
+): Record<string, unknown> {
+  const context = structuredClone(base)
+  for (const key of DYNAMIC_REQUEST_CONTEXT_KEYS) delete context[key]
+  for (const key of DYNAMIC_REQUEST_CONTEXT_KEYS) {
+    if (Object.hasOwn(dynamic, key)) context[key] = structuredClone(dynamic[key])
+  }
+  return context
+}
+
+/** Strip live capability fields before retaining/persisting a conversation base. */
+export function requestContextBase(
+  context: Record<string, unknown>,
+): Record<string, unknown> {
+  const base = structuredClone(context)
+  for (const key of DYNAMIC_REQUEST_CONTEXT_KEYS) delete base[key]
+  return base
 }

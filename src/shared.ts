@@ -14,6 +14,9 @@ export const MODEL_CACHE_FILE = "cursor-models.json"
 /** Bumped when the on-disk model cache shape/semantics change (forces refetch). */
 export const MODEL_CACHE_SCHEMA_VERSION = 3
 export const MODEL_CACHE_TTL_MS = 86_400_000
+export const CONVERSATION_CACHE_DIR = "cursor-conversations"
+export const CONVERSATION_CACHE_SCHEMA_VERSION = 3
+export const CONVERSATION_CACHE_TTL_MS = 86_400_000
 export const VERSION_CACHE_FILE = "cursor-client-version.json"
 
 export const CONTENT_TYPE_CONNECT_PROTO = "application/connect+proto"

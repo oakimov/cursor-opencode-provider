@@ -1,4 +1,6 @@
 import { describe, it, expect, afterEach } from "bun:test"
+import fs from "node:fs"
+import path from "node:path"
 import type { LanguageModelV3CallOptions } from "@ai-sdk/provider"
 import { sessionManager, type CursorSession } from "../src/session.js"
 import { findContinuationSession, deliverContinuationResults, extractTrailingToolResults } from "../src/language-model.js"
@@ -164,6 +166,46 @@ describe("deliverContinuationResults", () => {
     expect(kept).toBe(live)
     expect(writes.length).toBeGreaterThan(0)
     expect(live.pending.has(7)).toBe(false)
+  })
+
+  it("upgrades a host-authorized external edit read to complete content", () => {
+    const writes: Uint8Array[] = []
+    const root = fs.mkdtempSync(path.join("/tmp", "cursor-edit-workspace-"))
+    const externalRoot = fs.mkdtempSync(path.join("/tmp", "cursor-edit-authorized-"))
+    const target = path.join(externalRoot, "large.ts")
+    const source = `${"export const line = true\n".repeat(3000)}export const tail = true\n`
+    fs.writeFileSync(target, source)
+
+    try {
+      const live = fakeSession("authorized-external-read")
+      live.stream.write = (frame: Uint8Array) => { writes.push(frame) }
+      live.requestContext = { env: { workspace_paths: [root] } }
+      live.editToolCalls = new Map([["edit-call", { path: target }]])
+      sessionManager.registerPending(31, live, "read_result", "read", false, {
+        path: target,
+        correlatedEditCallId: "edit-call",
+      })
+
+      const kept = deliverContinuationResults(live, [{
+        sessionId: "authorized-external-read",
+        execId: 31,
+        toolName: "read",
+        output: "capped host preview\n\n[Partial read: It is NOT the complete file.]",
+      }])
+
+      expect(kept).toBe(live)
+      const result = decodeMessage<any>("AgentClientMessage", writes[0]).exec_client_message
+      expect(result.read_result.success).toMatchObject({
+        path: target,
+        content: source,
+        truncated: false,
+        range_applied: false,
+      })
+      expect(live.editToolCalls.get("edit-call")?.completeRead).toBe(true)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+      fs.rmSync(externalRoot, { recursive: true, force: true })
+    }
   })
 
   it("carries background-shell request metadata into the typed continuation result", () => {

@@ -25,6 +25,7 @@ import {
   extractHostSubagentCatalog,
   mapCursorSubagentTypeToOpenCode,
   remapNativeSubagentForCatalog,
+  rejectPartialReadMutation,
   resolveCursorSubagentType,
   REQUEST_CONTEXT_RESULT_FIELD,
   isUriReadTarget,
@@ -1019,6 +1020,67 @@ describe("parseExecServerMessage", () => {
 
   it("returns undefined without id", () => {
     expect(parseExecServerMessage({ read_args: { path: "/x" } })).toBeUndefined()
+  })
+})
+
+describe("partial-read mutation safety", () => {
+  const notice =
+    "\n\n[Partial read: the content above is lines 1-1275, capped at the host's 50 KB output limit. " +
+    "It is NOT the complete file. Continue with offset=1276 before acting on the whole file; " +
+    "writing the content above back would delete everything after line 1275.]"
+
+  it("rejects a write that echoes a partial-read notice", () => {
+    const parsed = parseExecServerMessage({
+      id: 1,
+      write_args: { path: "/tmp/large.ts", file_text: `partial${notice}` },
+    })!
+
+    rejectPartialReadMutation(parsed)
+
+    expect(parsed.localError).toContain("partial-read notice")
+  })
+
+  it("allows a targeted edit to modify text that quotes the notice", () => {
+    const parsed = parseExecServerMessage({
+      id: 2,
+      pi_edit_args: {
+        path: "/tmp/large.ts",
+        edits: [{ old_text: "complete file", new_text: `partial${notice}` }],
+      },
+    })!
+
+    rejectPartialReadMutation(parsed)
+
+    expect(parsed.localError).toBeUndefined()
+  })
+
+  it("rejects an Add File patch that would overwrite a file with partial content", () => {
+    const patchText = `*** Begin Patch\n*** Add File: /tmp/large.ts\n+partial${notice}\n*** End Patch`
+    const wire = encodeMessage("ExecServerMessage", {
+      id: 4,
+      mcp_args: {
+        name: "opencode-apply_patch",
+        tool_name: "apply_patch",
+        provider_identifier: "opencode",
+        args: [mcpArgEntry("patchText", patchText)],
+      },
+    })
+    const parsed = parseExecServerMessage(decodeMessage("ExecServerMessage", wire))!
+
+    rejectPartialReadMutation(parsed)
+
+    expect(parsed.localError).toContain("partial-read notice")
+  })
+
+  it("does not reject ordinary mutations", () => {
+    const parsed = parseExecServerMessage({
+      id: 3,
+      write_args: { path: "/tmp/small.ts", file_text: "complete content" },
+    })!
+
+    rejectPartialReadMutation(parsed)
+
+    expect(parsed.localError).toBeUndefined()
   })
 })
 

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test"
 import type { LanguageModelV3CallOptions } from "@ai-sdk/provider"
 import {
+  checkpointBlobGraphRequiresRebase,
   extractPromptHistory,
+  MAX_CHECKPOINT_BLOB_GRAPH_BYTES,
   pump,
   pumpWithRecovery,
 } from "../src/language-model.js"
@@ -92,6 +94,60 @@ function fixed32Field(field: number, value = 0): Uint8Array {
 }
 
 describe("interrupted Cursor Run handling", () => {
+  it("awaits KV reply backpressure before consuming the next server frame", async () => {
+    const blobId = new Uint8Array([1, 2, 3, 4])
+    const session = fakeSession("kv-backpressure", [
+      serverFrame({ kv_server_message: { id: 7, get_blob_args: { blob_id: blobId } } }),
+      serverFrame({ interaction_update: { turn_ended: { input_tokens: 1, output_tokens: 1 } } }),
+    ])
+    session.blobs.set("01020304", new TextEncoder().encode("large-enough-for-test"))
+    let releaseDrain!: () => void
+    let drainStarted!: () => void
+    const started = new Promise<void>((resolve) => { drainStarted = resolve })
+    const released = new Promise<void>((resolve) => { releaseDrain = resolve })
+    let writes = 0
+    session.stream.write = () => {
+      writes++
+      return false
+    }
+    session.stream.waitForDrain = async () => {
+      drainStarted()
+      await released
+    }
+
+    let completed = false
+    const pumping = pump(
+      session,
+      controller([]),
+      { textId: "t", reasoningId: "r" },
+    ).then(() => { completed = true })
+    await started
+    expect(writes).toBe(1)
+    expect(completed).toBe(false)
+    releaseDrain()
+    await pumping
+    expect(completed).toBe(true)
+  })
+
+  it("rebases checkpoint graphs that are oversized or incomplete", () => {
+    expect(checkpointBlobGraphRequiresRebase({
+      count: 1,
+      bytes: MAX_CHECKPOINT_BLOB_GRAPH_BYTES,
+      complete: true,
+    })).toBe(false)
+    expect(checkpointBlobGraphRequiresRebase({
+      count: 1,
+      bytes: MAX_CHECKPOINT_BLOB_GRAPH_BYTES + 1,
+      complete: true,
+    })).toBe(true)
+    expect(checkpointBlobGraphRequiresRebase({
+      count: 0,
+      bytes: 0,
+      complete: false,
+      fallbackReason: "missing referenced blob",
+    })).toBe(true)
+  })
+
   it("rejects iterator EOF without turn_ended instead of emitting a normal stop", async () => {
     const parts: unknown[] = []
     await expect(
@@ -403,7 +459,7 @@ describe("interrupted Cursor Run handling", () => {
     expect(parts.filter((part) => part.type === "finish")).toHaveLength(1)
   })
 
-  it("falls back to a request estimate for over-budget TurnEnded counters", async () => {
+  it("clamps malformed cache subsets without hiding the raw Cursor counters", async () => {
     const parts: any[] = []
     await pump(
       fakeSession("usage", [
@@ -421,29 +477,29 @@ describe("interrupted Cursor Run handling", () => {
         }),
       ]),
       controller(parts),
-      { textId: "t", reasoningId: "r", promptTokens: 25 },
+      { textId: "t", reasoningId: "r" },
     )
     const finish = parts.find((part) => part.type === "finish")
     expect(finish.usage.inputTokens).toEqual({
-      total: 25,
-      noCache: 25,
-      cacheRead: 0,
+      total: 120_000,
+      noCache: 0,
+      cacheRead: 120_000,
       cacheWrite: 0,
     })
     expect(finish.usage.outputTokens).toEqual({
-      total: 3,
-      text: 3,
-      reasoning: undefined,
+      total: 73_483,
+      text: 73_483,
+      reasoning: 0,
     })
     expect(finish.providerMetadata.cursor).toMatchObject({
-      usageVersion: 2,
+      usageVersion: 3,
       inputTokensRaw: 120_000,
       outputTokensRaw: 73_483,
       cacheReadRaw: 5_810_572,
     })
   })
 
-  it("trusts modest TurnEnded counters without a tool boundary", async () => {
+  it("maps total and subset TurnEnded counters without double counting", async () => {
     const parts: any[] = []
     await pump(
       fakeSession("small-usage", [
@@ -460,24 +516,24 @@ describe("interrupted Cursor Run handling", () => {
         }),
       ]),
       controller(parts),
-      { textId: "t", reasoningId: "r", promptTokens: 100 },
+      { textId: "t", reasoningId: "r" },
     )
 
     const finish = parts.find((part) => part.type === "finish")
     expect(finish.usage.inputTokens).toEqual({
-      total: 115,
-      noCache: 100,
+      total: 100,
+      noCache: 85,
       cacheRead: 10,
       cacheWrite: 5,
     })
     expect(finish.usage.outputTokens).toEqual({
-      total: 57,
-      text: 50,
+      total: 50,
+      text: 43,
       reasoning: 7,
     })
   })
 
-  it("does not expose cumulative multi-step TurnEnded usage as final-request context", async () => {
+  it("settles the final request-local counters once after a multi-step held Run", async () => {
     const parts: any[] = []
     const session = fakeSession("multi-step-usage", [
       serverFrame({ interaction_update: { text_delta: { text: "answer" } } }),
@@ -493,7 +549,6 @@ describe("interrupted Cursor Run handling", () => {
         },
       }),
     ])
-    session.hadToolCallBoundary = true
     session.usageEstimate = {
       inputTokens: 30_000,
       outputTokens: 500,
@@ -505,17 +560,21 @@ describe("interrupted Cursor Run handling", () => {
     await pump(
       session,
       controller(parts),
-      { textId: "t", reasoningId: "r", promptTokens: 25_000 },
+      { textId: "t", reasoningId: "r" },
     )
 
     const finish = parts.find((part) => part.type === "finish")
     expect(finish.usage.inputTokens).toEqual({
-      total: 30_500,
-      noCache: 30_500,
-      cacheRead: 0,
+      total: 101_753,
+      noCache: 21_881,
+      cacheRead: 79_872,
       cacheWrite: 0,
     })
-    expect(finish.usage.outputTokens.total).toBe(2)
+    expect(finish.usage.outputTokens).toEqual({
+      total: 1_391,
+      text: 866,
+      reasoning: 525,
+    })
     expect(finish.providerMetadata.cursor).toMatchObject({
       inputTokensRaw: 101_753,
       outputTokensRaw: 1_391,

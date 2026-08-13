@@ -12,6 +12,8 @@ export type RunRequestInput = {
   images?: CursorImageInput[]
   modelId: string
   conversationId: string
+  /** Stable parent group; unlike conversationId, this survives compaction/rebase. */
+  conversationGroupId?: string
   systemPrompt?: string
   /**
    * Prior chat turns for a seed ConversationStateStructure (no checkpoint).
@@ -119,6 +121,8 @@ export function buildRunRequest(input: RunRequestInput): Uint8Array {
 
   const runRequest: Record<string, unknown> = {
     conversation_id: input.conversationId,
+    conversation_group_id: input.conversationGroupId ?? input.conversationId,
+    run_id: msgId,
     action,
     requested_model: {
       // The provider always selects a concrete model. Cursor's "default"

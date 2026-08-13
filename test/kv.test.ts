@@ -2,9 +2,13 @@ import { describe, it, expect, beforeEach } from "bun:test"
 import { handleKvServerMessage } from "../src/protocol/kv.js"
 import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
 import {
+  compactConversationBlobs,
   getConversationBlob,
+  inspectConversationBlobGraph,
   resetConversationBlobsForTests,
+  setConversationBlob,
 } from "../src/protocol/blob-store.js"
+import protobuf from "protobufjs"
 import type { CursorSession } from "../src/session.js"
 
 function fakeSession(conversationId = "conv-kv-test"): CursorSession {
@@ -25,6 +29,16 @@ function fakeSession(conversationId = "conv-kv-test"): CursorSession {
   }
 }
 
+function hash(byte: number): Uint8Array {
+  return Uint8Array.from({ length: 32 }, () => byte)
+}
+
+function wire(...fields: Array<[number, Uint8Array]>): Uint8Array {
+  const writer = protobuf.Writer.create()
+  for (const [number, value] of fields) writer.uint32((number << 3) | 2).bytes(value)
+  return writer.finish()
+}
+
 describe("handleKvServerMessage", () => {
   beforeEach(() => resetConversationBlobsForTests())
 
@@ -39,6 +53,7 @@ describe("handleKvServerMessage", () => {
     expect(res).not.toBeNull()
     expect(res!.kind).toBe("set")
     expect(res!.id).toBe(42)
+    expect(res!.replyBlobBytes).toBe(0)
     // Blob persisted under hex key.
     expect(s.blobs.get("01020304")).toEqual(blobData)
     // Reply is an AgentClientMessage.kv_client_message with matching id.
@@ -63,6 +78,7 @@ describe("handleKvServerMessage", () => {
     const res = handleKvServerMessage({ id: 2, get_blob_args: { blob_id: blobId } }, turn2)
     expect(res!.found).toBe(true)
     expect(res!.echoed).toBeFalsy()
+    expect(res!.replyBlobBytes).toBe(blobData.length)
     const dec = decodeMessage<any>("AgentClientMessage", res!.reply).kv_client_message
     expect(dec.get_blob_result?.blob_data).toEqual(blobData)
   })
@@ -127,5 +143,120 @@ describe("handleKvServerMessage", () => {
 
   it("returns null for a kv message with neither get nor set", () => {
     expect(handleKvServerMessage({ id: 1 }, fakeSession())).toBeNull()
+  })
+})
+
+describe("conversation blob compaction", () => {
+  beforeEach(() => resetConversationBlobsForTests())
+
+  it("retains only the graph reachable from the latest checkpoint", () => {
+    const conversationId = "conv-reachable"
+    const turnId = hash(1)
+    const userId = hash(2)
+    const stepId = hash(3)
+    const imageId = hash(4)
+    const todoId = hash(5)
+    const staleId = hash(255)
+
+    const image = wire([1, imageId])
+    const selectedContext = wire([1, image])
+    setConversationBlob(conversationId, userId, wire([3, selectedContext]))
+    setConversationBlob(
+      conversationId,
+      turnId,
+      wire([1, wire([1, userId], [2, stepId])]),
+    )
+    setConversationBlob(conversationId, stepId, new TextEncoder().encode("step"))
+    setConversationBlob(conversationId, imageId, new TextEncoder().encode("image"))
+    setConversationBlob(conversationId, todoId, new TextEncoder().encode("todo"))
+    setConversationBlob(conversationId, staleId, new Uint8Array(1024))
+
+    const result = compactConversationBlobs(
+      conversationId,
+      wire([8, turnId], [3, todoId]),
+    )
+
+    expect(result.compacted).toBe(true)
+    expect(result.beforeCount).toBe(6)
+    expect(result.afterCount).toBe(5)
+    expect(result.afterBytes).toBeLessThan(result.beforeBytes)
+    expect(getConversationBlob(conversationId, staleId)).toBeUndefined()
+    for (const id of [turnId, userId, stepId, imageId, todoId]) {
+      expect(getConversationBlob(conversationId, id)).toBeDefined()
+    }
+  })
+
+  it("measures only checkpoint-reachable blob bytes without mutating the store", () => {
+    const conversationId = "conv-inspect"
+    const rootId = hash(31)
+    const childId = hash(32)
+    const staleId = hash(33)
+    const child = wire([99, new Uint8Array(2_048)])
+    const root = wire([1, wire([1, childId])])
+    setConversationBlob(conversationId, rootId, root)
+    setConversationBlob(conversationId, childId, child)
+    setConversationBlob(conversationId, staleId, new Uint8Array(8_192))
+
+    expect(inspectConversationBlobGraph(conversationId, wire([8, rootId]))).toEqual({
+      count: 2,
+      bytes: root.length + child.length,
+      complete: true,
+    })
+    expect(getConversationBlob(conversationId, staleId)).toBeDefined()
+  })
+
+  it("reports the complete retained bucket when checkpoint reachability is incomplete", () => {
+    const conversationId = "conv-inspect-fallback"
+    const retainedId = hash(34)
+    setConversationBlob(conversationId, retainedId, new Uint8Array(4_096))
+
+    const stats = inspectConversationBlobGraph(conversationId, wire([8, hash(200)]))
+    expect(stats.complete).toBe(false)
+    expect(stats.count).toBe(1)
+    expect(stats.bytes).toBe(4_096)
+    expect(stats.fallbackReason).toContain("missing referenced blob")
+  })
+
+  it("recurses through inline and blob-referenced subagent states", () => {
+    const conversationId = "conv-subagents"
+    const inlineTodoId = hash(10)
+    const referencedTodoId = hash(11)
+    const subagentStateId = hash(12)
+    const staleId = hash(13)
+    for (const id of [inlineTodoId, referencedTodoId, staleId]) {
+      setConversationBlob(conversationId, id, Uint8Array.from([id[0]!]))
+    }
+    const referencedState = wire([1, wire([3, referencedTodoId])])
+    setConversationBlob(conversationId, subagentStateId, referencedState)
+
+    const mapEntry = (key: string, value: Uint8Array) =>
+      wire([1, new TextEncoder().encode(key)], [2, value])
+    const checkpoint = wire(
+      [16, mapEntry("inline", wire([1, wire([3, inlineTodoId])]))],
+      [31, mapEntry("referenced", subagentStateId)],
+    )
+    const result = compactConversationBlobs(conversationId, checkpoint)
+
+    expect(result.compacted).toBe(true)
+    expect(result.afterCount).toBe(3)
+    expect(getConversationBlob(conversationId, inlineTodoId)).toBeDefined()
+    expect(getConversationBlob(conversationId, referencedTodoId)).toBeDefined()
+    expect(getConversationBlob(conversationId, subagentStateId)).toBeDefined()
+    expect(getConversationBlob(conversationId, staleId)).toBeUndefined()
+  })
+
+  it("keeps the complete snapshot when a referenced hash is missing or state is malformed", () => {
+    const conversationId = "conv-fallback"
+    const retainedId = hash(20)
+    setConversationBlob(conversationId, retainedId, new Uint8Array(512))
+
+    const missing = compactConversationBlobs(conversationId, wire([3, hash(21)]))
+    expect(missing.compacted).toBe(false)
+    expect(missing.fallbackReason).toContain("missing referenced blob")
+    expect(getConversationBlob(conversationId, retainedId)).toBeDefined()
+
+    const malformed = compactConversationBlobs(conversationId, Uint8Array.from([0xff]))
+    expect(malformed.compacted).toBe(false)
+    expect(getConversationBlob(conversationId, retainedId)).toBeDefined()
   })
 })

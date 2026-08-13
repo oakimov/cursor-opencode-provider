@@ -40,7 +40,7 @@ async function readJsonConfig(dir: string): Promise<OpencodeJson> {
   return {}
 }
 
-async function findGitWorktree(start: string): Promise<string> {
+export async function findGitWorktree(start: string): Promise<string> {
   let dir = path.resolve(start)
   for (;;) {
     if (await exists(path.join(dir, ".git"))) return dir

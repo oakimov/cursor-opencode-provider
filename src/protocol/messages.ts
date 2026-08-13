@@ -1348,6 +1348,7 @@ export function createMessageTypes(): protobuf.Root {
     { id: 12, name: "field_12", type: "uint32" },
     { id: 14, name: "selected_subagent_models", type: "RequestedModel", repeated: true },
     { id: 16, name: "conversation_group_id", type: "string" },
+    { id: 25, name: "run_id", type: "string" },
   ])
 
   // ── Client heartbeat ──
@@ -1643,6 +1644,17 @@ export function decodeMessage<T = Record<string, unknown>>(
   const type = root.lookupType(typeName)
   const decoded = type.decode(data)
   return type.toObject(decoded, { defaults: true, json: true, longs: Number }) as T
+}
+
+/** Decode without inventing absent proto defaults (used for byte-stable snapshots). */
+export function decodeMessageSparse<T = Record<string, unknown>>(
+  typeName: string,
+  data: Uint8Array,
+): T {
+  const root = getMessageTypes()
+  const type = root.lookupType(typeName)
+  const decoded = type.decode(data)
+  return type.toObject(decoded, { json: true, longs: Number }) as T
 }
 
 type RawField = {
