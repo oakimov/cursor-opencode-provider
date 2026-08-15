@@ -208,6 +208,12 @@ export function createMessageTypes(): protobuf.Root {
   addType(root, "AskQuestionArgs", [
     { id: 1, name: "title", type: "string" },
     { id: 2, name: "questions", type: "AskQuestionItem", repeated: true },
+    // #5/#6 drive Cursor's non-blocking AskQuestion: the client answers the
+    // interaction with `async` right away and delivers the real answers later
+    // through ConversationAction.async_ask_question_completion_action, keyed by
+    // the originating tool call id. See protocol/ask-question.ts.
+    { id: 5, name: "run_async", type: "bool" },
+    { id: 6, name: "async_original_tool_call_id", type: "string" },
   ])
   addType(root, "AskQuestionToolCall", [{ id: 1, name: "args", type: "AskQuestionArgs" }])
   addType(root, "FetchToolArgs", [
@@ -1281,6 +1287,16 @@ export function createMessageTypes(): protobuf.Root {
     { id: 1, name: "conversation_id", type: "string" },
   ])
 
+  // Deferred answers for an AskQuestion the client already replied to with
+  // `async`. `original_args` is kept as raw bytes so the exact AskQuestionArgs
+  // Cursor sent — including fields this schema does not model — is echoed back
+  // verbatim rather than re-encoded from a lossy decode.
+  addType(root, "AsyncAskQuestionCompletionAction", [
+    { id: 1, name: "original_tool_call_id", type: "string" },
+    { id: 2, name: "original_args", type: "bytes" },
+    { id: 3, name: "result", type: "AskQuestionResult" },
+  ])
+
   addType(
     root,
     "ConversationAction",
@@ -1288,8 +1304,17 @@ export function createMessageTypes(): protobuf.Root {
       { id: 1, name: "user_message_action", type: "UserMessageAction" },
       { id: 2, name: "resume_action", type: "ResumeAction" },
       { id: 3, name: "cancel_action", type: "CancelAction" },
+      { id: 8, name: "async_ask_question_completion_action", type: "AsyncAskQuestionCompletionAction" },
     ],
-    [{ name: "action", fields: ["user_message_action", "resume_action", "cancel_action"] }],
+    [{
+      name: "action",
+      fields: [
+        "user_message_action",
+        "resume_action",
+        "cancel_action",
+        "async_ask_question_completion_action",
+      ],
+    }],
   )
 
   // Seed ConversationStateStructure for turn 1 (system prompt as JSON strings
@@ -1418,11 +1443,30 @@ export function createMessageTypes(): protobuf.Root {
   ], [{ name: "result", fields: ["approved", "rejected"] }])
 
   addType(root, "AskQuestionRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(root, "AskQuestionError", [{ id: 1, name: "error_message", type: "string" }])
+  addType(root, "AskQuestionAsync", [])
+  addType(root, "AskQuestionSuccessAnswer", [
+    { id: 1, name: "question_id", type: "string" },
+    { id: 2, name: "selected_option_ids", type: "string", repeated: true },
+    { id: 3, name: "freeform_text", type: "string" },
+  ])
+  addType(root, "AskQuestionSuccess", [
+    { id: 1, name: "answers", type: "AskQuestionSuccessAnswer", repeated: true },
+  ])
   addType(root, "AskQuestionResult", [
+    { id: 1, name: "success", type: "AskQuestionSuccess" },
+    { id: 2, name: "error", type: "AskQuestionError" },
     { id: 3, name: "rejected", type: "AskQuestionRejected" },
-  ], [{ name: "result", fields: ["rejected"] }])
+    { id: 4, name: "async", type: "AskQuestionAsync" },
+  ], [{ name: "result", fields: ["success", "error", "rejected", "async"] }])
   addType(root, "AskQuestionInteractionResponse", [
     { id: 1, name: "result", type: "AskQuestionResult" },
+  ])
+  // InteractionQuery keeps query bodies opaque (see the InteractionQuery
+  // comment); this type decodes only the ask-question body on demand.
+  addType(root, "AskQuestionInteractionQuery", [
+    { id: 1, name: "args", type: "AskQuestionArgs" },
+    { id: 2, name: "tool_call_id", type: "string" },
   ])
 
   addType(root, "SwitchModeRequestApproved", [])
@@ -1572,11 +1616,23 @@ export function createMessageTypes(): protobuf.Root {
       { id: 1, name: "run_request", type: "AgentRunRequest" },
       { id: 2, name: "exec_client_message", type: "ExecClientMessage" },
       { id: 3, name: "kv_client_message", type: "KvClientMessage" },
+      { id: 4, name: "conversation_action", type: "ConversationAction" },
       { id: 5, name: "exec_client_control_message", type: "ExecClientControlMessage" },
       { id: 6, name: "interaction_response", type: "InteractionResponse" },
       { id: 7, name: "client_heartbeat", type: "ClientHeartbeat" },
     ],
-    [{ name: "message", fields: ["run_request", "exec_client_message", "kv_client_message", "exec_client_control_message", "interaction_response", "client_heartbeat"] }],
+    [{
+      name: "message",
+      fields: [
+        "run_request",
+        "exec_client_message",
+        "kv_client_message",
+        "conversation_action",
+        "exec_client_control_message",
+        "interaction_response",
+        "client_heartbeat",
+      ],
+    }],
   )
 
   // ── AgentServerMessage ──

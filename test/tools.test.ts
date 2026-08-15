@@ -516,6 +516,18 @@ describe("mapCursorArgsToOpencode", () => {
       args: { filePath: "/a.ts", oldString: "a", newString: "b" },
     })
   })
+  it("preserves OMP hashline edit input instead of dropping it", () => {
+    const r = mapCursorArgsToOpencode("edit", {
+      i: "Edit lines 1 and 3 at file start",
+      input: "[/tmp/lines-1200.txt#9D54]\nPUT 1.=1:\n+EDITED line 1200\nPUT 3.=3:\n+EDITED K1 line 1198",
+    })
+    expect(r).toEqual({
+      toolName: "edit",
+      args: {
+        input: "[/tmp/lines-1200.txt#9D54]\nPUT 1.=1:\n+EDITED line 1200\nPUT 3.=3:\n+EDITED K1 line 1198",
+      },
+    })
+  })
 })
 
 describe("parseExecServerMessage", () => {

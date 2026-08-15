@@ -381,6 +381,10 @@ const PRESERVE_EMPTY_STRING_KEYS = new Set([
   "file_text",
   "fileText",
   "stream_content",
+  // OMP's hashline edit uses a single textual `input` payload. Preserve it
+  // even when empty so the host reports the real edit error instead of a
+  // misleading missing-property error.
+  "input",
   "oldString",
   "old_string",
   "newString",
@@ -1188,6 +1192,14 @@ export function mapCursorArgsToOpencode(
       return { toolName: "write", args }
     }
     case "edit": {
+      // oh-my-pi's hashline edit mode is advertised as `{ input: string }`.
+      // Cursor can send that shape (plus its optional `i` intent metadata),
+      // while classic OpenCode uses filePath/oldString/newString. Keep the
+      // hashline payload intact; rebuilding only the classic fields would
+      // silently turn a valid call into `{}` before it reaches the host.
+      if (typeof cleaned.input === "string") {
+        return { toolName: "edit", args: { input: cleaned.input } }
+      }
       const args: Record<string, unknown> = {}
       const filePath = str(cleaned.filePath) ?? str(cleaned.path) ?? str(cleaned.file_path)
       if (filePath) args.filePath = filePath

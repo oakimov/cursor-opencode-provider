@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test"
-import { existsSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, rmSync } from "node:fs"
 import path from "node:path"
 import {
   ensureOpencodeProjectDir,
@@ -22,6 +22,8 @@ const originalXdgData = process.env.XDG_DATA_HOME
 const originalXdgConfig = process.env.XDG_CONFIG_HOME
 const originalMimoHome = process.env.MIMOCODE_HOME
 const originalKiloConfig = process.env.KILO_CONFIG_DIR
+const originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR
+const originalPiConfigDir = process.env.PI_CONFIG_DIR
 
 afterEach(() => {
   setHostCacheDirOverride(undefined)
@@ -39,6 +41,10 @@ afterEach(() => {
   else process.env.MIMOCODE_HOME = originalMimoHome
   if (originalKiloConfig === undefined) delete process.env.KILO_CONFIG_DIR
   else process.env.KILO_CONFIG_DIR = originalKiloConfig
+  if (originalPiCodingAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+  else process.env.PI_CODING_AGENT_DIR = originalPiCodingAgentDir
+  if (originalPiConfigDir === undefined) delete process.env.PI_CONFIG_DIR
+  else process.env.PI_CONFIG_DIR = originalPiConfigDir
 })
 
 describe("opencodeGlobalCacheDir", () => {
@@ -143,6 +149,52 @@ describe("resolveHostCacheDir", () => {
     expect(dir).toBe(path.join("/tmp/xdg-cache", "kilo"))
   })
 
+  it("resolves a Pi source checkout into the Pi agent cache", () => {
+    const dir = resolveHostCacheDir(
+      { HOME: "/tmp/fake-home", XDG_CACHE_HOME: "/tmp/xdg-cache" },
+      "/Users/dev/Projects/cursor-opencode-provider/dist/context/paths.js",
+      { argv: ["/opt/pi/bin/pi"], execPath: "/opt/pi/bin/pi" },
+    )
+    expect(dir).toBe(path.join("/tmp/fake-home", ".pi", "agent", "cache", "cursor-opencode"))
+  })
+
+  it("resolves an OMP source checkout into the OMP agent cache", () => {
+    const dir = resolveHostCacheDir(
+      { HOME: "/tmp/fake-home", XDG_CACHE_HOME: "/tmp/xdg-cache" },
+      "/Users/dev/Projects/cursor-opencode-provider/dist/context/paths.js",
+      { argv: ["/opt/omp/bin/omp"], execPath: "/opt/omp/bin/omp" },
+    )
+    expect(dir).toBe(path.join("/tmp/fake-home", ".omp", "agent", "cache", "cursor-opencode"))
+  })
+
+  it("honors a custom Pi-family agent directory", () => {
+    const dir = resolveHostCacheDir(
+      {
+        HOME: "/tmp/fake-home",
+        PI_CODING_AGENT_DIR: "~/custom-pi-agent",
+      },
+      "/Users/dev/Projects/cursor-opencode-provider/dist/context/paths.js",
+      { argv: ["/opt/omp/bin/omp"], execPath: "/opt/omp/bin/omp" },
+    )
+    expect(dir).toBe(path.join("/tmp/fake-home", "custom-pi-agent", "cache", "cursor-opencode"))
+  })
+
+  it("uses OMP's migrated XDG cache root when it exists", () => {
+    const root = path.join("/tmp", `cursor-omp-xdg-${process.pid}-${Date.now()}`)
+    const xdgOmp = path.join(root, "omp")
+    mkdirSync(xdgOmp, { recursive: true })
+    try {
+      const dir = resolveHostCacheDir(
+        { HOME: "/tmp/fake-home", XDG_CACHE_HOME: root },
+        "/Users/dev/Projects/cursor-opencode-provider/dist/context/paths.js",
+        { argv: ["/opt/omp/bin/omp"], execPath: "/opt/omp/bin/omp" },
+      )
+      expect(dir).toBe(path.join(xdgOmp, "cursor-opencode"))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it("keeps the OpenCode cache for a source checkout running as opencode", () => {
     const dir = resolveHostCacheDir(
       { HOME: "/tmp/fake-home", XDG_CACHE_HOME: "/tmp/xdg-cache" },
@@ -167,6 +219,8 @@ describe("resolveHostCacheDir", () => {
     expect(hostCacheDirFromProcess(["/opt/local/bin/opencode"], "/opt/local/bin/opencode")).toBe(
       "opencode",
     )
+    expect(hostCacheDirFromProcess(["/opt/local/bin/pi"], "/opt/local/bin/pi")).toBe("pi")
+    expect(hostCacheDirFromProcess(["/opt/local/bin/omp"], "/opt/local/bin/omp")).toBe("omp")
     expect(hostCacheDirFromProcess(["/opt/local/bin/bun"], "/opt/local/bin/bun")).toBeUndefined()
   })
 })

@@ -90,3 +90,8 @@
   `@types/bun` installed and include `bun` in `compilerOptions.types` so Bun's
   `bun:test` imports resolve in OpenCode's LSP without widening the build's
   source/test inclusion.
+- A provider-side argument mapper must preserve alternate host tool shapes
+  before normalizing the default shape. OMP's hashline `edit` sends `{input}`;
+  rebuilding every edit from OpenCode's `{filePath,oldString,newString}` fields
+  silently changed that valid call to `{}`, so OMP reported a misleading missing
+  `input` field. Keep the hashline payload intact and strip only its metadata.

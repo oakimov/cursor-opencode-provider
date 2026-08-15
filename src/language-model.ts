@@ -52,7 +52,17 @@ import {
   resolveBridgedOpenCodeToolCall,
 } from "./protocol/tool-call-bridge.js"
 import { handleKvServerMessage } from "./protocol/kv.js"
-import { handleInteractionQuery } from "./protocol/interactions.js"
+import {
+  buildAskQuestionInteractionReply,
+  buildAsyncAskQuestionCompletion,
+  handleInteractionQuery,
+} from "./protocol/interactions.js"
+import {
+  ASK_QUESTION_RESULT_FIELD,
+  type CursorAskQuestionArgs,
+  askQuestionResultFromToolOutput,
+  askQuestionToolInput,
+} from "./protocol/ask-question.js"
 import { clearCheckpoint, getCheckpoint, setCheckpoint } from "./protocol/checkpoint.js"
 import {
   cursorContextUsageMetadata,
@@ -82,6 +92,7 @@ import {
   sessionManager,
   type CursorSession,
   type Frame,
+  type PendingExec,
 } from "./session.js"
 import {
   CursorAuthError,
@@ -1063,6 +1074,42 @@ export function findContinuationSession(
 }
 
 /**
+ * Turn an OpenCode `question` tool result into the frame Cursor is waiting for.
+ *
+ * A synchronous AskQuestion still has its InteractionQuery open, so the answer
+ * goes back as the InteractionResponse for that query id. A `run_async` one was
+ * already released with `async{}`, so — exactly as Cursor CLI does — the answer
+ * travels as a ConversationAction keyed by the originating tool call id, with
+ * the server's own AskQuestionArgs bytes echoed back untouched.
+ */
+function buildAskQuestionContinuationFrame(
+  pending: PendingExec,
+  result: ExtractedToolResult,
+): Uint8Array {
+  const metadata = pending.resultMetadata ?? {}
+  const args = metadata.askQuestionArgs as CursorAskQuestionArgs | undefined
+  if (!args) throw new CursorProtocolError("Bridged AskQuestion lost its decoded arguments")
+  const answer = askQuestionResultFromToolOutput(args, result.output, result.error !== undefined)
+  if (!args.runAsync) {
+    const interactionId = metadata.interactionId
+    if (typeof interactionId !== "number") {
+      throw new CursorProtocolError("Bridged AskQuestion lost its interaction id")
+    }
+    return buildAskQuestionInteractionReply(interactionId, answer)
+  }
+  const rawArgs = metadata.askQuestionRawArgs
+  if (!(rawArgs instanceof Uint8Array)) {
+    throw new CursorProtocolError("Bridged async AskQuestion lost its original arguments")
+  }
+  const toolCallId = metadata.askQuestionToolCallId
+  return buildAsyncAskQuestionCompletion(
+    typeof toolCallId === "string" ? toolCallId : "",
+    rawArgs,
+    answer,
+  )
+}
+
+/**
  * Deliver trailing tool results onto a live continuation session.
  * Returns the same session when writes succeed (or only bridged results were
  * cleared). Returns undefined after closing the session when a write fails, so
@@ -1095,7 +1142,19 @@ export function deliverContinuationResults(
     }
     const pending = claim.pending
     let frames: Uint8Array[] = []
-    if (!pending.bridged) {
+    if (pending.resultField === ASK_QUESTION_RESULT_FIELD) {
+      // A bridged Cursor AskQuestion. The host tool result carries the user's
+      // choices; translate them back into the Cursor result the interaction is
+      // waiting for (or into the deferred completion, when Cursor was already
+      // released with `async`).
+      try {
+        frames = [buildAskQuestionContinuationFrame(pending, r)]
+      } catch (error) {
+        trace(`continuation: ask_question encode FAILED execId=${r.execId} err=${(error as Error).message}`)
+        sessionManager.close(session, "result-write-failed")
+        return undefined
+      }
+    } else if (!pending.bridged) {
       try {
         const shellResult =
           pending.resultField === "shell_stream"
@@ -1158,7 +1217,9 @@ export function deliverContinuationResults(
       continue
     }
     trace(
-      `continuation: wrote exec result execId=${r.execId} field=${pending.resultField} ` +
+      `continuation: wrote ${
+        pending.resultField === ASK_QUESTION_RESULT_FIELD ? "ask_question answer" : "exec result"
+      } execId=${r.execId} field=${pending.resultField} ` +
         `frames=${outcome.framesWritten} outLen=${r.output.length}`,
     )
   }
@@ -2177,7 +2238,9 @@ export async function pump(
       // F14 create_plan auto-ack / empty plan_uri for CLI headless parity).
       const handled = (() => {
         try {
-          return handleInteractionQuery(interactionQuery, payload)
+          return handleInteractionQuery(interactionQuery, payload, {
+            canBridgeAskQuestion: session.allowTools && advertisedToolNameSet.has("question"),
+          })
         } catch {
           return failRunProtocol("Cursor interaction request could not be handled", RUN_REQUEST_UNSUPPORTED)
         }
@@ -2186,18 +2249,59 @@ export async function pump(
         if (handled.outcome === "acknowledged") {
           replaySafety.markBarrier("stateful-interaction")
         }
-        await writeWithBackpressure(
-          session.stream,
-          handled.reply,
-          `interaction reply id=${handled.id}`,
-        )
+        if (handled.reply) {
+          await writeWithBackpressure(
+            session.stream,
+            handled.reply,
+            `interaction reply id=${handled.id}`,
+          )
+        }
         trace(
           `interaction_query: replied id=${handled.id} variant=${handled.variantName} ` +
-            `field=${handled.variantField} outcome=${handled.outcome}`,
+            `field=${handled.variantField} outcome=${handled.outcome}` +
+            (handled.reply ? "" : " (deferred to host tool result)"),
         )
       } catch (error) {
         rethrowTransportWriteFailure(error)
         failRunProtocol("Cursor interaction reply failed", RUN_REPLY_FAILED)
+      }
+      if (handled.outcome === "bridged" && handled.askQuestion) {
+        // Cursor raised AskQuestion; OpenCode owns the tool loop, so the prompt
+        // leaves as a `question` tool call and this doStream ends. The Run stays
+        // open on the pending entry, and the answer is written back on the next
+        // continuation (InteractionResponse when Cursor is blocking on it,
+        // ConversationAction when it was already acknowledged with `async`).
+        const ask = handled.askQuestion
+        const execId = session.nextBridgedExecId++
+        sessionManager.registerPending(
+          execId,
+          session,
+          ASK_QUESTION_RESULT_FIELD,
+          "question",
+          false,
+          {
+            interactionId: handled.id,
+            askQuestionArgs: ask.args,
+            askQuestionRawArgs: ask.rawArgs,
+            askQuestionToolCallId: ask.toolCallId,
+          },
+        )
+        const toolCallId = `cursor_${session.sessionId}_${execId}`
+        const input = JSON.stringify(askQuestionToolInput(ask.args))
+        trace(
+          `interaction_query: BRIDGED ask_question id=${handled.id} toolCallId=${toolCallId} ` +
+            `questions=${ask.args.questions.length} runAsync=${ask.args.runAsync} ` +
+            `cursorToolCallId=${ask.toolCallId || "(none)"}`,
+        )
+        closeOpenSpans()
+        safeEnqueue({
+          type: "tool-call",
+          toolCallId,
+          toolName: "question",
+          input,
+        } as V3Part)
+        emitFinish(undefined, { unified: "tool-calls", raw: undefined })
+        return
       }
     } else if (kv) {
       // KV blob channel: ack set_blob / answer get_blob, then keep pumping.
@@ -2362,8 +2466,12 @@ export function buildOpenCodeInteractionGuidance(
   const subagents = extractHostSubagentCatalog(tools)
 
   if (names.has("question")) {
+    // Cursor-native AskQuestion is translated into this tool (see
+    // protocol/ask-question.ts), so both routes reach the user. Saying so stops
+    // the model from treating a question as impossible when it reaches for its
+    // native interaction first.
     instructions.push(
-      "- When user input is required, call the OpenCode `question` tool; do not use Cursor's native AskQuestion interaction.",
+      "- When user input is required, call the OpenCode `question` tool. Cursor-native AskQuestion requests are also accepted and answered through it.",
     )
   }
   if (names.has("plan_enter")) {

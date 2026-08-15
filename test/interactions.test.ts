@@ -28,8 +28,11 @@ const cases: InteractionCase[] = [
     field: 3,
     query: "ask_question_interaction_query",
     response: "ask_question_interaction_response",
+    // An empty body carries no questions, so it is rejected with Cursor CLI's
+    // own reason. The bridged path is covered in ask-question.test.ts.
     outcome: "rejected",
-    assertResult: (r) => expect(r.result?.rejected?.reason).toContain("question tool"),
+    assertResult: (r) =>
+      expect(r.result?.rejected?.reason).toBe("Missing ask-question arguments"),
   },
   {
     field: 4,
@@ -154,6 +157,7 @@ describe("interaction query headless responses", () => {
       id: 0,
       variantField: 4,
       variantName: "switch_mode_request_query",
+      variantBytes: new Uint8Array(),
     })
 
     const query = decodeMessage<any>("AgentServerMessage", payload).interaction_query
@@ -171,6 +175,7 @@ describe("interaction query headless responses", () => {
       id: 17,
       variantField: 99,
       variantName: undefined,
+      variantBytes: new Uint8Array(),
     })
     const decoded = decodeMessage<any>("AgentServerMessage", payload).interaction_query
     expect(() => handleInteractionQuery(decoded, payload)).toThrow(UnsupportedInteractionQueryError)

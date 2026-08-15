@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { mkdirSync } from "node:fs"
+import { existsSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -73,8 +73,38 @@ export function getHostCacheDirOverride(): string | undefined {
   return hostCacheDirOverride
 }
 
-const HOST_CACHE_DIRS = ["mimocode", "kilo", "opencode"] as const
+const HOST_CACHE_DIRS = ["mimocode", "kilo", "opencode", "pi", "omp"] as const
 export type HostCacheDir = (typeof HOST_CACHE_DIRS)[number]
+
+const PI_FAMILY_CACHE_NAMESPACE = "cursor-opencode"
+
+function configuredPath(value: string, env: HostPathEnv): string {
+  const home = resolveHome(env)
+  if (value === "~") return home
+  if (value.startsWith("~/")) return path.join(home, value.slice(2))
+  return path.resolve(value)
+}
+
+/**
+ * Pi-family plugins do not have an OpenCode cache root. Keep the provider's
+ * private model/conversation state beside the host's own agent state instead
+ * of silently creating ~/.cache/opencode on machines without OpenCode.
+ *
+ * OMP's XDG migration makes $XDG_CACHE_HOME/omp the cache root once that
+ * directory exists; otherwise its portable/default root remains ~/.omp/agent.
+ * Pi's durable agent root is ~/.pi/agent (or PI_CODING_AGENT_DIR).
+ */
+function piFamilyCacheDir(host: "pi" | "omp", env: HostPathEnv): string {
+  if (host === "omp" && env.XDG_CACHE_HOME) {
+    const xdgRoot = path.join(env.XDG_CACHE_HOME, "omp")
+    if (existsSync(xdgRoot)) return path.join(xdgRoot, PI_FAMILY_CACHE_NAMESPACE)
+  }
+
+  const agentDir = env.PI_CODING_AGENT_DIR
+    ? configuredPath(env.PI_CODING_AGENT_DIR, env)
+    : path.join(resolveHome(env), env.PI_CONFIG_DIR || (host === "pi" ? ".pi" : ".omp"), "agent")
+  return path.join(agentDir, "cache", PI_FAMILY_CACHE_NAMESPACE)
+}
 
 /**
  * Host cache-dir name inferred from the running binary (`argv[0]` /
@@ -116,6 +146,8 @@ export function hostCacheDirFromProcess(
     ) {
       return "opencode"
     }
+    if (name === "pi" || name.startsWith("pi-")) return "pi"
+    if (name === "omp" || name.startsWith("omp-")) return "omp"
   }
   return undefined
 }
@@ -145,6 +177,12 @@ export function resolveHostCacheDir(
     return path.join(cacheHome, "kilo")
   }
 
+  const processHost = hostCacheDirFromProcess(
+    processIdentity.argv ?? process.argv,
+    processIdentity.execPath ?? process.execPath,
+  )
+  if (processHost === "pi" || processHost === "omp") return piFamilyCacheDir(processHost, env)
+
   let modulePath: string | undefined
   try {
     modulePath = moduleUrl.startsWith("file:") ? fileURLToPath(moduleUrl) : path.resolve(moduleUrl)
@@ -160,10 +198,7 @@ export function resolveHostCacheDir(
 
   // Source checkout: the module path can't name the host, but the binary that
   // loaded us can (running as `mimo` / `kilocode` / `opencode`).
-  const host = hostCacheDirFromProcess(
-    processIdentity.argv ?? process.argv,
-    processIdentity.execPath ?? process.execPath,
-  )
+  const host = processHost
   if (host) return path.join(cacheHome, host)
 
   return path.join(cacheHome, "opencode")
@@ -177,6 +212,20 @@ export async function adoptCompatHostCacheDir(
   detector?: CompatDetector,
 ): Promise<string | undefined> {
   if (hostCacheDirOverride) return hostCacheDirOverride
+
+  // The optional OCP detector predates Pi-family hosts and can see generic
+  // OpenCode compatibility environment variables while a Pi/OMP process is
+  // actually running. The active binary is stronger evidence: never let an
+  // installed compatibility package redirect a Pi-only installation into an
+  // OpenCode cache.
+  const processHost = hostCacheDirFromProcess()
+  if (processHost === "pi" || processHost === "omp") {
+    const cacheDir = piFamilyCacheDir(processHost, process.env)
+    setHostCacheDirOverride(cacheDir)
+    trace(`host-cache: selected Pi-family cacheDir=${cacheDir} host=${processHost}`)
+    return cacheDir
+  }
+
   try {
     const detect = detector ?? (await import("@opencode-compat/profile")).detect
     const result = detect()
