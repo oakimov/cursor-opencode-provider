@@ -34,8 +34,8 @@ OpenCode
 |------|------|--------|
 | Package entry | `src/index.ts` | `createCursor`; default export = classic `CursorPlugin` |
 | Classic plugin | `src/plugin.ts` | Auth, OAuth, model cache, provider registration |
-| V2 plugin (1.18) | `src/plugin-v2.ts` | Effect/Promise API via `ctx.aisdk.*` — load **only** as `./plugin/v2` |
-| OpenCode 2.0 plugin | `src/plugin-opencode2.ts` | 2.0 beta API — load **only** as `./plugin/opencode2` |
+| V2 plugin (1.18) | `src/plugin-v2.ts` | Effect/Promise API via `ctx.aisdk.*` — load as `./plugin/v2` **with** classic `plugin` (no `tool` domain; image-save/websearch need classic) |
+| OpenCode 2.0 plugin | `src/plugin-opencode2.ts` | 2.0 beta API — load **only** as `./plugin/opencode2` (registers `custom_websearch` + `cursor_image_save`) |
 | 2.0 support modules | `src/opencode2/` | Catalog mapping, integration/auth, local 2.0 API types |
 | Host-neutral core | `src/plugin-core.ts`, `src/model-config.ts` | Shared by every plugin surface; must not import a host plugin API |
 | Model pricing | `src/pricing.ts`, `src/pricing-data.ts` | Cursor docs → classic `cost` + OpenCode 2.0 cost tiers; regenerate via `bun run generate:pricing` |

@@ -5,6 +5,7 @@ import { applyCursorIntegration, accessTokenFromCredential } from "../src/openco
 import { clearCompactionSessions, isCompactionSession, markCompactionSession } from "../src/compaction-marker.js"
 import { clearSessionDirectories, getSessionDirectory } from "../src/session-directory.js"
 import { registerCursorShellCall } from "../src/shell-timeout.js"
+import { CURSOR_IMAGE_SAVE_TOOL } from "../src/protocol/generate-image.js"
 import type {
   CatalogDraft,
   IntegrationDraft,
@@ -373,7 +374,7 @@ function fakeContext() {
 
 describe("opencode2 setup", () => {
   test("registers every domain it needs and returns a cleanup", async () => {
-    const { ctx, registered } = fakeContext()
+    const { ctx, registered, transforms } = fakeContext()
     const cleanup = await plugin.setup(ctx)
 
     expect(registered).toContain("integration.transform")
@@ -385,6 +386,12 @@ describe("opencode2 setup", () => {
     expect(registered).toContain("tool.execute.after")
     expect(registered).toContain("session.context")
     expect(typeof cleanup).toBe("function")
+
+    const tools: Array<{ name: string }> = []
+    transforms.get("tool")!({ add: (tool: { name: string }) => tools.push(tool) })
+    expect(tools.map((t) => t.name)).toEqual(
+      expect.arrayContaining(["custom_websearch", CURSOR_IMAGE_SAVE_TOOL]),
+    )
   })
 
   test.each(["id", "callID"] as const)("accepts the %s tool execution identifier", async (field) => {

@@ -6,6 +6,12 @@ import { resolveAgentUrl } from "./agent-url.js"
 import { sessionActivity } from "./activity.js"
 import { fetchOpenCodeWebSearchText, type OpenCodeWebSearchArgs } from "./web-tools.js"
 import {
+  executeCursorImageSave,
+  type ImageSaveResult,
+  type ImageSaveToolContext,
+} from "./image-save.js"
+import { CURSOR_IMAGE_SAVE_TOOL } from "./protocol/generate-image.js"
+import {
   captureCursorShellResult,
   cursorShellOriginalCommand,
   prepareCursorShellArgs,
@@ -159,6 +165,52 @@ const plugin: Plugin2 = {
               title: `Exa Web Search: ${input.query}`,
               output,
               metadata: { provider: "exa" },
+            }
+          },
+        })
+
+        // Same handle-only commit tool as classic plugin.ts. Uses host-neutral
+        // executeCursorImageSave (not image-save-tool.ts) so this entrypoint never
+        // imports `@opencode-ai/plugin`'s classic `tool()` helper.
+        draft.add({
+          name: CURSOR_IMAGE_SAVE_TOOL,
+          description:
+            "Save an image that Cursor generated during this session to its target path. "
+            + "Takes only the id of an already-generated image — it cannot write arbitrary "
+            + "files, and it is not a general-purpose file writer. You do not normally call "
+            + "this: the Cursor provider issues it after an image is generated.",
+          input: {
+            type: "object",
+            properties: {
+              image_id: {
+                type: "string",
+                description: "Id of the pending Cursor-generated image to save",
+              },
+            },
+            required: ["image_id"],
+            additionalProperties: false,
+          },
+          execute: async (input: { image_id?: string }, context: any) => {
+            const saveCtx: ImageSaveToolContext = {
+              worktree: typeof context?.worktree === "string" ? context.worktree : "",
+              directory: typeof context?.directory === "string" ? context.directory : "",
+              ask: typeof context?.ask === "function"
+                ? context.ask.bind(context)
+                : async () => {
+                  throw new Error(
+                    "OpenCode 2.0 tool context did not provide ask(); cannot gate image save",
+                  )
+                },
+            }
+            const result = await executeCursorImageSave(input, saveCtx)
+            if (typeof result === "string") {
+              return { title: CURSOR_IMAGE_SAVE_TOOL, output: result, metadata: {} }
+            }
+            const typed = result as ImageSaveResult
+            return {
+              title: typed.title,
+              output: typed.output,
+              metadata: {},
             }
           },
         })

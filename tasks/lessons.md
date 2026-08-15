@@ -110,6 +110,12 @@
   `<system_reminder>` for that mode on later Runs. Never invent a `task`/
   subagent spawn for SwitchMode itself — reminders may instruct the model to
   use `task` afterward.
+- OpenCode 1.18 `/plugin/v2` has no `tool` domain — `cursor_image_save` and
+  `custom_websearch` live only on the classic Hooks plugin. Dual-load classic +
+  v2 is required for GenerateImage on 1.18; a v2-only load silently disables it.
+  OpenCode 2.0 `/plugin/opencode2` must register `cursor_image_save` itself via
+  `ctx.tool.transform` using host-neutral `executeCursorImageSave` (never import
+  `image-save-tool.ts`, which pulls classic `@opencode-ai/plugin` `tool()`).
 - SwitchMode has two Cursor channels that must stay distinct: InteractionQuery
   #4 is the sync consent gate (`approved{}`/`rejected{reason}`, no async
   variant); display `switch_mode_tool_call` (#25) is the transcript record with
