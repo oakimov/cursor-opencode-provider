@@ -7,6 +7,22 @@ import {
   MISSING_ARGS_REASON,
   MISSING_QUERY_REASON,
 } from "./ask-question.js"
+import {
+  type DecodedGenerateImageQuery,
+  decodeGenerateImageQuery,
+} from "./generate-image.js"
+import {
+  decodeCreatePlanQuery,
+  writeOpencodePlanFile,
+} from "./create-plan.js"
+import {
+  type DecodedSwitchModeQuery,
+  type SwitchModeHostTool,
+  decodeSwitchModeQuery,
+  MISSING_ARGS_REASON as SWITCH_MODE_MISSING_ARGS_REASON,
+  MISSING_QUERY_REASON as SWITCH_MODE_MISSING_QUERY_REASON,
+  resolveSwitchModeHostTool,
+} from "./switch-mode.js"
 
 const HEADLESS_REASON =
   "This Cursor interaction requires UI approval and is not available through the OpenCode provider."
@@ -49,14 +65,17 @@ export type HandledInteraction = {
   variantName: string
   outcome: "rejected" | "acknowledged" | "failed" | "bridged"
   /**
-   * Immediate reply for this query. Absent only for a bridged *synchronous*
-   * AskQuestion: Cursor blocks on the real answer, exactly as its own CLI does
-   * while the user is choosing, so the reply is written on continuation once
-   * the OpenCode `question` tool returns.
+   * Immediate reply for this query. Absent for bridged *synchronous* AskQuestion
+   * or SwitchMode: Cursor blocks until the host tool returns, exactly as its own
+   * CLI does while the user is choosing / approving the mode switch.
    */
   reply?: Uint8Array
   /** Present when `outcome === "bridged"`: the question set to hand OpenCode. */
   askQuestion?: DecodedAskQuestionQuery
+  /** Present when SwitchMode is bridged to plan_enter / plan_exit. */
+  switchMode?: DecodedSwitchModeQuery & { toolName: SwitchModeHostTool }
+  /** Present when an image generation was approved: the target to expect. */
+  generateImage?: DecodedGenerateImageQuery
 }
 
 export type HandleInteractionQueryOptions = {
@@ -65,6 +84,27 @@ export type HandleInteractionQueryOptions = {
    * allowed, i.e. the provider can actually surface the prompt to the user.
    */
   canBridgeAskQuestion?: boolean
+  /**
+   * True when tool calls are allowed this turn (needed before advertising can
+   * be checked for plan_enter / plan_exit).
+   */
+  allowTools?: boolean
+  /**
+   * Host tool names advertised this turn. Used to resolve SwitchMode →
+   * plan_enter / plan_exit only when the matching tool is present.
+   */
+  advertisedTools?: ReadonlySet<string> | Iterable<string>
+  /**
+   * True when `cursor_image_save` is advertised, i.e. a generated image can be
+   * committed to disk under OpenCode's permission. Approving generation the
+   * provider cannot then save would spend the user's Cursor quota for nothing.
+   */
+  canSaveGeneratedImage?: boolean
+  /**
+   * Session workspace root used to place CreatePlan files via {@link hostPlansDir}
+   * (host project-config `plans/` in a git worktree, else host global data/plans).
+   */
+  workspaceRoot?: string
 }
 
 export class UnsupportedInteractionQueryError extends Error {
@@ -115,12 +155,15 @@ export function inspectInteractionQueryWire(
  * Build the typed response required by Cursor's Run RPC.
  *
  * OpenCode has no Cursor UI callbacks, so UI-bound queries get a conservative
- * headless policy (reject; ack a few no-UI cases). See case 7 / F14 for
- * create_plan auto-ack parity with Cursor CLI headless mode.
+ * headless policy (reject; ack a few no-UI cases).
  *
- * AskQuestion (#3) is the exception: OpenCode's `question` tool is a real
- * equivalent, so it returns `outcome: "bridged"` and the caller surfaces the
- * prompt as a host tool call. Only genuinely unbridgeable cases are rejected.
+ * Bridged / persisted exceptions:
+ * - AskQuestion (#3) → OpenCode `question` tool
+ * - SwitchMode (#4) → OpenCode `plan_enter` / `plan_exit` when advertised
+ * - CreatePlan (#7) → host-calculated plan file via hostPlansDir (project-config
+ *   `plans/` in a git worktree, else host global data/plans); empty args still
+ *   get the CLI empty-`plan_uri` success ack
+ * - GenerateImage (#12) → approve when `cursor_image_save` is advertised
  */
 export function handleInteractionQuery(
   query: Record<string, unknown>,
@@ -138,6 +181,15 @@ export function handleInteractionQuery(
   if (info.variantField === 3) {
     return handleAskQuestionQuery(info.id, info.variantBytes, options)
   }
+  if (info.variantField === 4) {
+    return handleSwitchModeQuery(info.id, info.variantBytes, options)
+  }
+  if (info.variantField === 7) {
+    return handleCreatePlanQuery(info.id, info.variantBytes, options)
+  }
+  if (info.variantField === 12) {
+    return handleGenerateImageQuery(info.id, info.variantBytes, options)
+  }
 
   let response: Record<string, unknown>
   let outcome: HandledInteraction["outcome"]
@@ -146,22 +198,6 @@ export function handleInteractionQuery(
     case 2:
       response = { web_search_request_response: { rejected: { reason: HEADLESS_REASON } } }
       outcome = "rejected"
-      break
-    case 4:
-      response = { switch_mode_request_response: { rejected: { reason: HEADLESS_REASON } } }
-      outcome = "rejected"
-      break
-    case 7:
-      // F14: create_plan_request_query auto-ack (Cursor CLI headless parity).
-      // Cursor CLI's headless fallback acknowledges plan creation without a
-      // client-side URI (`success` + empty `plan_uri`); the plan remains in
-      // conversation state / checkpoints. This provider mirrors that reply so
-      // the Run RPC does not deadlock waiting for UI approval. Impact: Cursor
-      // may treat the plan as accepted without an OpenCode UI confirm; local
-      // tool execution is still gated by OpenCode permissions. Do not change
-      // this to reject/prompt without CLI parity evidence.
-      response = { create_plan_request_response: { result: { success: {}, plan_uri: "" } } }
-      outcome = "acknowledged"
       break
     case 8:
       // OpenCode owns the local environment; there is no Cursor VM to create.
@@ -178,10 +214,6 @@ export function handleInteractionQuery(
       break
     case 11:
       response = { mcp_auth_request_response: { rejected: { reason: HEADLESS_REASON } } }
-      outcome = "rejected"
-      break
-    case 12:
-      response = { generate_image_request_response: { rejected: { reason: HEADLESS_REASON } } }
       outcome = "rejected"
       break
     case 13:
@@ -264,6 +296,56 @@ export function buildAskQuestionInteractionReply(
 }
 
 /**
+ * SwitchMode is bridged to OpenCode `plan_enter` / `plan_exit` when advertised.
+ * Cursor CLI blocks until the user approves or rejects; we hold the query open
+ * until the host tool returns, then reply approved{} or rejected{reason}.
+ */
+function handleSwitchModeQuery(
+  id: number,
+  variantBytes: Uint8Array | undefined,
+  options: HandleInteractionQueryOptions,
+): HandledInteraction {
+  const base = { id, variantField: 4, variantName: "switch_mode_request_query" } as const
+  const reject = (reason: string): HandledInteraction => ({
+    ...base,
+    outcome: "rejected",
+    reply: buildSwitchModeInteractionReply(id, { rejected: { reason } }),
+  })
+
+  if (!variantBytes) return reject(SWITCH_MODE_MISSING_QUERY_REASON)
+  const decoded = decodeSwitchModeQuery(variantBytes)
+  if (!decoded) return reject(SWITCH_MODE_MISSING_ARGS_REASON)
+
+  const resolved = resolveSwitchModeHostTool(decoded.args.targetModeId, {
+    allowTools: options.allowTools === true,
+    advertised: options.advertisedTools ?? [],
+  })
+  if (!resolved.ok) return reject(resolved.reason)
+
+  return {
+    ...base,
+    outcome: "bridged",
+    switchMode: { ...decoded, toolName: resolved.toolName },
+    // Keep Cursor waiting until plan_enter / plan_exit returns, matching CLI
+    // blocking on the mode-switch approval prompt.
+    reply: undefined,
+  }
+}
+
+/** `AgentClientMessage{interaction_response{switch_mode_request_response}}`. */
+export function buildSwitchModeInteractionReply(
+  id: number,
+  result: Record<string, unknown>,
+): Uint8Array {
+  return encodeMessage("AgentClientMessage", {
+    interaction_response: {
+      id,
+      switch_mode_request_response: result,
+    },
+  })
+}
+
+/**
  * Deferred answers for a query already acknowledged with `async`.
  * `originalArgs` must be the server's own `AskQuestionArgs` bytes so Cursor can
  * correlate the completion with the tool call it raised.
@@ -282,4 +364,96 @@ export function buildAsyncAskQuestionCompletion(
       },
     },
   })
+}
+
+/**
+ * CreatePlan persistence. Cursor CLI writes `~/.cursor/plans/*.plan.md` with
+ * YAML frontmatter; this provider writes plain markdown under the host's
+ * calculated plans dir (`hostPlansDir` / path bridge) so switching models and
+ * hosts stays coherent. Empty / missing args keep the CLI empty-`plan_uri`
+ * success ack (nothing to write).
+ */
+function handleCreatePlanQuery(
+  id: number,
+  variantBytes: Uint8Array | undefined,
+  options: HandleInteractionQueryOptions,
+): HandledInteraction {
+  const base = { id, variantField: 7, variantName: "create_plan_request_query" } as const
+  const reply = (result: Record<string, unknown>): HandledInteraction => ({
+    ...base,
+    outcome: result.error ? "failed" : "acknowledged",
+    reply: encodeMessage("AgentClientMessage", {
+      interaction_response: {
+        id,
+        create_plan_request_response: { result },
+      },
+    }),
+  })
+
+  // Missing / empty args: CLI headless fallback — success with empty plan_uri.
+  if (!variantBytes) return reply({ success: {}, plan_uri: "" })
+  const decoded = decodeCreatePlanQuery(variantBytes)
+  if (!decoded) return reply({ success: {}, plan_uri: "" })
+
+  const workspaceRoot = options.workspaceRoot?.trim()
+  if (!workspaceRoot) {
+    return reply({
+      error: { error: "CreatePlan requires a workspace root to write the plan file" },
+      plan_uri: "",
+    })
+  }
+
+  const written = writeOpencodePlanFile(decoded.args, workspaceRoot)
+  if (!written.ok) {
+    return reply({ error: { error: written.error }, plan_uri: "" })
+  }
+  return reply({ success: {}, plan_uri: written.planUri })
+}
+
+/**
+ * GenerateImage approval. Cursor renders its own confirmation in the CLI; here
+ * the meaningful gate is OpenCode's `edit` permission raised by
+ * `cursor_image_save` when the finished bytes are written, so generation itself
+ * is approved whenever the provider can actually commit the result. Approving
+ * without a commit path would spend Cursor quota on an image that then has
+ * nowhere to go.
+ */
+function handleGenerateImageQuery(
+  id: number,
+  variantBytes: Uint8Array | undefined,
+  options: HandleInteractionQueryOptions,
+): HandledInteraction {
+  const base = { id, variantField: 12, variantName: "generate_image_request_query" } as const
+  const reject = (reason: string): HandledInteraction => ({
+    ...base,
+    outcome: "rejected",
+    reply: encodeMessage("AgentClientMessage", {
+      interaction_response: { id, generate_image_request_response: { rejected: { reason } } },
+    }),
+  })
+
+  if (!variantBytes) return reject("Missing generate image query")
+  const decoded = decodeGenerateImageQuery(variantBytes)
+  if (!decoded) return reject("Missing generate image arguments")
+  if (!options.canSaveGeneratedImage) {
+    return reject(
+      "This OpenCode agent cannot save a generated image, so generating one would "
+      + "produce nothing. Describe the image in your reply instead.",
+    )
+  }
+
+  return {
+    ...base,
+    outcome: "acknowledged",
+    generateImage: decoded,
+    reply: encodeMessage("AgentClientMessage", {
+      interaction_response: {
+        id,
+        // Cursor's CLI returns the description the user may have edited at the
+        // prompt. There is no text field on OpenCode's permission, so the
+        // model's own description is passed through unchanged.
+        generate_image_request_response: { approved: { description: decoded.description } },
+      },
+    }),
+  }
 }

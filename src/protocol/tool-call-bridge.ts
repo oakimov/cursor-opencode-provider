@@ -1,5 +1,6 @@
 import { mapCursorArgsToOpencode, mapCursorSubagentTypeToOpenCode, mcpRealToolName } from "./tools.js"
 import { decodeStructEntriesToJson } from "./struct.js"
+import { mapSwitchModeTarget } from "./switch-mode.js"
 
 /**
  * Cursor's interaction_update.tool_call_* carries a typed ToolCall oneof
@@ -159,8 +160,8 @@ export function parseDisplayToolCall(
   }
 
   // create_plan_tool_call here is display-state mirroring into todowrite.
-  // Separately, InteractionQuery create_plan_request_query is auto-acked in
-  // protocol/interactions.ts (F14 / CLI headless parity) — that ack is not an
+  // Separately, InteractionQuery create_plan_request_query writes a host plan
+  // file via protocol/create-plan.ts (hostPlansDir) — that write is not an
   // execution of this display payload.
   if (variant === "update_todos_tool_call" || variant === "create_plan_tool_call") {
     const result = asRecord(payload.result)
@@ -274,15 +275,19 @@ export function parseDisplayToolCall(
   }
 
   if (variant === "switch_mode_tool_call") {
-    const target = typeof args.target_mode_id === "string" ? args.target_mode_id.toLowerCase() : ""
-    const preferred =
-      target.includes("plan") || target === "plan" ? "plan_enter" : "plan_exit"
+    // Display-path mirror of InteractionQuery #4. Same mapping as switch-mode.ts:
+    // plan/spec → plan_enter; every other non-empty target → plan_exit.
+    // Display completions stay non-replayed regardless of mapping.
+    const target =
+      typeof args.target_mode_id === "string" ? args.target_mode_id : ""
+    const mapped = mapSwitchModeTarget(target)
     return {
       callId,
       variant,
-      preferredToolName: preferred,
+      preferredToolName: mapped.ok ? mapped.toolName : "plan_exit",
       // OpenCode plan_enter / plan_exit both advertise an empty input schema.
       args: {},
+      bridgeable: mapped.ok,
     }
   }
 

@@ -227,7 +227,23 @@ export function createMessageTypes(): protobuf.Root {
     { id: 2, name: "explanation", type: "string" },
     { id: 3, name: "tool_call_id", type: "string" },
   ])
-  addType(root, "SwitchModeToolCall", [{ id: 1, name: "args", type: "SwitchModeToolArgs" }])
+  // Display ToolCall.result (CLI success hardcodes from_mode_id=""); distinct from
+  // InteractionResponse approved/rejected, which is the consent gate.
+  addType(root, "SwitchModeSuccess", [
+    { id: 1, name: "from_mode_id", type: "string" },
+    { id: 2, name: "to_mode_id", type: "string" },
+  ])
+  addType(root, "SwitchModeError", [{ id: 1, name: "error", type: "string" }])
+  addType(root, "SwitchModeRejected", [{ id: 1, name: "reason", type: "string" }])
+  addType(root, "SwitchModeResult", [
+    { id: 1, name: "success", type: "SwitchModeSuccess" },
+    { id: 2, name: "error", type: "SwitchModeError" },
+    { id: 3, name: "rejected", type: "SwitchModeRejected" },
+  ], [{ name: "result", fields: ["success", "error", "rejected"] }])
+  addType(root, "SwitchModeToolCall", [
+    { id: 1, name: "args", type: "SwitchModeToolArgs" },
+    { id: 2, name: "result", type: "SwitchModeResult" },
+  ])
   addType(root, "PiReadToolArgs", [
     { id: 1, name: "path", type: "string" },
     { id: 2, name: "offset", type: "int32" },
@@ -299,7 +315,27 @@ export function createMessageTypes(): protobuf.Root {
     { id: 2, name: "file_path", type: "string" },
     { id: 5, name: "reference_image_paths", type: "string", repeated: true },
   ])
-  addType(root, "GenerateImageToolCall", [{ id: 1, name: "args", type: "GenerateImageToolArgs" }])
+  // Cursor generates the image server-side and returns it on the display
+  // tool_call frame. `image_data` is a base64 string, not bytes.
+  addType(root, "GenerateImageSuccess", [
+    { id: 1, name: "file_path", type: "string" },
+    { id: 2, name: "image_data", type: "string" },
+  ])
+  addType(root, "GenerateImageError", [{ id: 1, name: "error", type: "string" }])
+  addType(root, "GenerateImageResult", [
+    { id: 1, name: "success", type: "GenerateImageSuccess" },
+    { id: 2, name: "error", type: "GenerateImageError" },
+  ], [{ name: "result", fields: ["success", "error"] }])
+  addType(root, "GenerateImageToolCall", [
+    { id: 1, name: "args", type: "GenerateImageToolArgs" },
+    { id: 2, name: "result", type: "GenerateImageResult" },
+  ])
+  // InteractionQuery keeps query bodies opaque; decoded on demand like
+  // AskQuestionInteractionQuery.
+  addType(root, "GenerateImageRequestQuery", [
+    { id: 1, name: "args", type: "GenerateImageToolArgs" },
+    { id: 2, name: "tool_call_id", type: "string" },
+  ])
 
   addType(
     root,
@@ -540,14 +576,24 @@ export function createMessageTypes(): protobuf.Root {
     { id: 1, name: "path", type: "string" },
     { id: 2, name: "error", type: "string" },
   ])
+  // Cursor's own executor reports a refused write with this variant rather than
+  // a generic error, and its agent reads `operation` / `is_readonly` back.
+  addType(root, "WritePermissionDenied", [
+    { id: 1, name: "path", type: "string" },
+    { id: 2, name: "directory", type: "string" },
+    { id: 3, name: "operation", type: "string" },
+    { id: 4, name: "error", type: "string" },
+    { id: 5, name: "is_readonly", type: "bool" },
+  ])
   addType(
     root,
     "WriteResult",
     [
       { id: 1, name: "success", type: "WriteSuccess" },
+      { id: 3, name: "permission_denied", type: "WritePermissionDenied" },
       { id: 5, name: "error", type: "WriteError" },
     ],
-    [{ name: "result", fields: ["success", "error"] }],
+    [{ name: "result", fields: ["success", "permission_denied", "error"] }],
   )
 
   // agent.v1 Pi exec results. Cursor places Pi requests at ExecServerMessage
@@ -1475,6 +1521,11 @@ export function createMessageTypes(): protobuf.Root {
     { id: 1, name: "approved", type: "SwitchModeRequestApproved" },
     { id: 2, name: "rejected", type: "SwitchModeRequestRejected" },
   ], [{ name: "result", fields: ["approved", "rejected"] }])
+  // InteractionQuery keeps query bodies opaque; decoded on demand like
+  // AskQuestionInteractionQuery / CreatePlanRequestQuery.
+  addType(root, "SwitchModeRequestQuery", [
+    { id: 1, name: "args", type: "SwitchModeToolArgs" },
+  ])
 
   addType(root, "CreatePlanSuccess", [])
   addType(root, "CreatePlanError", [{ id: 1, name: "error", type: "string" }])
@@ -1485,6 +1536,12 @@ export function createMessageTypes(): protobuf.Root {
   ], [{ name: "result", fields: ["success", "error"] }])
   addType(root, "CreatePlanRequestResponse", [
     { id: 1, name: "result", type: "CreatePlanResult" },
+  ])
+  // InteractionQuery keeps query bodies opaque; decoded on demand like
+  // AskQuestionInteractionQuery / GenerateImageRequestQuery.
+  addType(root, "CreatePlanRequestQuery", [
+    { id: 1, name: "args", type: "CreatePlanArgs" },
+    { id: 2, name: "tool_call_id", type: "string" },
   ])
 
   addType(root, "SetupVmEnvironmentSuccess", [])

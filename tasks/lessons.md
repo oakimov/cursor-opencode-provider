@@ -95,3 +95,27 @@
   rebuilding every edit from OpenCode's `{filePath,oldString,newString}` fields
   silently changed that valid call to `{}`, so OMP reported a misleading missing
   `input` field. Keep the hashline payload intact and strip only its metadata.
+- Host-owned paths must be calculated through the path bridge, not hardcoded to
+  OpenCode's default. Writing CreatePlan files to `.opencode/plans/` verbatim
+  breaks MiMo/Kilo/OMP hosts that use a different project-config dir; route through
+  `opencodeProjectConfigDirs` / `hostPlansDir` and keep the body in the host's
+  universal plain-markdown shape so non-Cursor models are not confused by Cursor
+  YAML frontmatter or `~/.cursor/plans`.
+- Do not refuse a Cursor InteractionQuery that OpenCode can satisfy with an
+  advertised host tool. SwitchMode (#4) maps onto `plan_enter` / `plan_exit` the
+  same way AskQuestion maps onto `question`: hold the query open, emit the host
+  tool, and reply `approved{}` / `rejected{reason}` (CLI string on user decline)
+  on continuation. Map `plan`/`spec` → `plan_enter` and every other non-empty
+  target → `plan_exit` (no exclusions); after approval, inject a CLI-shaped
+  `<system_reminder>` for that mode on later Runs. Never invent a `task`/
+  subagent spawn for SwitchMode itself — reminders may instruct the model to
+  use `task` afterward.
+- SwitchMode has two Cursor channels that must stay distinct: InteractionQuery
+  #4 is the sync consent gate (`approved{}`/`rejected{reason}`, no async
+  variant); display `switch_mode_tool_call` (#25) is the transcript record with
+  `SwitchModeResult` (success hardcodes `from_mode_id=""`). Bridging the query
+  without inventing a display result is correct — display stays non-replayed.
+  OpenCode advertisement is the live gate: upstream `PlanEnterTool` is currently
+  commented out and `plan_exit` is experimental+CLI-only, so absence of
+  `plan_enter` must reject enter-plan SwitchMode rather than inventing a host
+  agent rename outside the tool loop.

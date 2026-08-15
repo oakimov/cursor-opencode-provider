@@ -38,8 +38,11 @@ const cases: InteractionCase[] = [
     field: 4,
     query: "switch_mode_request_query",
     response: "switch_mode_request_response",
+    // An empty body carries no target mode, so it is rejected. The bridged
+    // path is covered in switch-mode.test.ts.
     outcome: "rejected",
-    assertResult: (r) => expect(r.rejected?.reason).toContain("UI approval"),
+    assertResult: (r) =>
+      expect(r.rejected?.reason).toBe("Missing switch-mode arguments"),
   },
   {
     field: 7,
@@ -83,8 +86,10 @@ const cases: InteractionCase[] = [
     field: 12,
     query: "generate_image_request_query",
     response: "generate_image_request_response",
+    // An empty body carries no description to generate from. The approved path
+    // is covered in generate-image.test.ts.
     outcome: "rejected",
-    assertResult: (r) => expect(r.rejected?.reason).toContain("UI approval"),
+    assertResult: (r) => expect(r.rejected?.reason).toBe("Missing generate image arguments"),
   },
   {
     field: 13,

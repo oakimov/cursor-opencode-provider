@@ -266,12 +266,88 @@ export function opencodeGlobalCacheDir(): string {
  * OpenCode global data dir (`~/.local/share/opencode`).
  * Uses `$XDG_DATA_HOME/opencode` when set, otherwise `$HOME/.local/share/opencode`.
  * Auth credentials live here in `auth.json`.
+ *
+ * Prefer {@link hostGlobalDataDir} for host-portable artifacts (plans, etc.).
  */
 export function opencodeGlobalDataDir(): string {
   if (process.env.XDG_DATA_HOME) {
     return path.join(process.env.XDG_DATA_HOME, "opencode")
   }
   return path.join(resolveHome(), ".local", "share", "opencode")
+}
+
+/**
+ * XDG-style app name for the active host (`opencode` / `mimocode` / `kilo` / …).
+ * Used when placing durable host artifacts outside a git worktree.
+ */
+export function hostDataAppName(env: HostPathEnv = process.env): string {
+  if (env.MIMOCODE_HOME && env.MIMOCODE_HOME.length > 0) return "mimocode"
+  if (env.KILO_CONFIG_DIR && env.KILO_CONFIG_DIR.length > 0) return "kilo"
+  const processHost = hostCacheDirFromProcess()
+  if (processHost === "mimocode" || processHost === "kilo" || processHost === "opencode") {
+    return processHost
+  }
+  if (processHost === "pi" || processHost === "omp") return processHost
+  // Path bridge global config is authoritative when OCP installed the host dirs.
+  const [globalConfig] = opencodeGlobalConfigDirs()
+  if (globalConfig) {
+    const base = path.basename(path.resolve(globalConfig))
+    if (base && base !== "." && base !== "..") return base
+  }
+  return "opencode"
+}
+
+/**
+ * Host global data root (OpenCode `Global.Path.data` equivalent).
+ * - MiMo / Kilo / OpenCode → `$XDG_DATA_HOME/<app>` or `~/.local/share/<app>`
+ * - Pi / OMP → `<agent-root>/` (same durable root as their agent state)
+ */
+export function hostGlobalDataDir(env: HostPathEnv = process.env): string {
+  const app = hostDataAppName(env)
+  if (app === "pi" || app === "omp") {
+    if (env.PI_CODING_AGENT_DIR) return configuredPath(env.PI_CODING_AGENT_DIR, env)
+    return path.join(resolveHome(env), env.PI_CONFIG_DIR || (app === "pi" ? ".pi" : ".omp"), "agent")
+  }
+  if (env.MIMOCODE_HOME && env.MIMOCODE_HOME.length > 0 && app === "mimocode") {
+    return path.resolve(env.MIMOCODE_HOME)
+  }
+  if (env.XDG_DATA_HOME && env.XDG_DATA_HOME.length > 0) {
+    return path.join(env.XDG_DATA_HOME, app)
+  }
+  return path.join(resolveHome(env), ".local", "share", app)
+}
+
+/**
+ * Directory for host plan files — same shape as OpenCode `Session.plan`, but
+ * the project-config segment comes from {@link opencodeProjectConfigDirs}
+ * (`.opencode` / `.mimocode` / `.kilo` / …) rather than a hardcoded name.
+ *
+ * - git worktree → `<primary-project-config-dir>/plans`
+ * - otherwise → `<hostGlobalDataDir()>/plans`
+ */
+export function hostPlansDir(workspaceRoot: string): string {
+  let dir = path.resolve(workspaceRoot)
+  let worktree: string | undefined
+  for (;;) {
+    if (existsSync(path.join(dir, ".git"))) {
+      worktree = dir
+      break
+    }
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  if (worktree) {
+    // Primary project-config dir from the path bridge (OpenCode → `.opencode`,
+    // MiMo → `.mimocode`, Kilo → `.kilo`/`.kilocode`, …). Never hardcode a host
+    // name here — the bridge / default list already encodes it.
+    const [projectConfigDir] = opencodeProjectConfigDirs(worktree)
+    if (!projectConfigDir) {
+      throw new Error("hostPlansDir: opencodeProjectConfigDirs returned no project config dir")
+    }
+    return path.join(projectConfigDir, "plans")
+  }
+  return path.join(hostGlobalDataDir(), "plans")
 }
 
 /**

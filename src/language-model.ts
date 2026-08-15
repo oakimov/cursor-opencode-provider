@@ -35,6 +35,7 @@ import {
   remapEditToolsForCatalog,
   buildCompleteEditReadMessages,
   rejectPartialReadMutation,
+  binaryWritePayload,
   CUSTOM_WEBFETCH_TOOL,
   CUSTOM_WEBSEARCH_TOOL,
   CUSTOM_LIST_MCP_RESOURCES_TOOL,
@@ -55,6 +56,7 @@ import { handleKvServerMessage } from "./protocol/kv.js"
 import {
   buildAskQuestionInteractionReply,
   buildAsyncAskQuestionCompletion,
+  buildSwitchModeInteractionReply,
   handleInteractionQuery,
 } from "./protocol/interactions.js"
 import {
@@ -63,6 +65,20 @@ import {
   askQuestionResultFromToolOutput,
   askQuestionToolInput,
 } from "./protocol/ask-question.js"
+import {
+  SWITCH_MODE_RESULT_FIELD,
+  setActiveCursorMode,
+  switchModeResultFromToolOutput,
+  switchModeToolInput,
+  takeActiveCursorModeReminder,
+} from "./protocol/switch-mode.js"
+import {
+  CURSOR_IMAGE_SAVE_TOOL,
+  imageMimeForPath,
+  remapCursorImageWritePath,
+} from "./protocol/generate-image.js"
+import { stageCursorImage } from "./image-staging.js"
+import { IMAGE_PERMISSION_DENIED_PREFIX } from "./image-save.js"
 import { clearCheckpoint, getCheckpoint, setCheckpoint } from "./protocol/checkpoint.js"
 import {
   cursorContextUsageMetadata,
@@ -109,7 +125,11 @@ import {
 import { readCache, cacheFilePath, resolveVariantParameters, paramsImplyMaxMode, extractCursorVariantParameters, resolveCursorWireModelId, type ModelInfo } from "./models.js"
 import { getOrBuildRequestContext } from "./context/frozen.js"
 import { workspaceRootFromRequestContext } from "./context/env.js"
-import { opencodeGlobalCacheDir, setHostCacheDirOverride } from "./context/paths.js"
+import {
+  ensureOpencodeProjectDir,
+  opencodeGlobalCacheDir,
+  setHostCacheDirOverride,
+} from "./context/paths.js"
 import { resolveAgentUrl } from "./agent-url.js"
 import { CURSOR_API_HOST, CURSOR_COMPACTION_OPTION } from "./shared.js"
 import { isCompactionSession } from "./compaction-marker.js"
@@ -765,9 +785,12 @@ async function startSession(
   )
   const baseSystemPrompt = extractSystemPrompt(prompt)
   const interactionGuidance = buildOpenCodeInteractionGuidance(cursorTools, isCompaction, workspaceRoot)
-  const systemPrompt = interactionGuidance
-    ? [baseSystemPrompt, interactionGuidance].filter(Boolean).join("\n\n")
-    : baseSystemPrompt
+  // After an approved SwitchMode, inject the Cursor CLI-shaped mode reminder
+  // (same <system_reminder> contract the CLI uses after flipping unifiedMode).
+  const modeReminder = isCompaction ? undefined : takeActiveCursorModeReminder(sessionKey)
+  const systemPrompt = [baseSystemPrompt, interactionGuidance, modeReminder]
+    .filter(Boolean)
+    .join("\n\n")
   const history = extractPromptHistory(prompt, {
     preserveTrailingUser: recovery?.kind === "rebase",
     toolResults: isCompaction ? "all" : (recovery?.kind === "rebase" ? "trailing" : "omit"),
@@ -1110,6 +1133,35 @@ function buildAskQuestionContinuationFrame(
 }
 
 /**
+ * Turn an OpenCode plan_enter / plan_exit result into the SwitchMode reply
+ * Cursor is still blocking on (approved{} | rejected{reason}).
+ * On approval, record the Cursor unified mode so the next Run injects the
+ * CLI-shaped `<system_reminder>` for that mode.
+ */
+function buildSwitchModeContinuationFrame(
+  pending: PendingExec,
+  result: ExtractedToolResult,
+  sessionKey: string | undefined,
+): Uint8Array {
+  const metadata = pending.resultMetadata ?? {}
+  const interactionId = metadata.interactionId
+  if (typeof interactionId !== "number") {
+    throw new CursorProtocolError("Bridged SwitchMode lost its interaction id")
+  }
+  const answer = switchModeResultFromToolOutput(
+    result.output,
+    result.error !== undefined,
+  )
+  if ("approved" in answer) {
+    const target = metadata.switchModeTarget
+    if (typeof target === "string" && target.trim()) {
+      setActiveCursorMode(sessionKey, target)
+    }
+  }
+  return buildSwitchModeInteractionReply(interactionId, answer)
+}
+
+/**
  * Deliver trailing tool results onto a live continuation session.
  * Returns the same session when writes succeed (or only bridged results were
  * cleared). Returns undefined after closing the session when a write fails, so
@@ -1154,6 +1206,17 @@ export function deliverContinuationResults(
         sessionManager.close(session, "result-write-failed")
         return undefined
       }
+    } else if (pending.resultField === SWITCH_MODE_RESULT_FIELD) {
+      // Bridged SwitchMode: host plan_enter / plan_exit outcome becomes
+      // approved{} or rejected{reason} on the still-open InteractionQuery.
+      // Approval also arms the CLI-shaped mode reminder for the next Run.
+      try {
+        frames = [buildSwitchModeContinuationFrame(pending, r, session.openCodeSessionId)]
+      } catch (error) {
+        trace(`continuation: switch_mode encode FAILED execId=${r.execId} err=${(error as Error).message}`)
+        sessionManager.close(session, "result-write-failed")
+        return undefined
+      }
     } else if (!pending.bridged) {
       try {
         const shellResult =
@@ -1184,6 +1247,59 @@ export function deliverContinuationResults(
               )
             }
           }
+        }
+        // A refused image commit is Cursor's own `permission_denied` variant,
+        // not a generic write error: its agent branches on that case. The
+        // marker is set by this provider's own tool, so matching it is a
+        // contract rather than a guess at someone else's message text.
+        if (
+          pending.toolName === CURSOR_IMAGE_SAVE_TOOL
+          && pending.resultField === "write_result"
+          && r.error?.includes(IMAGE_PERMISSION_DENIED_PREFIX)
+        ) {
+          const deniedPath = typeof pending.resultMetadata?.path === "string"
+            ? pending.resultMetadata.path
+            : ""
+          frames = [encodeMessage("AgentClientMessage", {
+            exec_client_message: {
+              id: r.execId,
+              write_result: {
+                permission_denied: {
+                  path: deniedPath,
+                  directory: deniedPath ? path.dirname(deniedPath) : "",
+                  operation: "write",
+                  error: r.error.replace(`${IMAGE_PERMISSION_DENIED_PREFIX} `, ""),
+                  is_readonly: false,
+                },
+              },
+            },
+          })]
+        }
+        // A committed image reports the file Cursor asked about, not the tool's
+        // prose. `buildExecClientMessages` would otherwise put the message's
+        // character count in `WriteSuccess.file_size`.
+        if (
+          frames.length === 0
+          && !r.error
+          && pending.toolName === CURSOR_IMAGE_SAVE_TOOL
+          && pending.resultField === "write_result"
+        ) {
+          frames = [encodeMessage("AgentClientMessage", {
+            exec_client_message: {
+              id: r.execId,
+              write_result: {
+                success: {
+                  path: typeof pending.resultMetadata?.path === "string"
+                    ? pending.resultMetadata.path
+                    : "",
+                  lines_created: 0,
+                  file_size: typeof pending.resultMetadata?.imageByteLength === "number"
+                    ? pending.resultMetadata.imageByteLength
+                    : 0,
+                },
+              },
+            },
+          })]
         }
         if (frames.length === 0) {
           frames = buildExecClientMessages({
@@ -1216,10 +1332,14 @@ export function deliverContinuationResults(
       )
       continue
     }
+    const resultKind =
+      pending.resultField === ASK_QUESTION_RESULT_FIELD
+        ? "ask_question answer"
+        : pending.resultField === SWITCH_MODE_RESULT_FIELD
+          ? "switch_mode answer"
+          : "exec result"
     trace(
-      `continuation: wrote ${
-        pending.resultField === ASK_QUESTION_RESULT_FIELD ? "ask_question answer" : "exec result"
-      } execId=${r.execId} field=${pending.resultField} ` +
+      `continuation: wrote ${resultKind} execId=${r.execId} field=${pending.resultField} ` +
         `frames=${outcome.framesWritten} outLen=${r.output.length}`,
     )
   }
@@ -2155,6 +2275,69 @@ export async function pump(
             if (!rejectExec(parsed, reason, "allowTools=false")) return
             continue
           }
+          // Cursor writes a generated image with an ordinary write exec whose
+          // `file_bytes` are binary (Cursor CLI's agent does exactly this, then
+          // reads the client's WriteResult back). OpenCode's `write` takes a
+          // string, so those bytes are staged and committed by the host tool
+          // that can raise the `edit` permission before anything hits disk.
+          const binaryWrite = binaryWritePayload(parsed)
+          if (binaryWrite) {
+            if (!advertisedToolNameSet.has(CURSOR_IMAGE_SAVE_TOOL)) {
+              const reason =
+                "This OpenCode agent cannot write binary file content. "
+                + "Do not retry this write with the same bytes."
+              if (!rejectExec(parsed, reason, "binary write unsupported")) return
+              continue
+            }
+            const workspaceRoot = workspaceRootFromRequestContext(session.requestContext)
+            const projectDir = ensureOpencodeProjectDir(workspaceRoot)
+            const target = remapCursorImageWritePath(binaryWrite.path, {
+              workspaceRoot,
+              projectDir,
+            })
+            let imageId: string
+            try {
+              imageId = stageCursorImage({
+                path: target,
+                projectDir,
+                mime: imageMimeForPath(target),
+                data: binaryWrite.data,
+                sessionId: session.openCodeSessionId,
+              })
+            } catch (error) {
+              if (!rejectExec(parsed, (error as Error).message, "binary write too large")) return
+              continue
+            }
+            if (displayCallId) session.displayToolCalls.delete(displayCallId)
+            sessionManager.registerPending(
+              parsed.id,
+              session,
+              parsed.resultField,
+              CURSOR_IMAGE_SAVE_TOOL,
+              false,
+              {
+                ...parsed.resultMetadata,
+                path: target,
+                binaryWriteBytes: undefined,
+                imageByteLength: binaryWrite.data.length,
+              },
+            )
+            const toolCallId = `cursor_${session.sessionId}_${parsed.id}`
+            trace(
+              `exec: binary write STAGED toolCallId=${toolCallId} ` +
+                `requested=${JSON.stringify(binaryWrite.path)} target=${JSON.stringify(target)} ` +
+                `bytes=${binaryWrite.data.length}`,
+            )
+            closeOpenSpans()
+            safeEnqueue({
+              type: "tool-call",
+              toolCallId,
+              toolName: CURSOR_IMAGE_SAVE_TOOL,
+              input: JSON.stringify({ image_id: imageId }),
+            } as V3Part)
+            emitFinish(undefined, { unified: "tool-calls", raw: undefined })
+            return
+          }
           // Cursor has native capabilities (Task, filesystem, shell, etc.) in
           // addition to the MCP descriptors sent by this provider. The model
           // can request one even when the current OpenCode agent omitted its
@@ -2234,12 +2417,17 @@ export async function pump(
     } else if (interactionQuery) {
       // InteractionQuery is a must-reply channel, just like exec and KV. AI
       // SDK has no Cursor-specific UI callback, so answer immediately with the
-      // conservative headless policy from protocol/interactions.ts (including
-      // F14 create_plan auto-ack / empty plan_uri for CLI headless parity).
+      // policy from protocol/interactions.ts (AskQuestion bridge, CreatePlan
+      // write under OpenCode defaults, GenerateImage approve when saveable).
       const handled = (() => {
         try {
           return handleInteractionQuery(interactionQuery, payload, {
             canBridgeAskQuestion: session.allowTools && advertisedToolNameSet.has("question"),
+            allowTools: session.allowTools,
+            advertisedTools: advertisedToolNameSet,
+            canSaveGeneratedImage:
+              session.allowTools && advertisedToolNameSet.has(CURSOR_IMAGE_SAVE_TOOL),
+            workspaceRoot: workspaceRootFromRequestContext(session.requestContext),
           })
         } catch {
           return failRunProtocol("Cursor interaction request could not be handled", RUN_REQUEST_UNSUPPORTED)
@@ -2261,6 +2449,14 @@ export async function pump(
             `field=${handled.variantField} outcome=${handled.outcome}` +
             (handled.reply ? "" : " (deferred to host tool result)"),
         )
+        if (handled.generateImage) {
+          trace(
+            `interaction_query: approved generate_image target=` +
+              `${JSON.stringify(handled.generateImage.filePath || "(unspecified)")} ` +
+              `refs=${handled.generateImage.referenceImagePaths.length} ` +
+              `cursorToolCallId=${handled.generateImage.toolCallId || "(none)"}`,
+          )
+        }
       } catch (error) {
         rethrowTransportWriteFailure(error)
         failRunProtocol("Cursor interaction reply failed", RUN_REPLY_FAILED)
@@ -2298,6 +2494,42 @@ export async function pump(
           type: "tool-call",
           toolCallId,
           toolName: "question",
+          input,
+        } as V3Part)
+        emitFinish(undefined, { unified: "tool-calls", raw: undefined })
+        return
+      }
+      if (handled.outcome === "bridged" && handled.switchMode) {
+        // Cursor raised SwitchMode; OpenCode owns plan_enter / plan_exit, so the
+        // switch leaves as that tool call and this doStream ends. The Run stays
+        // open on the pending entry; approved/rejected is written back on the
+        // next continuation while Cursor is still blocking on the query.
+        const sw = handled.switchMode
+        const execId = session.nextBridgedExecId++
+        sessionManager.registerPending(
+          execId,
+          session,
+          SWITCH_MODE_RESULT_FIELD,
+          sw.toolName,
+          false,
+          {
+            interactionId: handled.id,
+            switchModeTarget: sw.args.targetModeId,
+            switchModeToolCallId: sw.toolCallId,
+          },
+        )
+        const toolCallId = `cursor_${session.sessionId}_${execId}`
+        const input = JSON.stringify(switchModeToolInput())
+        trace(
+          `interaction_query: BRIDGED switch_mode id=${handled.id} toolCallId=${toolCallId} ` +
+            `hostTool=${sw.toolName} target=${JSON.stringify(sw.args.targetModeId)} ` +
+            `cursorToolCallId=${sw.toolCallId || "(none)"}`,
+        )
+        closeOpenSpans()
+        safeEnqueue({
+          type: "tool-call",
+          toolCallId,
+          toolName: sw.toolName,
           input,
         } as V3Part)
         emitFinish(undefined, { unified: "tool-calls", raw: undefined })
@@ -2476,15 +2708,17 @@ export function buildOpenCodeInteractionGuidance(
   }
   if (names.has("plan_enter")) {
     instructions.push(
-      "- To enter plan mode, call the OpenCode `plan_enter` tool; do not use Cursor's native SwitchMode or CreatePlan interactions.",
+      "- To enter plan mode, call the OpenCode `plan_enter` tool. Cursor-native SwitchMode requests for plan/spec are also accepted and answered through it. Cursor-native CreatePlan is accepted and written as plain markdown under the host's project-config `plans/` dir (via the path bridge), or the host global data `plans/` dir when there is no git worktree.",
     )
   } else if (names.has("todowrite")) {
     instructions.push(
-      "- For planning, call the OpenCode `todowrite` tool and explain the plan in normal text; do not use Cursor's native SwitchMode or CreatePlan interactions.",
+      "- For planning, call the OpenCode `todowrite` tool and/or write the plan as normal markdown. Cursor-native CreatePlan is accepted and stored under the host's calculated plans directory.",
     )
   }
   if (names.has("plan_exit")) {
-    instructions.push("- To leave plan mode, call the OpenCode `plan_exit` tool.")
+    instructions.push(
+      "- To leave plan mode, call the OpenCode `plan_exit` tool. Cursor-native SwitchMode for any non-plan target (agent, build, chat, debug, edit, background, multitask, triage, project, …) is also accepted and answered through it; the provider then injects the Cursor CLI-shaped mode reminder for that target.",
+    )
   }
   if (names.has(CUSTOM_WEBSEARCH_TOOL)) {
     instructions.push(

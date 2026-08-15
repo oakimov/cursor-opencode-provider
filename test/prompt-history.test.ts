@@ -38,7 +38,9 @@ describe("buildOpenCodeInteractionGuidance", () => {
       { name: "custom_webfetch" },
     ], false, "/workspace/project")
     expect(guidance).toContain("OpenCode `plan_enter` tool")
+    expect(guidance).toContain("Cursor-native SwitchMode requests for plan/spec")
     expect(guidance).toContain("OpenCode `plan_exit` tool")
+    expect(guidance).toContain("Cursor-native SwitchMode for any non-plan target")
     expect(guidance).toContain("`custom_websearch`")
     expect(guidance).toContain("`custom_webfetch`")
     expect(guidance).not.toContain("OpenCode `custom_web")

@@ -23,6 +23,7 @@ import {
 } from "./shell-timeout.js"
 import { sessionActivity } from "./activity.js"
 import { openCodeWebSearchTool } from "./web-search-tool.js"
+import { cursorImageSaveTool } from "./image-save-tool.js"
 
 const MODULE_URL = new URL("./index.js", import.meta.url).href
 
@@ -161,6 +162,10 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
       // providers after plugin tools are merged. Use the collision-safe id
       // Cursor already sees so this host-side fallback survives that filter.
       custom_websearch: openCodeWebSearchTool,
+      // Commits Cursor-generated image bytes, which cannot travel through the
+      // host's text `write`. Handle-only, so its presence in the catalog does
+      // not give any model a way to write arbitrary files — see image-save.ts.
+      cursor_image_save: cursorImageSaveTool,
     },
 
     async event({ event }) {

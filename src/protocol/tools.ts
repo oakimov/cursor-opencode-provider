@@ -814,6 +814,11 @@ export function remapEditToolsForCatalog(
   workspaceRoot?: string,
 ): void {
   if (parsed.toolName !== "write" && parsed.toolName !== "edit") return
+  // `apply_patch` envelopes are text. A binary write has no patch form at all,
+  // so it must stay a write and reach the byte-preserving path — converting it
+  // here would drop the bytes and report a patch-translation failure instead of
+  // the image Cursor asked to save.
+  if (binaryWritePayload(parsed)) return
   const advertised = new Set(advertisedToolNames)
   if (advertised.has(parsed.toolName) || !advertised.has(APPLY_PATCH_TOOL)) return
 
@@ -1103,7 +1108,19 @@ export function parseExecServerMessage(
     toolName: mapped.toolName,
     args: mapped.args,
     resultField,
-    ...(resultMetadata ? { resultMetadata } : {}),
+    ...(resultMetadata || mapped.binaryBytes
+      ? {
+          resultMetadata: {
+            ...resultMetadata,
+            ...(mapped.binaryBytes
+              ? {
+                  binaryWriteBytes: mapped.binaryBytes,
+                  path: str(rawArgs.path) ?? str(rawArgs.file_path) ?? "",
+                }
+              : {}),
+          },
+        }
+      : {}),
   }
 }
 
@@ -1136,7 +1153,7 @@ export function mapCursorArgsToOpencode(
   toolName: string,
   raw: Record<string, unknown>,
   execVariant?: string,
-): { toolName: string; args: Record<string, unknown> } {
+): { toolName: string; args: Record<string, unknown>; binaryBytes?: Uint8Array } {
   const cleaned: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(raw)) {
     if (v === undefined || v === null) continue
@@ -1185,9 +1202,19 @@ export function mapCursorArgsToOpencode(
       // non-empty and only falls back to `file_text`; mirror that order so a
       // byte-encoded write is not silently seen as empty content.
       const bytes = bytesValue(cleaned.file_bytes) ?? bytesValue(cleaned.fileBytes)
-      const content = bytes !== undefined
-        ? decodeWriteBytes(bytes, str(cleaned.encoding_hint) ?? str(cleaned.encodingHint))
-        : stringValue(cleaned.content) ?? stringValue(cleaned.file_text) ?? stringValue(cleaned.fileText)
+      let content: string | undefined
+      if (bytes !== undefined) {
+        content = decodeWriteBytes(bytes, str(cleaned.encoding_hint) ?? str(cleaned.encodingHint))
+        if (content === undefined) {
+          // Binary. Surface the raw bytes to the caller instead of a lossy
+          // decode; `binaryWritePayload` picks them up after parsing.
+          return { toolName: "write", args, binaryBytes: bytes }
+        }
+      } else {
+        content = stringValue(cleaned.content)
+          ?? stringValue(cleaned.file_text)
+          ?? stringValue(cleaned.fileText)
+      }
       if (content !== undefined) args.content = content
       return { toolName: "write", args }
     }
@@ -1268,21 +1295,56 @@ function bytesValue(v: unknown): Uint8Array | undefined {
   return undefined
 }
 
+/** UTF-16/32 embed NUL bytes in ordinary text; 8-bit encodings do not. */
+const WIDE_TEXT_ENCODING = /^utf-?(16|32)/
+
 /**
  * Decode `WriteArgs.file_bytes`. `encoding_hint` names the file's original
- * encoding; OpenCode's `write` takes a string, so anything Node cannot decode
+ * encoding; OpenCode's `write` takes a string, so an unknown encoding label
  * falls back to UTF-8 rather than dropping the write.
+ *
+ * Returns undefined when the bytes are not text in that encoding. A non-fatal
+ * decode would replace every undecodable sequence with U+FFFD and hand the host
+ * a corrupted file that still reports success, so binary content must take the
+ * byte-preserving path instead (see `isBinaryWriteRequest`).
  */
-function decodeWriteBytes(bytes: Uint8Array, encodingHint?: string): string {
+export function decodeWriteBytes(bytes: Uint8Array, encodingHint?: string): string | undefined {
   const encoding = encodingHint?.trim().toLowerCase().replace(/[_ ]/g, "-")
+
+  let decoder: TextDecoder | undefined
+  let label = "utf-8"
   if (encoding && encoding !== "utf-8" && encoding !== "utf8") {
     try {
-      return new TextDecoder(encoding, { fatal: false }).decode(bytes)
+      decoder = new TextDecoder(encoding, { fatal: true })
+      label = encoding
     } catch {
       trace(`write: unsupported encoding_hint ${JSON.stringify(encodingHint)} — decoding as utf-8`)
     }
   }
-  return new TextDecoder("utf-8").decode(bytes)
+  if (!decoder) decoder = new TextDecoder("utf-8", { fatal: true })
+
+  // Single-byte encodings decode any byte sequence without error, so a decode
+  // that cannot fail is not on its own evidence of text.
+  if (!WIDE_TEXT_ENCODING.test(label) && bytes.includes(0)) return undefined
+  try {
+    return decoder.decode(bytes)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * True when a parsed `write` request carries bytes that are not text. Such a
+ * request cannot go to OpenCode's `write` tool at all — it takes a string, and
+ * additionally BOM-splits, diffs, and runs `Format.file()` on what it writes.
+ */
+export function binaryWritePayload(
+  parsed: ParsedExecRequest,
+): { path: string; data: Uint8Array } | undefined {
+  if (parsed.toolName !== "write") return undefined
+  const data = parsed.resultMetadata?.binaryWriteBytes
+  if (!(data instanceof Uint8Array)) return undefined
+  return { path: str(parsed.resultMetadata?.path) ?? "", data }
 }
 
 function num(v: unknown): number | undefined {
