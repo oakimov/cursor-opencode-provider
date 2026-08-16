@@ -121,7 +121,38 @@
   variant); display `switch_mode_tool_call` (#25) is the transcript record with
   `SwitchModeResult` (success hardcodes `from_mode_id=""`). Bridging the query
   without inventing a display result is correct — display stays non-replayed.
-  OpenCode advertisement is the live gate: upstream `PlanEnterTool` is currently
-  commented out and `plan_exit` is experimental+CLI-only, so absence of
-  `plan_enter` must reject enter-plan SwitchMode rather than inventing a host
-  agent rename outside the tool loop.
+  OpenCode advertisement is the live gate for *bridging to a host tool*, but
+  absence of that tool is not a reason to refuse the switch (see the 2026-08-16
+  entry below).
+- A provider-recorded mode can become stale when the host completes a native UI
+  lifecycle without another SwitchMode query. For the omp bridge, mark the mode
+  as bridge-entered when the real `plan_enter` continuation succeeds; native
+  approval/exit restores `plan_enter`, which is then a reliable signal to emit
+  one Agent handoff and clear the Cursor plan reminder. Do not infer native-plan
+  liveness from registration alone: the bridge tool is callable outside plan
+  mode too, so CreatePlan staging must require that successful entry marker.
+
+## 2026-08-16 — A missing host tool is not automatically a refusal
+
+- **Read what the host tool *does* before treating its absence as a dead end.**
+  SwitchMode rejected twice in `/tmp/opencode-plan-test.log` because neither
+  `plan_enter` nor `plan_exit` was advertised. The bridge was behaving to spec,
+  but the spec was wrong: OpenCode's plan tools are not mode flags. Each asks
+  the user through the Question service and, on "Yes", injects a synthetic user
+  message carrying `agent:"plan"|"build"`, which `createUserMessage` turns into
+  a `setAgentModel` primary-agent switch (`tool/plan.ts`, `session/prompt.ts`).
+  Of those three effects a provider cannot reach only the last one — so the
+  bridge can reproduce the observable contract instead of refusing.
+- **Entering a provider-owned mode needs no host tool at all.** The injected
+  `<system_reminder>` *is* the contract, exactly as Cursor CLI's own plan mode
+  is prompt-enforced. Gate on a host tool only where the host genuinely owns the
+  outcome — here, the execution approval, which degrades to `question`.
+- **Do not conclude "not implemented" from a filtered grep.** The first pass
+  searched `plan_enter` while excluding the very files that define plan mode,
+  concluded upstream had no such tool, and missed `plan-enter.txt`, commit
+  `fa559b038` disabling `PlanEnterTool`, and the whole synthetic-message
+  mechanism. Widen the search and read the git history before declaring absence.
+- **Absence is the common case, not the edge case.** OCP only relabels tools the
+  host already advertises — it never invents them — and neither the MiMo nor the
+  Kilo profile declares a plan role. Emulation is the live path on those hosts,
+  so it must be as considered as the native path, not a fallback afterthought.

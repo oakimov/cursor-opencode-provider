@@ -318,35 +318,25 @@ export function hostGlobalDataDir(env: HostPathEnv = process.env): string {
 }
 
 /**
- * Directory for host plan files — same shape as OpenCode `Session.plan`, but
- * the project-config segment comes from {@link opencodeProjectConfigDirs}
- * (`.opencode` / `.mimocode` / `.kilo` / …) rather than a hardcoded name.
+ * Directory for host plan files — always `<hostGlobalDataDir()>/plans`, and
+ * never inside the user's repository.
  *
- * - git worktree → `<primary-project-config-dir>/plans`
- * - otherwise → `<hostGlobalDataDir()>/plans`
+ * OpenCode's own `Session.plan` branches on VCS and puts plans in the worktree
+ * (`<worktree>/.opencode/plans`) for a git project. The provider deliberately
+ * does *not* mirror that branch. Writing there means a throwaway plan lands in
+ * the user's tree untracked-but-unignored, and — because OpenCode installs
+ * `@opencode-ai/plugin` into every `.opencode` directory it discovers walking up
+ * from the cwd — creating that directory also bootstraps a project-local
+ * `node_modules`. The provider must add nothing to a repository it did not
+ * already contain.
+ *
+ * The global-data location is not a degraded fallback: it is the branch OpenCode
+ * itself uses when there is no VCS, and its plan agent allow-lists that path for
+ * `edit` / `external_directory` alongside the in-worktree one. {@link
+ * hostGlobalDataDir} carries the native host translation (OpenCode / MiMo / Kilo
+ * XDG data dirs, Pi/OMP agent root).
  */
-export function hostPlansDir(workspaceRoot: string): string {
-  let dir = path.resolve(workspaceRoot)
-  let worktree: string | undefined
-  for (;;) {
-    if (existsSync(path.join(dir, ".git"))) {
-      worktree = dir
-      break
-    }
-    const parent = path.dirname(dir)
-    if (parent === dir) break
-    dir = parent
-  }
-  if (worktree) {
-    // Primary project-config dir from the path bridge (OpenCode → `.opencode`,
-    // MiMo → `.mimocode`, Kilo → `.kilo`/`.kilocode`, …). Never hardcode a host
-    // name here — the bridge / default list already encodes it.
-    const [projectConfigDir] = opencodeProjectConfigDirs(worktree)
-    if (!projectConfigDir) {
-      throw new Error("hostPlansDir: opencodeProjectConfigDirs returned no project config dir")
-    }
-    return path.join(projectConfigDir, "plans")
-  }
+export function hostPlansDir(_workspaceRoot?: string): string {
   return path.join(hostGlobalDataDir(), "plans")
 }
 

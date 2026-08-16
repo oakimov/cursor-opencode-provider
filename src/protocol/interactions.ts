@@ -12,16 +12,20 @@ import {
   decodeGenerateImageQuery,
 } from "./generate-image.js"
 import {
+  CURSOR_PLAN_STAGE_TOOL,
+  type DecodedCreatePlanQuery,
   decodeCreatePlanQuery,
   writeOpencodePlanFile,
 } from "./create-plan.js"
 import {
   type DecodedSwitchModeQuery,
+  type SwitchModeBridge,
   type SwitchModeHostTool,
   decodeSwitchModeQuery,
   MISSING_ARGS_REASON as SWITCH_MODE_MISSING_ARGS_REASON,
   MISSING_QUERY_REASON as SWITCH_MODE_MISSING_QUERY_REASON,
-  resolveSwitchModeHostTool,
+  resolveSwitchModeBridge,
+  switchModeApprovedResult,
 } from "./switch-mode.js"
 
 const HEADLESS_REASON =
@@ -63,7 +67,7 @@ export type HandledInteraction = {
   id: number
   variantField: number
   variantName: string
-  outcome: "rejected" | "acknowledged" | "failed" | "bridged"
+  outcome: "rejected" | "acknowledged" | "failed" | "bridged" | "approved"
   /**
    * Immediate reply for this query. Absent for bridged *synchronous* AskQuestion
    * or SwitchMode: Cursor blocks until the host tool returns, exactly as its own
@@ -72,8 +76,18 @@ export type HandledInteraction = {
   reply?: Uint8Array
   /** Present when `outcome === "bridged"`: the question set to hand OpenCode. */
   askQuestion?: DecodedAskQuestionQuery
-  /** Present when SwitchMode is bridged to plan_enter / plan_exit. */
-  switchMode?: DecodedSwitchModeQuery & { toolName: SwitchModeHostTool }
+  /**
+   * Present for every SwitchMode outcome the provider acts on — bridged to a
+   * host tool, or approved outright when entering plan mode needs none. The
+   * caller reads `bridge` to decide whether a tool call is emitted, and
+   * `args.targetModeId` to record the active Cursor mode either way.
+   */
+  switchMode?: DecodedSwitchModeQuery & {
+    bridge: SwitchModeBridge
+    toolName?: SwitchModeHostTool | "question"
+  }
+  /** Present when CreatePlan is delegated to a native host plan stage. */
+  createPlan?: DecodedCreatePlanQuery & { toolName: typeof CURSOR_PLAN_STAGE_TOOL }
   /** Present when an image generation was approved: the target to expect. */
   generateImage?: DecodedGenerateImageQuery
 }
@@ -105,6 +119,8 @@ export type HandleInteractionQueryOptions = {
    * (host project-config `plans/` in a git worktree, else host global data/plans).
    */
   workspaceRoot?: string
+  /** True when omp's native session-local plan staging tool is advertised. */
+  canBridgeCreatePlan?: boolean
 }
 
 export class UnsupportedInteractionQueryError extends Error {
@@ -316,18 +332,33 @@ function handleSwitchModeQuery(
   const decoded = decodeSwitchModeQuery(variantBytes)
   if (!decoded) return reject(SWITCH_MODE_MISSING_ARGS_REASON)
 
-  const resolved = resolveSwitchModeHostTool(decoded.args.targetModeId, {
+  const bridge = resolveSwitchModeBridge(decoded.args.targetModeId, {
     allowTools: options.allowTools === true,
     advertised: options.advertisedTools ?? [],
   })
-  if (!resolved.ok) return reject(resolved.reason)
+  if (bridge.kind === "reject") return reject(bridge.reason)
+
+  if (bridge.kind === "approve") {
+    // Entering plan mode needs no host tool, so Cursor is released at once and
+    // the caller records the mode for the reminder injected on later Runs.
+    return {
+      ...base,
+      outcome: "approved",
+      switchMode: { ...decoded, bridge },
+      reply: buildSwitchModeInteractionReply(id, switchModeApprovedResult()),
+    }
+  }
 
   return {
     ...base,
     outcome: "bridged",
-    switchMode: { ...decoded, toolName: resolved.toolName },
-    // Keep Cursor waiting until plan_enter / plan_exit returns, matching CLI
-    // blocking on the mode-switch approval prompt.
+    switchMode: {
+      ...decoded,
+      bridge,
+      toolName: bridge.kind === "native" ? bridge.toolName : "question",
+    },
+    // Keep Cursor waiting until the host tool returns, matching CLI blocking on
+    // the mode-switch approval prompt.
     reply: undefined,
   }
 }
@@ -341,6 +372,19 @@ export function buildSwitchModeInteractionReply(
     interaction_response: {
       id,
       switch_mode_request_response: result,
+    },
+  })
+}
+
+/** `AgentClientMessage{interaction_response{create_plan_request_response}}`. */
+export function buildCreatePlanInteractionReply(
+  id: number,
+  result: Record<string, unknown>,
+): Uint8Array {
+  return encodeMessage("AgentClientMessage", {
+    interaction_response: {
+      id,
+      create_plan_request_response: { result },
     },
   })
 }
@@ -394,6 +438,20 @@ function handleCreatePlanQuery(
   if (!variantBytes) return reply({ success: {}, plan_uri: "" })
   const decoded = decodeCreatePlanQuery(variantBytes)
   if (!decoded) return reply({ success: {}, plan_uri: "" })
+
+  if (options.canBridgeCreatePlan && options.allowTools === true) {
+    return {
+      ...base,
+      outcome: "bridged",
+      createPlan: { ...decoded, toolName: CURSOR_PLAN_STAGE_TOOL },
+      reply: undefined,
+    }
+  }
+
+  // A lifecycle turn (title generation, compaction) runs alongside the real one
+  // and would otherwise write a second, throwaway plan file for the same
+  // request. Ack it the CLI way instead of persisting anything.
+  if (options.allowTools !== true) return reply({ success: {}, plan_uri: "" })
 
   const workspaceRoot = options.workspaceRoot?.trim()
   if (!workspaceRoot) {

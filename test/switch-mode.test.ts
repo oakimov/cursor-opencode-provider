@@ -5,15 +5,20 @@ import {
   USER_REJECTED_REASON,
   cursorModeSystemReminder,
   decodeSwitchModeQuery,
+  isBridgedCursorPlanModeActive,
   mapSwitchModeTarget,
   resetActiveCursorModesForTests,
-  resolveSwitchModeHostTool,
+  resolveSwitchModeBridge,
   setActiveCursorMode,
+  switchModeResultFromQuestionOutput,
   switchModeResultFromToolOutput,
   switchModeToolInput,
   takeActiveCursorModeReminder,
+  SWITCH_MODE_EXIT_QUESTION,
 } from "../src/protocol/switch-mode.js"
 import { parseDisplayToolCall, resolveBridgedOpenCodeToolCall } from "../src/protocol/tool-call-bridge.js"
+import { deliverContinuationResults, pump } from "../src/language-model.js"
+import { sessionManager, type CursorSession, type Frame } from "../src/session.js"
 
 function switchModeArgs(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -64,29 +69,107 @@ describe("mapSwitchModeTarget", () => {
   })
 })
 
-describe("resolveSwitchModeHostTool", () => {
-  it("requires the matching host tool to be advertised", () => {
+describe("resolveSwitchModeBridge", () => {
+  it("prefers the native host tool when it is advertised", () => {
     expect(
-      resolveSwitchModeHostTool("plan", {
-        allowTools: true,
-        advertised: ["plan_exit"],
-      }).ok,
-    ).toBe(false)
+      resolveSwitchModeBridge("plan", { allowTools: true, advertised: ["plan_enter"] }),
+    ).toEqual({ kind: "native", toolName: "plan_enter" })
     expect(
-      resolveSwitchModeHostTool("plan", {
-        allowTools: true,
-        advertised: ["plan_enter"],
-      }),
-    ).toEqual({ ok: true, toolName: "plan_enter" })
+      resolveSwitchModeBridge("agent", { allowTools: true, advertised: ["plan_exit"] }),
+    ).toEqual({ kind: "native", toolName: "plan_exit" })
   })
 
-  it("rejects when tools are not allowed this turn", () => {
-    const resolved = resolveSwitchModeHostTool("agent", {
-      allowTools: false,
-      advertised: ["plan_exit"],
+  it("approves entering plan mode with no host plan tool at all", () => {
+    // The failing live case: neither plan tool advertised. Entering plan mode
+    // needs no host tool, so it must no longer reject.
+    for (const advertised of [[], ["plan_exit"], ["question", "read", "write"]]) {
+      expect(resolveSwitchModeBridge("plan", { allowTools: true, advertised })).toEqual({
+        kind: "approve",
+      })
+    }
+    expect(resolveSwitchModeBridge("SPEC", { allowTools: true, advertised: [] })).toEqual({
+      kind: "approve",
     })
-    expect(resolved.ok).toBe(false)
-    if (!resolved.ok) expect(resolved.reason).toContain("`plan_exit`")
+  })
+
+  it("never mutates session mode from a no-tool lifecycle turn", () => {
+    // OpenCode opens a tools=0 Run (title generation) alongside the real one and
+    // Cursor replays the whole turn on it. Approving there flipped plan mode
+    // twice and let the throwaway turn write its own plan file.
+    for (const target of ["plan", "spec", "agent"]) {
+      const bridge = resolveSwitchModeBridge(target, { allowTools: false, advertised: [] })
+      expect(bridge.kind).toBe("reject")
+      if (bridge.kind !== "reject") throw new Error("expected reject")
+      expect(bridge.reason).toContain("lifecycle turn")
+    }
+  })
+
+  it("falls back to the question prompt when leaving plan mode without plan_exit", () => {
+    const bridge = resolveSwitchModeBridge("agent", {
+      allowTools: true,
+      advertised: ["question", "read"],
+    })
+    expect(bridge.kind).toBe("question")
+    if (bridge.kind !== "question") throw new Error("expected question bridge")
+    expect(bridge.input.questions).toHaveLength(1)
+    expect(bridge.input.questions[0].question).toBe(SWITCH_MODE_EXIT_QUESTION)
+    expect(bridge.input.questions[0].header).toBe("Build Agent")
+    expect(bridge.input.questions[0].options.map((o) => o.label)).toEqual(["Yes", "No"])
+  })
+
+  it("rejects leaving plan mode when neither plan_exit nor question is available", () => {
+    const bridge = resolveSwitchModeBridge("agent", {
+      allowTools: true,
+      advertised: ["read", "write"],
+    })
+    expect(bridge.kind).toBe("reject")
+    if (bridge.kind !== "reject") throw new Error("expected reject")
+    expect(bridge.reason).toContain("`plan_exit`")
+    expect(bridge.reason).toContain("`question`")
+  })
+
+  it("rejects even an advertised host tool on a no-tool turn", () => {
+    const bridge = resolveSwitchModeBridge("agent", {
+      allowTools: false,
+      advertised: ["plan_exit", "question"],
+    })
+    expect(bridge.kind).toBe("reject")
+  })
+
+  it("rejects an empty target", () => {
+    expect(
+      resolveSwitchModeBridge("  ", { allowTools: true, advertised: ["plan_enter"] }).kind,
+    ).toBe("reject")
+  })
+})
+
+describe("switchModeResultFromQuestionOutput", () => {
+  const output = (answer: string) =>
+    `User has answered your questions: "${SWITCH_MODE_EXIT_QUESTION}"="${answer}". You can now continue.`
+
+  it("approves only on an explicit Yes", () => {
+    expect(switchModeResultFromQuestionOutput(output("Yes"), false)).toEqual({ approved: {} })
+    expect(switchModeResultFromQuestionOutput(output("yes"), false)).toEqual({ approved: {} })
+  })
+
+  it("keeps the model in plan mode on No, unanswered, or unparseable output", () => {
+    for (const out of [output("No"), output("Unanswered"), output(""), "nonsense"]) {
+      expect(switchModeResultFromQuestionOutput(out, false)).toEqual({
+        rejected: { reason: USER_REJECTED_REASON },
+      })
+    }
+  })
+
+  it("maps a dismissed prompt to the CLI user-reject string", () => {
+    expect(switchModeResultFromQuestionOutput("Question rejected", true)).toEqual({
+      rejected: { reason: USER_REJECTED_REASON },
+    })
+  })
+
+  it("passes a genuine tool failure through as the reason", () => {
+    expect(switchModeResultFromQuestionOutput("question tool crashed", true)).toEqual({
+      rejected: { reason: "question tool crashed" },
+    })
   })
 })
 
@@ -167,6 +250,38 @@ describe("cursorModeSystemReminder", () => {
     const second = takeActiveCursorModeReminder("sess-1")!
     expect(second).toContain("Ask mode is still active")
   })
+
+  it("hands a bridged plan back to Agent mode when plan_enter is restored", () => {
+    setActiveCursorMode("sess-plan", "plan", { bridgedPlanEntered: true })
+
+    expect(isBridgedCursorPlanModeActive("sess-plan")).toBe(true)
+    const active = takeActiveCursorModeReminder("sess-plan", {
+      advertisedTools: ["read", "write", "plan_exit"],
+    })!
+    expect(active).toContain("Plan mode is active")
+
+    const handoff = takeActiveCursorModeReminder("sess-plan", {
+      advertisedTools: ["read", "edit", "plan_enter", "plan_exit"],
+    })!
+    expect(handoff).toContain("Agent mode is active")
+    expect(isBridgedCursorPlanModeActive("sess-plan")).toBe(false)
+    expect(takeActiveCursorModeReminder("sess-plan")).toBeUndefined()
+  })
+
+  it("does not treat plan_enter present from the start as a bridged-plan exit", () => {
+    setActiveCursorMode("sess-native-plan", "spec")
+
+    const first = takeActiveCursorModeReminder("sess-native-plan", {
+      advertisedTools: ["read", "write", "plan_enter", "plan_exit"],
+    })!
+    expect(isBridgedCursorPlanModeActive("sess-native-plan")).toBe(false)
+    const second = takeActiveCursorModeReminder("sess-native-plan", {
+      advertisedTools: ["read", "write", "plan_enter", "plan_exit"],
+    })!
+
+    expect(first).toContain("Plan mode is active")
+    expect(second).toContain("Plan mode is still active")
+  })
 })
 
 describe("handleInteractionQuery switch-mode routing", () => {
@@ -203,14 +318,179 @@ describe("handleInteractionQuery switch-mode routing", () => {
     }
   })
 
-  it("rejects when the host tool is unavailable", () => {
+  it("approves entering plan mode outright when no host plan tool exists", () => {
+    // Regression for the live run where both SwitchMode queries were rejected
+    // because stock OpenCode advertises neither plan tool.
     const handled = handle(switchModePayload(), {
       allowTools: true,
-      advertisedTools: ["question"],
+      advertisedTools: ["question", "read", "write"],
+    })
+    expect(handled.outcome).toBe("approved")
+    expect(handled.switchMode?.bridge.kind).toBe("approve")
+    expect(handled.switchMode?.args.targetModeId).toBe("plan")
+    const response = decodeMessage<any>("AgentClientMessage", handled.reply!).interaction_response
+    expect(response.switch_mode_request_response.approved).toBeDefined()
+  })
+
+  it("bridges leaving plan mode to the question prompt when plan_exit is absent", () => {
+    const handled = handle(switchModePayload(switchModeArgs({ target_mode_id: "agent" })), {
+      allowTools: true,
+      advertisedTools: ["question", "read"],
+    })
+    expect(handled.outcome).toBe("bridged")
+    expect(handled.reply).toBeUndefined()
+    expect(handled.switchMode?.toolName).toBe("question")
+    expect(handled.switchMode?.bridge.kind).toBe("question")
+  })
+
+  it("rejects leaving plan mode when nothing can ask the user", () => {
+    const handled = handle(switchModePayload(switchModeArgs({ target_mode_id: "agent" })), {
+      allowTools: true,
+      advertisedTools: ["read", "write"],
     })
     expect(handled.outcome).toBe("rejected")
     const response = decodeMessage<any>("AgentClientMessage", handled.reply!).interaction_response
-    expect(response.switch_mode_request_response.rejected.reason).toContain("`plan_enter`")
+    expect(response.switch_mode_request_response.rejected.reason).toContain("`plan_exit`")
+  })
+})
+
+// ── end-to-end through the held-open Run ─────────────────────────────────────
+
+function switchModeSession(
+  payloads: Uint8Array[],
+  writes: Uint8Array[],
+  advertised: string[],
+): CursorSession {
+  let index = 0
+  const frames: AsyncIterator<Frame> = {
+    next: async () => index < payloads.length
+      ? { done: false, value: { flags: 0, payload: payloads[index++] } }
+      : { done: true, value: undefined },
+  }
+  return {
+    sessionId: "switch-mode-session",
+    conversationId: "switch-mode-conversation",
+    openCodeSessionId: "switch-mode-opencode-session",
+    stream: {
+      write(data: Uint8Array) { writes.push(data); return true },
+      end() {},
+      destroy() {},
+      isClosed: () => false,
+      frames: () => ({ [Symbol.asyncIterator]: () => frames }),
+    } as any,
+    frames,
+    pending: new Map(),
+    blobs: new Map(),
+    displayToolCalls: new Map(),
+    toolDescriptors: advertised.map((name) => ({
+      name: `opencode-${name}`,
+      tool_name: name,
+      provider_identifier: "opencode",
+    })),
+    requestContext: {},
+    usageEstimate: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0, reasoningTokens: 0 },
+    allowTools: true,
+    pumpActive: true,
+    heartbeat: null,
+    nextBridgedExecId: 900_000,
+    expiresAt: Date.now() + 10_000,
+  } as unknown as CursorSession
+}
+
+const turnEnded = encodeMessage("AgentServerMessage", {
+  interaction_update: { turn_ended: { input_tokens: 5, output_tokens: 2 } },
+})
+
+async function runSwitchMode(payloads: Uint8Array[], advertised: string[]) {
+  const writes: Uint8Array[] = []
+  const parts: any[] = []
+  const session = switchModeSession(payloads, writes, advertised)
+  await pump(
+    session,
+    { enqueue(part: unknown) { parts.push(part) }, error() {} } as ReadableStreamDefaultController<any>,
+    { textId: "text", reasoningId: "reasoning" },
+  )
+  return { session, writes, parts }
+}
+
+describe("SwitchMode over a held-open Run without host plan tools", () => {
+  beforeEach(() => resetActiveCursorModesForTests())
+
+  it("approves plan entry inline, emits no tool call, and keeps pumping", async () => {
+    // The exact live failure: 65 tools advertised, neither of them a plan tool.
+    const { session, writes, parts } = await runSwitchMode(
+      [switchModePayload(), turnEnded],
+      ["question", "read", "write", "todowrite"],
+    )
+
+    expect(writes).toHaveLength(1)
+    const response = decodeMessage<any>("AgentClientMessage", writes[0]!).interaction_response
+    expect(response.id).toBe(42)
+    expect(response.switch_mode_request_response.approved).toBeDefined()
+
+    // No host tool is involved, so nothing is pending and the turn ran to its end.
+    expect(session.pending.size).toBe(0)
+    expect(parts.some((part) => part.type === "tool-call")).toBe(false)
+
+    // The mode is recorded, so the next Run carries the plan contract, and it
+    // points at the reachable way to ask for execution.
+    const reminder = takeActiveCursorModeReminder("switch-mode-opencode-session", {
+      advertisedTools: ["question", "read", "write"],
+    })!
+    expect(reminder).toContain("Plan mode is active")
+    expect(reminder).toContain("SwitchMode, target `agent`")
+    expect(reminder).not.toContain("call OpenCode `plan_exit`")
+    sessionManager.close(session, "ordinary-cleanup")
+  })
+
+  it("asks the user before leaving plan mode, then approves on Yes", async () => {
+    const { session, writes, parts } = await runSwitchMode(
+      [switchModePayload(switchModeArgs({ target_mode_id: "agent" }))],
+      ["question", "read", "write"],
+    )
+
+    // Cursor is still blocked; the approval left as a question tool call.
+    expect(writes).toHaveLength(0)
+    const toolCall = parts.find((part) => part.type === "tool-call")
+    expect(toolCall.toolName).toBe("question")
+    expect(JSON.parse(toolCall.input).questions[0].question).toBe(SWITCH_MODE_EXIT_QUESTION)
+    expect(session.pending.size).toBe(1)
+
+    const delivered = deliverContinuationResults(session, [{
+      toolCallId: toolCall.toolCallId,
+      sessionId: session.sessionId,
+      execId: 900_000,
+      toolName: "question",
+      output:
+        `User has answered your questions: "${SWITCH_MODE_EXIT_QUESTION}"="Yes". You can now continue.`,
+    }] as any)
+
+    expect(delivered).toBe(session)
+    expect(writes).toHaveLength(1)
+    const response = decodeMessage<any>("AgentClientMessage", writes[0]!).interaction_response
+    expect(response.switch_mode_request_response.approved).toBeDefined()
+    sessionManager.close(session, "ordinary-cleanup")
+  })
+
+  it("keeps the model in plan mode when the user declines execution", async () => {
+    const { session, writes, parts } = await runSwitchMode(
+      [switchModePayload(switchModeArgs({ target_mode_id: "agent" }))],
+      ["question"],
+    )
+    const toolCall = parts.find((part) => part.type === "tool-call")
+
+    deliverContinuationResults(session, [{
+      toolCallId: toolCall.toolCallId,
+      sessionId: session.sessionId,
+      execId: 900_000,
+      toolName: "question",
+      output:
+        `User has answered your questions: "${SWITCH_MODE_EXIT_QUESTION}"="No". You can now continue.`,
+    }] as any)
+
+    const response = decodeMessage<any>("AgentClientMessage", writes[0]!).interaction_response
+    expect(response.switch_mode_request_response.rejected.reason).toBe(USER_REJECTED_REASON)
+    sessionManager.close(session, "ordinary-cleanup")
   })
 })
 

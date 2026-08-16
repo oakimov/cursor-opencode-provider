@@ -6,6 +6,7 @@ import { sessionManager, type CursorSession } from "../src/session.js"
 import { findContinuationSession, deliverContinuationResults, extractTrailingToolResults } from "../src/language-model.js"
 import { CursorRunInterruptedError } from "../src/transport/connect.js"
 import { decodeMessage } from "../src/protocol/messages.js"
+import { CREATE_PLAN_RESULT_FIELD } from "../src/protocol/create-plan.js"
 import {
   captureCursorShellResult,
   registerCursorShellCall,
@@ -289,6 +290,59 @@ describe("deliverContinuationResults", () => {
     expect(exit.shell_stream.exit).toMatchObject({ code: 0, aborted: true, abort_reason: 2 })
     expect(JSON.stringify(writes.map((frame) => decodeMessage("AgentClientMessage", frame))))
       .not.toContain("shell_metadata")
+  })
+
+  it("turns the native proposal result into CreatePlan success", () => {
+    const writes: Uint8Array[] = []
+    const live = fakeSession("native-plan")
+    live.stream.write = (frame: Uint8Array) => { writes.push(frame) }
+    sessionManager.registerPending(
+      900_101,
+      live,
+      CREATE_PLAN_RESULT_FIELD,
+      "write",
+      false,
+      { interactionId: 7, planUri: "local://sample-plan.md" },
+    )
+
+    const kept = deliverContinuationResults(live, [{
+      sessionId: "native-plan",
+      execId: 900_101,
+      toolName: "write",
+      output: "Plan ready for review.",
+    }])
+
+    expect(kept).toBe(live)
+    const response = decodeMessage<any>("AgentClientMessage", writes[0]).interaction_response
+    expect(response.id).toBe(7)
+    expect(response.create_plan_request_response.result.success).toBeDefined()
+    expect(response.create_plan_request_response.result.plan_uri).toBe("local://sample-plan.md")
+  })
+
+  it("turns a failed native proposal into CreatePlan error", () => {
+    const writes: Uint8Array[] = []
+    const live = fakeSession("native-plan-error")
+    live.stream.write = (frame: Uint8Array) => { writes.push(frame) }
+    sessionManager.registerPending(
+      900_102,
+      live,
+      CREATE_PLAN_RESULT_FIELD,
+      "write",
+      false,
+      { interactionId: 8, planUri: "local://sample-plan.md" },
+    )
+
+    deliverContinuationResults(live, [{
+      sessionId: "native-plan-error",
+      execId: 900_102,
+      toolName: "write",
+      output: "Plan artifact missing",
+      error: "Plan artifact missing",
+    }])
+
+    const response = decodeMessage<any>("AgentClientMessage", writes[0]).interaction_response
+    expect(response.create_plan_request_response.result.plan_uri).toBe("")
+    expect(response.create_plan_request_response.result.error.error).toBe("Plan artifact missing")
   })
 
   it("closes and returns undefined when continuation write fails", () => {

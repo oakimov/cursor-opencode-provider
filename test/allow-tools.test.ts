@@ -53,6 +53,7 @@ describe("compaction tool catalog", () => {
   })
 
   it("does not reinterpret an ordinary no-tool call as compaction", () => {
+    // No catalog was ever seen for this session, so there is nothing to restore.
     expect(resolveTurnToolState({
       sessionKey: "ses_2",
       incomingTools: [],
@@ -61,7 +62,9 @@ describe("compaction tool catalog", () => {
     })).toEqual({ advertisedTools: [], allowTools: false })
   })
 
-  it("uses a restored catalog for compaction only", () => {
+  it("keeps the catalog advertised on every lifecycle turn, not just compaction", () => {
+    // Collapsing a title-generation turn to tools=0 changes the RequestContext
+    // shape and costs the whole prompt cache; execution stays refused instead.
     const tools = [{ name: "read", inputSchema: { type: "object" } }]
     restoreTurnToolCatalog("ses_restored_catalog", tools)
 
@@ -69,12 +72,31 @@ describe("compaction tool catalog", () => {
       sessionKey: "ses_restored_catalog",
       incomingTools: [],
       isCompaction: false,
-    })).toEqual({ advertisedTools: [], allowTools: false })
+    })).toEqual({ advertisedTools: tools, allowTools: false })
+    expect(resolveTurnToolState({
+      sessionKey: "ses_restored_catalog",
+      incomingTools: [],
+      toolChoice: { type: "none" },
+      isCompaction: false,
+    })).toEqual({ advertisedTools: tools, allowTools: false })
     expect(resolveTurnToolState({
       sessionKey: "ses_restored_catalog",
       incomingTools: [],
       isCompaction: true,
     })).toEqual({ advertisedTools: tools, allowTools: false })
+  })
+
+  it("advertises a genuinely restricted catalog verbatim", () => {
+    const full = [{ name: "read" }, { name: "write" }, { name: "bash" }]
+    const restricted = [{ name: "read" }]
+    resolveTurnToolState({ sessionKey: "ses_restricted", incomingTools: full, isCompaction: false })
+
+    // A non-empty smaller set is a real restriction, never a lifecycle signal.
+    expect(resolveTurnToolState({
+      sessionKey: "ses_restricted",
+      incomingTools: restricted,
+      isCompaction: false,
+    })).toEqual({ advertisedTools: restricted, allowTools: true })
   })
 
   it("rebases after the summary checkpoint, restores execution, then stays stable", () => {

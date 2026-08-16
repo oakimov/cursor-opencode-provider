@@ -56,6 +56,7 @@ import { handleKvServerMessage } from "./protocol/kv.js"
 import {
   buildAskQuestionInteractionReply,
   buildAsyncAskQuestionCompletion,
+  buildCreatePlanInteractionReply,
   buildSwitchModeInteractionReply,
   handleInteractionQuery,
 } from "./protocol/interactions.js"
@@ -67,11 +68,18 @@ import {
 } from "./protocol/ask-question.js"
 import {
   SWITCH_MODE_RESULT_FIELD,
+  isBridgedCursorPlanModeActive,
   setActiveCursorMode,
+  switchModeResultFromQuestionOutput,
   switchModeResultFromToolOutput,
   switchModeToolInput,
   takeActiveCursorModeReminder,
 } from "./protocol/switch-mode.js"
+import {
+  CREATE_PLAN_RESULT_FIELD,
+  CURSOR_PLAN_STAGE_TOOL,
+  createPlanStageInput,
+} from "./protocol/create-plan.js"
 import {
   CURSOR_IMAGE_SAVE_TOOL,
   imageMimeForPath,
@@ -787,7 +795,11 @@ async function startSession(
   const interactionGuidance = buildOpenCodeInteractionGuidance(cursorTools, isCompaction, workspaceRoot)
   // After an approved SwitchMode, inject the Cursor CLI-shaped mode reminder
   // (same <system_reminder> contract the CLI uses after flipping unifiedMode).
-  const modeReminder = isCompaction ? undefined : takeActiveCursorModeReminder(sessionKey)
+  const modeReminder = isCompaction
+    ? undefined
+    : takeActiveCursorModeReminder(sessionKey, {
+        advertisedTools: cursorTools.map((tool) => tool.name),
+      })
   const systemPrompt = [baseSystemPrompt, interactionGuidance, modeReminder]
     .filter(Boolean)
     .join("\n\n")
@@ -1138,6 +1150,30 @@ function buildAskQuestionContinuationFrame(
  * On approval, record the Cursor unified mode so the next Run injects the
  * CLI-shaped `<system_reminder>` for that mode.
  */
+function buildCreatePlanContinuationFrame(
+  pending: PendingExec,
+  result: ExtractedToolResult,
+): Uint8Array {
+  const interactionId = pending.resultMetadata?.interactionId
+  if (typeof interactionId !== "number") {
+    throw new CursorProtocolError("Bridged CreatePlan lost its interaction id")
+  }
+  if (result.error !== undefined) {
+    return buildCreatePlanInteractionReply(interactionId, {
+      error: { error: result.error.trim() || "Native plan proposal failed" },
+      plan_uri: "",
+    })
+  }
+  const planUri = pending.resultMetadata?.planUri
+  if (typeof planUri !== "string" || !planUri.trim()) {
+    throw new CursorProtocolError("Bridged CreatePlan lost its native plan URI")
+  }
+  return buildCreatePlanInteractionReply(interactionId, {
+    success: {},
+    plan_uri: planUri,
+  })
+}
+
 function buildSwitchModeContinuationFrame(
   pending: PendingExec,
   result: ExtractedToolResult,
@@ -1148,14 +1184,19 @@ function buildSwitchModeContinuationFrame(
   if (typeof interactionId !== "number") {
     throw new CursorProtocolError("Bridged SwitchMode lost its interaction id")
   }
-  const answer = switchModeResultFromToolOutput(
-    result.output,
-    result.error !== undefined,
-  )
+  // A question-emulated exit carries the user's Yes/No as prose, not a plan
+  // tool's success/failure, so it needs the answer parser rather than the
+  // error-shaped mapping.
+  const answer = metadata.switchModeBridgeKind === "question"
+    ? switchModeResultFromQuestionOutput(result.output, result.error !== undefined)
+    : switchModeResultFromToolOutput(result.output, result.error !== undefined)
   if ("approved" in answer) {
     const target = metadata.switchModeTarget
     if (typeof target === "string" && target.trim()) {
-      setActiveCursorMode(sessionKey, target)
+      const normalized = target.trim().toLowerCase()
+      setActiveCursorMode(sessionKey, target, {
+        bridgedPlanEntered: normalized === "plan" || normalized === "spec",
+      })
     }
   }
   return buildSwitchModeInteractionReply(interactionId, answer)
@@ -1214,6 +1255,14 @@ export function deliverContinuationResults(
         frames = [buildSwitchModeContinuationFrame(pending, r, session.openCodeSessionId)]
       } catch (error) {
         trace(`continuation: switch_mode encode FAILED execId=${r.execId} err=${(error as Error).message}`)
+        sessionManager.close(session, "result-write-failed")
+        return undefined
+      }
+    } else if (pending.resultField === CREATE_PLAN_RESULT_FIELD) {
+      try {
+        frames = [buildCreatePlanContinuationFrame(pending, r)]
+      } catch (error) {
+        trace(`continuation: create_plan encode FAILED execId=${r.execId} err=${(error as Error).message}`)
         sessionManager.close(session, "result-write-failed")
         return undefined
       }
@@ -1337,7 +1386,9 @@ export function deliverContinuationResults(
         ? "ask_question answer"
         : pending.resultField === SWITCH_MODE_RESULT_FIELD
           ? "switch_mode answer"
-          : "exec result"
+          : pending.resultField === CREATE_PLAN_RESULT_FIELD
+            ? "create_plan answer"
+            : "exec result"
     trace(
       `continuation: wrote ${resultKind} execId=${r.execId} field=${pending.resultField} ` +
         `frames=${outcome.framesWritten} outLen=${r.output.length}`,
@@ -2427,6 +2478,11 @@ export async function pump(
             advertisedTools: advertisedToolNameSet,
             canSaveGeneratedImage:
               session.allowTools && advertisedToolNameSet.has(CURSOR_IMAGE_SAVE_TOOL),
+            canBridgeCreatePlan:
+              session.allowTools
+              && isBridgedCursorPlanModeActive(session.openCodeSessionId)
+              && advertisedToolNameSet.has(CURSOR_PLAN_STAGE_TOOL)
+              && advertisedToolNameSet.has("write"),
             workspaceRoot: workspaceRootFromRequestContext(session.requestContext),
           })
         } catch {
@@ -2499,38 +2555,92 @@ export async function pump(
         emitFinish(undefined, { unified: "tool-calls", raw: undefined })
         return
       }
-      if (handled.outcome === "bridged" && handled.switchMode) {
-        // Cursor raised SwitchMode; OpenCode owns plan_enter / plan_exit, so the
-        // switch leaves as that tool call and this doStream ends. The Run stays
-        // open on the pending entry; approved/rejected is written back on the
-        // next continuation while Cursor is still blocking on the query.
+      if (handled.outcome === "approved" && handled.switchMode) {
+        // Entering plan mode without a host plan tool: Cursor was already
+        // released with approved{} above, and the behavioural contract travels
+        // as the <system_reminder> injected on subsequent Runs. Nothing is
+        // pending, so keep pumping this Run rather than ending doStream.
         const sw = handled.switchMode
+        setActiveCursorMode(session.openCodeSessionId, sw.args.targetModeId, {
+          bridgedPlanEntered: false,
+        })
+        trace(
+          `interaction_query: APPROVED switch_mode id=${handled.id} ` +
+            `target=${JSON.stringify(sw.args.targetModeId)} (no host plan tool; ` +
+            `provider-owned mode) cursorToolCallId=${sw.toolCallId || "(none)"}`,
+        )
+        continue
+      }
+      if (handled.outcome === "bridged" && handled.switchMode) {
+        // Cursor raised SwitchMode; the host owns the outcome, so the switch
+        // leaves as a tool call (native plan_enter / plan_exit, or the emulated
+        // `question` approval prompt) and this doStream ends. The Run stays open
+        // on the pending entry; approved/rejected is written back on the next
+        // continuation while Cursor is still blocking on the query.
+        const sw = handled.switchMode
+        const bridgeKind = sw.bridge.kind
+        const toolName = sw.toolName ?? "plan_exit"
         const execId = session.nextBridgedExecId++
         sessionManager.registerPending(
           execId,
           session,
           SWITCH_MODE_RESULT_FIELD,
-          sw.toolName,
+          toolName,
           false,
           {
             interactionId: handled.id,
             switchModeTarget: sw.args.targetModeId,
             switchModeToolCallId: sw.toolCallId,
+            switchModeBridgeKind: bridgeKind,
           },
         )
         const toolCallId = `cursor_${session.sessionId}_${execId}`
-        const input = JSON.stringify(switchModeToolInput())
+        const input = JSON.stringify(
+          sw.bridge.kind === "question" ? sw.bridge.input : switchModeToolInput(),
+        )
         trace(
           `interaction_query: BRIDGED switch_mode id=${handled.id} toolCallId=${toolCallId} ` +
-            `hostTool=${sw.toolName} target=${JSON.stringify(sw.args.targetModeId)} ` +
+            `bridge=${bridgeKind} hostTool=${toolName} ` +
+            `target=${JSON.stringify(sw.args.targetModeId)} ` +
             `cursorToolCallId=${sw.toolCallId || "(none)"}`,
         )
         closeOpenSpans()
         safeEnqueue({
           type: "tool-call",
           toolCallId,
-          toolName: sw.toolName,
+          toolName,
           input,
+        } as V3Part)
+        emitFinish(undefined, { unified: "tool-calls", raw: undefined })
+        return
+      }
+      if (handled.outcome === "bridged" && handled.createPlan) {
+        const plan = handled.createPlan
+        const staged = createPlanStageInput(plan.args)
+        const stageExecId = session.nextBridgedExecId++
+        sessionManager.registerPending(
+          stageExecId,
+          session,
+          CREATE_PLAN_RESULT_FIELD,
+          plan.toolName,
+          false,
+          {
+            interactionId: handled.id,
+            createPlanToolCallId: plan.toolCallId,
+            planUri: staged.plan_uri,
+          },
+        )
+        const stageToolCallId = `cursor_${session.sessionId}_${stageExecId}`
+        trace(
+          `interaction_query: BRIDGED create_plan id=${handled.id} ` +
+            `stageToolCallId=${stageToolCallId} cursorToolCallId=${plan.toolCallId || "(none)"}`,
+        )
+        closeOpenSpans()
+        safeEnqueue({
+          type: "tool-call",
+          toolCallId: stageToolCallId,
+          toolName: plan.toolName,
+          input: JSON.stringify(staged),
         } as V3Part)
         emitFinish(undefined, { unified: "tool-calls", raw: undefined })
         return
@@ -3016,7 +3126,19 @@ export function resolveTurnToolState(input: {
   if (sessionKey && cached && incomingTools.length === 0) {
     rememberToolCatalog(sessionKey, cached)
   }
-  const advertisedTools = isCompaction && incomingTools.length === 0
+  // Advertisement and permission are deliberately independent.
+  //
+  // Advertisement must stay byte-stable across every Run of a conversation or
+  // the RequestContext changes shape and Cursor's prompt cache goes cold. A
+  // zero-tool call is never a smaller catalog — it is a lifecycle turn
+  // (compaction, title generation, summarization) that OpenCode opens alongside
+  // the real one — so it re-advertises the last real catalog rather than
+  // collapsing the context to tools=0. A genuinely restricted turn still sends
+  // a non-empty set and is advertised verbatim.
+  //
+  // Permission is computed from what actually arrived, so those lifecycle turns
+  // still refuse execution and cannot duplicate the real turn's side effects.
+  const advertisedTools = incomingTools.length === 0
     ? (cached?.map((tool) => ({ ...tool })) ?? [])
     : incomingTools
   return {

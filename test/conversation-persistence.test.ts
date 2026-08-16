@@ -153,8 +153,11 @@ describe("conversation restart persistence", () => {
     expect(hydrated?.conversationId).toBe(conversationId)
     expect(hydrated?.toolCatalog).toEqual(toolCatalog)
     restoreTurnToolCatalog(sessionKey, hydrated!.toolCatalog)
+    // A hydrated catalog is re-advertised on every lifecycle turn so the
+    // RequestContext keeps its shape and the prompt cache survives; execution
+    // stays refused until a turn actually arrives with tools.
     expect(resolveTurnToolState({ sessionKey, incomingTools: [], isCompaction: false }))
-      .toEqual({ advertisedTools: [], allowTools: false })
+      .toEqual({ advertisedTools: toolCatalog, allowTools: false })
     expect(resolveTurnToolState({ sessionKey, incomingTools: [], isCompaction: true }))
       .toEqual({ advertisedTools: toolCatalog, allowTools: false })
     expect(bindConversationId(sessionKey).conversationId).toBe(conversationId)

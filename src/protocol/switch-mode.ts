@@ -13,10 +13,36 @@
  * - every other non-empty target → plan_exit (leave plan for OpenCode build),
  *   then inject the Cursor CLI-shaped mode reminder for that target
  *
+ * Upstream OpenCode's plan tools are not mode flags. Each one asks the user
+ * through the Question service and, on "Yes", injects a synthetic user message
+ * carrying `agent: "plan" | "build"`, which `createUserMessage` turns into a
+ * `setAgentModel` primary-agent switch (opencode `tool/plan.ts`,
+ * `session/prompt.ts`). A provider cannot reach `setAgentModel`, but the two
+ * observable halves — the approval gate and the behavioural contract — are both
+ * reachable, so the bridge degrades instead of refusing when the host tool is
+ * missing (`plan_enter` is commented out upstream and `plan_exit` is gated
+ * behind OPENCODE_EXPERIMENTAL_PLAN_MODE + CLI client):
+ *
+ * - entering plan/spec needs no host tool at all — approve immediately and let
+ *   the injected <system_reminder> carry the contract, exactly as Cursor CLI's
+ *   own plan mode is prompt-enforced.
+ * - leaving plan mode is the gate the user must actually see, so it falls back
+ *   to the host `question` tool and only rejects when that is absent too.
+ *
+ * Resolution is keyed solely on the advertised catalog under canonical tool
+ * names — never on host identity or model id. OCP restates fork vocabulary
+ * (`enter_plan` / `leave_plan`) under the canonical names before the provider
+ * sees the catalog, so MiMo and Kilo take the native path unchanged.
+ *
  * CLI reject reason for user declines: "Mode switch rejected by user"
  * (chunk-7076/dist/ui.js onSwitchModeReject).
  */
 
+import {
+  type CursorAskQuestionItem,
+  type OpencodeQuestionInput,
+  parseAnswerSegments,
+} from "./ask-question.js"
 import { decodeMessageSparse } from "./messages.js"
 
 /**
@@ -32,15 +58,44 @@ export const MISSING_QUERY_REASON = "Missing switch-mode query"
 export const MISSING_ARGS_REASON = "Missing switch-mode arguments"
 export const MISSING_TARGET_REASON = "Missing targetModeId"
 
-export const PLAN_ENTER_UNAVAILABLE_REASON =
-  "The OpenCode `plan_enter` tool is not available to the current agent, so " +
-  "entering plan mode cannot be offered this turn."
+/**
+ * A turn that cannot call host tools is a lifecycle turn (title generation,
+ * compaction, summarization). OpenCode opens one alongside the real Run, and it
+ * must not mutate session state — approving there flips plan mode twice and
+ * lets the throwaway turn write its own plan file.
+ */
+export const LIFECYCLE_TURN_REASON =
+  "This turn cannot call host tools (a lifecycle turn such as title generation " +
+  "or compaction), so the mode switch is not applied to the session."
 
 export const PLAN_EXIT_UNAVAILABLE_REASON =
-  "The OpenCode `plan_exit` tool is not available to the current agent, so " +
-  "leaving plan mode cannot be offered this turn."
+  "Neither the OpenCode `plan_exit` tool nor the `question` tool is available to the " +
+  "current agent, so leaving plan mode cannot be approved this turn."
+
+/** Upstream `PlanExitTool` wording, minus a plan path the provider cannot verify. */
+export const SWITCH_MODE_EXIT_QUESTION =
+  "Planning is complete. Would you like to switch to the build agent and start implementing?"
+
+export const SWITCH_MODE_EXIT_HEADER = "Build Agent"
+
+const SWITCH_MODE_EXIT_YES = "Yes"
+const SWITCH_MODE_EXIT_NO = "No"
 
 export type SwitchModeHostTool = "plan_enter" | "plan_exit"
+
+/**
+ * How a SwitchMode query is satisfied this turn.
+ *
+ * - `native`   the host advertises the matching plan tool; bridge to it.
+ * - `approve`  entering plan mode needs no host tool — approve immediately.
+ * - `question` leaving plan mode falls back to the host `question` prompt.
+ * - `reject`   nothing can satisfy it; `reason` names the real cause.
+ */
+export type SwitchModeBridge =
+  | { kind: "native"; toolName: SwitchModeHostTool }
+  | { kind: "approve" }
+  | { kind: "question"; input: OpencodeQuestionInput }
+  | { kind: "reject"; reason: string }
 
 export type CursorSwitchModeArgs = {
   targetModeId: string
@@ -62,6 +117,8 @@ type ActiveCursorModeState = {
   modeId: string
   /** True until the first post-switch Run consumes the enter reminder. */
   firstTurn: boolean
+  /** The approved SwitchMode entered plan/spec through a real host plan_enter tool. */
+  bridgedPlanEntered: boolean
 }
 
 const activeCursorModeBySession = new Map<string, ActiveCursorModeState>()
@@ -99,43 +156,78 @@ export function mapSwitchModeTarget(targetModeId: string): SwitchModeMapping {
   return { ok: true, toolName: "plan_exit" }
 }
 
+/** The synthetic AskQuestion item backing a question-emulated plan exit. */
+function switchModeExitQuestionItem(): CursorAskQuestionItem {
+  return {
+    id: "switch_mode_exit",
+    prompt: SWITCH_MODE_EXIT_QUESTION,
+    options: [
+      { id: "yes", label: SWITCH_MODE_EXIT_YES },
+      { id: "no", label: SWITCH_MODE_EXIT_NO },
+    ],
+    allowMultiple: false,
+  }
+}
+
+/** Host `question` input mirroring upstream `PlanExitTool`'s own prompt. */
+export function switchModeExitQuestionInput(): OpencodeQuestionInput {
+  return {
+    questions: [
+      {
+        question: SWITCH_MODE_EXIT_QUESTION,
+        header: SWITCH_MODE_EXIT_HEADER,
+        options: [
+          {
+            label: SWITCH_MODE_EXIT_YES,
+            description: "Switch to build agent and start implementing the plan",
+          },
+          {
+            label: SWITCH_MODE_EXIT_NO,
+            description: "Stay with plan agent to continue refining the plan",
+          },
+        ],
+      },
+    ],
+  }
+}
+
 /**
- * Resolve the host tool only when it is advertised this turn.
+ * Resolve how this SwitchMode target is satisfied, keyed only on the advertised
+ * catalog under canonical tool names.
+ *
+ * A missing plan tool is not a refusal: entering plan mode needs no host tool,
+ * and leaving it degrades to the `question` prompt so the user still approves
+ * before any execution starts.
  */
-export function resolveSwitchModeHostTool(
+export function resolveSwitchModeBridge(
   targetModeId: string,
   options: {
     allowTools: boolean
     advertised: ReadonlySet<string> | Iterable<string>
   },
-): SwitchModeMapping {
+): SwitchModeBridge {
   const mapped = mapSwitchModeTarget(targetModeId)
-  if (!mapped.ok) return mapped
+  if (!mapped.ok) return { kind: "reject", reason: mapped.reason }
 
-  if (!options.allowTools) {
-    return {
-      ok: false,
-      reason:
-        mapped.toolName === "plan_enter"
-          ? PLAN_ENTER_UNAVAILABLE_REASON
-          : PLAN_EXIT_UNAVAILABLE_REASON,
-    }
-  }
+  // Never mutate session mode from a lifecycle turn — see LIFECYCLE_TURN_REASON.
+  if (!options.allowTools) return { kind: "reject", reason: LIFECYCLE_TURN_REASON }
 
   const names =
     options.advertised instanceof Set
       ? options.advertised
       : new Set(options.advertised)
-  if (!names.has(mapped.toolName)) {
-    return {
-      ok: false,
-      reason:
-        mapped.toolName === "plan_enter"
-          ? PLAN_ENTER_UNAVAILABLE_REASON
-          : PLAN_EXIT_UNAVAILABLE_REASON,
-    }
+
+  if (names.has(mapped.toolName)) return { kind: "native", toolName: mapped.toolName }
+
+  // Entering plan mode is provider-owned: the injected <system_reminder> is the
+  // whole contract, exactly as Cursor CLI's own plan mode is prompt-enforced.
+  if (mapped.toolName === "plan_enter") return { kind: "approve" }
+
+  // Leaving plan mode starts real work, so it keeps a user-visible gate.
+  if (names.has("question")) {
+    return { kind: "question", input: switchModeExitQuestionInput() }
   }
-  return mapped
+  return { kind: "reject", reason: PLAN_EXIT_UNAVAILABLE_REASON }
 }
 
 /** Decode a `switch_mode_request_query` body, or undefined when unusable. */
@@ -204,17 +296,48 @@ export function switchModeResultFromToolOutput(
   return switchModeRejectedResult(trimmed)
 }
 
+/**
+ * Host `question` outcome → Cursor SwitchModeRequestResponse, for the emulated
+ * plan exit. Only an explicit "Yes" approves; an unanswered or dismissed prompt
+ * keeps the model in plan mode rather than silently starting execution.
+ */
+export function switchModeResultFromQuestionOutput(
+  output: string,
+  isError: boolean,
+): Record<string, unknown> {
+  if (isError) return switchModeResultFromToolOutput(output, true)
+  const [segment] = parseAnswerSegments([switchModeExitQuestionItem()], output)
+  const answer = (segment ?? "").trim().toLowerCase()
+  if (answer === SWITCH_MODE_EXIT_YES.toLowerCase()) return switchModeApprovedResult()
+  return switchModeRejectedResult(USER_REJECTED_REASON)
+}
+
 /** Record the approved Cursor mode for later system-reminder injection. */
-export function setActiveCursorMode(sessionKey: string | undefined, targetModeId: string): void {
+export function setActiveCursorMode(
+  sessionKey: string | undefined,
+  targetModeId: string,
+  options: { bridgedPlanEntered?: boolean } = {},
+): void {
   if (!sessionKey) return
   const modeId = normalizeSwitchModeId(targetModeId)
   if (!modeId) return
-  activeCursorModeBySession.set(sessionKey, { modeId, firstTurn: true })
+  activeCursorModeBySession.set(sessionKey, {
+    modeId,
+    firstTurn: true,
+    bridgedPlanEntered: options.bridgedPlanEntered === true,
+  })
 }
 
 export function getActiveCursorMode(sessionKey: string | undefined): string | undefined {
   if (!sessionKey) return undefined
   return activeCursorModeBySession.get(sessionKey)?.modeId
+}
+
+/** True after a bridged plan/spec Run has observed plan_enter removed by the host. */
+export function isBridgedCursorPlanModeActive(sessionKey: string | undefined): boolean {
+  if (!sessionKey) return false
+  const state = activeCursorModeBySession.get(sessionKey)
+  return (state?.modeId === "plan" || state?.modeId === "spec") && state.bridgedPlanEntered
 }
 
 export function clearActiveCursorMode(sessionKey: string | undefined): void {
@@ -237,11 +360,18 @@ function wrapReminder(body: string): string {
  */
 export function cursorModeSystemReminder(
   targetModeId: string,
-  options: { firstTurn?: boolean } = {},
+  options: { firstTurn?: boolean; planExitAdvertised?: boolean } = {},
 ): string | undefined {
   const id = normalizeSwitchModeId(targetModeId)
   if (!id) return undefined
   const first = options.firstTurn !== false
+  // Without a host plan_exit, the reachable way to ask for execution is a
+  // Cursor-native SwitchMode back to agent, which the provider turns into the
+  // approval prompt itself. Naming an unavailable tool would strand the model.
+  const leavePlan =
+    options.planExitAdvertised === false
+      ? "request a switch back to agent mode (Cursor SwitchMode, target `agent`), which asks the user to approve starting implementation"
+      : "call OpenCode `plan_exit` so the user can approve leaving plan mode"
 
   if (id === "plan" || id === "spec") {
     return wrapReminder(
@@ -251,7 +381,7 @@ export function cursorModeSystemReminder(
 1. Research enough to make an accurate plan.
 2. Before finishing, resolve decisions that would materially change the implementation path, touched files, architecture, user-visible behavior, data model, or validation strategy. If investigation cannot resolve one, ask clarifying questions in small batches (use the OpenCode \`question\` tool when available).
 3. Do not put choices in the plan for the user to resolve. The plan must present one recommended approach, not unresolved questions or "choose A or B" options.
-4. When ready, write or update the plan as markdown and/or call OpenCode \`plan_exit\` so the user can approve leaving plan mode.
+4. When ready, write or update the plan as markdown, then ${leavePlan}.
 5. Do not execute the plan until the user confirms it.`
         : `Plan mode is still active. You MUST NOT make edits, run non-readonly tools (including changing configs or making commits), or otherwise modify system state. This supersedes any conflicting instruction.`,
     )
@@ -363,13 +493,32 @@ Your mandate is to convert user intent into a correct, high-quality implementati
  * Consume the active-mode reminder for this OpenCode session.
  * Marks the mode as no longer first-turn after the first successful read.
  */
-export function takeActiveCursorModeReminder(sessionKey: string | undefined): string | undefined {
+export function takeActiveCursorModeReminder(
+  sessionKey: string | undefined,
+  options: { advertisedTools?: ReadonlySet<string> | Iterable<string> } = {},
+): string | undefined {
   if (!sessionKey) return undefined
   const state = activeCursorModeBySession.get(sessionKey)
   if (!state) return undefined
-  const reminder = cursorModeSystemReminder(state.modeId, { firstTurn: state.firstTurn })
-  if (state.firstTurn) {
-    activeCursorModeBySession.set(sessionKey, { modeId: state.modeId, firstTurn: false })
+
+  const advertised = options.advertisedTools
+    ? options.advertisedTools instanceof Set
+      ? options.advertisedTools
+      : new Set(options.advertisedTools)
+    : undefined
+
+  const isPlanMode = state.modeId === "plan" || state.modeId === "spec"
+  if (isPlanMode && state.bridgedPlanEntered && advertised) {
+    if (advertised.has("plan_enter")) {
+      activeCursorModeBySession.delete(sessionKey)
+      return cursorModeSystemReminder("agent", { firstTurn: true })
+    }
   }
+
+  const reminder = cursorModeSystemReminder(state.modeId, {
+    firstTurn: state.firstTurn,
+    ...(advertised ? { planExitAdvertised: advertised.has("plan_exit") } : {}),
+  })
+  if (state.firstTurn) state.firstTurn = false
   return reminder
 }

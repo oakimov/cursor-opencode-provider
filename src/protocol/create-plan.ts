@@ -111,6 +111,18 @@ export type CreatePlanWriteResult =
   | { ok: true; planPath: string; planUri: string }
   | { ok: false; error: string }
 
+/** omp-only host tool that stages Cursor CreatePlan content into native plan mode. */
+export const CURSOR_PLAN_STAGE_TOOL = "cursor_plan_stage"
+
+/** Held InteractionQuery continuation field for a native host plan stage. */
+export const CREATE_PLAN_RESULT_FIELD = "create_plan_request_response"
+
+export type CursorPlanStageInput = {
+  plan_uri: string
+  content: string
+  title: string
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -211,6 +223,17 @@ export function slugifyPlanName(name: string): string {
   return slug || randomPlanSlug()
 }
 
+/** Build omp's canonical session-local plan artifact payload. */
+export function createPlanStageInput(args: CursorCreatePlanArgs): CursorPlanStageInput {
+  const slug = slugifyPlanName(args.name)
+  return {
+    plan_uri: `local://${slug}-plan.md`,
+    content: renderOpencodePlanMarkdown(args),
+    title: slug,
+  }
+}
+
+
 /**
  * Resolve the absolute plan file path via {@link hostPlansDir}.
  * Filename shape matches OpenCode Session.plan: `<created>-<slug>.md`.
@@ -238,20 +261,31 @@ export function renderOpencodePlanMarkdown(args: CursorCreatePlanArgs): string {
   const overview = args.overview.trim()
   const plan = args.plan.trim()
 
+  // Cursor usually repeats the plan name as the body's own leading H1. Strip it
+  // so the document keeps one title in the right place instead of opening with
+  // the same heading twice (or with the overview stranded above it).
+  const planLeadHeading = /^#\s+(.+?)\s*$/.exec(plan.split("\n", 1)[0] ?? "")?.[1]
+  const planBody =
+    name
+    && planLeadHeading !== undefined
+    && planLeadHeading.trim().toLowerCase() === name.toLowerCase()
+      ? plan.slice(plan.indexOf("\n") + 1).trimStart()
+      : plan
+
   if (name) {
     parts.push(`# ${name}`)
     parts.push("")
   }
   if (overview) {
     // Avoid duplicating overview when it already leads the plan body.
-    if (!plan || !plan.startsWith(overview)) {
+    if (!planBody || !planBody.startsWith(overview)) {
       parts.push(overview)
       parts.push("")
     }
   }
-  if (plan) {
-    parts.push(plan)
-    if (!plan.endsWith("\n")) parts.push("")
+  if (planBody) {
+    parts.push(planBody)
+    if (!planBody.endsWith("\n")) parts.push("")
   }
   if (args.todos.length > 0) {
     if (parts.length > 0 && parts[parts.length - 1] !== "") parts.push("")

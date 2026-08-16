@@ -55,6 +55,10 @@
     "./auth": {
       "types": "./dist/auth.d.ts",
       "import": "./dist/auth.js"
+    },
+    "./image-save": {
+      "types": "./dist/image-save.d.ts",
+      "import": "./dist/image-save.js"
     }
   },
   "files": [
