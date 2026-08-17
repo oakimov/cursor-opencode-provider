@@ -16,6 +16,8 @@
  *
  * Also runs automatically before npm publish (GitHub Actions publish.yml and
  * package.json prepublishOnly) so released packages carry current docs rates.
+ * Run and commit a successful refresh before any version bump or v* tag —
+ * unmapped display names fail publish CI.
  */
 
 import { readFileSync, writeFileSync } from "node:fs"

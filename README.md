@@ -368,7 +368,11 @@ bun run typecheck    # type-check without emit
 bun test             # run unit tests
 bun run test:node-http2 # Node-specific HTTP/2 detach regression
 bun run test:watch   # watch mode
+bun run generate:pricing  # refresh src/pricing-data.ts from Cursor docs
+bun run check:pricing     # fixture coverage for known model ids
 ```
+
+Before any version bump or `v*` tag, run `generate:pricing` and `check:pricing` and commit mapping/`pricing-data.ts` updates. Publish CI regenerates rates from the live docs; an unmapped Cursor display name fails the job.
 
 ## Architecture
 

@@ -31,7 +31,14 @@ bun run generate:pricing   # refresh src/pricing-data.ts from Cursor docs
 bun run check:pricing      # fixture coverage for known model ids
 ```
 
-Publish surface is `dist/` only (`files` in `package.json`). Always rebuild before testing a local `file://` OpenCode install. Tagged npm publishes (`.github/workflows/publish.yml`) and local `npm publish` (`prepublishOnly`) refresh Cursor pricing from the docs before build so released packages carry current rates.
+Publish surface is `dist/` only (`files` in `package.json`). Always rebuild before testing a local `file://` OpenCode install.
+
+**Before any `package.json` version bump or `v*` tag**, verify Cursor pricing locally and commit the result. Tagged npm publishes (`.github/workflows/publish.yml`) and local `npm publish` (`prepublishOnly`) re-run `generate:pricing` from the live docs; an unmapped display name fails the job and blocks the release.
+
+1. `bun run generate:pricing` — must succeed against current Cursor docs.
+2. On `Unmapped pricing display name` / `Unmapped context display name`, add the name to `DISPLAY_NAME_TO_MODEL_ID` or `SKIP_DISPLAY_NAMES` in `scripts/generate-cursor-pricing.ts`, add any new wire id to `test/fixtures/cursor-pricing-models.txt`, and regenerate.
+3. `bun run check:pricing`
+4. Commit the mapping, fixture, and `src/pricing-data.ts` **before** bumping the version or pushing a tag.
 
 ## Architecture
 

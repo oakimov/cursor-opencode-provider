@@ -19,6 +19,9 @@
 #      cursor-opencode-provider, workflow publish.yml, allow "npm publish").
 #
 # Publish flow (after setup):
+#   - Before bumping version: bun run generate:pricing && bun run check:pricing.
+#     Map any new Cursor display names, update the coverage fixture, and commit
+#     those files. An unmapped name fails this workflow and blocks the release.
 #   - Bump "version" in package.json, commit to main.
 #   - Push a tag matching the version (e.g. git tag v0.1.2 && git push --tags).
 #   - This workflow runs install → refresh Cursor pricing → coverage check →
