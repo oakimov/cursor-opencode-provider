@@ -172,7 +172,7 @@ export async function loadMergedConfig(workspaceRoot: string): Promise<OpencodeJ
   if (isProjectConfigDisabled()) return mergeConfig({}, globalConfig)
 
   // The bridge supplies native project config roots for an unchanged plugin:
-  // .opencode on OpenCode, .mimocode on MiMo, and .kilo/.kilocode on Kilo.
+  // The active host's project config directories are supplied by the path bridge; OpenCode defaults to .opencode.
   // Later roots have higher precedence, matching the host's native ordering.
   let projectConfig = await readJsonConfig(workspaceRoot)
   for (const configDir of opencodeProjectConfigDirs(workspaceRoot)) {

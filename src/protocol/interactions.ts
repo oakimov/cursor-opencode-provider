@@ -13,8 +13,12 @@ import {
 } from "./generate-image.js"
 import {
   CURSOR_PLAN_STAGE_TOOL,
+  type CreatePlanBridge,
   type DecodedCreatePlanQuery,
+  createPlanApprovalQuestionInput,
   decodeCreatePlanQuery,
+  renderPlanReviewMessage,
+  resolveCreatePlanBridge,
   writeOpencodePlanFile,
 } from "./create-plan.js"
 import {
@@ -77,17 +81,32 @@ export type HandledInteraction = {
   /** Present when `outcome === "bridged"`: the question set to hand OpenCode. */
   askQuestion?: DecodedAskQuestionQuery
   /**
-   * Present for every SwitchMode outcome the provider acts on — bridged to a
-   * host tool, or approved outright when entering plan mode needs none. The
-   * caller reads `bridge` to decide whether a tool call is emitted, and
-   * `args.targetModeId` to record the active Cursor mode either way.
+   * Present when SwitchMode should mutate session mode — bridged to a host
+   * tool, or approved outright when entering plan mode needs none. Absent on
+   * lifecycle soft-acks (`ack`): those reply `approved{}` without recording
+   * a mode. The caller reads `bridge` to decide whether a tool call is emitted,
+   * and `args.targetModeId` to record the active Cursor mode when present.
    */
   switchMode?: DecodedSwitchModeQuery & {
     bridge: SwitchModeBridge
     toolName?: SwitchModeHostTool | "question"
   }
-  /** Present when CreatePlan is delegated to a native host plan stage. */
-  createPlan?: DecodedCreatePlanQuery & { toolName: typeof CURSOR_PLAN_STAGE_TOOL }
+  /**
+   * Present when CreatePlan needs a host tool: either a native plan stage that
+   * owns the write *and* the approval, or the emulated `question` prompt the
+   * provider raises after writing the plan itself. `planUri` is set only for
+   * the emulated path, where the provider already knows the file it wrote.
+   */
+  createPlan?: DecodedCreatePlanQuery & {
+    bridge: CreatePlanBridge
+    toolName: typeof CURSOR_PLAN_STAGE_TOOL | "question"
+    planUri?: string
+    /** Filesystem path of the plan the provider just wrote (emulated path). */
+    planPath?: string
+    questionInput?: ReturnType<typeof createPlanApprovalQuestionInput>
+    /** The plan to show the user before they approve it (emulated path only). */
+    planReview?: string
+  }
   /** Present when an image generation was approved: the target to expect. */
   generateImage?: DecodedGenerateImageQuery
 }
@@ -119,8 +138,20 @@ export type HandleInteractionQueryOptions = {
    * (host project-config `plans/` in a git worktree, else host global data/plans).
    */
   workspaceRoot?: string
-  /** True when omp's native session-local plan staging tool is advertised. */
+  /** True when the advertised host plan-stage tool is available. */
   canBridgeCreatePlan?: boolean
+  /**
+   * True when the provider has recorded an approved Cursor plan/spec mode for
+   * this session. A written plan then ends with an execution-approval prompt,
+   * which is the transition out of planning; outside plan mode there is none.
+   */
+  planModeActive?: boolean
+  /**
+   * Cursor unified mode currently recorded for this session. A SwitchMode to
+   * the mode already in effect needs no approval, matching Cursor's own IDE
+   * handler and keeping the plan-approval prompt from firing twice.
+   */
+  activeCursorModeId?: string
 }
 
 export class UnsupportedInteractionQueryError extends Error {
@@ -335,8 +366,19 @@ function handleSwitchModeQuery(
   const bridge = resolveSwitchModeBridge(decoded.args.targetModeId, {
     allowTools: options.allowTools === true,
     advertised: options.advertisedTools ?? [],
+    ...(options.activeCursorModeId ? { activeModeId: options.activeCursorModeId } : {}),
   })
   if (bridge.kind === "reject") return reject(bridge.reason)
+
+  // Lifecycle turn: approve on the wire so the model never sees a rejection, but
+  // do not attach switchMode — the real turn owns session mode.
+  if (bridge.kind === "ack") {
+    return {
+      ...base,
+      outcome: "acknowledged",
+      reply: buildSwitchModeInteractionReply(id, switchModeApprovedResult()),
+    }
+  }
 
   if (bridge.kind === "approve") {
     // Entering plan mode needs no host tool, so Cursor is released at once and
@@ -411,11 +453,17 @@ export function buildAsyncAskQuestionCompletion(
 }
 
 /**
- * CreatePlan persistence. Cursor CLI writes `~/.cursor/plans/*.plan.md` with
- * YAML frontmatter; this provider writes plain markdown under the host's
- * calculated plans dir (`hostPlansDir` / path bridge) so switching models and
- * hosts stays coherent. Empty / missing args keep the CLI empty-`plan_uri`
- * success ack (nothing to write).
+ * CreatePlan persistence and execution approval. Cursor CLI writes
+ * `~/.cursor/plans/*.plan.md` with YAML frontmatter; this provider writes plain
+ * markdown under the host's calculated plans dir (`hostPlansDir` / path bridge)
+ * so switching models and hosts stays coherent. Empty / missing args keep the
+ * CLI empty-`plan_uri` success ack (nothing to write).
+ *
+ * Writing the plan never asks; executing it always does. Which channel raises
+ * that prompt is resolved from the advertised catalog by
+ * {@link resolveCreatePlanBridge}, and every channel reports the same outcome:
+ * `success` means the user approved execution, `error` means the plan was
+ * written but not accepted, so the model keeps planning.
  */
 function handleCreatePlanQuery(
   id: number,
@@ -439,11 +487,19 @@ function handleCreatePlanQuery(
   const decoded = decodeCreatePlanQuery(variantBytes)
   if (!decoded) return reply({ success: {}, plan_uri: "" })
 
-  if (options.canBridgeCreatePlan && options.allowTools === true) {
+  const bridge = resolveCreatePlanBridge({
+    allowTools: options.allowTools === true,
+    canStage: options.canBridgeCreatePlan === true,
+    planModeActive: options.planModeActive === true,
+    advertised: options.advertisedTools ?? [],
+  })
+
+  // The host plan-stage tool owns the write and the approval prompt together.
+  if (bridge.kind === "stage") {
     return {
       ...base,
       outcome: "bridged",
-      createPlan: { ...decoded, toolName: CURSOR_PLAN_STAGE_TOOL },
+      createPlan: { ...decoded, bridge, toolName: CURSOR_PLAN_STAGE_TOOL },
       reply: undefined,
     }
   }
@@ -465,6 +521,26 @@ function handleCreatePlanQuery(
   if (!written.ok) {
     return reply({ error: { error: written.error }, plan_uri: "" })
   }
+
+  // The plan is on disk either way; only execution needs the user. Hold Cursor's
+  // query open while the host asks, exactly as the CLI blocks on its own prompt.
+  if (bridge.kind === "approve") {
+    return {
+      ...base,
+      outcome: "bridged",
+      createPlan: {
+        ...decoded,
+        bridge,
+        toolName: "question",
+        planUri: written.planUri,
+        planPath: written.planPath,
+        questionInput: createPlanApprovalQuestionInput(written.planPath),
+        planReview: renderPlanReviewMessage(written.markdown, written.planPath),
+      },
+      reply: undefined,
+    }
+  }
+
   return reply({ success: {}, plan_uri: written.planUri })
 }
 

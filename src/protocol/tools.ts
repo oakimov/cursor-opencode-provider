@@ -381,8 +381,8 @@ const PRESERVE_EMPTY_STRING_KEYS = new Set([
   "file_text",
   "fileText",
   "stream_content",
-  // OMP's hashline edit uses a single textual `input` payload. Preserve it
-  // even when empty so the host reports the real edit error instead of a
+  // Some advertised edit schemas use a single textual `input` payload. Preserve
+  // an empty value so the executor reports the real edit error rather than a
   // misleading missing-property error.
   "input",
   "oldString",
@@ -434,9 +434,9 @@ export type HostSubagentDefinition = {
 }
 
 export type HostSubagentCatalog = {
-  executor?: "task" | "actor"
+  executor?: "task"
   agents: HostSubagentDefinition[]
-  /** True when the host tool supplied its complete, permission-filtered catalog. */
+  /** True when the OpenCode task tool supplied its complete, permission-filtered catalog. */
   complete: boolean
 }
 
@@ -497,20 +497,18 @@ function subagentTypeEnumValues(schema: unknown): string[] {
 
 /** Extract the current host's permission-filtered Task/Actor recipient catalog. */
 export function extractHostSubagentCatalog(tools: OpencodeToolDef[]): HostSubagentCatalog {
-  const executorTool = tools.find((tool) => tool.name === "actor") ??
-    tools.find((tool) => tool.name === "task")
+  const executorTool = tools.find((tool) => tool.name === "task")
   if (!executorTool) return { agents: [], complete: true }
 
   const described = parseSubagentDescriptionCatalog(executorTool.description)
   const enumNames = subagentTypeEnumValues(executorTool.inputSchema)
   const descriptions = new Map(described.agents.map((agent) => [agent.name, agent.description]))
-  // MiMo's Actor enum is stricter than its prose catalog (`mode: subagent`
-  // rather than every non-primary agent), so structured names are authoritative.
+  // A structured subagent_type enum is stricter than prose, so it is authoritative.
   const names = new Set(
     enumNames.length > 0 ? enumNames : described.agents.map((agent) => agent.name),
   )
   return {
-    executor: executorTool.name as "task" | "actor",
+    executor: "task",
     agents: [...names].map((name) => ({
       name,
       ...(descriptions.get(name) ? { description: descriptions.get(name) } : {}),
@@ -582,8 +580,8 @@ export function remapNativeSubagentForCatalog(
 ): void {
   if (parsed.resultField !== "subagent_result" || parsed.toolName !== "task") return
   const advertised = new Set(advertisedToolNames)
-  const executor = advertised.has("actor") ? "actor" : advertised.has("task") ? "task" : undefined
-  if (!executor) return
+  if (!advertised.has("task")) return
+  const executor = "task" as const
 
   const description = str(parsed.args.description) ?? ""
   const prompt = str(parsed.args.prompt) ?? ""
@@ -600,24 +598,12 @@ export function remapNativeSubagentForCatalog(
 
   const resumeAgentId = str(parsed.args.task_id)
   parsed.toolName = executor
-  if (executor === "task") {
-    parsed.args = {
-      description,
-      prompt,
-      subagent_type: subagentType,
-      ...(resumeAgentId ? { task_id: resumeAgentId } : {}),
-      ...(parsed.args.background === true ? { background: true } : {}),
-    }
-    return
-  }
   parsed.args = {
-    operation: {
-      action: parsed.args.background === true ? "spawn" : "run",
-      description,
-      prompt,
-      subagent_type: subagentType,
-      ...(resumeAgentId ? { actor_id: resumeAgentId } : {}),
-    },
+    description,
+    prompt,
+    subagent_type: subagentType,
+    ...(resumeAgentId ? { task_id: resumeAgentId } : {}),
+    ...(parsed.args.background === true ? { background: true } : {}),
   }
 }
 
@@ -1219,11 +1205,9 @@ export function mapCursorArgsToOpencode(
       return { toolName: "write", args }
     }
     case "edit": {
-      // oh-my-pi's hashline edit mode is advertised as `{ input: string }`.
-      // Cursor can send that shape (plus its optional `i` intent metadata),
-      // while classic OpenCode uses filePath/oldString/newString. Keep the
-      // hashline payload intact; rebuilding only the classic fields would
-      // silently turn a valid call into `{}` before it reaches the host.
+      // Preserve an opaque textual edit payload when the advertised executor
+      // accepts that generic shape; rebuilding only OpenCode's targeted fields
+      // would silently turn a valid call into `{}`.
       if (typeof cleaned.input === "string") {
         return { toolName: "edit", args: { input: cleaned.input } }
       }
@@ -1438,15 +1422,10 @@ function untildify(input: string): string {
  * A read target addressed by URI scheme rather than by local filesystem path.
  *
  * Cursor's LocalReadExecutor only ever reads local files, so this provider
- * mirrors its pre-execution validation. Host read tools are not so limited:
- * oh-my-pi's `read` accepts "a path, URL, or internal URI", and mounts every
- * discoverable tool — including all MCP server tools — under `xd://<tool>`
- * device URLs that are read for their schema and written to for execution
- * (`tools.xdev`, on by default). Resolving those against the workspace root
- * mangles `xd://everything_echo` into `<root>/xd:/everything_echo`, which stats
- * as missing and gets refused as `file_not_found` — so the host's read tool is
- * never called and every xd://-mounted MCP tool is unreachable through this
- * provider. Such targets must be forwarded untouched and left to the host.
+ * mirrors its pre-execution validation. An advertised host read tool may also
+ * accept URLs or internal URI schemes. Resolving those against the workspace
+ * root mangles the URI and produces a false `file_not_found`, so URI targets
+ * are forwarded untouched and left to the advertised executor.
  *
  * Requires a scheme of two or more characters followed by `://`, so Windows
  * drive letters (`C:\src`, `C:/src`) stay local paths.

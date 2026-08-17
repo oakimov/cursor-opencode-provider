@@ -63,7 +63,7 @@ type AdvertisedSubagentCatalog = {
 /**
  * Convert the raw host executor catalog into the exact subagent list advertised
  * to Cursor. `hostSubagents.complete` answers a narrow question: did the host's
- * task/actor tool itself expose an exhaustive recipient list (schema enum or
+ * task tool itself exposes an exhaustive recipient list (schema enum or
  * catalog marker)? OpenCode's task tool intentionally uses a plain string, so
  * that raw flag is false even though we can still advertise a complete Cursor
  * catalog by adding built-in defaults and discovered agent files.
@@ -89,7 +89,9 @@ function buildAdvertisedSubagentCatalog(
 /**
  * Full RequestContext payload for live UMA + exec #10 reply.
  * Sourced from OpenCode discovery (and .claude/.agents skill fallbacks).
- * Honors `instructions` globs the same way OpenCode does (including `.cursor/` if listed).
+ * Honors `instructions` globs the same way OpenCode does. The provider never
+ * looks in Cursor's own directories; a `.cursor/` path is read only when the
+ * user's own OpenCode config lists it, exactly as the host would read it.
  */
 export async function buildRequestContext(
   input: BuildRequestContextInput,

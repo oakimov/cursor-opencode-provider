@@ -358,6 +358,8 @@ function fakeContext() {
         if (!directory) throw new Error(`no fake location for session ${sessionID}`)
         return { id: sessionID, location: { directory } }
       },
+      switchAgent: async () => {},
+      prompt: async () => ({}),
     },
     tool: { ...hookDomain("tool"), ...transformDomain("tool") },
     websearch: transformDomain("websearch"),

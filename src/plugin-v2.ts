@@ -1,23 +1,25 @@
-import { define } from "@opencode-ai/plugin/v2/promise"
 import { CURSOR_PROVIDER_ID } from "./shared.js"
 import { createSdk, isCursorPackage } from "./plugin-core.js"
-import { adoptCompatHostCacheDir } from "./context/paths.js"
 import type { CreateCursorOptions } from "./index.js"
 
-/**
- * OpenCode Effect / Promise v2 plugin.
- *
- * Wires the Cursor provider through `ctx.aisdk.sdk` / `ctx.aisdk.language`
- * (the V2 extension points). Auth still lives in the classic Hooks plugin
- * (`plugin.ts`) until OpenCode integrations fully replace provider OAuth.
- */
-export default define({
+type PromiseV2Plugin = {
+  id: string
+  setup: (ctx: {
+    aisdk: {
+      sdk: (callback: (event: any) => void) => Promise<void>
+      language: (callback: (event: any) => void) => Promise<void>
+    }
+  }) => Promise<void>
+}
+
+/** OpenCode's v2/promise `define` is an identity function. */
+function define(plugin: PromiseV2Plugin): PromiseV2Plugin {
+  return plugin
+}
+
+const plugin: PromiseV2Plugin = define({
   id: "cursor.provider",
   setup: async (ctx) => {
-    // Prefer OCP HostProfile.cacheDir when present; else XDG host heuristic.
-    // Explicit createCursor({ cacheDir }) / event.options.cacheDir still wins via LM.
-    await adoptCompatHostCacheDir()
-
     await ctx.aisdk.sdk((event) => {
       if (event.sdk) return
       if (!isCursorPackage(event.package, event.model.providerID)) return
@@ -35,3 +37,5 @@ export default define({
     })
   },
 })
+
+export default plugin

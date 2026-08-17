@@ -5,7 +5,7 @@ import {
   formatCursorCacheDiagnostics,
   formatCursorTokenCategories,
   formatTurnUsageValidation,
-  kiloShapedUsageFromV3,
+  flatUsageFromV3,
   turnEndedCounter,
 } from "../src/usage.js"
 
@@ -49,8 +49,8 @@ describe("buildLanguageModelV3UsageFromTurnEnded", () => {
     expect(usage.outputTokens?.total).toBe(2)
   })
 
-  it("matches Kilo-shaped flat fields", () => {
-    const flat = kiloShapedUsageFromV3(buildLanguageModelV3UsageFromTurnEnded(te))
+  it("projects V3 usage into flat counter fields", () => {
+    const flat = flatUsageFromV3(buildLanguageModelV3UsageFromTurnEnded(te))
     expect(flat).toEqual({
       inputTokens: 85,
       outputTokens: 43,
@@ -104,7 +104,7 @@ describe("buildLanguageModelV3UsageFromTurnEnded", () => {
       text: 15,
       reasoning: 5,
     })
-    expect(kiloShapedUsageFromV3(usage)).toEqual({
+    expect(flatUsageFromV3(usage)).toEqual({
       inputTokens: 10,
       outputTokens: 15,
       reasoningTokens: 5,

@@ -132,6 +132,38 @@
   liveness from registration alone: the bridge tool is callable outside plan
   mode too, so CreatePlan staging must require that successful entry marker.
 
+## 2026-08-16 — An approval the model has to volunteer is not a gate
+
+- **A gate that depends on the model choosing to ask is not a gate.** Plan mode
+  was entered and the plan file was written, and then the turn simply ended: the
+  model never raised SwitchMode back to `agent`, so the approval prompt that
+  lives on that path never fired. Nothing was broken by the spec's own terms —
+  the spec was wrong. Attach the prompt to the step that actually happens
+  (recording the plan), not to a later step the model may skip.
+- **Two hosts satisfying "the same" flow can fail in opposite directions.** The
+  pi-bridge path asked but reported *both* answers as success, so requesting a
+  refinement made Cursor start implementing the plan the user had just declined;
+  the native path never asked at all. Fix both by naming one contract — success
+  = approved for execution, error = written but not accepted — and making every
+  channel report through it, rather than patching each side's symptom.
+- **Split "persist" from "execute" when deciding what needs consent.** Writing a
+  plan is cheap, reversible, and outside the repository, so it needs no
+  approval; starting the work it describes does. That split is what lets the
+  write stay unconditional while the gate stays mandatory.
+- **An approval prompt is only a gate if the user can see what they are
+  approving.** The first version asked "start implementing?" and named a file
+  path; the plan itself had never been displayed, because Cursor routes the body
+  through the interaction query rather than the text stream. Ask where the
+  content already is, or put the content where the user reads — and check which
+  surface can actually hold it: OpenCode's question dock renders outside the
+  scrollbox with `flexShrink={0}`, so a full plan there pushes the conversation
+  off screen, while the assistant message scrolls and persists.
+- **An answer parsed by anchor text must be parsed with the exact anchor.** The
+  host echoes the prompt verbatim and the answer is sliced relative to it, so a
+  prompt built from a different label silently reads as unanswered. Carry the
+  literal question that was asked through to the parse, and test the mismatch —
+  the failure mode is a prompt that can never be approved.
+
 ## 2026-08-16 — A missing host tool is not automatically a refusal
 
 - **Read what the host tool *does* before treating its absence as a dead end.**
@@ -156,3 +188,64 @@
   host already advertises — it never invents them — and neither the MiMo nor the
   Kilo profile declares a plan role. Emulation is the live path on those hosts,
   so it must be as considered as the native path, not a fallback afterthought.
+
+## 2026-08-16 — CreatePlan Yes must kick off OpenCode, not only ack Cursor
+
+- **Cursor `success` is not a host turn.** After the emulated CreatePlan
+  approval, writing `{success, plan_uri}` and flipping the session to `agent`
+  only closes the held Run (`finish: stop`). Native `plan_exit` also injects a
+  synthetic user message with `agent: "build"` and "Execute the plan" so a new
+  OpenCode loop starts. Mirror that second half via `session.promptAsync` from
+  the classic plugin (`src/plan-execution-kickoff.ts`); keep failures out of the
+  Cursor wire path — approval already succeeded.
+- **Register the kickoff where the host client lives.** The language model
+  cannot import the OpenCode SDK client; the classic plugin installs the
+  handler once, and unit tests stub it. No handler means approval still works
+  but the host stays idle — that is the observed production bug.
+
+## 2026-08-16 — Lifecycle SwitchMode must soft-ack, not reject
+
+- **A hard `rejected{reason}` on a tools=0 title turn enters the transcript.**
+  The real agentic Run then sees "mode switch rejected" and narrates that
+  switches are blocked, even though the next SwitchMode succeeds. Soft-ack
+  with `approved{}` and omit `switchMode` so session mode is not mutated —
+  same pattern CreatePlan already uses for lifecycle turns.
+- **Advertisement ≠ permission still holds.** Re-advertise the full catalog on
+  lifecycle turns, refuse execution, and never flip plan mode from them.
+- **Soft-ack is not a tool-list change.** Rebuild `dist/` before live OpenCode
+  tests; a stale build still hard-rejects while source soft-acks.
+
+## 2026-08-16 — Cold-start zero-tool Runs must wait for the sibling catalog
+
+- **Never freeze `tools=0` into RequestContext when a real catalog is about to
+  arrive.** Title/lifecycle Opens often race ahead of the agent Run. Advertising
+  empty then the full set changes RequestContext bytes and colds the prompt
+  cache (`continuity=cold`, divergent hashes). A timeout is not a fix — the live
+  race exceeded 1.6 seconds. A session-keyed lifecycle Run must wait for a sibling
+  `rememberToolCatalog`; cancellation is the only escape, never `tools=[]`.
+- **Do not invent or filter enabled tools.** Advertisement stays the host's full
+  set (or the last remembered one); permission (`allowTools`) stays false on
+  zero-tool turns. Soft-ack alone does not fix the cache break.
+
+## 2026-08-17 — Bridged Cursor interactions are not missing MCP tools
+
+- **The OpenCode tool catalog is not the complete Cursor capability set.**
+  CreatePlan is an inbound Cursor `InteractionQuery`, so it is expected to be
+  absent from the OpenCode/MCP catalog while still appearing in Cursor's native
+  function definitions. Guidance must name this distinction explicitly and tell
+  the model to raise CreatePlan normally, not narrate that it is unavailable.
+- **Use actual tool APIs, never render tool-call JSON as assistant text.** A
+  textual tool request does not execute and confuses the user; after a failed
+  tool attempt, retry with the provided tool mechanism rather than another
+  protocol representation.
+
+## 2026-08-17 — Compatibility dependency is one-way
+
+- **A provider-neutral bridge is not enough if the provider imports the bridge
+  package.** The provider may consume a structural host capability installed on
+  `globalThis`, but host detection, package imports, fork environment variables,
+  and rotated tool vocabulary belong entirely to the compatibility layer.
+- **Move behavior only after parity is pinned at its destination.** Before
+  removing fork handling from the provider, prove catalog, call, resume-id,
+  result, path, and schema translation in OCP. This keeps architectural cleanup
+  from silently deleting working compatibility.

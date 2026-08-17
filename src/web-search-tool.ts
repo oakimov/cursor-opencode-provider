@@ -1,23 +1,46 @@
-import { tool } from "@opencode-ai/plugin"
 import { executeOpenCodeWebSearch } from "./web-tools.js"
 
+type ToolFactory = {
+  tool: (input: Record<string, unknown>) => Record<string, unknown>
+  schema: {
+    string: () => any
+    number: () => any
+    enum: (values: readonly string[]) => any
+  }
+}
+
+/** Build the classic OpenCode web-search tool with the host's own Zod helper. */
+export function createOpenCodeWebSearchTool(factory: ToolFactory): Record<string, unknown> {
+  const schema = factory.schema
+  return factory.tool({
+    description: "Search the web for current information using OpenCode's web search backend.",
+    args: {
+      query: schema.string().describe("Web search query"),
+      numResults: schema.number().int().min(1).max(20).optional(),
+      livecrawl: schema.enum(["fallback", "preferred"]).optional(),
+      type: schema.enum(["auto", "fast", "deep"]).optional(),
+      contextMaxCharacters: schema.number().int().positive().optional(),
+    },
+    execute: executeOpenCodeWebSearch,
+  })
+}
+
 /**
- * Classic-plugin web search tool registration.
- *
- * Kept apart from `./web-tools.ts` on purpose: this is a *value* import from
- * `@opencode-ai/plugin`, and the OpenCode 2.0 entrypoint shares the search
- * implementation in that module. 2.0's package root exports no `tool`, so
- * importing it from a module on the 2.0 graph would throw during plugin load.
- * Only `plugin.ts` (classic hooks) may import this file.
+ * Host-neutral JSON-schema fallback when the classic helper is unavailable.
+ * OpenCode's legacy schema adapter marks every listed property required, so
+ * expose only the genuinely required query rather than turning four optional
+ * tuning fields into mandatory inputs.
  */
-export const openCodeWebSearchTool = tool({
+export const openCodeWebSearchTool = {
   description: "Search the web for current information using OpenCode's web search backend.",
   args: {
-    query: tool.schema.string().describe("Web search query"),
-    numResults: tool.schema.number().int().min(1).max(20).optional(),
-    livecrawl: tool.schema.enum(["fallback", "preferred"]).optional(),
-    type: tool.schema.enum(["auto", "fast", "deep"]).optional(),
-    contextMaxCharacters: tool.schema.number().int().positive().optional(),
+    query: { type: "string", description: "Web search query" },
   },
   execute: executeOpenCodeWebSearch,
-})
+}
+
+export type { ToolFactory as OpenCodeToolFactory }
+
+export function createOpenCodeWebSearchToolFromPlugin(pluginModule: any): Record<string, unknown> {
+  return createOpenCodeWebSearchTool({ tool: pluginModule.tool, schema: pluginModule.tool.schema })
+}

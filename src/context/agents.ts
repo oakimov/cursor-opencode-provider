@@ -131,7 +131,7 @@ async function scanAgentRoot(
 }
 
 /**
- * Custom agents from the active OpenCode-compatible config roots. OCP may
+ * Custom agents from the active OpenCode-compatible config roots. A host bridge may
  * install a host-neutral bridge before loading this module; without one this
  * remains the direct OpenCode discovery path.
  */

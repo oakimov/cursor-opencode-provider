@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises"
 import path from "node:path"
-import { opencodeGlobalDataDir } from "./paths.js"
+import { hostGlobalDataDir } from "./paths.js"
 
 /** Mirrors OpenCode / SDK OAuth + API auth used for Cursor. `wellknown` is not wired yet. */
 export type StoredAuth =
@@ -44,7 +44,7 @@ export async function readStoredAuth(providerId: string): Promise<StoredAuth | u
     }
   }
 
-  const filePath = path.join(opencodeGlobalDataDir(), "auth.json")
+  const filePath = path.join(hostGlobalDataDir(), "auth.json")
   try {
     const raw = await readFile(filePath, "utf-8")
     try {

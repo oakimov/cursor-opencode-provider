@@ -24,6 +24,37 @@ const variantParams = (params: Array<{ id: string; value: string }>) => ({
 })
 
 describe("package root exports", () => {
+  it("loads classic tools from a Windows absolute host path", async () => {
+    const { loadClassicTools } = await import("../src/plugin.js")
+    const seen: string[] = []
+    const schema = {
+      string: () => ({ describe() { return this }, optional() { return this } }),
+      number: () => ({ int() { return this }, min() { return this }, max() { return this }, positive() { return this }, optional() { return this } }),
+      enum: () => ({ optional() { return this } }),
+    }
+    const identityTool = Object.assign((input: Record<string, unknown>) => input, { schema })
+    const tools = await loadClassicTools({
+      configDirs: ["C:\\host-config"],
+      importModule: async (specifier) => {
+        seen.push(specifier)
+        return { tool: identityTool }
+      },
+    })
+    expect(seen[0]).toMatch(/^file:\/\/\/C:/)
+    expect(tools.webSearch).toBeDefined()
+    expect(tools.imageSave).toBeDefined()
+  })
+
+  it("falls back to plain classic definitions when no helper can be imported", async () => {
+    const { loadClassicTools } = await import("../src/plugin.js")
+    const tools = await loadClassicTools({
+      configDirs: ["/missing"],
+      importModule: async () => { throw new Error("missing") },
+    })
+    expect((tools.webSearch as any).args.query.type).toBe("string")
+    expect((tools.imageSave as any).args.image_id.type).toBe("string")
+  })
+
   it("keeps runtime root exports safe for OpenCode's legacy plugin loader", () => {
     expect(Object.keys(rootExports).sort()).toEqual(["CursorPlugin", "createCursor", "default"])
   })

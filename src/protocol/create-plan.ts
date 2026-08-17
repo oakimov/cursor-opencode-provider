@@ -9,7 +9,7 @@
  *
  * Location mirrors OpenCode Session.plan shape, but the project-config segment
  * comes from {@link hostPlansDir} / {@link opencodeProjectConfigDirs}
- * (`.opencode` / `.mimocode` / `.kilo` / … via the path bridge), never a
+ * (the active host's project config dir via the path bridge), never a
  * hardcoded OpenCode-only directory name.
  *
  * Body is plain markdown (the same shape a plan-mode model would write with
@@ -20,6 +20,11 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 import { hostPlansDir } from "../context/paths.js"
+import {
+  type CursorAskQuestionItem,
+  type OpencodeQuestionInput,
+  parseAnswerSegments,
+} from "./ask-question.js"
 import { decodeMessageSparse } from "./messages.js"
 
 const PLAN_ADJECTIVES = [
@@ -108,10 +113,10 @@ export type DecodedCreatePlanQuery = {
 }
 
 export type CreatePlanWriteResult =
-  | { ok: true; planPath: string; planUri: string }
+  | { ok: true; planPath: string; planUri: string; markdown: string }
   | { ok: false; error: string }
 
-/** omp-only host tool that stages Cursor CreatePlan content into native plan mode. */
+/** Optional host plan-stage tool advertised by a compatible host. */
 export const CURSOR_PLAN_STAGE_TOOL = "cursor_plan_stage"
 
 /** Held InteractionQuery continuation field for a native host plan stage. */
@@ -121,6 +126,120 @@ export type CursorPlanStageInput = {
   plan_uri: string
   content: string
   title: string
+}
+
+/**
+ * How a CreatePlan query is satisfied this turn. Keyed only on the advertised
+ * catalog and the provider's own plan-mode state — never on host identity.
+ *
+ * - `stage`   a host plan-stage tool is advertised; the host writes the plan
+ *             *and* owns the execution-approval prompt, and its tool result is
+ *             the approval outcome (success = approved, error = not approved).
+ * - `approve` no such tool, but the host advertises `question`: the provider
+ *             writes the plan itself and then asks the same thing with upstream
+ *             `PlanExitTool`'s own prompt.
+ * - `ack`     nothing to ask with (or a lifecycle turn): write, or for a
+ *             lifecycle turn skip the write, and acknowledge the CLI way.
+ *
+ * The plan is always persisted before any prompt: writing needs no approval,
+ * executing does.
+ */
+export type CreatePlanBridge =
+  | { kind: "stage" }
+  | { kind: "approve" }
+  | { kind: "ack" }
+
+/** Upstream `PlanExitTool` wording, with the plan the provider just wrote. */
+export function createPlanApprovalQuestion(planLabel: string): string {
+  const where = planLabel.trim()
+  return where
+    ? `Plan at ${where} is complete. Would you like to switch to the build agent and start implementing?`
+    : "The plan is complete. Would you like to switch to the build agent and start implementing?"
+}
+
+export const CREATE_PLAN_APPROVAL_HEADER = "Build Agent"
+const CREATE_PLAN_APPROVAL_YES = "Yes"
+const CREATE_PLAN_APPROVAL_NO = "No"
+
+/** Cursor-visible reason when the user wants the plan revised instead of run. */
+export const CREATE_PLAN_NOT_APPROVED_REASON =
+  "The user did not approve executing this plan. Keep planning: refine the plan and "
+  + "propose it again when it is ready."
+
+/**
+ * Resolve how this CreatePlan is satisfied. `planModeActive` is the provider's
+ * own record of an approved Cursor plan/spec mode: the approval prompt guards
+ * the transition *out of* planning, so a CreatePlan raised outside plan mode is
+ * written and acknowledged without one.
+ */
+export function resolveCreatePlanBridge(options: {
+  allowTools: boolean
+  canStage?: boolean
+  planModeActive?: boolean
+  advertised: ReadonlySet<string> | Iterable<string>
+}): CreatePlanBridge {
+  // A lifecycle turn (title generation, compaction) runs alongside the real one
+  // and must not write a second plan file or raise a second prompt.
+  if (!options.allowTools) return { kind: "ack" }
+  if (options.canStage) return { kind: "stage" }
+
+  const names =
+    options.advertised instanceof Set ? options.advertised : new Set(options.advertised)
+  if (options.planModeActive && names.has("question")) return { kind: "approve" }
+  return { kind: "ack" }
+}
+
+/** The synthetic AskQuestion item backing the emulated approval prompt. */
+function createPlanApprovalItem(question: string): CursorAskQuestionItem {
+  return {
+    id: "create_plan_approval",
+    prompt: question,
+    options: [
+      { id: "yes", label: CREATE_PLAN_APPROVAL_YES },
+      { id: "no", label: CREATE_PLAN_APPROVAL_NO },
+    ],
+    allowMultiple: false,
+  }
+}
+
+/** Host `question` input mirroring upstream `PlanExitTool`'s own prompt. */
+export function createPlanApprovalQuestionInput(planLabel: string): OpencodeQuestionInput {
+  return {
+    questions: [
+      {
+        question: createPlanApprovalQuestion(planLabel),
+        header: CREATE_PLAN_APPROVAL_HEADER,
+        options: [
+          {
+            label: CREATE_PLAN_APPROVAL_YES,
+            description: "Switch to build agent and start implementing the plan",
+          },
+          {
+            label: CREATE_PLAN_APPROVAL_NO,
+            description: "Stay with plan agent to continue refining the plan",
+          },
+        ],
+      },
+    ],
+  }
+}
+
+/**
+ * True when the emulated approval prompt came back as an explicit "Yes".
+ * An unanswered, dismissed, or failed prompt keeps the model planning rather
+ * than silently starting execution.
+ *
+ * `question` must be the exact prompt that was asked — the host echoes it back
+ * verbatim, and it is the anchor the answer is parsed from.
+ */
+export function createPlanApproved(
+  output: string,
+  isError: boolean,
+  question: string,
+): boolean {
+  if (isError) return false
+  const [segment] = parseAnswerSegments([createPlanApprovalItem(question)], output)
+  return (segment ?? "").trim().toLowerCase() === CREATE_PLAN_APPROVAL_YES.toLowerCase()
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -223,7 +342,7 @@ export function slugifyPlanName(name: string): string {
   return slug || randomPlanSlug()
 }
 
-/** Build omp's canonical session-local plan artifact payload. */
+/** Build the advertised host plan-stage artifact payload. */
 export function createPlanStageInput(args: CursorCreatePlanArgs): CursorPlanStageInput {
   const slug = slugifyPlanName(args.name)
   return {
@@ -326,5 +445,23 @@ export function writeOpencodePlanFile(
     ok: true,
     planPath,
     planUri: pathToFileURL(planPath).href,
+    markdown,
   }
+}
+
+/**
+ * The plan as the user reads it before approving execution.
+ *
+ * Cursor routes the plan body through the interaction query rather than the
+ * text stream, so without this the user is asked to approve a plan they were
+ * never shown. It goes into the assistant message — the host renders markdown
+ * there, it scrolls, and it survives answering the prompt. It must not go into
+ * the question itself: OpenCode renders the question dock outside its
+ * scrollbox with `flexShrink={0}`, so a full plan there would push the
+ * conversation off screen.
+ */
+export function renderPlanReviewMessage(markdown: string, planPath: string): string {
+  const body = markdown.trim()
+  const saved = `_Plan saved to ${planPath}_`
+  return body ? `${body}\n\n${saved}\n` : `${saved}\n`
 }

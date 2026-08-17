@@ -29,7 +29,7 @@ export type CreateCursorOptions = {
   /**
    * Host cache root for Cursor project metadata + model/version caches.
    * Prefer the host's Path.cache (Effect v2) when available; otherwise the
-   * provider resolves OpenCode / MiMo / Kilo XDG cache dirs automatically.
+   * provider resolves the native OpenCode cache dir, or an injected host path bridge.
    */
   cacheDir?: string
   /** Held-stream policy. Defaults: heartbeat 5s, semantic idle 120s, tool inactivity 10m. */

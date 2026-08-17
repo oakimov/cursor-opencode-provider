@@ -37,77 +37,117 @@ describe("compaction tool catalog", () => {
     resetConversationBindingsForTests()
   })
 
-  it("advertises the prior catalog during compaction but refuses execution", () => {
+  it("advertises the prior catalog during compaction but refuses execution", async () => {
     const tools = [{ name: "bash" }, { name: "grep" }]
-    expect(resolveTurnToolState({
+    expect(await resolveTurnToolState({
       sessionKey: "ses_1",
       incomingTools: tools,
       isCompaction: false,
     })).toEqual({ advertisedTools: tools, allowTools: true })
 
-    expect(resolveTurnToolState({
+    expect(await resolveTurnToolState({
       sessionKey: "ses_1",
       incomingTools: [],
       isCompaction: true,
     })).toEqual({ advertisedTools: tools, allowTools: false })
   })
 
-  it("does not reinterpret an ordinary no-tool call as compaction", () => {
-    // No catalog was ever seen for this session, so there is nothing to restore.
-    expect(resolveTurnToolState({
-      sessionKey: "ses_2",
+  it("preserves a literal no-tool call when no session key can correlate a sibling", async () => {
+    expect(await resolveTurnToolState({
       incomingTools: [],
       toolChoice: { type: "none" },
       isCompaction: false,
     })).toEqual({ advertisedTools: [], allowTools: false })
   })
 
-  it("keeps the catalog advertised on every lifecycle turn, not just compaction", () => {
+  it("keeps the catalog advertised on every lifecycle turn, not just compaction", async () => {
     // Collapsing a title-generation turn to tools=0 changes the RequestContext
     // shape and costs the whole prompt cache; execution stays refused instead.
     const tools = [{ name: "read", inputSchema: { type: "object" } }]
     restoreTurnToolCatalog("ses_restored_catalog", tools)
 
-    expect(resolveTurnToolState({
+    expect(await resolveTurnToolState({
       sessionKey: "ses_restored_catalog",
       incomingTools: [],
       isCompaction: false,
     })).toEqual({ advertisedTools: tools, allowTools: false })
-    expect(resolveTurnToolState({
+    expect(await resolveTurnToolState({
       sessionKey: "ses_restored_catalog",
       incomingTools: [],
       toolChoice: { type: "none" },
       isCompaction: false,
     })).toEqual({ advertisedTools: tools, allowTools: false })
-    expect(resolveTurnToolState({
+    expect(await resolveTurnToolState({
       sessionKey: "ses_restored_catalog",
       incomingTools: [],
       isCompaction: true,
     })).toEqual({ advertisedTools: tools, allowTools: false })
   })
 
-  it("advertises a genuinely restricted catalog verbatim", () => {
+  it("waits indefinitely for a sibling catalog on cold-start lifecycle turns", async () => {
+    // The production race exceeded one second. A timeout merely moves the race
+    // threshold, so assert that the lifecycle call remains blocked well beyond
+    // the old 100 ms cutoff and resolves only when the real catalog arrives.
+    const tools = [{ name: "read" }, { name: "bash" }]
+    const sessionKey = "ses_cold_start"
+    let settled = false
+
+    const lifecycle = resolveTurnToolState({
+      sessionKey,
+      incomingTools: [],
+      isCompaction: false,
+    }).then((state) => {
+      settled = true
+      return state
+    })
+
+    await new Promise((r) => setTimeout(r, 150))
+    expect(settled).toBe(false)
+
+    await resolveTurnToolState({
+      sessionKey,
+      incomingTools: tools,
+      isCompaction: false,
+    })
+
+    expect(await lifecycle).toEqual({ advertisedTools: tools, allowTools: false })
+  })
+
+  it("cancels a catalog wait instead of sending tools=0", async () => {
+    const abort = new AbortController()
+    const lifecycle = resolveTurnToolState({
+      sessionKey: "ses_cancelled",
+      incomingTools: [],
+      isCompaction: false,
+      abortSignal: abort.signal,
+    })
+
+    abort.abort()
+    await expect(lifecycle).rejects.toThrow("tool-catalog wait cancelled")
+  })
+
+  it("advertises a genuinely restricted catalog verbatim", async () => {
     const full = [{ name: "read" }, { name: "write" }, { name: "bash" }]
     const restricted = [{ name: "read" }]
-    resolveTurnToolState({ sessionKey: "ses_restricted", incomingTools: full, isCompaction: false })
+    await resolveTurnToolState({ sessionKey: "ses_restricted", incomingTools: full, isCompaction: false })
 
     // A non-empty smaller set is a real restriction, never a lifecycle signal.
-    expect(resolveTurnToolState({
+    expect(await resolveTurnToolState({
       sessionKey: "ses_restricted",
       incomingTools: restricted,
       isCompaction: false,
     })).toEqual({ advertisedTools: restricted, allowTools: true })
   })
 
-  it("rebases after the summary checkpoint, restores execution, then stays stable", () => {
+  it("rebases after the summary checkpoint, restores execution, then stays stable", async () => {
     const sessionKey = "ses_transition"
     const tools = [{ name: "bash" }, { name: "grep" }]
 
-    resolveTurnToolState({ sessionKey, incomingTools: tools, isCompaction: false })
+    await resolveTurnToolState({ sessionKey, incomingTools: tools, isCompaction: false })
     const beforeCompaction = bindConversationId(sessionKey).conversationId
 
     const compactionReset = resolveTurnConversationReset({ sessionKey, isCompaction: true })
-    const compacted = resolveTurnToolState({
+    const compacted = await resolveTurnToolState({
       sessionKey,
       incomingTools: [],
       isCompaction: true,
@@ -118,7 +158,7 @@ describe("compaction tool catalog", () => {
     expect(compacted).toEqual({ advertisedTools: tools, allowTools: false })
 
     const resumedReset = resolveTurnConversationReset({ sessionKey, isCompaction: false })
-    const resumed = resolveTurnToolState({
+    const resumed = await resolveTurnToolState({
       sessionKey,
       incomingTools: tools,
       isCompaction: false,
@@ -138,8 +178,8 @@ describe("compaction tool catalog", () => {
       .toEqual({ reset: false })
   })
 
-  it("bounds cached tool catalogs and pending post-compaction rebases", () => {
-    resolveTurnToolState({
+  it("bounds cached tool catalogs and pending post-compaction rebases", async () => {
+    await resolveTurnToolState({
       sessionKey: "oldest",
       incomingTools: [{ name: "read" }],
       isCompaction: false,
@@ -148,7 +188,7 @@ describe("compaction tool catalog", () => {
 
     for (let i = 0; i < MAX_TURN_STATE_SESSIONS; i++) {
       const sessionKey = `new-${i}`
-      resolveTurnToolState({
+      await resolveTurnToolState({
         sessionKey,
         incomingTools: [{ name: "bash" }],
         isCompaction: false,
@@ -156,11 +196,17 @@ describe("compaction tool catalog", () => {
       resolveTurnConversationReset({ sessionKey, isCompaction: true })
     }
 
-    expect(resolveTurnToolState({
+    // The evicted session has no safe catalog. It must wait rather than emit an
+    // empty one; cancellation tears down the wait without changing advertisement.
+    const abort = new AbortController()
+    const evicted = resolveTurnToolState({
       sessionKey: "oldest",
       incomingTools: [],
       isCompaction: true,
-    })).toEqual({ advertisedTools: [], allowTools: false })
+      abortSignal: abort.signal,
+    })
+    abort.abort()
+    await expect(evicted).rejects.toThrow("tool-catalog wait cancelled")
     expect(resolveTurnConversationReset({ sessionKey: "oldest", isCompaction: false }))
       .toEqual({ reset: false })
   })

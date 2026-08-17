@@ -25,6 +25,8 @@ describe("buildOpenCodeInteractionGuidance", () => {
     ], false, "/workspace/project")
     expect(guidance).toContain("OpenCode `question` tool")
     expect(guidance).toContain("OpenCode `todowrite` tool")
+    expect(guidance).toContain("Cursor-native CreatePlan is accepted as a Cursor interaction")
+    expect(guidance).toContain("Do not narrate that CreatePlan is missing")
     expect(guidance).toContain("Emit the actual tool call")
     expect(guidance).not.toContain("`plan_enter`")
     expect(guidance).not.toContain("`webfetch`")
@@ -41,14 +43,17 @@ describe("buildOpenCodeInteractionGuidance", () => {
     expect(guidance).toContain("Cursor-native SwitchMode requests for plan/spec")
     expect(guidance).toContain("OpenCode `plan_exit` tool")
     expect(guidance).toContain("Cursor-native SwitchMode for any non-plan target")
+    expect(guidance).toContain("Cursor-native CreatePlan is accepted as a Cursor interaction")
     expect(guidance).toContain("`custom_websearch`")
     expect(guidance).toContain("`custom_webfetch`")
     expect(guidance).not.toContain("OpenCode `custom_web")
     expect(guidance).not.toContain("`todowrite`")
-    expect(guidance).not.toContain("AskQuestion")
+    // AskQuestion is named only in the bridged-interactions note; without
+    // `question` advertised there must be no host-tool redirect.
+    expect(guidance).not.toContain("OpenCode `question` tool")
   })
 
-  it("does not alter compaction and forbids native tools outside the exact catalog", () => {
+  it("does not alter compaction and clarifies bridged interactions are not MCP tools", () => {
     expect(buildOpenCodeInteractionGuidance([
       { name: "question" },
     ], true, "/workspace/project")).toBeUndefined()
@@ -57,8 +62,9 @@ describe("buildOpenCodeInteractionGuidance", () => {
       { name: "read" },
     ], false, "/workspace/project")
     expect(guidance).toContain("exactly these executable tools for this turn: `bash`, `read`")
-    expect(guidance).toContain("Task/subagents")
-    expect(guidance).toContain("are unavailable; do not invoke them")
+    expect(guidance).toContain("not an OpenCode or MCP catalog tool")
+    expect(guidance).toContain("do not narrate that they are missing")
+    expect(guidance).toContain("without claiming a missing MCP tool")
     expect(guidance).not.toContain("OpenCode `question` tool")
     expect(buildOpenCodeInteractionGuidance([], false, "/workspace/project")).toBeUndefined()
   })
@@ -91,21 +97,16 @@ describe("buildOpenCodeInteractionGuidance", () => {
   it("documents Cursor-native Task subtype mapping when subagents are advertised", () => {
     const guidance = buildOpenCodeInteractionGuidance([
       {
-        name: "actor",
+        name: "task",
         inputSchema: {
           properties: {
-            operation: {
-              properties: {
-                subagent_type: { enum: ["general", "explore", "scout"] },
-              },
-            },
+            subagent_type: { enum: ["general", "explore", "scout"] },
           },
         },
       },
-      { name: "task" },
     ], false, "/workspace/project")
 
-    expect(guidance).toContain("Native Cursor Task/subagent requests are executed through OpenCode `actor`")
+    expect(guidance).toContain("Native Cursor Task/subagent requests are executed through OpenCode `task`")
     expect(guidance).toContain("`generalPurpose`")
     expect(guidance).toContain("`bugbot`, `security-review`, and `explore` select host `explore`")
     expect(guidance).toContain("Host `scout` is available")

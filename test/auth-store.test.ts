@@ -3,11 +3,13 @@ import { mkdir, writeFile, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { asStoredAuth, readStoredAuth } from "../src/context/auth-store.js"
+import { HOST_PATH_BRIDGE } from "../src/context/paths.js"
 
 const originalHome = process.env.HOME
 const originalXdgData = process.env.XDG_DATA_HOME
 const originalAuthContent = process.env.OPENCODE_AUTH_CONTENT
 const originalDebug = process.env.CURSOR_PROVIDER_DEBUG
+const previousBridge = (globalThis as Record<PropertyKey, unknown>)[HOST_PATH_BRIDGE]
 
 afterEach(() => {
   if (originalHome === undefined) delete process.env.HOME
@@ -18,6 +20,8 @@ afterEach(() => {
   else process.env.OPENCODE_AUTH_CONTENT = originalAuthContent
   if (originalDebug === undefined) delete process.env.CURSOR_PROVIDER_DEBUG
   else process.env.CURSOR_PROVIDER_DEBUG = originalDebug
+  if (previousBridge === undefined) delete (globalThis as Record<PropertyKey, unknown>)[HOST_PATH_BRIDGE]
+  else (globalThis as Record<PropertyKey, unknown>)[HOST_PATH_BRIDGE] = previousBridge
 })
 
 describe("readStoredAuth", () => {
@@ -45,6 +49,26 @@ describe("readStoredAuth", () => {
       })
     } finally {
       await rm(fakeHome, { recursive: true, force: true })
+    }
+  })
+
+  it("reads auth.json from an injected host data root", async () => {
+    const root = path.join(os.tmpdir(), `auth-store-bridge-${process.pid}-${Date.now()}`)
+    delete process.env.OPENCODE_AUTH_CONTENT
+    await mkdir(root, { recursive: true })
+    await writeFile(path.join(root, "auth.json"), JSON.stringify({
+      cursor: { type: "api", key: "from-bridge" },
+    }))
+    ;(globalThis as Record<PropertyKey, unknown>)[HOST_PATH_BRIDGE] = {
+      projectConfigDirs: () => [],
+      globalConfigDirs: () => [],
+      globalDataDir: () => root,
+    }
+
+    try {
+      expect(await readStoredAuth("cursor")).toEqual({ type: "api", key: "from-bridge" })
+    } finally {
+      await rm(root, { recursive: true, force: true })
     }
   })
 

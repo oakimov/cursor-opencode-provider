@@ -92,16 +92,29 @@ describe("resolveSwitchModeBridge", () => {
     })
   })
 
-  it("never mutates session mode from a no-tool lifecycle turn", () => {
+  it("soft-acks a no-tool lifecycle turn without mutating session mode", () => {
     // OpenCode opens a tools=0 Run (title generation) alongside the real one and
-    // Cursor replays the whole turn on it. Approving there flipped plan mode
-    // twice and let the throwaway turn write its own plan file.
+    // Cursor replays the whole turn on it. A hard reject landed in the transcript
+    // and the real turn narrated "mode switches are blocked". Soft-ack with
+    // approved{} on the wire (no session mutation) — same pattern as CreatePlan.
     for (const target of ["plan", "spec", "agent"]) {
-      const bridge = resolveSwitchModeBridge(target, { allowTools: false, advertised: [] })
-      expect(bridge.kind).toBe("reject")
-      if (bridge.kind !== "reject") throw new Error("expected reject")
-      expect(bridge.reason).toContain("lifecycle turn")
+      expect(resolveSwitchModeBridge(target, { allowTools: false, advertised: [] })).toEqual({
+        kind: "ack",
+      })
     }
+  })
+
+  it("auto-approves when the requested mode is already active", () => {
+    expect(resolveSwitchModeBridge("plan", {
+      allowTools: true,
+      advertised: ["plan_enter", "question"],
+      activeModeId: "PLAN",
+    })).toEqual({ kind: "approve" })
+    expect(resolveSwitchModeBridge("agent", {
+      allowTools: true,
+      advertised: ["plan_exit", "question"],
+      activeModeId: "agent",
+    })).toEqual({ kind: "approve" })
   })
 
   it("falls back to the question prompt when leaving plan mode without plan_exit", () => {
@@ -128,12 +141,11 @@ describe("resolveSwitchModeBridge", () => {
     expect(bridge.reason).toContain("`question`")
   })
 
-  it("rejects even an advertised host tool on a no-tool turn", () => {
-    const bridge = resolveSwitchModeBridge("agent", {
+  it("soft-acks even an advertised host tool on a no-tool turn", () => {
+    expect(resolveSwitchModeBridge("agent", {
       allowTools: false,
       advertised: ["plan_exit", "question"],
-    })
-    expect(bridge.kind).toBe("reject")
+    })).toEqual({ kind: "ack" })
   })
 
   it("rejects an empty target", () => {
@@ -287,12 +299,13 @@ describe("cursorModeSystemReminder", () => {
 describe("handleInteractionQuery switch-mode routing", () => {
   const handle = (
     payload: Uint8Array,
-    options: { allowTools?: boolean; advertisedTools?: string[] } = {},
+    options: { allowTools?: boolean; advertisedTools?: string[]; activeCursorModeId?: string } = {},
   ) => {
     const query = decodeMessage<any>("AgentServerMessage", payload).interaction_query
     return handleInteractionQuery(query, payload, {
       allowTools: options.allowTools ?? true,
       advertisedTools: options.advertisedTools ?? ["plan_enter", "plan_exit"],
+      ...(options.activeCursorModeId ? { activeCursorModeId: options.activeCursorModeId } : {}),
     })
   }
 
@@ -332,6 +345,19 @@ describe("handleInteractionQuery switch-mode routing", () => {
     expect(response.switch_mode_request_response.approved).toBeDefined()
   })
 
+  it("auto-approves an already-active target without a host prompt", () => {
+    const handled = handle(switchModePayload(switchModeArgs({ target_mode_id: "agent" })), {
+      allowTools: true,
+      advertisedTools: ["plan_exit", "question"],
+      activeCursorModeId: "agent",
+    })
+    expect(handled.outcome).toBe("approved")
+    expect(handled.switchMode?.bridge.kind).toBe("approve")
+    expect(handled.switchMode?.toolName).toBeUndefined()
+    const response = decodeMessage<any>("AgentClientMessage", handled.reply!).interaction_response
+    expect(response.switch_mode_request_response.approved).toBeDefined()
+  })
+
   it("bridges leaving plan mode to the question prompt when plan_exit is absent", () => {
     const handled = handle(switchModePayload(switchModeArgs({ target_mode_id: "agent" })), {
       allowTools: true,
@@ -351,6 +377,20 @@ describe("handleInteractionQuery switch-mode routing", () => {
     expect(handled.outcome).toBe("rejected")
     const response = decodeMessage<any>("AgentClientMessage", handled.reply!).interaction_response
     expect(response.switch_mode_request_response.rejected.reason).toContain("`plan_exit`")
+  })
+
+  it("soft-acks a lifecycle turn with approved{} and does not attach switchMode", () => {
+    // Live bug: tools=0 title Run hard-rejected SwitchMode; the real turn then
+    // narrated that mode switches were blocked. Soft-ack on the wire, no mode.
+    const handled = handle(switchModePayload(), {
+      allowTools: false,
+      advertisedTools: ["plan_enter", "question"],
+    })
+    expect(handled.outcome).toBe("acknowledged")
+    expect(handled.switchMode).toBeUndefined()
+    const response = decodeMessage<any>("AgentClientMessage", handled.reply!).interaction_response
+    expect(response.switch_mode_request_response.approved).toBeDefined()
+    expect(response.switch_mode_request_response.rejected).toBeUndefined()
   })
 })
 
@@ -438,7 +478,10 @@ describe("SwitchMode over a held-open Run without host plan tools", () => {
       advertisedTools: ["question", "read", "write"],
     })!
     expect(reminder).toContain("Plan mode is active")
-    expect(reminder).toContain("SwitchMode, target `agent`")
+    // Without a host plan_exit, recording the plan is the gate the model can
+    // actually reach — the provider asks for execution approval right after it.
+    expect(reminder).toContain("record the finished plan (Cursor CreatePlan)")
+    expect(reminder).toContain("asked whether to start implementing")
     expect(reminder).not.toContain("call OpenCode `plan_exit`")
     sessionManager.close(session, "ordinary-cleanup")
   })

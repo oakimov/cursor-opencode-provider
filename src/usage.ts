@@ -300,8 +300,8 @@ export function emptyLanguageModelV3Usage(): LanguageModelV3Usage {
   })
 }
 
-/** Mirror Kilo `Session.getUsage` / AI SDK flat fields from V3 nested usage. */
-export function kiloShapedUsageFromV3(usage: LanguageModelV3Usage): {
+/** Project nested V3 usage into the common flat AI-SDK counter shape. */
+export function flatUsageFromV3(usage: LanguageModelV3Usage): {
   inputTokens: number
   outputTokens: number
   reasoningTokens: number

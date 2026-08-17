@@ -84,11 +84,10 @@
     "protobufjs": "^7.6.5"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": "^1.17.13",
-    "@opencode-compat/profile": ">=0.1.0"
+    "@opencode-ai/plugin": "^1.17.13"
   },
   "peerDependenciesMeta": {
-    "@opencode-compat/profile": {
+    "@opencode-ai/plugin": {
       "optional": true
     }
   },

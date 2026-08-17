@@ -68,7 +68,9 @@ import {
 } from "./protocol/ask-question.js"
 import {
   SWITCH_MODE_RESULT_FIELD,
+  getActiveCursorMode,
   isBridgedCursorPlanModeActive,
+  isCursorPlanModeActive,
   setActiveCursorMode,
   switchModeResultFromQuestionOutput,
   switchModeResultFromToolOutput,
@@ -76,10 +78,21 @@ import {
   takeActiveCursorModeReminder,
 } from "./protocol/switch-mode.js"
 import {
+  CREATE_PLAN_NOT_APPROVED_REASON,
   CREATE_PLAN_RESULT_FIELD,
   CURSOR_PLAN_STAGE_TOOL,
+  createPlanApproved,
   createPlanStageInput,
 } from "./protocol/create-plan.js"
+import {
+  flushPlanExecutionKickoff,
+  formatPlanKickoffPath,
+  hasPlanExecutionKickoff,
+  planExecutionKickoffState,
+  planPathFromUri,
+  queuePlanExecutionKickoff,
+  takePlanExecutionKickoffWarning,
+} from "./plan-execution-kickoff.js"
 import {
   CURSOR_IMAGE_SAVE_TOOL,
   imageMimeForPath,
@@ -385,9 +398,78 @@ export function connectFrameError(payload: string): CursorProviderError {
   }
 }
 
+/**
+ * Cold-start race: OpenCode's title/lifecycle Run often arrives with tools=[]
+ * before the real agent Run publishes the catalog. Materializing RequestContext
+ * with tools=0 and later with the full set changes its bytes, forces a prompt-
+ * cache rebuild, and incurs avoidable cost. A valid session-keyed lifecycle Run
+ * therefore waits for the first real catalog; cancellation is the only escape.
+ */
+type ToolCatalogWaiter = {
+  resolve: (tools: OpencodeToolDef[]) => void
+  cancel: () => void
+}
+
+const toolCatalogWaitersBySession = new Map<string, Set<ToolCatalogWaiter>>()
+
+function publishToolCatalogWaiters(sessionKey: string, tools: OpencodeToolDef[]): void {
+  const waiters = toolCatalogWaitersBySession.get(sessionKey)
+  if (!waiters || waiters.size === 0) return
+  toolCatalogWaitersBySession.delete(sessionKey)
+  for (const waiter of waiters) waiter.resolve(tools)
+}
+
+function waitForSiblingToolCatalog(
+  sessionKey: string,
+  signal?: AbortSignal,
+): Promise<OpencodeToolDef[]> {
+  const existing = toolCatalogBySession.get(sessionKey)
+  if (existing && existing.length > 0) {
+    return Promise.resolve(structuredClone(existing))
+  }
+  if (signal?.aborted) {
+    return Promise.reject(new CursorLocalCancellationError("Cursor tool-catalog wait cancelled"))
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false
+    let set = toolCatalogWaitersBySession.get(sessionKey)
+    const finish = (tools?: OpencodeToolDef[], error?: CursorLocalCancellationError) => {
+      if (settled) return
+      settled = true
+      set?.delete(waiter)
+      if (set?.size === 0) toolCatalogWaitersBySession.delete(sessionKey)
+      signal?.removeEventListener("abort", onAbort)
+      if (error) reject(error)
+      else resolve(structuredClone(tools!))
+    }
+    const onAbort = () => finish(
+      undefined,
+      new CursorLocalCancellationError("Cursor tool-catalog wait cancelled"),
+    )
+    const waiter: ToolCatalogWaiter = {
+      resolve: (tools) => finish(tools),
+      cancel: onAbort,
+    }
+
+    if (!set) {
+      set = new Set()
+      toolCatalogWaitersBySession.set(sessionKey, set)
+    }
+    set.add(waiter)
+    signal?.addEventListener("abort", onAbort, { once: true })
+
+    // Re-check after enqueue: a sibling may have published between the initial
+    // map lookup and waiter registration.
+    const raced = toolCatalogBySession.get(sessionKey)
+    if (raced && raced.length > 0) finish(raced)
+  })
+}
+
 function rememberToolCatalog(sessionKey: string, tools: OpencodeToolDef[]): void {
   toolCatalogBySession.delete(sessionKey)
   toolCatalogBySession.set(sessionKey, structuredClone(tools))
+  publishToolCatalogWaiters(sessionKey, tools)
   while (toolCatalogBySession.size > MAX_TURN_STATE_SESSIONS) {
     const oldest = toolCatalogBySession.keys().next().value as string | undefined
     if (!oldest) break
@@ -576,6 +658,23 @@ async function doStreamImpl(
           } catch (e) {
             trace(`pull: close failed (already closed/cancelled) err=${(e as Error).message}`)
           }
+          // pumpWithRecovery has returned only after the Run reached terminal
+          // turn_ended and endPump cleared ownership. This is the first safe
+          // point to start a second OpenCode generation. A failed prior handoff
+          // is retried only because this explicit new provider turn reached its
+          // own terminal boundary — never from a timer or tight loop.
+          const kickoff = await flushPlanExecutionKickoff(activeSession.openCodeSessionId, {
+            cursorSessionID: activeSession.sessionId,
+            terminal: activeSession.closed,
+            pumpActive: activeSession.pumpActive || activeSession.pumpOwner != null,
+            pendingExecs: activeSession.pending.size,
+          })
+          if (!kickoff) {
+            const state = planExecutionKickoffState(activeSession.openCodeSessionId)
+            if (state?.status === "failed") {
+              setActiveCursorMode(activeSession.openCodeSessionId, "plan")
+            }
+          }
         } catch (e) {
           activeSession.pumpActive = false
           trace(`pull: pump threw (cleaning up): ${(e as Error).message}`)
@@ -705,11 +804,12 @@ async function startSession(
   // Do not infer this from tools/toolChoice: standalone no-tool calls are valid.
   const isCompaction =
     providerOptions?.[CURSOR_COMPACTION_OPTION] === true || isCompactionSession(sessionKey)
-  const toolState = resolveTurnToolState({
+  const toolState = await resolveTurnToolState({
     sessionKey,
     incomingTools,
     toolChoice: callOptions.toolChoice,
     isCompaction,
+    abortSignal: callOptions.abortSignal,
   })
   const tools = toolState.advertisedTools
   const webToolAliases = buildCustomWebToolAliases(tools)
@@ -800,7 +900,15 @@ async function startSession(
     : takeActiveCursorModeReminder(sessionKey, {
         advertisedTools: cursorTools.map((tool) => tool.name),
       })
-  const systemPrompt = [baseSystemPrompt, interactionGuidance, modeReminder]
+  const kickoffWarning = isCompaction
+    ? undefined
+    : takePlanExecutionKickoffWarning(sessionKey)
+  const systemPrompt = [
+    baseSystemPrompt,
+    interactionGuidance,
+    modeReminder,
+    kickoffWarning ? `<system_reminder>${kickoffWarning}</system_reminder>` : undefined,
+  ]
     .filter(Boolean)
     .join("\n\n")
   const history = extractPromptHistory(prompt, {
@@ -1145,29 +1253,82 @@ function buildAskQuestionContinuationFrame(
 }
 
 /**
- * Turn an OpenCode plan_enter / plan_exit result into the SwitchMode reply
- * Cursor is still blocking on (approved{} | rejected{reason}).
- * On approval, record the Cursor unified mode so the next Run injects the
- * CLI-shaped `<system_reminder>` for that mode.
+ * Turn the host's plan-approval outcome into the CreatePlan reply Cursor is
+ * still blocking on. One contract across every channel: `success` means the
+ * user approved execution, `error` means the plan was written but not accepted,
+ * so the model keeps planning instead of starting work.
+ *
+ * A host plan-stage tool reports that outcome as tool success/failure. The
+ * emulated path asks through `question`, so only an explicit "Yes" approves.
+ * On approval the session leaves plan mode, which arms the agent-mode
+ * `<system_reminder>` for the next Run.
  */
 function buildCreatePlanContinuationFrame(
   pending: PendingExec,
   result: ExtractedToolResult,
+  sessionKey: string | undefined,
+  cursorSessionID: string,
 ): Uint8Array {
-  const interactionId = pending.resultMetadata?.interactionId
+  const metadata = pending.resultMetadata ?? {}
+  const interactionId = metadata.interactionId
   if (typeof interactionId !== "number") {
     throw new CursorProtocolError("Bridged CreatePlan lost its interaction id")
   }
-  if (result.error !== undefined) {
+  const planUri = metadata.planUri
+  if (typeof planUri !== "string" || !planUri.trim()) {
+    throw new CursorProtocolError("Bridged CreatePlan lost its plan URI")
+  }
+
+  const approved = metadata.createPlanBridgeKind === "approve"
+    ? createPlanApproved(
+        result.output,
+        result.error !== undefined,
+        typeof metadata.createPlanQuestion === "string" ? metadata.createPlanQuestion : "",
+      )
+    : result.error === undefined
+  if (!approved) {
+    const reason = result.error?.trim()
     return buildCreatePlanInteractionReply(interactionId, {
-      error: { error: result.error.trim() || "Native plan proposal failed" },
+      error: { error: reason || CREATE_PLAN_NOT_APPROVED_REASON },
       plan_uri: "",
     })
   }
-  const planUri = pending.resultMetadata?.planUri
-  if (typeof planUri !== "string" || !planUri.trim()) {
-    throw new CursorProtocolError("Bridged CreatePlan lost its native plan URI")
+
+  // The question-emulated path can report execution approval only when a host
+  // kickoff exists. Otherwise keep planning mode active and return an error.
+  if (metadata.createPlanBridgeKind === "approve" && !hasPlanExecutionKickoff()) {
+    return buildCreatePlanInteractionReply(interactionId, {
+      error: { error: "The plan was approved, but this host cannot start its execution turn." },
+      plan_uri: planUri,
+    })
   }
+
+  // Approved: planning is over for this plan, so drop the plan-mode reminder
+  // and hand the next Run the agent-mode contract, exactly as an approved
+  // plan_exit does.
+  setActiveCursorMode(sessionKey, "agent")
+
+  // Only the question-emulated path needs the provider's synthetic build turn.
+  // A host stage tool owns both approval and execution handoff itself.
+  if (metadata.createPlanBridgeKind === "approve" && sessionKey) {
+    const absolute =
+      typeof metadata.planPath === "string" && metadata.planPath.trim()
+        ? metadata.planPath.trim()
+        : planPathFromUri(planUri)
+    const workspaceRoot =
+      typeof metadata.workspaceRoot === "string" ? metadata.workspaceRoot : undefined
+    if (!queuePlanExecutionKickoff({
+      sessionID: sessionKey,
+      planPath: formatPlanKickoffPath(absolute, workspaceRoot),
+      cursorSessionID,
+    })) {
+      return buildCreatePlanInteractionReply(interactionId, {
+        error: { error: "The plan was approved, but this host cannot start its execution turn." },
+        plan_uri: planUri,
+      })
+    }
+  }
+
   return buildCreatePlanInteractionReply(interactionId, {
     success: {},
     plan_uri: planUri,
@@ -1260,7 +1421,12 @@ export function deliverContinuationResults(
       }
     } else if (pending.resultField === CREATE_PLAN_RESULT_FIELD) {
       try {
-        frames = [buildCreatePlanContinuationFrame(pending, r)]
+        frames = [buildCreatePlanContinuationFrame(
+          pending,
+          r,
+          session.openCodeSessionId,
+          session.sessionId,
+        )]
       } catch (error) {
         trace(`continuation: create_plan encode FAILED execId=${r.execId} err=${(error as Error).message}`)
         sessionManager.close(session, "result-write-failed")
@@ -1772,10 +1938,9 @@ export async function pump(
     if (parsed.toolName !== "read") return false
     const requested = typeof parsed.args.filePath === "string" ? parsed.args.filePath : ""
     if (!requested) return false
-    // A scheme-addressed target is the host's to resolve, not a local file to
-    // stat. Rejecting it here makes host-mounted capabilities (oh-my-pi's
-    // `xd://` device URLs, which is how every MCP tool is exposed by default)
-    // permanently unreachable through this provider.
+    // A scheme-addressed target is the advertised host executor's to resolve,
+    // not a local file to stat. Rejecting it here would make any URI-backed
+    // capability permanently unreachable through this provider.
     if (isUriReadTarget(requested)) {
       trace(`exec: forwarding URI read target id=${parsed.id} target=${JSON.stringify(requested)}`)
       return false
@@ -2483,6 +2648,10 @@ export async function pump(
               && isBridgedCursorPlanModeActive(session.openCodeSessionId)
               && advertisedToolNameSet.has(CURSOR_PLAN_STAGE_TOOL)
               && advertisedToolNameSet.has("write"),
+            planModeActive: isCursorPlanModeActive(session.openCodeSessionId),
+            ...(getActiveCursorMode(session.openCodeSessionId)
+              ? { activeCursorModeId: getActiveCursorMode(session.openCodeSessionId)! }
+              : {}),
             workspaceRoot: workspaceRootFromRequestContext(session.requestContext),
           })
         } catch {
@@ -2615,8 +2784,13 @@ export async function pump(
         return
       }
       if (handled.outcome === "bridged" && handled.createPlan) {
+        // Either a host plan-stage tool (writes the plan and runs its own
+        // approval UI) or the emulated prompt after the provider already wrote
+        // the plan. Both hold Cursor's query open until the user decides.
         const plan = handled.createPlan
-        const staged = createPlanStageInput(plan.args)
+        const staged = plan.bridge.kind === "stage" ? createPlanStageInput(plan.args) : undefined
+        const planUri = staged?.plan_uri ?? plan.planUri ?? ""
+        const input = staged ?? plan.questionInput ?? {}
         const stageExecId = session.nextBridgedExecId++
         sessionManager.registerPending(
           stageExecId,
@@ -2627,20 +2801,33 @@ export async function pump(
           {
             interactionId: handled.id,
             createPlanToolCallId: plan.toolCallId,
-            planUri: staged.plan_uri,
+            createPlanBridgeKind: plan.bridge.kind,
+            // The host echoes the prompt verbatim; it anchors the answer parse.
+            createPlanQuestion: plan.questionInput?.questions[0]?.question ?? "",
+            planUri,
+            // Absolute path for the post-Yes OpenCode kickoff (plan_exit shape).
+            ...(typeof plan.planPath === "string" && plan.planPath.trim()
+              ? { planPath: plan.planPath.trim() }
+              : {}),
+            workspaceRoot: workspaceRootFromRequestContext(session.requestContext),
           },
         )
         const stageToolCallId = `cursor_${session.sessionId}_${stageExecId}`
         trace(
-          `interaction_query: BRIDGED create_plan id=${handled.id} ` +
-            `stageToolCallId=${stageToolCallId} cursorToolCallId=${plan.toolCallId || "(none)"}`,
+          `interaction_query: BRIDGED create_plan id=${handled.id} bridge=${plan.bridge.kind} ` +
+            `hostTool=${plan.toolName} stageToolCallId=${stageToolCallId} ` +
+            `planUri=${planUri || "(none)"} cursorToolCallId=${plan.toolCallId || "(none)"}`,
         )
+        // Cursor sends the plan body through the interaction query, not the
+        // text stream, so nothing has shown it yet. Put it in the transcript
+        // before asking — approving a plan you cannot read is not approval.
+        if (plan.planReview) emitText(plan.planReview)
         closeOpenSpans()
         safeEnqueue({
           type: "tool-call",
           toolCallId: stageToolCallId,
           toolName: plan.toolName,
-          input: JSON.stringify(staged),
+          input: JSON.stringify(input),
         } as V3Part)
         emitFinish(undefined, { unified: "tool-calls", raw: undefined })
         return
@@ -2816,13 +3003,21 @@ export function buildOpenCodeInteractionGuidance(
       "- When user input is required, call the OpenCode `question` tool. Cursor-native AskQuestion requests are also accepted and answered through it.",
     )
   }
+  // CreatePlan is a Cursor InteractionQuery (#7), not an OpenCode/MCP catalog
+  // tool. Always say so when we advertise any tools — otherwise the model sees
+  // CreatePlan in Cursor's function definitions, notices it is absent from the
+  // OpenCode list, and narrates "No CreatePlan MCP tool is available" even
+  // though the provider bridges the native interaction.
+  instructions.push(
+    "- Cursor-native CreatePlan is accepted as a Cursor interaction (not an OpenCode or MCP catalog tool). Raise it normally; the provider writes the plan under the host's calculated plans directory and handles execution approval. Do not narrate that CreatePlan is missing, unavailable, or not an MCP tool.",
+  )
   if (names.has("plan_enter")) {
     instructions.push(
-      "- To enter plan mode, call the OpenCode `plan_enter` tool. Cursor-native SwitchMode requests for plan/spec are also accepted and answered through it. Cursor-native CreatePlan is accepted and written as plain markdown under the host's project-config `plans/` dir (via the path bridge), or the host global data `plans/` dir when there is no git worktree.",
+      "- To enter plan mode, call the OpenCode `plan_enter` tool. Cursor-native SwitchMode requests for plan/spec are also accepted and answered through it.",
     )
   } else if (names.has("todowrite")) {
     instructions.push(
-      "- For planning, call the OpenCode `todowrite` tool and/or write the plan as normal markdown. Cursor-native CreatePlan is accepted and stored under the host's calculated plans directory.",
+      "- For planning task lists, call the OpenCode `todowrite` tool and/or write the plan as normal markdown.",
     )
   }
   if (names.has("plan_exit")) {
@@ -2850,8 +3045,8 @@ export function buildOpenCodeInteractionGuidance(
       `- To read an MCP resource, call \`${CUSTOM_READ_MCP_RESOURCE_TOOL}\`; do not use Cursor's native resource-reading interaction.`,
     )
   }
-  if (names.has("task") || names.has("actor")) {
-    const target = names.has("actor") ? "`actor`" : "`task`"
+  if (names.has("task")) {
+    const target = "`task`"
     const available = subagents.agents.map((agent) => `\`${agent.name}\``).join(", ")
     instructions.push(
       `- Native Cursor Task/subagent requests are executed through OpenCode ${target}. ` +
@@ -2888,8 +3083,8 @@ export function buildOpenCodeInteractionGuidance(
     `OpenCode exposes exactly these executable tools for this turn: ${[...names].map((name) => `\`${name}\``).join(", ")}.`,
     `Workspace root: ${JSON.stringify(workspaceRoot)}. Resolve workspace paths against exactly this root; never invent an absolute prefix, and verify uncertain paths with an available tool before using them.`,
     subagents.executor
-      ? "Call only tools in that exact list. Cursor-native Task/subagent requests are permitted because a compatible host executor is listed; other unlisted Cursor-native tools remain unavailable."
-      : "Call only tools in that exact list. Cursor-native tools that are not listed—including Task/subagents—are unavailable; do not invoke them. If a capability is absent, complete the work directly with the listed tools or explain the limitation.",
+      ? "Call only tools in that exact list for ordinary host execution. Cursor-native Task/subagent requests are permitted because a compatible host executor is listed. Bridged Cursor interactions named below (AskQuestion, SwitchMode, CreatePlan, …) are not OpenCode/MCP catalog tools — raise them normally and do not narrate that they are missing."
+      : "Call only tools in that exact list for ordinary host execution. Bridged Cursor interactions named below (AskQuestion, SwitchMode, CreatePlan, …) are not OpenCode/MCP catalog tools — raise them normally and do not narrate that they are missing. Other unlisted Cursor-native tools are not bridged; complete the work with the listed tools or explain the limitation without claiming a missing MCP tool.",
     ...(instructions.length > 0
       ? ["Use these OpenCode tools instead of equivalent Cursor-native UI interactions:"]
       : []),
@@ -3112,20 +3307,18 @@ export function computeAllowTools(
   return toolCount > 0 && toolChoice?.type !== "none"
 }
 
-export function resolveTurnToolState(input: {
+export async function resolveTurnToolState(input: {
   sessionKey?: string
   incomingTools: OpencodeToolDef[]
   toolChoice?: LanguageModelV3CallOptions["toolChoice"]
   isCompaction: boolean
-}): { advertisedTools: OpencodeToolDef[]; allowTools: boolean } {
+  abortSignal?: AbortSignal
+}): Promise<{ advertisedTools: OpencodeToolDef[]; allowTools: boolean }> {
   const { sessionKey, incomingTools, isCompaction } = input
   if (sessionKey && incomingTools.length > 0) {
     rememberToolCatalog(sessionKey, incomingTools.map((tool) => ({ ...tool })))
   }
-  const cached = sessionKey ? toolCatalogBySession.get(sessionKey) : undefined
-  if (sessionKey && cached && incomingTools.length === 0) {
-    rememberToolCatalog(sessionKey, cached)
-  }
+
   // Advertisement and permission are deliberately independent.
   //
   // Advertisement must stay byte-stable across every Run of a conversation or
@@ -3136,11 +3329,26 @@ export function resolveTurnToolState(input: {
   // collapsing the context to tools=0. A genuinely restricted turn still sends
   // a non-empty set and is advertised verbatim.
   //
+  // On cold start the lifecycle Run may arrive before any catalog exists. For a
+  // valid session key, wait until a sibling doStream publishes the first real
+  // catalog; cancellation is the only escape. Never time out to tools=[] and
+  // never invent or filter the enabled set.
+  //
   // Permission is computed from what actually arrived, so those lifecycle turns
   // still refuse execution and cannot duplicate the real turn's side effects.
-  const advertisedTools = incomingTools.length === 0
-    ? (cached?.map((tool) => ({ ...tool })) ?? [])
-    : incomingTools
+  let advertisedTools: OpencodeToolDef[]
+  if (incomingTools.length > 0) {
+    advertisedTools = incomingTools
+  } else if (sessionKey) {
+    const cached = toolCatalogBySession.get(sessionKey)
+      ?? await waitForSiblingToolCatalog(sessionKey, input.abortSignal)
+    advertisedTools = cached.map((tool) => ({ ...tool }))
+  } else {
+    // Without a session key there is no safe sibling-correlation key. Preserve
+    // the host's literal no-tool call rather than borrowing another session's
+    // catalog.
+    advertisedTools = []
+  }
   return {
     advertisedTools,
     allowTools: !isCompaction && computeAllowTools(incomingTools.length, input.toolChoice),
@@ -3163,6 +3371,10 @@ export function resolveTurnConversationReset(input: {
 }
 
 export function resetTurnStateForTests(): void {
+  for (const waiters of toolCatalogWaitersBySession.values()) {
+    for (const waiter of waiters) waiter.cancel()
+  }
+  toolCatalogWaitersBySession.clear()
   toolCatalogBySession.clear()
   postCompactionRebaseBySession.clear()
 }

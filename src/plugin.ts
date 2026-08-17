@@ -1,3 +1,5 @@
+import path from "node:path"
+import { pathToFileURL } from "node:url"
 import type { Hooks, PluginInput, AuthOAuthResult, Config } from "@opencode-ai/plugin"
 import type { Auth } from "@opencode-ai/sdk"
 import { CURSOR_COMPACTION_OPTION, CURSOR_PROVIDER_ID, CURSOR_WEBSITE_HOST, CURSOR_API_HOST } from "./shared.js"
@@ -9,7 +11,7 @@ import { readCache, discoverModels, isCacheFresh } from "./models.js"
 // host plugin imports so the OpenCode 2.0 entrypoint can share it.
 import { modelsToConfig } from "./model-config.js"
 export { modelInfoToConfig, modelsToConfig, thinkingSuffixBaseNames } from "./model-config.js"
-import { adoptCompatHostCacheDir, opencodeGlobalCacheDir } from "./context/paths.js"
+import { opencodeGlobalCacheDir, opencodeGlobalConfigDirs } from "./context/paths.js"
 import { readStoredAuth, type StoredAuth } from "./context/auth-store.js"
 import { resolveAgentUrl } from "./agent-url.js"
 import {
@@ -22,16 +24,75 @@ import {
   setCursorShellPath,
 } from "./shell-timeout.js"
 import { sessionActivity } from "./activity.js"
-import { openCodeWebSearchTool } from "./web-search-tool.js"
-import { cursorImageSaveTool } from "./image-save-tool.js"
+import { createOpenCodeWebSearchTool, openCodeWebSearchTool } from "./web-search-tool.js"
+import { createCursorImageSaveTool, cursorImageSaveTool } from "./image-save-tool.js"
+import {
+  createPlanExecutionKickoffText,
+  setPlanExecutionKickoff,
+} from "./plan-execution-kickoff.js"
 
 const MODULE_URL = new URL("./index.js", import.meta.url).href
 
+export async function loadClassicTools(options: {
+  importModule?: (specifier: string) => Promise<{ tool?: any }>
+  configDirs?: string[]
+} = {}): Promise<{
+  webSearch: any
+  imageSave: any
+}> {
+  const configDir = options.configDirs?.[0] ?? opencodeGlobalConfigDirs()[0]
+  const candidates = [
+    ...(configDir
+      ? [path.join(configDir, "node_modules", "@opencode-ai", "plugin", "dist", "index.js")]
+      : []),
+    "@opencode-ai/plugin",
+  ]
+  const importModule = options.importModule ?? ((specifier: string) => import(specifier))
+  // The global config copy is the host-owned installation; bare import is a fallback.
+  for (const candidate of candidates) {
+    try {
+      const specifier = path.win32.isAbsolute(candidate) && !path.isAbsolute(candidate)
+        ? new URL(`file:///${candidate.replaceAll("\\", "/")}`).href
+        : path.isAbsolute(candidate)
+          ? pathToFileURL(candidate).href
+          : candidate
+      const module = await importModule(specifier)
+      if (typeof module.tool === "function" && module.tool.schema) {
+        const factory = { tool: module.tool, schema: module.tool.schema }
+        return {
+          webSearch: createOpenCodeWebSearchTool(factory),
+          imageSave: createCursorImageSaveTool(factory),
+        }
+      }
+    } catch {
+      // Try the next host-owned/normal resolution location.
+    }
+  }
+  // `tool()` is an identity helper; the fallback definitions use plain JSON
+  // Schema accepted by OpenCode's legacy registry when no Zod helper is present.
+  return { webSearch: openCodeWebSearchTool, imageSave: cursorImageSaveTool }
+}
+
 export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
-  // Prefer strong OCP host identity when available; otherwise resolve from explicit host signals/install path.
-  await adoptCompatHostCacheDir()
   const cacheDir = opencodeGlobalCacheDir()
   const apiBaseURL = cursorApiBaseURL()
+  const classicTools = await loadClassicTools()
+
+  // After CreatePlan Yes, queue OpenCode's plan_exit-shaped synthetic turn so
+  // implementation starts. Failures stay in the kickoff module (trace only).
+  setPlanExecutionKickoff(async ({ sessionID, planPath }) => {
+    await input.client.session.promptAsync({
+      path: { id: sessionID },
+      body: {
+        agent: "build",
+        parts: [{
+          type: "text",
+          text: createPlanExecutionKickoffText(planPath),
+          synthetic: true,
+        }],
+      },
+    })
+  })
 
   // Last access token successfully resolved in this plugin instance. Config's
   // loadModels can only read OpenCode's durable store (auth.json /
@@ -161,11 +222,11 @@ export async function CursorPlugin(input: PluginInput): Promise<Hooks> {
       // `websearch` is a reserved OpenCode id and is filtered for third-party
       // providers after plugin tools are merged. Use the collision-safe id
       // Cursor already sees so this host-side fallback survives that filter.
-      custom_websearch: openCodeWebSearchTool,
+      custom_websearch: classicTools.webSearch,
       // Commits Cursor-generated image bytes, which cannot travel through the
       // host's text `write`. Handle-only, so its presence in the catalog does
       // not give any model a way to write arbitrary files — see image-save.ts.
-      cursor_image_save: cursorImageSaveTool,
+      cursor_image_save: classicTools.imageSave,
     },
 
     async event({ event }) {

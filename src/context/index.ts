@@ -16,11 +16,12 @@ export {
   transferFrozenRequestContext,
 } from "./frozen.js"
 export {
-  adoptCompatHostCacheDir,
+  HOST_PATH_BRIDGE,
   getHostCacheDirOverride,
   opencodeGlobalCacheDir,
   opencodeGlobalConfigDir,
   opencodeGlobalDataDir,
+  hostGlobalDataDir,
   resolveHostCacheDir,
   setHostCacheDirOverride,
 } from "./paths.js"

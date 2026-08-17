@@ -1,6 +1,6 @@
 import { CURSOR_PROVIDER_ID } from "./shared.js"
 import { createSdk, cursorApiBaseURL, cursorGetServerConfigTelemetryEnabled, isCursorPackage } from "./plugin-core.js"
-import { adoptCompatHostCacheDir, opencodeGlobalCacheDir } from "./context/paths.js"
+import { opencodeGlobalCacheDir } from "./context/paths.js"
 import { discoverModels, isCacheFresh, readCache, type ModelInfo } from "./models.js"
 import { resolveAgentUrl } from "./agent-url.js"
 import { sessionActivity } from "./activity.js"
@@ -22,6 +22,7 @@ import { applyCursorModels, applyCursorProvider } from "./opencode2/catalog.js"
 import { applyCursorIntegration, resolveCursorAccessToken } from "./opencode2/integration.js"
 import { markCompactionSession } from "./compaction-marker.js"
 import { markSessionDirectory } from "./session-directory.js"
+import { setPlanExecutionKickoff } from "./plan-execution-kickoff.js"
 import type { CreateCursorOptions } from "./index.js"
 import type { Cleanup, PluginContext, Plugin2 } from "./opencode2/types.js"
 
@@ -61,9 +62,13 @@ const plugin: Plugin2 = {
   id: "cursor.provider",
 
   setup: async (ctx: PluginContext): Promise<Cleanup> => {
-    // Prefer OCP HostProfile.cacheDir when present; else XDG host heuristic.
-    await adoptCompatHostCacheDir()
     const cacheDir = opencodeGlobalCacheDir()
+
+    // The 2.0 SessionDomain has `prompt` but no agent-selection method, so it
+    // cannot faithfully reproduce classic plan_exit's `agent: "build"` kickoff.
+    // Leave the handler absent: the continuation reports an execution error and
+    // retains plan mode instead of returning false success.
+    setPlanExecutionKickoff(undefined)
 
     const registrations: Array<{ dispose: () => Promise<void> }> = []
     const track = async (p: Promise<{ dispose: () => Promise<void> }>) => {
@@ -332,6 +337,7 @@ const plugin: Plugin2 = {
     return async () => {
       clearInterval(retry)
       unsubscribe?.()
+      setPlanExecutionKickoff(undefined)
       for (const registration of registrations.reverse()) {
         await registration.dispose().catch(() => {})
       }

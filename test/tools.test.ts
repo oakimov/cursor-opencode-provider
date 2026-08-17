@@ -516,7 +516,7 @@ describe("mapCursorArgsToOpencode", () => {
       args: { filePath: "/a.ts", oldString: "a", newString: "b" },
     })
   })
-  it("preserves OMP hashline edit input instead of dropping it", () => {
+  it("preserves an opaque textual edit input instead of dropping it", () => {
     const r = mapCursorArgsToOpencode("edit", {
       i: "Edit lines 1 and 3 at file start",
       input: "[/tmp/lines-1200.txt#9D54]\nPUT 1.=1:\n+EDITED line 1200\nPUT 3.=3:\n+EDITED K1 line 1198",
@@ -650,7 +650,7 @@ describe("parseExecServerMessage", () => {
     }
   })
 
-  it("extracts OpenCode/Kilo subagents from the generated Task catalog", () => {
+  it("extracts subagents from the generated OpenCode Task catalog", () => {
     const catalog = extractHostSubagentCatalog([{
       name: "task",
       description: [
@@ -674,31 +674,25 @@ describe("parseExecServerMessage", () => {
     })
   })
 
-  it("extracts MiMo subagents from Actor's nested dynamic enum", () => {
+  it("prefers Task's structured subagent enum over prose", () => {
     const catalog = extractHostSubagentCatalog([{
-      name: "actor",
+      name: "task",
       description: [
-        "Launch an actor.",
+        "Launch a subagent.",
         "Available agent types and the tools they have access to:",
         "- general: General work.",
         "- explore: Local search.",
         "- reviewer: Configured subagent.",
-        "- all-mode-agent: Listed in prose but rejected by Actor's enum.",
+        "- all-mode-agent: Listed in prose but rejected by the enum.",
       ].join("\n"),
       inputSchema: {
-        oneOf: [{
-          properties: {
-            operation: {
-              properties: {
-                subagent_type: { type: "string", enum: ["general", "explore", "reviewer"] },
-              },
-            },
-          },
-        }],
+        properties: {
+          subagent_type: { type: "string", enum: ["general", "explore", "reviewer"] },
+        },
       },
-    }, { name: "task", description: "Track work items" }])
+    }])
 
-    expect(catalog.executor).toBe("actor")
+    expect(catalog.executor).toBe("task")
     expect(catalog.complete).toBe(true)
     expect(catalog.agents.map((agent) => agent.name)).toEqual(["general", "explore", "reviewer"])
   })
@@ -744,34 +738,32 @@ describe("parseExecServerMessage", () => {
     expect(result?.localError).toBeUndefined()
   })
 
-  it("routes native subagent exec through MiMo actor when actor is advertised", () => {
+  it("keeps native subagent resume and background fields canonical", () => {
     const parsed = parseExecServerMessage({
       id: 35,
       subagent_args: {
         prompt: "Inspect the MCP import bridge",
         subagent_type: "bugbot",
-        resume_agent_id: "actor_previous",
+        resume_agent_id: "task_previous",
         run_in_background: true,
       },
     })
     expect(parsed).toBeDefined()
-    remapNativeSubagentForCatalog(parsed!, ["actor", "task", "read"])
+    remapNativeSubagentForCatalog(parsed!, ["task", "read"])
     expect(parsed).toMatchObject({
-      toolName: "actor",
+      toolName: "task",
       resultField: "subagent_result",
       args: {
-        operation: {
-          action: "spawn",
-          description: "Inspect the MCP import bridge",
-          prompt: "Inspect the MCP import bridge",
-          subagent_type: "explore",
-          actor_id: "actor_previous",
-        },
+        description: "Inspect the MCP import bridge",
+        prompt: "Inspect the MCP import bridge",
+        subagent_type: "explore",
+        task_id: "task_previous",
+        background: true,
       },
     })
   })
 
-  it("uses enabled Kilo scout for Cursor guide requests", () => {
+  it("uses an enabled custom scout for Cursor guide requests", () => {
     const parsed = parseExecServerMessage({
       id: 36,
       subagent_args: {
@@ -2028,8 +2020,8 @@ describe("exec safety net (unmapped variants)", () => {
 describe("isUriReadTarget", () => {
   it("treats scheme-addressed targets as the host's to resolve", () => {
     for (const target of [
-      "xd://everything_echo",
-      "xd://mcp/everything/get-resource-reference",
+      "resource://catalog/item",
+      "custom+transport://service/action",
       "https://example.com/spec.json",
       "http://localhost:3000/x",
       "file:///etc/hosts",

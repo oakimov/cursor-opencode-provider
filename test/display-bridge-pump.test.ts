@@ -487,12 +487,9 @@ describe("display-only ToolCall pump bridge", () => {
   })
 
   it("forwards a scheme-addressed read target to the host instead of refusing it", async () => {
-    // oh-my-pi mounts every discoverable tool — all MCP server tools included —
-    // under `xd://<tool>` device URLs read for their schema and written to for
-    // execution. Resolving those as workspace-relative paths stats them as
-    // missing, so refusing here would make every xd://-mounted MCP tool
-    // permanently unreachable through this provider.
-    for (const target of ["xd://everything_echo", "https://example.com/spec.json"]) {
+    // URI-backed capabilities belong to the advertised executor. Resolving them
+    // as workspace-relative paths would produce a false local missing-file error.
+    for (const target of ["resource://catalog/item", "https://example.com/spec.json"]) {
       const writes: Uint8Array[] = []
       const parts: any[] = []
       const session = fakeSession(
@@ -920,7 +917,7 @@ describe("display-only ToolCall pump bridge", () => {
     sessionManager.resolve(session.sessionId, 34)
   })
 
-  it("routes Cursor guide through enabled Kilo scout without changing local explore", async () => {
+  it("routes Cursor guide through an enabled custom scout without changing local explore", async () => {
     const writes: Uint8Array[] = []
     const parts: any[] = []
     const session = fakeSession(
@@ -946,45 +943,6 @@ describe("display-only ToolCall pump bridge", () => {
     const toolCall = parts.find((part) => part.type === "tool-call")
     expect(toolCall?.toolName).toBe("task")
     expect(JSON.parse(toolCall.input).subagent_type).toBe("scout")
-    sessionManager.resolve(session.sessionId, 34)
-  })
-
-  it("routes canonical subagent field #28 to MiMo actor when actor is advertised", async () => {
-    const writes: Uint8Array[] = []
-    const parts: any[] = []
-    let streamError: Error | undefined
-    const session = fakeSession(
-      [rawExecPayload(34, 28, rawSubagentArgs())],
-      writes,
-      [
-        { name: "actor", description: "Spawn actors" },
-        { name: "task", description: "Track work items" },
-        { name: "read", description: "Read" },
-      ],
-    )
-    const controller = {
-      enqueue(part: unknown) {
-        parts.push(part)
-      },
-      error(error: Error) {
-        streamError = error
-      },
-    } as ReadableStreamDefaultController<any>
-
-    await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
-
-    expect(streamError).toBeUndefined()
-    const toolCall = parts.find((part) => part.type === "tool-call")
-    expect(toolCall?.toolName).toBe("actor")
-    expect(JSON.parse(toolCall.input)).toEqual({
-      operation: {
-        action: "run",
-        description: "Investigate why the conversation stopped",
-        prompt: "Investigate why the conversation stopped",
-        subagent_type: "general",
-      },
-    })
-    expect(sessionManager.pendingFor(session.sessionId, 34)?.resultField).toBe("subagent_result")
     sessionManager.resolve(session.sessionId, 34)
   })
 

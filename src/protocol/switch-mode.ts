@@ -30,9 +30,9 @@
  *   to the host `question` tool and only rejects when that is absent too.
  *
  * Resolution is keyed solely on the advertised catalog under canonical tool
- * names — never on host identity or model id. OCP restates fork vocabulary
- * (`enter_plan` / `leave_plan`) under the canonical names before the provider
- * sees the catalog, so MiMo and Kilo take the native path unchanged.
+ * names — never on host identity or model id. A compatibility layer may restate
+ * alternate host vocabulary under canonical names before the provider sees the
+ * catalog, so the bridge itself remains OpenCode-shaped.
  *
  * CLI reject reason for user declines: "Mode switch rejected by user"
  * (chunk-7076/dist/ui.js onSwitchModeReject).
@@ -63,11 +63,12 @@ export const MISSING_TARGET_REASON = "Missing targetModeId"
  * compaction, summarization). OpenCode opens one alongside the real Run, and it
  * must not mutate session state — approving there flips plan mode twice and
  * lets the throwaway turn write its own plan file.
+ *
+ * Soft-ack with `approved{}` instead of `rejected{reason}`: a hard reject lands
+ * in the transcript and the real turn narrates "mode switches are blocked"
+ * even though the next Run will succeed. CreatePlan already soft-acks the same
+ * case; SwitchMode must match.
  */
-export const LIFECYCLE_TURN_REASON =
-  "This turn cannot call host tools (a lifecycle turn such as title generation " +
-  "or compaction), so the mode switch is not applied to the session."
-
 export const PLAN_EXIT_UNAVAILABLE_REASON =
   "Neither the OpenCode `plan_exit` tool nor the `question` tool is available to the " +
   "current agent, so leaving plan mode cannot be approved this turn."
@@ -88,12 +89,15 @@ export type SwitchModeHostTool = "plan_enter" | "plan_exit"
  *
  * - `native`   the host advertises the matching plan tool; bridge to it.
  * - `approve`  entering plan mode needs no host tool — approve immediately.
+ * - `ack`      lifecycle turn (`allowTools=false`): approve on the wire without
+ *              mutating session mode (same soft-ack pattern as CreatePlan).
  * - `question` leaving plan mode falls back to the host `question` prompt.
  * - `reject`   nothing can satisfy it; `reason` names the real cause.
  */
 export type SwitchModeBridge =
   | { kind: "native"; toolName: SwitchModeHostTool }
   | { kind: "approve" }
+  | { kind: "ack" }
   | { kind: "question"; input: OpencodeQuestionInput }
   | { kind: "reject"; reason: string }
 
@@ -204,13 +208,26 @@ export function resolveSwitchModeBridge(
   options: {
     allowTools: boolean
     advertised: ReadonlySet<string> | Iterable<string>
+    /** Cursor unified mode currently recorded for this session, if any. */
+    activeModeId?: string
   },
 ): SwitchModeBridge {
   const mapped = mapSwitchModeTarget(targetModeId)
   if (!mapped.ok) return { kind: "reject", reason: mapped.reason }
 
-  // Never mutate session mode from a lifecycle turn — see LIFECYCLE_TURN_REASON.
-  if (!options.allowTools) return { kind: "reject", reason: LIFECYCLE_TURN_REASON }
+  // Lifecycle turn: soft-ack on the wire, no session mutation. A hard reject
+  // would enter the transcript and make the real turn narrate a blocked switch.
+  if (!options.allowTools) return { kind: "ack" }
+
+  // Already in the target mode: nothing to approve. Cursor's own IDE handler
+  // auto-approves here too, and without this a model that asks to leave plan
+  // mode after the plan write already prompted would ask the user twice.
+  if (
+    options.activeModeId
+    && normalizeSwitchModeId(options.activeModeId) === normalizeSwitchModeId(targetModeId)
+  ) {
+    return { kind: "approve" }
+  }
 
   const names =
     options.advertised instanceof Set
@@ -333,6 +350,12 @@ export function getActiveCursorMode(sessionKey: string | undefined): string | un
   return activeCursorModeBySession.get(sessionKey)?.modeId
 }
 
+/** True while the provider has an approved Cursor plan/spec mode for this session. */
+export function isCursorPlanModeActive(sessionKey: string | undefined): boolean {
+  const mode = getActiveCursorMode(sessionKey)
+  return mode === "plan" || mode === "spec"
+}
+
 /** True after a bridged plan/spec Run has observed plan_enter removed by the host. */
 export function isBridgedCursorPlanModeActive(sessionKey: string | undefined): boolean {
   if (!sessionKey) return false
@@ -365,13 +388,13 @@ export function cursorModeSystemReminder(
   const id = normalizeSwitchModeId(targetModeId)
   if (!id) return undefined
   const first = options.firstTurn !== false
-  // Without a host plan_exit, the reachable way to ask for execution is a
-  // Cursor-native SwitchMode back to agent, which the provider turns into the
-  // approval prompt itself. Naming an unavailable tool would strand the model.
+  // Without a host plan_exit, recording the plan is itself the gate: the
+  // provider persists it and then asks the user whether to start implementing.
+  // Naming an unavailable tool would strand the model.
   const leavePlan =
     options.planExitAdvertised === false
-      ? "request a switch back to agent mode (Cursor SwitchMode, target `agent`), which asks the user to approve starting implementation"
-      : "call OpenCode `plan_exit` so the user can approve leaving plan mode"
+      ? "record the finished plan (Cursor CreatePlan). Writing it needs no approval, and the user is then asked whether to start implementing; if they decline, refine the plan and record it again"
+      : "record the finished plan, then call OpenCode `plan_exit` so the user can approve leaving plan mode"
 
   if (id === "plan" || id === "spec") {
     return wrapReminder(
@@ -381,7 +404,7 @@ export function cursorModeSystemReminder(
 1. Research enough to make an accurate plan.
 2. Before finishing, resolve decisions that would materially change the implementation path, touched files, architecture, user-visible behavior, data model, or validation strategy. If investigation cannot resolve one, ask clarifying questions in small batches (use the OpenCode \`question\` tool when available).
 3. Do not put choices in the plan for the user to resolve. The plan must present one recommended approach, not unresolved questions or "choose A or B" options.
-4. When ready, write or update the plan as markdown, then ${leavePlan}.
+4. When ready, ${leavePlan}.
 5. Do not execute the plan until the user confirms it.`
         : `Plan mode is still active. You MUST NOT make edits, run non-readonly tools (including changing configs or making commits), or otherwise modify system state. This supersedes any conflicting instruction.`,
     )
