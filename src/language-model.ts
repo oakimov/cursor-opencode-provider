@@ -829,12 +829,18 @@ async function startSession(
   // Compaction must not reuse the prior conversation; its first normal turn
   // must also rebase so the summary-agent checkpoint cannot replace the normal
   // system prompt and OpenCode's newly compacted history.
+  const lifecycle = !allowTools && !isCompaction && !recovery
   let bound = resuming
     ? { conversationId: resumeRecovery!.conversationId, reset: false, previousId: undefined }
-    : bindConversationId(sessionKey, { reset: resetState.reset || recovery?.kind === "rebase" })
-  let conversationState = resuming
-    ? resumeRecovery!.checkpoint
-    : (bound.reset ? undefined : getCheckpoint(bound.conversationId))
+    : bindConversationId(sessionKey, {
+        reset: resetState.reset || recovery?.kind === "rebase",
+        ephemeral: lifecycle,
+      })
+  let conversationState = lifecycle
+    ? undefined
+    : resuming
+      ? resumeRecovery!.checkpoint
+      : (bound.reset ? undefined : getCheckpoint(bound.conversationId))
   let checkpointGraph: ConversationBlobGraphStats = conversationState
     ? inspectConversationBlobGraph(bound.conversationId, conversationState)
     : { count: 0, bytes: 0, complete: true }
@@ -895,12 +901,13 @@ async function startSession(
   const interactionGuidance = buildOpenCodeInteractionGuidance(cursorTools, isCompaction, workspaceRoot)
   // After an approved SwitchMode, inject the Cursor CLI-shaped mode reminder
   // (same <system_reminder> contract the CLI uses after flipping unifiedMode).
-  const modeReminder = isCompaction
+  const startedWithCheckpoint = !!conversationState
+  const modeReminder = isCompaction || startedWithCheckpoint || lifecycle
     ? undefined
     : takeActiveCursorModeReminder(sessionKey, {
         advertisedTools: cursorTools.map((tool) => tool.name),
       })
-  const kickoffWarning = isCompaction
+  const kickoffWarning = isCompaction || startedWithCheckpoint || lifecycle
     ? undefined
     : takePlanExecutionKickoffWarning(sessionKey)
   const systemPrompt = [
@@ -1130,7 +1137,7 @@ async function startSession(
       displayToolCalls: 0,
       execRequests: 0,
     },
-    openCodeSessionId: sessionKey,
+    openCodeSessionId: lifecycle ? undefined : sessionKey,
     postCompactionRebase: isCompaction,
     toolCatalog: snapshotToolCatalog(sessionKey),
     stream,
@@ -3299,6 +3306,10 @@ export function spanEndParts(opts: {
   return out
 }
 
+function toolsInFixedOrder<T extends { name?: string }>(tools: readonly T[]): T[] {
+  return tools.map((tool) => ({ ...tool })).sort((left, right) => (left.name ?? "").localeCompare(right.name ?? ""))
+}
+
 /** Exported for tests — false for compaction/summary (no tools) and toolChoice none. */
 export function computeAllowTools(
   toolCount: number,
@@ -3316,7 +3327,7 @@ export async function resolveTurnToolState(input: {
 }): Promise<{ advertisedTools: OpencodeToolDef[]; allowTools: boolean }> {
   const { sessionKey, incomingTools, isCompaction } = input
   if (sessionKey && incomingTools.length > 0) {
-    rememberToolCatalog(sessionKey, incomingTools.map((tool) => ({ ...tool })))
+    rememberToolCatalog(sessionKey, toolsInFixedOrder(incomingTools))
   }
 
   // Advertisement and permission are deliberately independent.
@@ -3338,11 +3349,11 @@ export async function resolveTurnToolState(input: {
   // still refuse execution and cannot duplicate the real turn's side effects.
   let advertisedTools: OpencodeToolDef[]
   if (incomingTools.length > 0) {
-    advertisedTools = incomingTools
+    advertisedTools = toolsInFixedOrder(incomingTools)
   } else if (sessionKey) {
     const cached = toolCatalogBySession.get(sessionKey)
       ?? await waitForSiblingToolCatalog(sessionKey, input.abortSignal)
-    advertisedTools = cached.map((tool) => ({ ...tool }))
+    advertisedTools = toolsInFixedOrder(cached)
   } else {
     // Without a session key there is no safe sibling-correlation key. Preserve
     // the host's literal no-tool call rather than borrowing another session's

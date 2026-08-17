@@ -94,8 +94,11 @@ export function peekConversationId(sessionKey: string): string {
  */
 export function bindConversationId(
   sessionKey: string | undefined,
-  opts?: { reset?: boolean },
+  opts?: { reset?: boolean; ephemeral?: boolean },
 ): { conversationId: string; reset: boolean; previousId?: string } {
+  if (opts?.ephemeral) {
+    return { conversationId: crypto.randomUUID(), reset: false }
+  }
   if (!sessionKey) {
     return { conversationId: crypto.randomUUID(), reset: !!opts?.reset }
   }

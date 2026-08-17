@@ -88,7 +88,7 @@ describe("compaction tool catalog", () => {
     // The production race exceeded one second. A timeout merely moves the race
     // threshold, so assert that the lifecycle call remains blocked well beyond
     // the old 100 ms cutoff and resolves only when the real catalog arrives.
-    const tools = [{ name: "read" }, { name: "bash" }]
+    const tools = [{ name: "bash" }, { name: "read" }]
     const sessionKey = "ses_cold_start"
     let settled = false
 
@@ -124,6 +124,17 @@ describe("compaction tool catalog", () => {
 
     abort.abort()
     await expect(lifecycle).rejects.toThrow("tool-catalog wait cancelled")
+  })
+
+  it("advertises every enabled tool in a fixed name order", async () => {
+    expect(await resolveTurnToolState({
+      sessionKey: "ses_order",
+      incomingTools: [{ name: "write" }, { name: "bash" }, { name: "read" }],
+      isCompaction: false,
+    })).toEqual({
+      advertisedTools: [{ name: "bash" }, { name: "read" }, { name: "write" }],
+      allowTools: true,
+    })
   })
 
   it("advertises a genuinely restricted catalog verbatim", async () => {

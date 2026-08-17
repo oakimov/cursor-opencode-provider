@@ -193,9 +193,9 @@ describe("collectRules / buildRequestContext", () => {
     })
     const tools = ctx.tools as Array<Record<string, unknown>>
     expect(tools.map((tool) => [tool.provider_identifier, tool.tool_name])).toEqual([
+      ["opencode", "custom_helper"],
       ["github", "create_pull_request"],
       ["my_server", "lookup"],
-      ["opencode", "custom_helper"],
     ])
   })
 })

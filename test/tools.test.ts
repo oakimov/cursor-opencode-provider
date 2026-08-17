@@ -180,11 +180,12 @@ describe("toolsToDescriptors", () => {
       { name: "read", description: "Read" },
       { name: "github_create_pull_request", description: "Open a PR" },
     ], "opencode", ["github"])
-    expect(d[0].provider_identifier).toBe("opencode")
-    expect(d[0].name).toBe("opencode-read")
-    expect(d[1].provider_identifier).toBe("github")
-    expect(d[1].tool_name).toBe("create_pull_request")
-    expect(d[1].name).toBe("github-create_pull_request")
+    const read = d.find((tool) => tool.tool_name === "read")
+    const pr = d.find((tool) => tool.tool_name === "create_pull_request")
+    expect(read?.provider_identifier).toBe("opencode")
+    expect(read?.name).toBe("opencode-read")
+    expect(pr?.provider_identifier).toBe("github")
+    expect(pr?.name).toBe("github-create_pull_request")
   })
 
   it("defaults a missing schema to an empty object schema", () => {
@@ -198,8 +199,8 @@ describe("toolsToDescriptors", () => {
       { name: "custom_websearch", description: "Search" },
       { name: "custom_webfetch", description: "Fetch" },
     ])
-    expect(d.map((tool) => tool.name)).toEqual(["custom_websearch", "custom_webfetch"])
-    expect(d.map((tool) => tool.tool_name)).toEqual(["custom_websearch", "custom_webfetch"])
+    expect(d.map((tool) => tool.name)).toEqual(["custom_webfetch", "custom_websearch"])
+    expect(d.map((tool) => tool.tool_name)).toEqual(["custom_webfetch", "custom_websearch"])
   })
 })
 
@@ -239,9 +240,9 @@ describe("custom web tool aliases", () => {
       { name: "webfetch", description: "Fetch" },
     ])
     expect(catalog.aliases.get("custom_websearch")).toBe("brave-search_brave_web_search")
-    expect(catalog.advertisedTools[0]!.name).toBe("custom_websearch")
+    expect(catalog.advertisedTools.some((tool) => tool.name === "custom_websearch")).toBe(true)
     const flat = toolsToDescriptors(catalog.advertisedTools, "opencode", ["brave-search"])
-    expect(flat[0]).toMatchObject({
+    expect(flat.find((tool) => tool.name === "custom_websearch")).toMatchObject({
       name: "custom_websearch",
       provider_identifier: "brave-search",
       tool_name: "custom_websearch",

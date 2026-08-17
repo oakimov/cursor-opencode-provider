@@ -34,6 +34,14 @@ describe("conversation bind / compaction reset", () => {
     expect(bindConversationId("ses_abc").conversationId).toBe(sessionIdToUuid("ses_abc"))
   })
 
+  it("ephemeral binds do not replace the sticky conversation", () => {
+    const sticky = bindConversationId("ses_live").conversationId
+    const ephemeral = bindConversationId("ses_live", { ephemeral: true })
+    expect(ephemeral.reset).toBe(false)
+    expect(ephemeral.conversationId).not.toBe(sticky)
+    expect(bindConversationId("ses_live").conversationId).toBe(sticky)
+  })
+
   it("restores a reminted durable binding", () => {
     restoreConversationBinding("ses_restored", "persisted-conversation")
     expect(bindConversationId("ses_restored").conversationId).toBe("persisted-conversation")

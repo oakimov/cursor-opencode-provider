@@ -107,7 +107,9 @@ export function toolsToDescriptors(
   providerIdentifier = "opencode",
   knownMcpServers: Iterable<string> = [],
 ): Array<Record<string, unknown>> {
-  return tools.map((t) => {
+  return [...tools]
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map((t) => {
     const id = resolveToolServerIdentity(t.sourceName ?? t.name, providerIdentifier, knownMcpServers)
     const collisionSafeAlias = COLLISION_SAFE_ALIASES.has(t.name)
     return {

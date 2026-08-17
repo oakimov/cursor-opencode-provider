@@ -73,6 +73,10 @@ describe("encodeJsonAsValue", () => {
     expect(bytes[0]).toBe(0x2a) // (5 << 3) | 2
   })
 
+  it("encodes object keys in sorted order", () => {
+    expect(Buffer.from(encodeJsonAsValue({ b: 1, a: 2 })).equals(Buffer.from(encodeJsonAsValue({ a: 2, b: 1 })))).toBe(true)
+  })
+
   it("round-trips a JSON Schema object", () => {
     const schema = {
       type: "object",

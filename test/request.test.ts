@@ -101,12 +101,11 @@ describe("buildRunRequest", () => {
     const decoded = decodeMessage<any>("AgentClientMessage", data)
     const descriptors = decoded.run_request.mcp_tools?.mcp_tools
     expect(descriptors).toHaveLength(2)
-    expect(descriptors[0].name).toBe("opencode-read")
-    expect(descriptors[0].tool_name).toBe("read")
-    expect(descriptors[0].provider_identifier).toBe("opencode")
-    expect(descriptors[0].description).toBe("Read a file")
-    // input_schema is encoded as google.protobuf.Value bytes (non-empty)
-    expect(descriptors[0].input_schema.length).toBeGreaterThan(0)
+    const read = descriptors.find((tool: { tool_name: string }) => tool.tool_name === "read")
+    expect(read.name).toBe("opencode-read")
+    expect(read.provider_identifier).toBe("opencode")
+    expect(read.description).toBe("Read a file")
+    expect(read.input_schema.length).toBeGreaterThan(0)
   })
 
   it("advertises tools on the LIVE request_context path (not only prewarm #4)", () => {
@@ -128,16 +127,19 @@ describe("buildRunRequest", () => {
     expect(rc.web_fetch_enabled).toBe(false)
     // Flat list at RequestContext.tools (#7) — what the CLI historically used.
     expect(rc.tools).toHaveLength(2)
-    expect(rc.tools[0].name).toBe("opencode-read")
-    expect(rc.tools[0].tool_name).toBe("read")
-    expect(rc.tools[0].input_schema.length).toBeGreaterThan(0)
+    const read = rc.tools.find((tool: { tool_name: string }) => tool.tool_name === "read")
+    expect(read.name).toBe("opencode-read")
+    expect(read.input_schema.length).toBeGreaterThan(0)
     // Nested IDE path at #23 mcp_file_system_options.
     const fsOpts = rc.mcp_file_system_options
     expect(fsOpts.enabled).toBe(true)
     expect(fsOpts.mcp_descriptors).toHaveLength(1)
     expect(fsOpts.mcp_descriptors[0].server_identifier).toBe("opencode")
     expect(fsOpts.mcp_descriptors[0].tools).toHaveLength(2)
-    expect(fsOpts.mcp_descriptors[0].tools[0].tool_name).toBe("read")
+    expect(fsOpts.mcp_descriptors[0].tools.map((tool: { tool_name: string }) => tool.tool_name).sort()).toEqual([
+      "bash",
+      "read",
+    ])
     // Meta-tool options (#34) also populated.
     expect(rc.mcp_meta_tool_options.mcp_descriptors[0].tools).toHaveLength(2)
   })
@@ -165,14 +167,14 @@ describe("buildRunRequest", () => {
     const rc = decoded.run_request.action.user_message_action.request_context
     const flat = rc.tools
     expect(flat.map((t: any) => t.name)).toEqual([
-      "opencode-read",
-      "github-create_pull_request",
       "brave-web_search",
+      "github-create_pull_request",
+      "opencode-read",
     ])
     expect(flat.map((t: any) => t.provider_identifier)).toEqual([
-      "opencode",
-      "github",
       "brave",
+      "github",
+      "opencode",
     ])
     const descriptors = rc.mcp_file_system_options.mcp_descriptors
     expect(descriptors.map((d: any) => d.server_identifier)).toEqual([

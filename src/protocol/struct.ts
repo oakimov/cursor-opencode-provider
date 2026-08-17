@@ -262,7 +262,7 @@ export function encodeJsonAsValue(v: unknown): Uint8Array {
     writeLengthDelimited(out, 6, new Uint8Array(lv))
   } else if (typeof v === "object") {
     const st: number[] = []
-    for (const [key, val] of Object.entries(v as Record<string, unknown>)) {
+    for (const [key, val] of Object.entries(v as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right))) {
       if (val === undefined) continue
       const entry: number[] = []
       writeString(entry, 1, key)

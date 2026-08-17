@@ -65,6 +65,7 @@ async function scanSkillsRoot(root: string, out: Map<string, CollectedSkill>): P
   } catch {
     return
   }
+  entries.sort()
   for (const name of entries) {
     const skillMd = path.join(root, name, "SKILL.md")
     if (!(await exists(skillMd))) continue

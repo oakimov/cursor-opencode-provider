@@ -113,6 +113,7 @@ async function expandGlob(pattern: string, workspaceRoot: string): Promise<strin
     } catch {
       return
     }
+    entries.sort()
     for (const name of entries) {
       if (name === "node_modules" || name === ".git") continue
       const full = path.join(dir, name)

@@ -22,6 +22,7 @@ async function listLocalPlugins(dir: string): Promise<CollectedPlugin[]> {
   } catch {
     return []
   }
+  entries.sort()
   for (const name of entries) {
     if (!/\.(m?[jt]s)$/.test(name)) continue
     const full = path.join(dir, name)
