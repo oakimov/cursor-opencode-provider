@@ -2036,7 +2036,10 @@ export async function pump(
       ? tokenDetails
         ? buildLanguageModelV3UsageFromCounters(
             counters!,
-            { contextTotalTokens: tokenDetails.usedTokens },
+            {
+              contextTotalTokens: tokenDetails.usedTokens,
+              priorContextTokens: session.cacheDiagnostics?.priorTokenDetails?.usedTokens,
+            },
           )
         : emptyLanguageModelV3Usage()
       : emptyLanguageModelV3Usage())

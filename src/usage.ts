@@ -15,6 +15,8 @@ export type CursorUsageCounters = {
 export type CursorUsageOptions = {
   /** Cursor checkpoint occupancy, including the current turn's output. */
   contextTotalTokens?: number
+  /** Previous turn's occupancy. When Cursor's cache read covers this window, do not dilute the hit by multi-step TurnEnded aggregates. */
+  priorContextTokens?: number
 }
 
 export type CursorCacheDiagnosticStats = {
@@ -81,9 +83,18 @@ export function buildLanguageModelV3UsageFromCounters(
   // TurnEnded can aggregate several internal model calls, so its absolute input
   // and cache counts can exceed the final checkpoint occupancy. Preserve the
   // cache proportions while normalizing the partition to Cursor's context total.
-  const cacheRead = rawInput > 0
+  const proportionalRead = rawInput > 0
     ? Math.min(input, Math.round(input * rawCacheRead / rawInput))
     : 0
+  const priorContext = options.priorContextTokens
+  const prefixRead =
+    typeof priorContext === "number"
+    && Number.isFinite(priorContext)
+    && priorContext > 0
+    && rawCacheRead >= priorContext
+      ? Math.min(input, Math.trunc(priorContext))
+      : 0
+  const cacheRead = Math.min(input, Math.max(proportionalRead, prefixRead))
   const cacheWrite = rawInput > 0
     ? Math.min(input - cacheRead, Math.round(input * rawCacheWrite / rawInput))
     : 0
@@ -249,9 +260,13 @@ export function formatTurnUsageValidation(
     : undefined
   const rawCached = counters.cacheRead + counters.cacheWrite
   const sentCached = cacheRead + cacheWrite
+  const proportionalCached = counters.inputTokens > 0 && input > 0
+    ? Math.round(input * rawCached / counters.inputTokens)
+    : 0
   const cacheRatioMatch = tokenDetails
     ? counters.inputTokens > 0 && input > 0
       ? Math.abs(rawCached / counters.inputTokens - sentCached / input) <= 1 / input
+        || (sentCached >= proportionalCached && sentCached <= input)
       : rawCached === 0 && sentCached === 0
     : undefined
   const status =

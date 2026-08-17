@@ -81,6 +81,26 @@ describe("buildLanguageModelV3UsageFromTurnEnded", () => {
     })
   })
 
+  it("does not dilute a prefix cache hit by multi-step TurnEnded aggregates", () => {
+    const usage = buildLanguageModelV3UsageFromTurnEnded(
+      {
+        input_tokens: 94_836,
+        output_tokens: 3_513,
+        cache_read: 45_952,
+        cache_write: 0,
+        reasoning_tokens: 3_178,
+      },
+      { contextTotalTokens: 50_702, priorContextTokens: 45_243 },
+    )
+    expect(usage.inputTokens).toEqual({
+      total: 47_189,
+      noCache: 1_946,
+      cacheRead: 45_243,
+      cacheWrite: 0,
+    })
+    expect(usage.outputTokens?.total).toBe(3_513)
+  })
+
   it("uses checkpoint occupancy as the total while preserving cache proportions", () => {
     const usage = buildLanguageModelV3UsageFromTurnEnded(
       {
