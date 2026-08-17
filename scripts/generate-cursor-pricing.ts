@@ -68,6 +68,7 @@ const DISPLAY_NAME_TO_MODEL_ID: Record<string, string> = {
   "Gemini 3.1 Pro": "gemini-3.1-pro",
   "Gemini 3.5 Flash": "gemini-3.5-flash",
   "Gemini 3.6 Flash": "gemini-3.6-flash",
+  "Gemini 3.7 Flash": "gemini-3.7-flash",
   "GLM 5.2": "glm-5.2",
   "GPT-5 Mini": "gpt-5-mini",
   // Cursor lists Codex-branded GPT-5.1 rows; our AvailableModels id is gpt-5.1.

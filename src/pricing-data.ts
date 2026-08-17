@@ -76,10 +76,10 @@ export const CURSOR_MODEL_COSTS = {
     "cache_write": 3.75
   },
   "claude-sonnet-5": {
-    "input": 3,
-    "output": 15,
-    "cache_read": 0.3,
-    "cache_write": 3.75
+    "input": 2,
+    "output": 10,
+    "cache_read": 0.2,
+    "cache_write": 2.5
   },
   "gemini-2.5-flash": {
     "input": 0.3,
@@ -105,6 +105,11 @@ export const CURSOR_MODEL_COSTS = {
     "input": 1.5,
     "output": 7.5,
     "cache_read": 0.15
+  },
+  "gemini-3.7-flash": {
+    "input": 0.75,
+    "output": 3.5,
+    "cache_read": 0.075
   },
   "glm-5.2": {
     "input": 1.4,
@@ -264,6 +269,10 @@ export const CURSOR_MODEL_CONTEXTS = {
     "maxContext": 200000,
     "maxContextForMaxMode": 1000000
   },
+  "gemini-3.7-flash": {
+    "maxContext": 200000,
+    "maxContextForMaxMode": 1000000
+  },
   "glm-5.2": {
     "maxContext": 200000
   },
@@ -371,6 +380,9 @@ export const CURSOR_MODEL_CAPABILITIES = {
     "supportsImages": true
   },
   "gemini-3.6-flash": {
+    "supportsImages": true
+  },
+  "gemini-3.7-flash": {
     "supportsImages": true
   },
   "glm-5.2": {
