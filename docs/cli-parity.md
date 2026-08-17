@@ -1,6 +1,6 @@
 # Feature Parity: cursor-opencode-provider vs Cursor CLI
 
-Comparison against the decompiled Cursor agent CLI **2026.08.11-e8db854** (client version reported in `src/statsig.ts`). Last verified 2026-08-16.
+Comparison against the decompiled Cursor agent CLI **2026.08.11-e8db854** (local `~/.local/share/cursor-agent/versions/`; client version resolved via `src/protocol/client-version.ts`). Last verified 2026-08-18.
 
 **Legend:** ✅ full parity · 🔶 partial/adapted · ❌ not implemented · ⚪ N/A (not a CLI concern)
 
@@ -12,7 +12,7 @@ Comparison against the decompiled Cursor agent CLI **2026.08.11-e8db854** (clien
 | `RunSSE` / `RunPoll` transports | Yes | No (HTTP/2 bidi only) | ❌ |
 | Client msgs: run_request, exec, kv, conversation_action, exec_control, interaction_response, client_heartbeat, prewarm | All 8 | All except `prewarm_request` (RunRequest.mcp_tools is prewarm-only, empty on real turns) | 🔶 |
 | Server msgs: interaction_update, exec, checkpoint_update, kv, exec_control, interaction_query, ttft_breakdown | All | All except `ttft_breakdown` (not decoded) | 🔶 |
-| ConversationActions | 16 (user_message, resume, cancel, summarize, shell_command, start/execute_plan, async_ask_question_completion, cancel_subagent, background_task/shell/subagent, subscription_notification, goal_continuation, inject_context + triggering_auth_id/user_info/request_context_parts) | 3: user_message, resume, cancel (via agent protocol) — summarize emulated via compaction marker; async_ask_question_completion used | 🔶 |
+| ConversationActions | 15 oneof actions + 3 metadata fields (`triggering_auth_id`, `triggering_user_info`, `request_context_parts`): user_message, resume, cancel, summarize, shell_command, start/execute_plan, async_ask_question_completion, cancel_subagent, background_task/shell/subagent, subscription_notification, goal_continuation, inject_context | Schema encodes 4: user_message, resume, cancel, async_ask_question_completion — summarize emulated via compaction marker | 🔶 |
 | Sparse protobuf decode w/ full schema | Native protobuf | Hand-rolled `struct.ts` sparse decoder + full schema table (`messages.ts`) | ✅ |
 | Checksums / framing / device id / client-version | Yes | Yes (`checksum.ts`, `framing.ts`, `device-id.ts`, `client-version.ts`) | ✅ |
 | Response-required write backpressure + heartbeat | Yes (blocks on heartbeats) | Yes (drain-await per stream, heartbeat replies) | ✅ |
@@ -23,12 +23,12 @@ Comparison against the decompiled Cursor agent CLI **2026.08.11-e8db854** (clien
 |---|---|---|---|
 | read / write / edit / delete / grep / ls | Native | Native + OpenCode permission-aware read/write; edit via catalog-aware remap | ✅ |
 | apply_patch (edit/write substitution) | Native `apply_patch` exists | Synthesizes `apply_patch` envelopes when OpenCode 1.x drops edit/write | 🔶 (parity by design) |
-| shell (streaming, stdin, background, force-background, allowlist precheck) | Native pty | shell_stream only; stdin/force/allowlist rejected | 🔶 |
+| shell (streaming, stdin, background, force-background, allowlist precheck) | Native pty | `shell_stream` + `background_shell_spawn` (bash/nohup); stdin / force-background / allowlist precheck unsupported | 🔶 |
 | mcp, list_mcp_resources, read_mcp_resource, mcp_state | Native | MCP exec + provider-control variants | ✅ |
 | subagent, subagent_await | Full SubagentType oneof (computer_use, browser_use, explore, custom, bash, shell, vm_setup_helper, debug, cursor_guide, watch_video, media_review) + permission modes | subagent bridged to OpenCode `task`; subtype set limited to what OpenCode advertises; await unsupported | 🔶 |
 | request_context | Native | provider-control | ✅ |
 | diagnostics, canvas_diagnostics | Native | ❌ | ❌ |
-| fetch / web_fetch | Native | ❌ (websearch/webfetch via OpenCode tools instead) | 🔶 |
+| fetch / web_fetch | Native exec + UI | Native exec unsupported; capability via host `custom_webfetch` / `webfetch` (see Interactions) | 🔶 (parity by design) |
 | record_screen, computer_use | Native (X11/xdotool, worker) | ❌ | ❌ |
 | execute_hook, redacted_read, smart_mode_classifier, git_diff_request | Native | ❌ | ❌ |
 | pi_read/bash/edit/write/grep/find/ls (Pi/OMP protocol) | — | ✅ (pi-bridge hosts) | ✅ (provider extra) |
@@ -37,16 +37,16 @@ Comparison against the decompiled Cursor agent CLI **2026.08.11-e8db854** (clien
 
 | Interaction | Cursor CLI | This provider | Match |
 |---|---|---|---|
-| #2 web_search | Native search UI | Rejected (headless); OpenCode `websearch`/`custom_websearch` tool registered instead | 🔶 |
+| #2 web_search | Native search UI | Rejected by design; `web_search_enabled=false` so Cursor prefers host `custom_websearch` (interaction replies cannot carry OpenCode tool results) | 🔶 (parity by design) |
 | #3 ask_question | Blocks until user answers; async variant via `async_ask_question_completion_action` | Bridged to OpenCode `question` tool, CLI-verbatim semantics, async echo of server args | ✅ |
 | #4 switch_mode | Blocks until approve/reject | Three tiers: native `plan_enter`/`plan_exit` when advertised → else enter-plan approved outright → else leave-plan via host `question`; CLI-shaped system reminder injected on next Run | ✅ |
-| #7 create_plan | Writes Cursor plan file, returns plan_uri | Writes plain markdown to host `plans/` dir | 🔶 |
+| #7 create_plan | Writes Cursor plan file, returns plan_uri | Writes plain markdown to host `plans/` dir; execution gated (host plan-stage tool or `question` after plan review); classic plugin kickoff on Yes | 🔶 |
 | #8 setup_vm | Full VM env setup | Ack `success:{}` | 🔶 |
-| #9 web_fetch | Native fetch UI | Rejected headless | 🔶 |
+| #9 web_fetch | Native fetch UI | Rejected by design; `web_fetch_enabled=false` so Cursor prefers host `custom_webfetch` / `webfetch` | 🔶 (parity by design) |
 | #10 pr_management | Native PR workflow (gh) | Rejected | ❌ |
 | #11 mcp_auth | OAuth flow (pkce, Slack client-id) | Rejected | ❌ |
 | #12 generate_image | Approve → server generates → binary write exec | Approve + stage bytes + `cursor_image_save` plugin tool (permission-gated), byte-exact verified | ✅ |
-| #13 replace_env | Native | Acknowledged (no-UI case) | 🔶 |
+| #13 replace_env | Native | Failed (`Environment replacement is not supported…`) | 🔶 |
 | #14 connect_scm | Native SCM connect | Rejected | ❌ |
 
 ## Display / transcript surface
@@ -94,6 +94,6 @@ These have no provider equivalent by design — the provider is a *host language
 ## Bottom line
 
 - **Core agent protocol:** near-total parity — every message class, checkpoint/KV semantics, token accounting, backpressure, and the interaction machinery are mirrored, many CLI-verbatim.
-- **Tools:** the full read/write/edit/grep/ls/mcp/subagent family plus Pi variants; deliberately unsupported: shell args/allowlist, computer use, record_screen, hooks, diagnostics, redacted_read, git_diff, smart_mode_classifier.
-- **Interactions:** 4 of 11 bridged with CLI-verbatim semantics (ask_question, switch_mode, create_plan, generate_image); 5 rejected headless (web, PR, MCP auth, SCM); 2 acked.
-- **Biggest gaps:** PR management, MCP OAuth approval, computer use/screen recording, full ConversationAction surface (background jobs, goal continuation, inject_context, shell_command), and everything UI-shaped (TUI, notifications, sudo, worktrees, sandbox).
+- **Tools:** the full read/write/edit/grep/ls/mcp/subagent family plus Pi variants and background shell spawn; deliberately unsupported: shell stdin/force/allowlist, computer use, record_screen, hooks, diagnostics, redacted_read, git_diff, smart_mode_classifier.
+- **Interactions:** 3 ✅ bridges (ask_question, switch_mode, generate_image) + CreatePlan 🔶 (host plan file + execution gate); web search/fetch rejected by design and covered by host `custom_websearch` / `custom_webfetch`; setup_vm acked; replace_env failed; PR / MCP auth / SCM rejected.
+- **Biggest remaining gaps:** PR management, MCP OAuth approval, computer use/screen recording, full ConversationAction surface (background jobs, goal continuation, inject_context, shell_command), await/force-background shell continuity, git_diff / diagnostics exec, and everything UI-shaped (TUI, notifications, sudo, worktrees, sandbox). Web search/fetch are **not** gaps.
