@@ -2,10 +2,13 @@ import { describe, expect, it } from "bun:test"
 import {
   CursorAuthError,
   CursorProtocolError,
+  CursorRetryExhaustedError,
   CursorServerError,
   CursorTransportError,
   cursorGrpcError,
   cursorHttpError,
+  retrySuppressedError,
+  sanitizeHostTerminalMessage,
   toCursorProviderError,
 } from "../src/errors.js"
 import { connectFrameError, resolveRetryPolicy } from "../src/language-model.js"
@@ -78,5 +81,38 @@ describe("Cursor provider errors", () => {
     })
     expect(failure.message).not.toContain("private backend detail")
     expect(failure).toMatchObject({ code: "unavailable", retryAfterMs: 500 })
+  })
+
+  it("strips OpenCode SessionRetry trigger words from terminal host messages", () => {
+    expect(sanitizeHostTerminalMessage("Cursor API error (code=unavailable)")).toBe(
+      "Cursor API error (code=capacity_limit)",
+    )
+    expect(sanitizeHostTerminalMessage("resource_exhausted / overloaded")).toBe(
+      "capacity_limit / capacity_limit",
+    )
+
+    const last = new CursorServerError("Cursor API error (code=unavailable)", {
+      transient: true,
+      replaySafe: true,
+      code: "unavailable",
+      grpcStatus: "unavailable",
+    })
+    const exhausted = new CursorRetryExhaustedError(3, last)
+    expect(exhausted.transient).toBe(false)
+    expect(exhausted.code).toBe("unavailable")
+    expect(exhausted.grpcStatus).toBe("unavailable")
+    expect(exhausted.message.toLowerCase()).not.toMatch(/unavailable|exhausted/)
+    expect(exhausted.message).toContain("capacity_limit")
+
+    const suppressed = retrySuppressedError(
+      last,
+      "after visible output or stateful server activity",
+      1,
+      3,
+    )
+    expect(suppressed.transient).toBe(false)
+    expect(suppressed.code).toBe("unavailable")
+    expect(suppressed.message.toLowerCase()).not.toMatch(/unavailable|exhausted/)
+    expect(suppressed.message).toContain("automatic retry unsafe")
   })
 })

@@ -104,21 +104,45 @@ export class CursorAuthError extends CursorProviderError {
   }
 }
 
+/**
+ * OpenCode's SessionRetry treats several substrings in provider error messages
+ * as always-retryable — notably bare "unavailable" and "exhausted", plus a
+ * broader regex set (resource_exhausted, service unavailable, …).
+ *
+ * When this provider has already spent its Run retry budget, or has decided a
+ * replay would be unsafe, the host-facing message must not re-arm that loop.
+ * Keep the real gRPC/HTTP code on structured fields (`code`, `grpcStatus`).
+ */
+export function sanitizeHostTerminalMessage(message: string): string {
+  return message
+    .replace(/\bresource[_\s-]?exhausted\b/gi, "capacity_limit")
+    .replace(/\bservice[_\s-]?unavailable\b/gi, "capacity_limit")
+    .replace(/\bunavailable\b/gi, "capacity_limit")
+    .replace(/\boverloaded\b/gi, "capacity_limit")
+    .replace(/\bretry exhausted\b/gi, "retries finished")
+    .replace(/\bexhausted\b/gi, "finished")
+}
+
 export class CursorRetryExhaustedError extends CursorProviderError {
   readonly attempts: number
 
   constructor(attempts: number, last: CursorProviderError) {
-    super(`Cursor retry exhausted after ${attempts} attempts: ${last.message}`, {
-      origin: last.origin,
-      transient: false,
-      replaySafe: false,
-      statusCode: last.statusCode,
-      grpcStatus: last.grpcStatus,
-      rstCode: last.rstCode,
-      code: last.code,
-      retryAfterMs: last.retryAfterMs,
-      cause: last,
-    })
+    // Host-facing text must not contain OpenCode SessionRetry trigger words
+    // ("unavailable", "exhausted", …). Structured fields keep the real code.
+    super(
+      `Cursor Run failed after ${attempts} attempts: ${sanitizeHostTerminalMessage(last.message)}`,
+      {
+        origin: last.origin,
+        transient: false,
+        replaySafe: false,
+        statusCode: last.statusCode,
+        grpcStatus: last.grpcStatus,
+        rstCode: last.rstCode,
+        code: last.code,
+        retryAfterMs: last.retryAfterMs,
+        cause: last,
+      },
+    )
     this.name = "CursorRetryExhaustedError"
     this.attempts = attempts
   }
@@ -256,7 +280,9 @@ export function retrySuppressedError(
   attempt: number,
   maxAttempts: number,
 ): CursorProviderError {
-  const subject = cause.message.replace(/^Cursor Run stream /, "Cursor stream ")
+  const subject = sanitizeHostTerminalMessage(
+    cause.message.replace(/^Cursor Run stream /, "Cursor stream "),
+  )
   return new CursorProviderError(
     `${subject} ${reason}; automatic retry unsafe (attempt ${attempt}/${maxAttempts})`,
     {

@@ -253,6 +253,42 @@ describe("interrupted Cursor Run handling", () => {
     expect(recoveries).toBe(1)
   })
 
+  it("does not leak OpenCode SessionRetry triggers after unavailable retries finish", async () => {
+    let recoveries = 0
+    let failure: unknown
+    try {
+      await pumpWithRecovery({
+        initialSession: fakeSession("busy", [
+          {
+            flags: 0x02,
+            payload: new TextEncoder().encode(JSON.stringify({ error: { code: "unavailable" } })),
+          },
+        ]),
+        controller: controller([]),
+        retryPolicy: { maxAttempts: 2, baseDelayMs: 0, maxDelayMs: 0 },
+        recover: async () => {
+          recoveries++
+          return fakeSession("busy-retry", [
+            {
+              flags: 0x02,
+              payload: new TextEncoder().encode(JSON.stringify({ error: { code: "unavailable" } })),
+            },
+          ])
+        },
+      })
+    } catch (error) {
+      failure = error
+    }
+
+    expect(failure).toMatchObject({
+      name: "CursorRetryExhaustedError",
+      code: "unavailable",
+      transient: false,
+    })
+    expect(recoveries).toBe(1)
+    expect(String((failure as Error).message).toLowerCase()).not.toMatch(/unavailable|exhausted/)
+  })
+
   it("uses retry.maxAttempts as the total Run attempt budget", async () => {
     let recoveries = 0
     await expect(

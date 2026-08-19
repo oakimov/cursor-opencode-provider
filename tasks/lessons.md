@@ -227,6 +227,16 @@
   set (or the last remembered one); permission (`allowTools`) stays false on
   zero-tool turns. Soft-ack alone does not fix the cache break.
 
+## 2026-08-19 — Host retry loops key off error *text*, not our flags
+
+- **OpenCode SessionRetry matches substrings in the provider error message**
+  (notably `unavailable` and `exhausted`), not `transient` / `replaySafe`.
+  After this provider finishes its own Run budget — or suppresses replay as
+  unsafe — the host-facing message must not still contain those triggers, or
+  OpenCode will keep retrying ("Provider is overloaded") until the process is
+  restarted. Keep the real gRPC code on structured fields; sanitize only the
+  terminal message text.
+
 ## 2026-08-17 — Bridged Cursor interactions are not missing MCP tools
 
 - **The OpenCode tool catalog is not the complete Cursor capability set.**
