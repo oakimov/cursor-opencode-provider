@@ -900,6 +900,21 @@ describe("opencode2 setup", () => {
     expect(getSessionDirectory("s1")).toBe("/home/user/projects/my-app")
   })
 
+  test("the session hook records the session directory from info.directory (flat OpenCode 2.0 shape)", async () => {
+    clearSessionDirectories()
+    const { ctx, hooks } = fakeContext()
+    ctx.session.get = async ({ sessionID }: { sessionID: string }) => ({
+      id: sessionID,
+      directory: "/home/user/projects/flat-app",
+    })
+    await plugin.setup(ctx)
+
+    const hook = hooks.get("session.context")!
+    await hook({ sessionID: "s-flat", agent: "build", model: { providerID: "cursor" } })
+
+    expect(getSessionDirectory("s-flat")).toBe("/home/user/projects/flat-app")
+  })
+
   test("a failed session lookup does not throw and leaves the directory unset", async () => {
     clearSessionDirectories()
     const { ctx, hooks } = fakeContext()

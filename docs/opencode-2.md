@@ -95,6 +95,16 @@ Prefer the `$OPENCODE_CONFIG_DIR/plugins/<name>/` package directory shown above.
 - **OpenCode does not install dependencies for local plugin files.** Keep the clone's `bun install` intact and load the plugin from inside the clone (a copied-out file will not resolve `protobufjs`).
 - **Rebuild after every change** (`bun run build`). The daemon reads `dist/`, not `src/`.
 
+## Workspace directory
+
+OpenCode 2.0's long-lived daemon often starts from `$HOME` (or another spawn cwd), so `process.cwd()` is not the active project. The provider resolves the session workspace in this order:
+
+1. Request header `x-opencode-directory` (URI-encoded absolute path; per-request)
+2. Session mark from `session.hook("context")` → `ctx.session.get()` (`info.directory`, or legacy `info.location.directory`)
+3. Static `createSdk({ workspaceRoot })` / process cwd as last resort
+
+The plugin also forces OpenCode 2's `path` / `shell` tool dialect when advertised schemas are opaque, so bridged file tools do not fall back to OpenCode 1.x `filePath` / `bash` under a multi-project daemon.
+
 ## Feature parity vs the classic plugin
 
 | Classic plugin (OpenCode 1.x) | OpenCode 2.0 plugin |

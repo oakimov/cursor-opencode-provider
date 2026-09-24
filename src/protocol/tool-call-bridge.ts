@@ -1,4 +1,6 @@
 import {
+  type HostToolDialect,
+  OPENCODE_1_TOOL_DIALECT,
   mapCursorArgsToOpencode,
   mapCursorSubagentTypeToOpenCode,
   mcpRealToolName,
@@ -535,6 +537,7 @@ function shellQuote(s: string): string {
 export function resolveBridgedOpenCodeToolCall(
   display: DisplayToolCall,
   advertised: Iterable<string>,
+  dialect: HostToolDialect = OPENCODE_1_TOOL_DIALECT,
 ): BridgedOpenCodeToolCall | undefined {
   if (isNativeDisplayToolCall(display.variant)) return undefined
   if (!DISPLAY_STATE_MIRROR_VARIANTS.has(display.variant)) return undefined
@@ -545,7 +548,7 @@ export function resolveBridgedOpenCodeToolCall(
   const candidates = candidateToolNames(display, names)
   for (const toolName of candidates) {
     if (!names.has(toolName)) continue
-    const mapped = mapCursorArgsToOpencode(toolName, display.args)
+    const mapped = mapCursorArgsToOpencode(toolName, display.args, undefined, dialect)
     if (toolName === "todowrite") {
       mapped.args = {
         todos: mapTodos((display.args as { todos?: unknown }).todos ?? mapped.args.todos),

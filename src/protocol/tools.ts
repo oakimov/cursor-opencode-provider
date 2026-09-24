@@ -50,6 +50,10 @@ export const OPENCODE_1_TOOL_DIALECT: HostToolDialect = {
   filePathKey: "filePath",
   shellTool: "bash",
 }
+export const OPENCODE_2_TOOL_DIALECT: HostToolDialect = {
+  filePathKey: "path",
+  shellTool: "shell",
+}
 
 function jsonSchemaProperties(schema: unknown): Record<string, unknown> | undefined {
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) return undefined
@@ -57,11 +61,11 @@ function jsonSchemaProperties(schema: unknown): Record<string, unknown> | undefi
   if (obj.properties && typeof obj.properties === "object" && !Array.isArray(obj.properties)) {
     return obj.properties as Record<string, unknown>
   }
-  const nested = obj.jsonSchema
+  const nested = obj.jsonSchema ?? obj.parameters ?? obj.schema
   if (nested && typeof nested === "object" && !Array.isArray(nested)) {
-    const props = (nested as Record<string, unknown>).properties
-    if (props && typeof props === "object" && !Array.isArray(props)) {
-      return props as Record<string, unknown>
+    const nestedProps = (nested as Record<string, unknown>).properties
+    if (nestedProps && typeof nestedProps === "object" && !Array.isArray(nestedProps)) {
+      return nestedProps as Record<string, unknown>
     }
   }
   return undefined
@@ -79,6 +83,7 @@ export function opencodePathArg(args: Record<string, unknown> | undefined): stri
  */
 export function hostToolDialectFromTools(
   tools: readonly { name?: string; inputSchema?: unknown }[],
+  defaultDialect: HostToolDialect = OPENCODE_1_TOOL_DIALECT,
 ): HostToolDialect {
   let filePathKey: HostFilePathKey | undefined
   for (const name of ["read", "write", "edit"] as const) {
@@ -97,10 +102,12 @@ export function hostToolDialectFromTools(
   const names = new Set(
     tools.map((tool) => tool.name).filter((name): name is string => typeof name === "string"),
   )
-  const shellTool: HostShellTool = names.has("shell") && !names.has("bash") ? "shell" : "bash"
+  const shellTool: HostShellTool = names.has("shell") && !names.has("bash")
+    ? "shell"
+    : (names.has("bash") ? "bash" : defaultDialect.shellTool)
   if (!filePathKey) {
     // OpenCode 2 hosts advertise `shell` and `path` together; use that when schemas are opaque.
-    filePathKey = shellTool === "shell" ? "path" : "filePath"
+    filePathKey = shellTool === "shell" ? "path" : defaultDialect.filePathKey
   }
   return { filePathKey, shellTool }
 }
@@ -1379,6 +1386,8 @@ export function mapCursorArgsToOpencode(
         content = stringValue(cleaned.content)
           ?? stringValue(cleaned.file_text)
           ?? stringValue(cleaned.fileText)
+          ?? stringValue(cleaned.contents)
+          ?? stringValue(cleaned.text)
       }
       if (content !== undefined) args.content = content
       return { toolName: "write", args }

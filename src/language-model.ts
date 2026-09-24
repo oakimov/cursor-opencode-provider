@@ -179,7 +179,7 @@ import {
   CURSOR_HOST_AGENT_OPTION,
 } from "./shared.js"
 import { isCompactionSession } from "./compaction-marker.js"
-import { getSessionDirectory } from "./session-directory.js"
+import { resolveSessionWorkspaceRoot } from "./session-directory.js"
 import type { SeedHistoryMessage } from "./protocol/request.js"
 import { assertCursorUserImageSupport, extractCursorPromptImages } from "./image-input.js"
 import { resolveCursorModelSupportsImages } from "./model-metadata.js"
@@ -1050,11 +1050,14 @@ async function startSession(
   const lifecycle = !allowTools && !isCompaction && !recovery
   // v1 sets `options.workspaceRoot` correctly per invocation (`input.directory`,
   // one plugin instance per project). OpenCode 2.0 runs one daemon across many
-  // projects, so its static option is only a fallback for the directory recorded
-  // from `session.hook("context")`.
-  const workspaceRoot = path.resolve(
-    getSessionDirectory(sessionKey) ?? (options.workspaceRoot || process.cwd()),
-  )
+  // projects, so its static option is only a last-resort fallback. Prefer the
+  // per-request `x-opencode-directory` header, then the session mark recorded
+  // from `session.hook("context")` via `getSessionDirectory`.
+  const workspaceRoot = resolveSessionWorkspaceRoot({
+    sessionKey,
+    headers: callOptions.headers,
+    workspaceRoot: options.workspaceRoot,
+  })
   const baseSystemPrompt = extractSystemPrompt(prompt)
   const interactionGuidance = buildOpenCodeInteractionGuidance(cursorTools, isCompaction, workspaceRoot)
   // Prompt-identity diagnostics are filled after Context Epoch admission below
@@ -1369,7 +1372,7 @@ async function startSession(
     throw error
   }
 
-  const hostToolDialect = hostToolDialectFromTools(tools)
+  const hostToolDialect = hostToolDialectFromTools(tools, options.defaultDialect)
   trace(
     `host tool dialect: filePathKey=${hostToolDialect.filePathKey} shellTool=${hostToolDialect.shellTool} ` +
       `tools=[${tools.map((t) => t.name).join(",")}]`,
@@ -3093,7 +3096,7 @@ export async function pump(
           const display = parseDisplayToolCall(callId, toolCall, session.mirroredTodos)
           const advertised = advertisedToolNamesFromDescriptors(session.toolDescriptors)
           const bridged = display
-            ? resolveBridgedOpenCodeToolCall(display, advertised)
+            ? resolveBridgedOpenCodeToolCall(display, advertised, session.hostToolDialect)
             : undefined
           if (!display) {
             const callIdLog = callId.replace(/\r?\n/g, "\\n")
@@ -4246,11 +4249,19 @@ function extractTools(callOptions: LanguageModelV3CallOptions): OpencodeToolDef[
   const out: OpencodeToolDef[] = []
   for (const t of tools) {
     // LanguageModelV3FunctionTool always has type:"function". Be defensive in
-    // case a middleware strips it — still accept anything with a name + schema.
-    const any = t as { type?: string; name?: string; description?: string; inputSchema?: unknown }
-    if (any.type === "function" || (any.name && any.inputSchema !== undefined)) {
+    // case a middleware strips it or passes schema as parameters/schema.
+    const any = t as {
+      type?: string
+      name?: string
+      description?: string
+      inputSchema?: unknown
+      parameters?: unknown
+      schema?: unknown
+    }
+    const schema = any.inputSchema ?? any.parameters ?? any.schema
+    if (any.type === "function" || (any.name && schema !== undefined)) {
       if (!any.name) continue
-      out.push({ name: any.name, description: any.description, inputSchema: any.inputSchema })
+      out.push({ name: any.name, description: any.description, inputSchema: schema })
     }
   }
   trace(`extractTools: ${tools.length} incoming → ${out.length} advertised [${out.map((t) => t.name).join(",")}]`)

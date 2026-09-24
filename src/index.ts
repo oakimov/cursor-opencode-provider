@@ -1,6 +1,7 @@
 import { createSdk } from "./plugin-core.js"
 import { CursorPlugin } from "./plugin.js"
 import type { CursorContinuationOptions } from "./session.js"
+import type { HostToolDialect } from "./protocol/tools.js"
 
 export type CursorRetryOptions = {
   /** Total attempts including the initial request. Default: 3. */
@@ -36,6 +37,8 @@ export type CreateCursorOptions = {
   continuation?: CursorContinuationOptions
   /** Fresh-turn retry policy. Defaults: 3 attempts, 500ms base, 8000ms cap. */
   retry?: CursorRetryOptions
+  /** Fallback host dialect when schemas are omitted or ambiguous. Default: OpenCode 1.x. */
+  defaultDialect?: HostToolDialect
 }
 
 export function createCursor(options: CreateCursorOptions) {

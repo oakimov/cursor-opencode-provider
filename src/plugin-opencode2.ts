@@ -22,6 +22,7 @@ import {
 import { applyCursorProviderInventory, CURSOR_INTEGRATION_ID } from "./opencode2/catalog.js"
 import { applyCursorIntegration, resolveCursorAccessToken } from "./opencode2/integration.js"
 import { registerTodoTools } from "./opencode2/todo-tools.js"
+import { OPENCODE_2_TOOL_DIALECT } from "./protocol/tools.js"
 import { clearSessionTodos } from "./todo-store.js"
 import { markCompactionSession } from "./compaction-marker.js"
 import { markSessionDirectory } from "./session-directory.js"
@@ -259,11 +260,14 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
           ...(token ? { accessToken: token } : {}),
           // Static fallback only. This hook fires once per model/package, not
           // per session, and 2.0 runs one daemon across many projects — the
-          // real per-request directory comes from the session.context hook
-          // below via `getSessionDirectory`, which `language-model.ts` prefers.
+          // real per-request directory comes from `x-opencode-directory` and
+          // the session.context hook below via `getSessionDirectory`.
           workspaceRoot,
           cacheDir,
           ...event.options,
+          // Keep after `event.options` so the OC2 plugin always selects the
+          // `path`/`shell` dialect when advertised schemas are opaque.
+          defaultDialect: OPENCODE_2_TOOL_DIALECT,
         } as CreateCursorOptions)
       }),
     )
@@ -388,8 +392,13 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
 
     const rememberSessionDirectory = async (sessionID: string) => {
       try {
-        const info = await ctx.session.get({ sessionID })
-        markSessionDirectory(sessionID, info.location?.directory)
+        const info = (await ctx.session.get({ sessionID })) as {
+          directory?: string
+          location?: { directory?: string }
+        }
+        // OpenCode 2.0 stable exposes a flat `directory`; older shapes nest it
+        // under `location.directory`. Prefer the flat field when both exist.
+        markSessionDirectory(sessionID, info.directory ?? info.location?.directory)
       } catch {
         // Best effort — falls back to the static workspaceRoot above.
       }

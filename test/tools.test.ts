@@ -37,6 +37,7 @@ import {
   CUSTOM_READ_MCP_RESOURCE_TOOL,
   hostToolDialectFromTools,
   opencodePathArg,
+  OPENCODE_2_TOOL_DIALECT,
 } from "../src/protocol/tools.js"
 import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
 import { encodeJsonAsValue } from "../src/protocol/struct.js"
@@ -580,6 +581,10 @@ describe("OpenCode 2 host tool dialect", () => {
       toolName: "write",
       args: { path: "/a.ts", content: "hi" },
     })
+    expect(mapCursorArgsToOpencode("write", { path: "/a.ts", contents: "hi" }, undefined, oc2)).toEqual({
+      toolName: "write",
+      args: { path: "/a.ts", content: "hi" },
+    })
     expect(mapCursorArgsToOpencode("edit", { filePath: "/a.ts", old_string: "a", new_string: "b" }, undefined, oc2)).toEqual({
       toolName: "edit",
       args: { path: "/a.ts", oldString: "a", newString: "b" },
@@ -638,6 +643,20 @@ describe("OpenCode 2 host tool dialect", () => {
     expect(hostToolDialectFromTools([{ name: "shell" }])).toEqual({
       filePathKey: "path",
       shellTool: "shell",
+    })
+  })
+
+  it("falls back to defaultDialect when tools list is empty or opaque", () => {
+    expect(hostToolDialectFromTools([], OPENCODE_2_TOOL_DIALECT)).toEqual({
+      filePathKey: "path",
+      shellTool: "shell",
+    })
+  })
+
+  it("detects path from schema with parameters wrapper", () => {
+    expect(hostToolDialectFromTools([{ name: "read", inputSchema: { parameters: { properties: { path: { type: "string" } } } } }])).toEqual({
+      filePathKey: "path",
+      shellTool: "bash",
     })
   })
 })
