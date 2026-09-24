@@ -65,6 +65,7 @@ const DISPLAY_NAME_TO_MODEL_ID: Record<string, string> = {
   "Claude Fable 5.1": "claude-fable-5-1",
   "Claude Opus 4.8": "claude-opus-4-8",
   "Claude Opus 5": "claude-opus-5",
+  "Claude Opus 5.5": "claude-opus-5-5",
   "Claude Sonnet 5": "claude-sonnet-5",
   "Composer 2.5": "composer-2.5",
   "Gemini 2.5 Flash": "gemini-2.5-flash",
@@ -89,6 +90,9 @@ const DISPLAY_NAME_TO_MODEL_ID: Record<string, string> = {
   "GPT-5.6 Terra": "gpt-5.6-terra",
   "Grok 4.5": "grok-4.5",
   "Grok 4.6": "grok-4.6",
+  "Grok 4.7": "grok-4.7",
+  // Explicit long-context row; same wire id as the base model (like Claude 1M).
+  "Grok 4.7 500k": "grok-4.7",
   "Kimi K2.7 Code": "kimi-k2.7-code",
   "Kimi K3": "kimi-k3",
   "Muse Spark 1.3": "muse-spark-1.3",
@@ -333,7 +337,9 @@ function parsePricingTables(markdown: string): ParsedRow[] {
       cacheRead,
       cacheWrite,
       notes: cells[6] ?? "",
-      isExplicitLongContextRow: /\b1M\b/i.test(displayName),
+      // Cursor publishes some long-context rates as separate rows (`1M`, `500k`)
+      // instead of only as a note on the base model.
+      isExplicitLongContextRow: /\b1M\b/i.test(displayName) || /\b500k\b/i.test(displayName),
     })
   }
 

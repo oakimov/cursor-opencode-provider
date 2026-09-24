@@ -57,6 +57,12 @@ export const CURSOR_MODEL_COSTS = {
     "cache_read": 0.5,
     "cache_write": 6.25
   },
+  "claude-opus-5-5": {
+    "input": 4,
+    "output": 20,
+    "cache_read": 0.2,
+    "cache_write": 5
+  },
   "claude-sonnet-4": {
     "input": 3,
     "output": 15,
@@ -243,6 +249,26 @@ export const CURSOR_MODEL_COSTS = {
     "output": 12,
     "cache_read": 1
   },
+  "grok-4.7": {
+    "input": 2,
+    "output": 6,
+    "cache_read": 0.5,
+    "context_over_200k": {
+      "input": 4,
+      "output": 12,
+      "cache_read": 1
+    }
+  },
+  "grok-4.7-fast": {
+    "input": 4,
+    "output": 12,
+    "cache_read": 1,
+    "context_over_200k": {
+      "input": 6,
+      "output": 18,
+      "cache_read": 1.5
+    }
+  },
   "kimi-k2.7-code": {
     "input": 0.95,
     "output": 4,
@@ -292,6 +318,10 @@ export const CURSOR_MODEL_CONTEXTS = {
     "maxContext": 300000,
     "maxContextForMaxMode": 1000000
   },
+  "claude-opus-5-5": {
+    "maxContext": 300000,
+    "maxContextForMaxMode": 1000000
+  },
   "claude-sonnet-4": {
     "maxContext": 200000,
     "maxContextForMaxMode": 1000000
@@ -385,6 +415,10 @@ export const CURSOR_MODEL_CONTEXTS = {
   },
   "grok-4.6": {
     "maxContext": 256000
+  },
+  "grok-4.7": {
+    "maxContext": 256000,
+    "maxContextForMaxMode": 500000
   },
   "kimi-k2.7-code": {
     "maxContext": 262000
@@ -424,6 +458,9 @@ export const CURSOR_MODEL_CAPABILITIES = {
   "claude-opus-5": {
     "supportsImages": true
   },
+  "claude-opus-5-5": {
+    "supportsImages": true
+  },
   "claude-sonnet-4": {
     "supportsImages": true
   },
@@ -500,6 +537,9 @@ export const CURSOR_MODEL_CAPABILITIES = {
     "supportsImages": false
   },
   "grok-4.6": {
+    "supportsImages": false
+  },
+  "grok-4.7": {
     "supportsImages": false
   },
   "kimi-k2.7-code": {

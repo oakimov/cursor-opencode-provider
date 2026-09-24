@@ -74,6 +74,26 @@ describe("pricing", () => {
       output: 18,
       cache_read: 1,
     })
+    expect(getCursorModelCost("grok-4.7")).toEqual({
+      input: 2,
+      output: 6,
+      cache_read: 0.5,
+      context_over_200k: {
+        input: 4,
+        output: 12,
+        cache_read: 1,
+      },
+    })
+    expect(getCursorModelCost("grok-4.7-fast")).toEqual({
+      input: 4,
+      output: 12,
+      cache_read: 1,
+      context_over_200k: {
+        input: 6,
+        output: 18,
+        cache_read: 1.5,
+      },
+    })
     expect(getCursorModelCost("composer-2.5")).toEqual({
       input: 0.5,
       output: 2.5,
@@ -124,6 +144,7 @@ describe("pricing", () => {
     expect(hasCursorFastPricing("composer-2.5")).toBe(true)
     expect(hasCursorFastPricing("grok-4.5")).toBe(true)
     expect(hasCursorFastPricing("grok-4.6")).toBe(true)
+    expect(hasCursorFastPricing("grok-4.7")).toBe(true)
     expect(hasCursorFastPricing("claude-opus-4-8")).toBe(false)
     expect(hasCursorFastPricing("claude-sonnet-4-5")).toBe(false)
   })
@@ -132,6 +153,10 @@ describe("pricing", () => {
     expect(catalogIdForPricingDisplayName("Composer 2.5")).toBe("composer-2.5")
     expect(catalogIdForPricingDisplayName("Composer 2.5 (Fast)")).toBe("composer-2.5-fast")
     expect(catalogIdForPricingDisplayName("Grok 4.6 (Fast)")).toBe("grok-4.6-fast")
+    expect(catalogIdForPricingDisplayName("Grok 4.7")).toBe("grok-4.7")
+    expect(catalogIdForPricingDisplayName("Grok 4.7 (Fast)")).toBe("grok-4.7-fast")
+    expect(catalogIdForPricingDisplayName("Grok 4.7 500k")).toBe("grok-4.7")
+    expect(catalogIdForPricingDisplayName("Grok 4.7 500k (Fast)")).toBe("grok-4.7-fast")
     expect(catalogIdForPricingDisplayName("Unknown (Fast)")).toBeUndefined()
   })
 
