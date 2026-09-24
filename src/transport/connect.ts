@@ -15,7 +15,8 @@ import {
 } from "../errors.js"
 import { withAbortDeadline } from "../deadline.js"
 import http2 from "node:http2"
-import { openProxiedTlsSocket, resolveHttpsProxyUrl } from "./https-proxy.js"
+import type { TLSSocket } from "node:tls"
+import { openProxiedTlsSocket, proxyEndpoint, resolveHttpsProxyUrl } from "./https-proxy.js"
 
 const API_BASE = `https://${CURSOR_API_HOST}`
 const DEFAULT_UNARY_TIMEOUT_MS = 5_000
@@ -524,7 +525,7 @@ function connectSession(origin: string): Promise<http2.ClientHttp2Session> {
   return new Promise((resolve, reject) => {
     let settled = false
     let session: http2.ClientHttp2Session | undefined
-    let tunnelSocket: { destroy?: () => void } | undefined
+    let tunnelSocket: TLSSocket | undefined
     const abort = new AbortController()
 
     const clearConnectTimer = () => {
@@ -537,7 +538,7 @@ function connectSession(origin: string): Promise<http2.ClientHttp2Session> {
       session.removeListener("connect", onConnect)
     }
     const destroyTunnel = () => {
-      try { tunnelSocket?.destroy?.() } catch { /* ignore */ }
+      try { tunnelSocket?.destroy() } catch { /* ignore */ }
       tunnelSocket = undefined
     }
     const fail = (error: Error) => {
@@ -584,9 +585,10 @@ function connectSession(origin: string): Promise<http2.ClientHttp2Session> {
       try {
         const { hostname, port: originPort } = new URL(origin)
         const targetPort = originPort ? Number(originPort) : 443
-        const proxy = resolveHttpsProxyUrl(hostname)
+        const proxy = resolveHttpsProxyUrl(hostname, process.env, targetPort)
         if (proxy) {
-          trace(`h2 connect via HTTPS proxy: origin=${origin} proxy=${proxy.hostname}:${proxy.port || "80"}`)
+          const endpoint = proxyEndpoint(proxy)
+          trace(`h2 connect via HTTPS proxy: origin=${origin} proxy=${endpoint.host}:${endpoint.port}`)
           const tlsSocket = await openProxiedTlsSocket({
             proxy,
             targetHost: hostname,

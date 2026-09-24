@@ -17,21 +17,27 @@ import { CursorTransportError } from "../errors.js"
 
 export type ProxyEnv = Record<string, string | undefined>
 
-/** Prefer HTTPS_PROXY / https_proxy (HTTP proxies used for HTTPS CONNECT). */
+/**
+ * HTTPS_PROXY / https_proxy for an HTTPS target. Like curl, HTTP_PROXY is not
+ * consulted for HTTPS. Only `http://` proxies can carry the CONNECT tunnel;
+ * `https://` (TLS to the proxy) and other schemes are ignored so the Run keeps
+ * its direct connection rather than failing on every connect.
+ */
 export function resolveHttpsProxyUrl(
   targetHost: string,
   env: ProxyEnv = process.env,
+  targetPort = 443,
 ): URL | undefined {
   if (!targetHost) return undefined
-  if (hostMatchesNoProxy(targetHost, env.NO_PROXY ?? env.no_proxy)) return undefined
+  if (hostMatchesNoProxy(targetHost, env.NO_PROXY ?? env.no_proxy, targetPort)) return undefined
 
-  const raw = (env.HTTPS_PROXY ?? env.https_proxy ?? env.HTTP_PROXY ?? env.http_proxy)?.trim()
+  const raw = (env.HTTPS_PROXY ?? env.https_proxy)?.trim()
   if (!raw) return undefined
 
   try {
     const withScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(raw) ? raw : `http://${raw}`
     const url = new URL(withScheme)
-    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined
+    if (url.protocol !== "http:") return undefined
     if (!url.hostname) return undefined
     return url
   } catch {
@@ -42,10 +48,12 @@ export function resolveHttpsProxyUrl(
 /**
  * curl/Node-style NO_PROXY matching: `*`, exact host, optional `:port`, and
  * leading-dot / bare-domain suffix forms (`.corp.example` / `corp.example`).
+ * A port-qualified entry only bypasses that port.
  */
 export function hostMatchesNoProxy(
   targetHost: string,
   noProxy: string | undefined,
+  targetPort = 443,
 ): boolean {
   if (!noProxy?.trim()) return false
   const host = targetHost.trim().toLowerCase().replace(/\.$/, "")
@@ -59,8 +67,7 @@ export function hostMatchesNoProxy(
     const [entryHostRaw, entryPort] = splitHostPort(entry)
     const entryHost = entryHostRaw.replace(/^\./, "").replace(/\.$/, "")
     if (!entryHost) continue
-    // Port-qualified entries only bypass that port; we always dial 443 for Runs.
-    if (entryPort !== undefined && entryPort !== "443") continue
+    if (entryPort !== undefined && Number(entryPort) !== targetPort) continue
 
     if (host === entryHost) return true
     if (host.endsWith(`.${entryHost}`)) return true
@@ -84,10 +91,27 @@ function splitHostPort(entry: string): [string, string | undefined] {
   return [entry, undefined]
 }
 
+/** Dialable proxy address: IPv6 literals without URL brackets, default port 80. */
+export function proxyEndpoint(proxy: URL): { host: string; port: number } {
+  return {
+    host: proxy.hostname.replace(/^\[(.*)\]$/, "$1"),
+    port: proxy.port ? Number(proxy.port) : 80,
+  }
+}
+
+/** Userinfo as typed when it is not valid percent-encoding (e.g. a bare `%`). */
+function decodeUserinfo(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
 function proxyAuthorizationHeader(proxy: URL): string | undefined {
   if (!proxy.username && !proxy.password) return undefined
-  const user = decodeURIComponent(proxy.username)
-  const pass = decodeURIComponent(proxy.password)
+  const user = decodeUserinfo(proxy.username)
+  const pass = decodeUserinfo(proxy.password)
   const token = Buffer.from(`${user}:${pass}`, "utf8").toString("base64")
   return `Basic ${token}`
 }
@@ -117,9 +141,18 @@ export async function openHttpsConnectTunnel(
     )
   }
 
-  const proxyPort = proxy.port ? Number(proxy.port) : 80
-  const proxyHost = proxy.hostname
+  const { host: proxyHost, port: proxyPort } = proxyEndpoint(proxy)
   const connect = options.connect ?? net.connect
+  const authority = `${options.targetHost}:${targetPort}`
+  const auth = proxyAuthorizationHeader(proxy)
+  const request = [
+    `CONNECT ${authority} HTTP/1.1`,
+    `Host: ${authority}`,
+    "Proxy-Connection: keep-alive",
+    ...(auth ? [`Proxy-Authorization: ${auth}`] : []),
+    "",
+    "",
+  ].join("\r\n")
 
   if (options.signal?.aborted) {
     throw new CursorTransportError("HTTPS CONNECT tunnel aborted before connect", {
@@ -162,17 +195,6 @@ export async function openHttpsConnectTunnel(
     s.once("connect", onConnect)
     s.once("error", onError)
   })
-
-  const authority = `${options.targetHost}:${targetPort}`
-  const auth = proxyAuthorizationHeader(proxy)
-  const request = [
-    `CONNECT ${authority} HTTP/1.1`,
-    `Host: ${authority}`,
-    "Proxy-Connection: keep-alive",
-    ...(auth ? [`Proxy-Authorization: ${auth}`] : []),
-    "",
-    "",
-  ].join("\r\n")
 
   await new Promise<void>((resolve, reject) => {
     let settled = false
@@ -232,10 +254,14 @@ export async function openHttpsConnectTunnel(
       const statusLine = headerText.split("\r\n", 1)[0] ?? ""
       const match = /^HTTP\/\d\.\d\s+(\d{3})\b/i.exec(statusLine)
       const status = match ? Number(match[1]) : NaN
-      if (status !== 200) {
+      // RFC 9110 §9.3.6: any 2xx response to CONNECT establishes the tunnel.
+      if (!(status >= 200 && status < 300)) {
+        // Same classification as other HTTP failures: a proxy denial (403/407)
+        // will not succeed on retry; 429/5xx and unparseable replies might.
+        const transient = Number.isNaN(status) || status === 429 || status >= 500
         fail(new CursorTransportError(
           `HTTPS CONNECT to ${authority} via ${proxyHost}:${proxyPort} failed: ${statusLine || "no status"}`,
-          { transient: true, replaySafe: true, code: "CURSOR_PROXY_CONNECT_REJECTED" },
+          { transient, replaySafe: true, code: "CURSOR_PROXY_CONNECT_REJECTED" },
         ))
         return
       }
@@ -291,14 +317,40 @@ export async function openProxiedTlsSocket(
 
   const tlsConnect = options.tlsConnect ?? tls.connect
   return await new Promise<tls.TLSSocket>((resolve, reject) => {
+    const tlsError = (cause: unknown) => new CursorTransportError(
+      `HTTPS CONNECT TLS to ${options.targetHost} failed`,
+      { transient: true, replaySafe: true, code: "CURSOR_PROXY_TLS_FAILED", cause },
+    )
+    const abortError = () => new CursorTransportError("HTTPS CONNECT TLS handshake aborted", {
+      transient: true,
+      replaySafe: true,
+      code: "CURSOR_PROXY_ABORTED",
+      cause: options.signal?.reason,
+    })
+
+    if (options.signal?.aborted) {
+      try { plain.destroy() } catch { /* ignore */ }
+      reject(abortError())
+      return
+    }
+    let socket: tls.TLSSocket
+    try {
+      socket = tlsConnect({
+        socket: plain,
+        servername: options.targetHost,
+        ALPNProtocols: ["h2"],
+      })
+    } catch (error) {
+      try { plain.destroy() } catch { /* ignore */ }
+      reject(tlsError(error))
+      return
+    }
+
     let settled = false
-    const onAbort = () => {
-      fail(new CursorTransportError("HTTPS CONNECT TLS handshake aborted", {
-        transient: true,
-        replaySafe: true,
-        code: "CURSOR_PROXY_ABORTED",
-        cause: options.signal?.reason,
-      }))
+    const cleanup = () => {
+      socket.removeListener("secureConnect", onSecure)
+      socket.removeListener("error", onError)
+      options.signal?.removeEventListener("abort", onAbort)
     }
     const fail = (error: Error) => {
       if (settled) return
@@ -308,17 +360,8 @@ export async function openProxiedTlsSocket(
       try { plain.destroy() } catch { /* ignore */ }
       reject(error)
     }
-    const cleanup = () => {
-      socket.removeListener("secureConnect", onSecure)
-      socket.removeListener("error", onError)
-      options.signal?.removeEventListener("abort", onAbort)
-    }
-    const onError = (error: Error) => {
-      fail(new CursorTransportError(
-        `HTTPS CONNECT TLS to ${options.targetHost} failed`,
-        { transient: true, replaySafe: true, code: "CURSOR_PROXY_TLS_FAILED", cause: error },
-      ))
-    }
+    const onAbort = () => fail(abortError())
+    const onError = (error: Error) => fail(tlsError(error))
     const onSecure = () => {
       if (settled) return
       settled = true
@@ -326,11 +369,6 @@ export async function openProxiedTlsSocket(
       resolve(socket)
     }
 
-    const socket = tlsConnect({
-      socket: plain,
-      servername: options.targetHost,
-      ALPNProtocols: ["h2"],
-    })
     options.signal?.addEventListener("abort", onAbort, { once: true })
     socket.once("secureConnect", onSecure)
     socket.once("error", onError)
