@@ -15,6 +15,8 @@ import {
 } from "../errors.js"
 import { withAbortDeadline } from "../deadline.js"
 import http2 from "node:http2"
+import type { TLSSocket } from "node:tls"
+import { openProxiedTlsSocket, proxyEndpoint, resolveHttpsProxyUrl } from "./https-proxy.js"
 
 const API_BASE = `https://${CURSOR_API_HOST}`
 const DEFAULT_UNARY_TIMEOUT_MS = 5_000
@@ -521,35 +523,54 @@ function validateCachedSession(
 
 function connectSession(origin: string): Promise<http2.ClientHttp2Session> {
   return new Promise((resolve, reject) => {
-    const session = http2.connect(origin)
     let settled = false
-    const cleanup = () => {
+    let session: http2.ClientHttp2Session | undefined
+    let tunnelSocket: TLSSocket | undefined
+    const abort = new AbortController()
+
+    const clearConnectTimer = () => {
       clearTimeout(timer)
+    }
+    const detachSessionListeners = () => {
+      if (!session) return
       session.removeListener("error", onError)
       session.removeListener("close", onClose)
       session.removeListener("connect", onConnect)
     }
+    const destroyTunnel = () => {
+      try { tunnelSocket?.destroy() } catch { /* ignore */ }
+      tunnelSocket = undefined
+    }
     const fail = (error: Error) => {
       if (settled) return
       settled = true
-      cleanup()
-      dropSession(origin, session)
-      try { session.destroy() } catch { /* ignore */ }
+      clearConnectTimer()
+      try { abort.abort(error) } catch { /* ignore */ }
+      detachSessionListeners()
+      if (session) {
+        dropSession(origin, session)
+        try { session.destroy() } catch { /* ignore */ }
+      }
+      destroyTunnel()
       reject(error)
     }
     const onError = (error: Error) => fail(toTransportError(error, "Cursor HTTP/2 connection failed"))
     const onClose = () => fail(new CursorTransportError(`HTTP/2 connection to ${origin} closed before connecting`))
     const onConnect = () => {
-      if (settled) return
+      if (settled || !session) return
       settled = true
-      cleanup()
+      clearConnectTimer()
+      detachSessionListeners()
       installSessionInvalidation(origin, session)
       if (session.destroyed || session.closed) {
         const error = new CursorTransportError(`HTTP/2 connection to ${origin} closed while connecting`)
         invalidateSession(origin, session)
+        destroyTunnel()
         reject(error)
         return
       }
+      // The TLS socket (if any) is owned by the HTTP/2 session from here on.
+      tunnelSocket = undefined
       _http2SessionCreatedAt.set(session, Date.now())
       _http2Sessions.set(origin, session)
       trace(`h2 session connected: origin=${origin}`)
@@ -559,9 +580,44 @@ function connectSession(origin: string): Promise<http2.ClientHttp2Session> {
       fail(new CursorTransportError(`HTTP/2 connect to ${origin} timed out after ${CONNECT_TIMEOUT_MS}ms`))
     }, CONNECT_TIMEOUT_MS)
     timer.unref?.()
-    session.on("error", onError)
-    session.once("close", onClose)
-    session.once("connect", onConnect)
+
+    void (async () => {
+      try {
+        const { hostname, port: originPort } = new URL(origin)
+        const targetPort = originPort ? Number(originPort) : 443
+        const proxy = resolveHttpsProxyUrl(hostname, process.env, targetPort)
+        if (proxy) {
+          const endpoint = proxyEndpoint(proxy)
+          trace(`h2 connect via HTTPS proxy: origin=${origin} proxy=${endpoint.host}:${endpoint.port}`)
+          const tlsSocket = await openProxiedTlsSocket({
+            proxy,
+            targetHost: hostname,
+            targetPort,
+            signal: abort.signal,
+          })
+          if (settled) {
+            try { tlsSocket.destroy() } catch { /* ignore */ }
+            return
+          }
+          tunnelSocket = tlsSocket
+          session = http2.connect(origin, {
+            createConnection: () => tlsSocket,
+          })
+        } else {
+          session = http2.connect(origin)
+        }
+        if (settled) {
+          try { session.destroy() } catch { /* ignore */ }
+          destroyTunnel()
+          return
+        }
+        session.on("error", onError)
+        session.once("close", onClose)
+        session.once("connect", onConnect)
+      } catch (error) {
+        fail(toTransportError(error, "Cursor HTTP/2 connection failed"))
+      }
+    })()
   })
 }
 

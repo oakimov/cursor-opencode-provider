@@ -91,6 +91,7 @@ OpenCode
 | Host agent mode sync | `src/host-agent-mode.ts` | Structural callback/terminal queue used by OpenCode 2 to map approved Cursor plan/spec → native `plan`, other modes → `build`; absent on classic 1.x |
 | Image generation | `src/protocol/generate-image.ts`, `src/image-staging.ts`, `src/image-save.ts` | Cursor GenerateImage approval + permission-gated byte write |
 | Transport | `src/transport/connect.ts` | HTTP/2 bidi + unary RPC |
+| HTTPS proxy | `src/transport/https-proxy.ts` | CONNECT tunnel for Run when `HTTPS_PROXY` applies |
 
 Package exports:
 
