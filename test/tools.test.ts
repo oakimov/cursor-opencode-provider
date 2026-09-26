@@ -608,8 +608,8 @@ describe("OpenCode 2 host tool dialect", () => {
       args: { code: "return 1 + 1" },
     })
 
-    // OpenCode 2 keeps MCP tools inside Code Mode. The provider must send the
-    // host's JavaScript through `execute` without treating the nested MCP name
+    // Tools that remain in Code Mode still arrive as `execute` with `{ code }`.
+    // The provider forwards that JavaScript and does not treat a nested path
     // as an absent direct AI SDK tool.
     const code = 'return await tools.context7["resolve-library-id"]({ libraryName: "react" })'
     const parsed = parseExecServerMessage({

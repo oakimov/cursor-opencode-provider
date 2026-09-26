@@ -105,6 +105,34 @@ OpenCode 2.0's long-lived daemon often starts from `$HOME` (or another spawn cwd
 
 The plugin also forces OpenCode 2's `path` / `shell` tool dialect when advertised schemas are opaque, so bridged file tools do not fall back to OpenCode 1.x `filePath` / `bash` under a multi-project daemon.
 
+## MCP tools
+
+OpenCode 2.0 routes MCP servers through Code Mode unless their config sets `codemode: false` (the host default is `true`). Code Mode tools do not reach the model individually: the provider only sees a single `execute` tool, so Cursor cannot call an MCP tool such as `github_create_pull_request` by name.
+
+The plugin leaves that server config alone. `codemode` on the server also decides whether OpenCode asks a remote MCP server for its raw tools. Catalog placement is separate: `ctx.tool.transform` sets `options.codemode: false` on tools whose namespace belongs to an MCP server that did not set `"codemode": true`. Those tools join the direct catalog. Explicit `"codemode": true` stays inside `execute`, as do OpenCode's own Code Mode tools.
+
+The tool registry is shared by every provider in the process. A server that should stay in Code Mode for other models needs `"codemode": true` in its MCP config.
+
+No extra configuration is needed. Declare MCP servers in `opencode.json` as usual:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "github": { "type": "local", "command": ["github-mcp-server", "stdio"] },
+      "docs": { "type": "remote", "url": "https://example.com/mcp" },
+      "executor": { "type": "local", "command": ["my-executor"], "codemode": true }
+    }
+  }
+}
+```
+
+`github` and `docs` leave `codemode` unset, so their tools join the direct catalog and Cursor calls them by name (for example `github_create_pull_request`). `executor` sets `"codemode": true` and stays inside `execute`. The plugin does not rewrite these entries.
+
+Server names are normalized into tool namespaces (`my.docs` becomes `my_docs`). If names collide, an explicit `"codemode": true` prevents this plugin from moving that namespace. The `opencode` namespace is always left alone to preserve OpenCode's own tools; choose another MCP server name to use automatic direct placement.
+
+OpenCode's `<mcp_instructions>` still say to use `execute` for a server that left `codemode` unset, because that sentence reads the server config and not the tool option. The provider guidance tells Cursor to ignore that sentence for tools that are on the direct list. Discovery reloads replay the tool transform, so tools that connect after startup join the same catalog.
+
 ## Feature parity vs the classic plugin
 
 | Classic plugin (OpenCode 1.x) | OpenCode 2.0 plugin |
@@ -130,7 +158,7 @@ Generated-image saving remains available through the classic plugin/OCP surfaces
 
 OpenCode 2 owns its full system prompt and its vendor-maintained Plan agent. The provider forwards the host prompt; it does not copy or replace the 2.0 prompt templates. Provider-added guidance is limited to protocol facts the host cannot know, such as Cursor interaction bridging and the advertised direct tool catalog.
 
-OpenCode 2 normally exposes MCP server tools inside its Code Mode catalog rather than as direct AI SDK tools. Cursor calls the advertised `execute` tool with `{ code }`, then uses the exact `tools` paths and signatures from the host's Code Mode catalog (or its `search` function). The provider's direct-tool list does not exclude those nested tools; OpenCode still applies its own tool availability and permission checks when `execute` runs.
+MCP tools whose server did not set `"codemode": true` are on the direct catalog and are called by name. `execute` remains Code Mode for tools that are still absent from that list, including an explicit `"codemode": true` server and OpenCode's own Code Mode tools. Cursor calls `execute` with `{ code }` and uses the exact paths and signatures from the host Code Mode catalog (or its `search` function). OpenCode still applies its own tool availability and permission checks when `execute` runs.
 
 When Cursor raises SwitchMode for `plan` or `spec`, the plugin selects OpenCode 2's `plan` primary agent after the current Cursor Run has safely ended. Approved non-plan targets select `build`; when no native `plan_exit` tool exists, the advertised `question` tool remains the user-visible approval gate. A user switching agents in the OpenCode UI follows the same state path because `session.hook("context")` carries the active agent into the provider.
 
@@ -228,5 +256,6 @@ Then `/connect` → **Cursor** if credentials are missing. Filter the picker by 
 |---------|-------------|
 | No Cursor models in the picker | `/connect` → **Cursor** (or shared `auth.json`). Dedicated `OPENCODE_CONFIG_DIR`. Plugin is a **directory** re-exporting `plugin/opencode2`, not a bare `.js`. Filter by provider **Cursor** (`time.released` is `0`). Remove leftover `providers.cursor` (see [Safe transition](#safe-transition)). |
 | Local daemon still runs the published package | Set `CURSOR_OPENCODE2_DEV_ENTRY` to an absolute `…/dist/index.js` path **before** start, persist it with `opencode2 service set env`, rebuild, restart. Loading only `dist/plugin-opencode2.js` is not enough. |
+| The model cannot find an MCP tool and searches files for it instead | The server set `"codemode": true`, so its tools stay inside `execute`. Remove that field to put them on the direct catalog; see [MCP tools](#mcp-tools). MCP servers connect asynchronously, so a prompt sent right after startup can also miss tools that are still connecting. |
 | Picker / auth broke after an upgrade | You are likely still on the next-era `ctx.catalog` build or the dump-era plugin. Follow [Safe transition](#safe-transition) and restart. |
 | `opencode.json` ballooned to thousands of lines | That was the dump-era `providers.cursor.models` map. Remove `providers.cursor` as above. The current plugin will not recreate it. |

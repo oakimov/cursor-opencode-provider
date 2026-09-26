@@ -461,6 +461,7 @@ function fakeContext(events: readonly unknown[] = []) {
       prompt: async () => ({}),
     },
     websearch: transformDomain("websearch"),
+    mcp: transformDomain("mcp"),
     shell: hookDomain("shell"),
     provider: {
       transform: async (callback: (editor: any) => void) => {
@@ -549,6 +550,74 @@ describe("opencode2 setup", () => {
     }
   })
 
+  test("puts MCP tools on the direct catalog without editing server config", async () => {
+    const { ctx, transforms } = fakeContext()
+    const cleanup = await plugin.setup(ctx)
+    const servers: Record<string, { type: string; codemode?: boolean }> = {
+      github: { type: "local" },
+      executor: { type: "local", codemode: true },
+    }
+    const tools = [
+      { id: "github_create_pull_request", options: { namespace: "github", codemode: true as boolean | undefined, permission: "github_create_pull_request" } },
+      { id: "executor_run", options: { namespace: "executor", codemode: true as boolean | undefined } },
+      { id: "opencode_session_rename", options: { namespace: "opencode", codemode: true as boolean | undefined } },
+    ]
+    const applyTools = () => {
+      transforms.get("tool")?.({
+        add: () => {},
+        list: () => tools,
+        update: (id: string, update: (tool: (typeof tools)[number]) => void) => {
+          const tool = tools.find((item) => item.id === id)
+          if (tool) update(tool)
+        },
+      })
+    }
+
+    applyTools()
+    expect(tools[0]?.options.codemode).toBe(true)
+
+    transforms.get("mcp")?.({ list: () => Object.entries(servers) })
+    expect(servers.github?.codemode).toBeUndefined()
+    expect(servers.executor?.codemode).toBe(true)
+
+    applyTools()
+    expect(tools[0]?.options).toEqual({
+      namespace: "github",
+      permission: "github_create_pull_request",
+      codemode: false,
+    })
+    expect(tools[1]?.options.codemode).toBe(true)
+    expect(tools[2]?.options.codemode).toBe(true)
+
+    // Discovery reloads rebuild from the host's original registrations, then
+    // replay this transform over newly discovered tools too.
+    tools.push({ id: "github_search", options: { namespace: "github", codemode: true } })
+    applyTools()
+    expect(tools[3]?.options.codemode).toBe(false)
+
+    servers.github!.codemode = true
+    transforms.get("mcp")?.({ list: () => Object.entries(servers) })
+    for (const tool of tools) tool.options.codemode = true
+    applyTools()
+    expect(tools[0]?.options.codemode).toBe(true)
+    expect(tools[3]?.options.codemode).toBe(true)
+
+    delete servers.github
+    transforms.get("mcp")?.({ list: () => Object.entries(servers) })
+    applyTools()
+    expect(tools[0]?.options.codemode).toBe(true)
+    await cleanup()
+  })
+
+  test("sets up on a host without the mcp domain", async () => {
+    const { ctx, registered } = fakeContext()
+    delete ctx.mcp
+    const cleanup = await plugin.setup(ctx)
+    expect(registered).not.toContain("mcp.transform")
+    expect(registered).toContain("provider.transform")
+    await cleanup()
+  })
+
   test("registers every domain it needs and returns a cleanup", async () => {
     const { ctx, registered, transforms } = fakeContext()
     const cleanup = await plugin.setup(ctx)
@@ -566,6 +635,7 @@ describe("opencode2 setup", () => {
     expect(registered).toContain("session.title")
     expect(registered).toContain("shell.create.before")
     expect(registered).toContain("websearch.transform")
+    expect(registered).toContain("mcp.transform")
     expect(typeof cleanup).toBe("function")
 
     const tools: Array<{
