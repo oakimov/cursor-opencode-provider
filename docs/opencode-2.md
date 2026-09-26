@@ -133,22 +133,6 @@ Server names are normalized into tool namespaces (`my.docs` becomes `my_docs`). 
 
 OpenCode's `<mcp_instructions>` still say to use `execute` for a server that left `codemode` unset, because that sentence reads the server config and not the tool option. The provider guidance tells Cursor to ignore that sentence for tools that are on the direct list. Discovery reloads replay the tool transform, so tools that connect after startup join the same catalog.
 
-No extra configuration is needed. Declare MCP servers in `opencode.json` as usual:
-
-```json
-{
-  "mcp": {
-    "servers": {
-      "github": { "type": "local", "command": ["github-mcp-server", "stdio"] },
-      "docs": { "type": "remote", "url": "https://example.com/mcp" },
-      "executor": { "type": "local", "command": ["my-executor"], "codemode": true }
-    }
-  }
-}
-```
-
-`github` and `docs` leave `codemode` unset, so the plugin sets it to `false` and Cursor sees their tools by name (for example `github_create_pull_request`). `executor` sets `"codemode": true` explicitly, so it stays behind Code Mode's `execute` tool.
-
 ## Feature parity vs the classic plugin
 
 | Classic plugin (OpenCode 1.x) | OpenCode 2.0 plugin |
