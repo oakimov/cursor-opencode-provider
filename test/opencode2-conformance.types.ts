@@ -18,6 +18,7 @@ import {
   modelsToCatalogModelMap,
 } from "../src/opencode2/catalog.js"
 import { applyCursorIntegration } from "../src/opencode2/integration.js"
+import { applyDirectMcpTools } from "../src/opencode2/mcp-codemode.js"
 import { registerTodoTools } from "../src/opencode2/todo-tools.js"
 import type { HostModelInfo, HostPluginContext, HostProviderEditor, HostProviderInfo } from "./opencode2-host-contract.js"
 
@@ -77,6 +78,7 @@ void (() =>
 
 void (() => ctx.integration.transform(applyCursorIntegration))
 void (() => ctx.tool.transform((hostEditor) => registerTodoTools(hostEditor)))
+void (() => ctx.mcp.transform((hostEditor) => applyDirectMcpTools(hostEditor)))
 
 void (async () => {
   const connection = await ctx.integration.connection.active("cursor")

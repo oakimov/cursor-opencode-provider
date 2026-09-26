@@ -105,6 +105,14 @@ OpenCode 2.0's long-lived daemon often starts from `$HOME` (or another spawn cwd
 
 The plugin also forces OpenCode 2's `path` / `shell` tool dialect when advertised schemas are opaque, so bridged file tools do not fall back to OpenCode 1.x `filePath` / `bash` under a multi-project daemon.
 
+## MCP tools
+
+OpenCode 2.0 routes MCP servers through Code Mode unless their config sets `codemode: false` (the host default is `true`). Code Mode tools do not reach the model individually: the provider only sees a single `execute` tool, so Cursor cannot call an MCP tool such as `github_create_pull_request` by name and tends to search the workspace for it instead.
+
+The plugin therefore sets `codemode: false` on every MCP server that leaves it unset, through `ctx.mcp.transform` — the same mechanism OpenCode's own `mcp-codemode-exclusion` plugin uses. An explicit `codemode` value (`true` or `false`) is kept.
+
+This edits host MCP config, so it also applies to other providers loaded in the same OpenCode. To keep the host default, set `CURSOR_OPENCODE2_MCP_CODEMODE=1` (or `true`), or set `"codemode": true` on the servers that should stay in Code Mode.
+
 ## Feature parity vs the classic plugin
 
 | Classic plugin (OpenCode 1.x) | OpenCode 2.0 plugin |
@@ -228,5 +236,6 @@ Then `/connect` → **Cursor** if credentials are missing. Filter the picker by 
 |---------|-------------|
 | No Cursor models in the picker | `/connect` → **Cursor** (or shared `auth.json`). Dedicated `OPENCODE_CONFIG_DIR`. Plugin is a **directory** re-exporting `plugin/opencode2`, not a bare `.js`. Filter by provider **Cursor** (`time.released` is `0`). Remove leftover `providers.cursor` (see [Safe transition](#safe-transition)). |
 | Local daemon still runs the published package | Set `CURSOR_OPENCODE2_DEV_ENTRY` to an absolute `…/dist/index.js` path **before** start, persist it with `opencode2 service set env`, rebuild, restart. Loading only `dist/plugin-opencode2.js` is not enough. |
+| The model cannot find an MCP tool and searches files for it instead | The server is still in Code Mode. Check that `CURSOR_OPENCODE2_MCP_CODEMODE` is unset and the server has no `"codemode": true`; see [MCP tools](#mcp-tools). MCP servers connect asynchronously, so a prompt sent right after startup can also miss tools that are still connecting. |
 | Picker / auth broke after an upgrade | You are likely still on the next-era `ctx.catalog` build or the dump-era plugin. Follow [Safe transition](#safe-transition) and restart. |
 | `opencode.json` ballooned to thousands of lines | That was the dump-era `providers.cursor.models` map. Remove `providers.cursor` as above. The current plugin will not recreate it. |

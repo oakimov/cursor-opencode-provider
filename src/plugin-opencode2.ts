@@ -21,6 +21,7 @@ import {
 } from "./shell-timeout.js"
 import { applyCursorProviderInventory, CURSOR_INTEGRATION_ID } from "./opencode2/catalog.js"
 import { applyCursorIntegration, resolveCursorAccessToken } from "./opencode2/integration.js"
+import { applyDirectMcpTools, isOpenCode2McpCodeModeKept } from "./opencode2/mcp-codemode.js"
 import { registerTodoTools } from "./opencode2/todo-tools.js"
 import { OPENCODE_2_TOOL_DIALECT } from "./protocol/tools.js"
 import { clearSessionTodos } from "./todo-store.js"
@@ -302,6 +303,13 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
           })
         }),
       )
+    }
+
+    // ── MCP tools in the direct catalog ─────────────────────
+    // OpenCode 2 hides MCP tools behind Code Mode's single `execute` tool by
+    // default; Cursor needs them by name. See `opencode2/mcp-codemode.ts`.
+    if (ctx.mcp && !isOpenCode2McpCodeModeKept()) {
+      await track(ctx.mcp.transform(applyDirectMcpTools))
     }
 
     await track(

@@ -360,6 +360,25 @@ export type WebSearchDomain = {
   readonly reload: () => Promise<void>
 }
 
+// ── MCP ──
+
+/**
+ * MCP config editor subset this plugin uses (`list` + `update`, only
+ * `codemode`). The host `MCPEditor` is a superset.
+ */
+export type McpServerConfig = {
+  codemode?: boolean
+}
+
+export type McpEditor = {
+  list(): readonly (readonly [string, McpServerConfig])[]
+  update(name: string, update: (config: McpServerConfig) => void): void
+}
+
+export type McpDomain = {
+  readonly transform: Transform<McpEditor>
+}
+
 export type PluginLocation = {
   readonly directory: string
 }
@@ -374,6 +393,7 @@ export type PluginContext = {
   readonly location?: PluginLocation
   readonly shell?: ShellDomain
   readonly websearch?: WebSearchDomain
+  readonly mcp?: McpDomain
 }
 
 export type Cleanup = () => Promise<void> | void

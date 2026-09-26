@@ -461,6 +461,7 @@ function fakeContext(events: readonly unknown[] = []) {
       prompt: async () => ({}),
     },
     websearch: transformDomain("websearch"),
+    mcp: transformDomain("mcp"),
     shell: hookDomain("shell"),
     provider: {
       transform: async (callback: (editor: any) => void) => {
@@ -549,6 +550,48 @@ describe("opencode2 setup", () => {
     }
   })
 
+  test("exposes MCP tools directly instead of through Code Mode", async () => {
+    const { ctx, transforms } = fakeContext()
+    const cleanup = await plugin.setup(ctx)
+    const servers: Record<string, { type: string; codemode?: boolean }> = {
+      github: { type: "local" },
+      executor: { type: "local", codemode: true },
+    }
+    transforms.get("mcp")?.({
+      list: () => Object.entries(servers),
+      update: (name: string, update: (config: { codemode?: boolean }) => void) => {
+        const config = servers[name]
+        if (config) update(config)
+      },
+    })
+    expect(servers.github?.codemode).toBe(false)
+    expect(servers.executor?.codemode).toBe(true)
+    await cleanup()
+  })
+
+  test("leaves MCP Code Mode alone when CURSOR_OPENCODE2_MCP_CODEMODE is set", async () => {
+    const previous = process.env.CURSOR_OPENCODE2_MCP_CODEMODE
+    process.env.CURSOR_OPENCODE2_MCP_CODEMODE = "1"
+    try {
+      const { ctx, registered } = fakeContext()
+      const cleanup = await plugin.setup(ctx)
+      expect(registered).not.toContain("mcp.transform")
+      await cleanup()
+    } finally {
+      if (previous === undefined) delete process.env.CURSOR_OPENCODE2_MCP_CODEMODE
+      else process.env.CURSOR_OPENCODE2_MCP_CODEMODE = previous
+    }
+  })
+
+  test("sets up on a host without the mcp domain", async () => {
+    const { ctx, registered } = fakeContext()
+    delete ctx.mcp
+    const cleanup = await plugin.setup(ctx)
+    expect(registered).not.toContain("mcp.transform")
+    expect(registered).toContain("provider.transform")
+    await cleanup()
+  })
+
   test("registers every domain it needs and returns a cleanup", async () => {
     const { ctx, registered, transforms } = fakeContext()
     const cleanup = await plugin.setup(ctx)
@@ -566,6 +609,7 @@ describe("opencode2 setup", () => {
     expect(registered).toContain("session.title")
     expect(registered).toContain("shell.create.before")
     expect(registered).toContain("websearch.transform")
+    expect(registered).toContain("mcp.transform")
     expect(typeof cleanup).toBe("function")
 
     const tools: Array<{
