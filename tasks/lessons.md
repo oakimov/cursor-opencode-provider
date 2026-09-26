@@ -399,6 +399,12 @@
   a direct catalog. OpenCode's `<mcp_instructions>` still emit that sentence
   from server config (`packages/core/src/mcp/instructions.ts`), so provider
   guidance has to prefer the direct name when the tool is on the direct list.
+- **A prompt sent before MCP servers finish connecting is a non-issue.**
+  OpenCode connects servers asynchronously and does not block startup on a
+  slow server (`packages/core/src/mcp/index.ts`). The first turn can advertise
+  no MCP tools; the next turn in the same session replays the tool transform
+  after discovery and includes them. Do not delay startup or the first Run to
+  wait for MCP.
 
 ## 2026-08-25 — Pricing gate before every release
 

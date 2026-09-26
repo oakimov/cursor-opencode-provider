@@ -133,6 +133,8 @@ Server names are normalized into tool namespaces (`my.docs` becomes `my_docs`). 
 
 OpenCode's `<mcp_instructions>` still say to use `execute` for a server that left `codemode` unset, because that sentence reads the server config and not the tool option. The provider guidance tells Cursor to ignore that sentence for tools that are on the direct list. Discovery reloads replay the tool transform, so tools that connect after startup join the same catalog.
 
+A prompt sent before those servers finish connecting will not see their tools. OpenCode connects MCP servers asynchronously and does not block startup on a slow server. The next turn in the same session includes the tools that have connected. That first-turn gap is expected host behavior, not a missing catalog placement.
+
 ## Feature parity vs the classic plugin
 
 | Classic plugin (OpenCode 1.x) | OpenCode 2.0 plugin |
@@ -256,6 +258,7 @@ Then `/connect` → **Cursor** if credentials are missing. Filter the picker by 
 |---------|-------------|
 | No Cursor models in the picker | `/connect` → **Cursor** (or shared `auth.json`). Dedicated `OPENCODE_CONFIG_DIR`. Plugin is a **directory** re-exporting `plugin/opencode2`, not a bare `.js`. Filter by provider **Cursor** (`time.released` is `0`). Remove leftover `providers.cursor` (see [Safe transition](#safe-transition)). |
 | Local daemon still runs the published package | Set `CURSOR_OPENCODE2_DEV_ENTRY` to an absolute `…/dist/index.js` path **before** start, persist it with `opencode2 service set env`, rebuild, restart. Loading only `dist/plugin-opencode2.js` is not enough. |
-| The model cannot find an MCP tool and searches files for it instead | The server set `"codemode": true`, so its tools stay inside `execute`. Remove that field to put them on the direct catalog; see [MCP tools](#mcp-tools). MCP servers connect asynchronously, so a prompt sent right after startup can also miss tools that are still connecting. |
+| The model cannot find an MCP tool and searches files for it instead | The server set `"codemode": true`, so its tools stay inside `execute`. Remove that field to put them on the direct catalog; see [MCP tools](#mcp-tools). |
+| A prompt immediately after startup does not see MCP tools | Expected. OpenCode connects MCP servers asynchronously and does not block startup on a slow server. The next turn in the same session includes tools that have connected. Do not treat this as a catalog bug or delay startup to wait for MCP. |
 | Picker / auth broke after an upgrade | You are likely still on the next-era `ctx.catalog` build or the dump-era plugin. Follow [Safe transition](#safe-transition) and restart. |
 | `opencode.json` ballooned to thousands of lines | That was the dump-era `providers.cursor.models` map. Remove `providers.cursor` as above. The current plugin will not recreate it. |
