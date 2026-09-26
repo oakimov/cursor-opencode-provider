@@ -113,6 +113,22 @@ The plugin therefore sets `codemode: false` on every MCP server that leaves it u
 
 This edits host MCP config, so it also applies to other providers loaded in the same OpenCode. To keep the host default, set `CURSOR_OPENCODE2_MCP_CODEMODE=1` (or `true`), or set `"codemode": true` on the servers that should stay in Code Mode.
 
+No extra configuration is needed. Declare MCP servers in `opencode.json` as usual:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "github": { "type": "local", "command": ["github-mcp-server", "stdio"] },
+      "docs": { "type": "remote", "url": "https://example.com/mcp" },
+      "executor": { "type": "local", "command": ["my-executor"], "codemode": true }
+    }
+  }
+}
+```
+
+`github` and `docs` leave `codemode` unset, so the plugin sets it to `false` and Cursor sees their tools by name (for example `github_create_pull_request`). `executor` sets `"codemode": true` explicitly, so it stays behind Code Mode's `execute` tool.
+
 ## Feature parity vs the classic plugin
 
 | Classic plugin (OpenCode 1.x) | OpenCode 2.0 plugin |
