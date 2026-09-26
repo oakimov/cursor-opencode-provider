@@ -229,6 +229,18 @@ export type ToolDraft = {
   /** Host ToolEditor.get — used to skip registering tools the host already owns. */
   get?(id: string): (ToolDefinition & { readonly id?: string }) | undefined
   list?(): readonly (ToolDefinition & { readonly id: string })[]
+  /** Host ToolEditor.update — missing ids are ignored. */
+  update?(
+    id: string,
+    update: (tool: {
+      options?: {
+        namespace?: string
+        permission?: string
+        codemode?: boolean
+        pinned?: boolean
+      }
+    }) => void,
+  ): void
 }
 
 export type ToolHookBaseFields = {
@@ -363,16 +375,16 @@ export type WebSearchDomain = {
 // ── MCP ──
 
 /**
- * MCP config editor subset this plugin uses (`list` + `update`, only
- * `codemode`). The host `MCPEditor` is a superset.
+ * MCP config reader this plugin uses. Server `codemode` is observed and not
+ * written: writing it also changes the remote raw-tool URL. The host
+ * `MCPEditor` is a superset.
  */
 export type McpServerConfig = {
-  codemode?: boolean
+  readonly codemode?: boolean
 }
 
 export type McpEditor = {
   list(): readonly (readonly [string, McpServerConfig])[]
-  update(name: string, update: (config: McpServerConfig) => void): void
 }
 
 export type McpDomain = {

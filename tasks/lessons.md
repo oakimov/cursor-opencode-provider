@@ -388,6 +388,18 @@
   host text as `seedSystemPrompt` after checkpoint-less recovery — Cursor
   already holds the prefix. Chronological updates stay on the user-turn tail.
 
+## 2026-09-26 — OpenCode 2 MCP catalog placement
+
+- **Do not write MCP server `codemode` to put tools on the direct catalog.**
+  That field also decides whether OpenCode appends `?codemode=false` so a
+  remote server returns individual tools (`packages/core/src/mcp/client.ts`).
+  Catalog placement is `options.codemode` on the tool (`packages/core/src/tool.ts`).
+  Set that to `false` via `ctx.tool.transform` for namespaces whose server did not explicitly set `codemode: true`.
+  Prompt text that tells Cursor to call every MCP tool inside `execute` fights
+  a direct catalog. OpenCode's `<mcp_instructions>` still emit that sentence
+  from server config (`packages/core/src/mcp/instructions.ts`), so provider
+  guidance has to prefer the direct name when the tool is on the direct list.
+
 ## 2026-08-25 — Pricing gate before every release
 
 - **CI regenerating pricing is a backstop, not permission to skip the local

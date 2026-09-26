@@ -259,6 +259,17 @@ export type HostPluginContext = {
         readonly options?: { readonly codemode?: boolean; readonly namespace?: string; readonly permission?: string }
         readonly execute: (input: any, context: HostToolContext) => Promise<any>
       }[]
+      update?(
+        id: string,
+        update: (tool: {
+          options?: {
+            namespace?: string
+            permission?: string
+            codemode?: boolean
+            pinned?: boolean
+          }
+        }) => void,
+      ): void
     }>
     readonly reload: () => Promise<void>
     readonly hook: HostHooks<{

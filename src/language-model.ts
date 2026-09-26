@@ -4008,7 +4008,7 @@ export function buildOpenCodeInteractionGuidance(
         : "- OpenCode `execute` is Code Mode JavaScript (`code`); it is not a shell. Do not pass `command` to `execute`.",
     )
     instructions.push(
-      "- When the host's Code Mode catalog lists additional tools, including MCP server tools, call them inside `execute` through `tools`. Use only the exact paths and signatures in that catalog or returned by its `search` function. Call `execute` with `{ code }` to run them; do not request a Code Mode tool as a direct OpenCode tool call.",
+      "- Call tools named in the direct list by their own names, even when a server instruction says to reach them through `execute`. Use `execute` only for tools that appear in the host Code Mode catalog and are absent from that list. Use the exact paths and signatures from that catalog or its `search` function, and call `execute` with `{ code }`.",
     )
   }
   if (names.has("task") || names.has("subagent")) {

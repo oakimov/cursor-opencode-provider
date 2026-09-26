@@ -21,7 +21,7 @@ import {
 } from "./shell-timeout.js"
 import { applyCursorProviderInventory, CURSOR_INTEGRATION_ID } from "./opencode2/catalog.js"
 import { applyCursorIntegration, resolveCursorAccessToken } from "./opencode2/integration.js"
-import { applyDirectMcpTools, isOpenCode2McpCodeModeKept } from "./opencode2/mcp-codemode.js"
+import { exposeDirectMcpTools, rememberDirectMcpNamespaces } from "./opencode2/mcp-direct.js"
 import { registerTodoTools } from "./opencode2/todo-tools.js"
 import { OPENCODE_2_TOOL_DIALECT } from "./protocol/tools.js"
 import { clearSessionTodos } from "./todo-store.js"
@@ -305,11 +305,16 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
       )
     }
 
-    // ── MCP tools in the direct catalog ─────────────────────
-    // OpenCode 2 hides MCP tools behind Code Mode's single `execute` tool by
-    // default; Cursor needs them by name. See `opencode2/mcp-codemode.ts`.
-    if (ctx.mcp && !isOpenCode2McpCodeModeKept()) {
-      await track(ctx.mcp.transform(applyDirectMcpTools))
+    // Namespaces whose tools belong on the direct catalog. Filled by the MCP
+    // transform (config is not written) and read when tool transforms replay,
+    // including after a later MCP discovery reload.
+    const directMcpNamespaces = new Set<string>()
+    if (ctx.mcp) {
+      await track(
+        ctx.mcp.transform((editor) => {
+          rememberDirectMcpNamespaces(directMcpNamespaces, editor.list())
+        }),
+      )
     }
 
     await track(
@@ -319,6 +324,10 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
         // them as direct catalog tools (`codemode: false` + output schema) if
         // the host does not already own those names. When off, register none.
         registerTodoTools(draft)
+        // MCP tools default into Code Mode. Move every server that did not
+        // explicitly opt in onto the direct catalog so Cursor can call them
+        // by name. See `opencode2/mcp-direct.ts`.
+        exposeDirectMcpTools(draft, directMcpNamespaces)
       }),
     )
 

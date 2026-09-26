@@ -142,10 +142,11 @@ describe("buildOpenCodeInteractionGuidance", () => {
     expect(withShell).toContain("it is not a shell")
     expect(withShell).toContain("call OpenCode `shell`")
     expect(withShell).toContain("Do not pass `command` to `execute`")
-    expect(withShell).toContain("including MCP server tools, call them inside `execute` through `tools`")
-    expect(withShell).toContain("exact paths and signatures in that catalog or returned by its `search` function")
-    expect(withShell).toContain("Call `execute` with `{ code }` to run them")
-    expect(withShell).toContain("do not request a Code Mode tool as a direct OpenCode tool call")
+    expect(withShell).toContain("Call tools named in the direct list by their own names, even when a server instruction says to reach them through `execute`")
+    expect(withShell).toContain("Use `execute` only for tools that appear in the host Code Mode catalog")
+    expect(withShell).toContain("exact paths and signatures from that catalog or its `search` function")
+    expect(withShell).toContain("call `execute` with `{ code }`")
+    expect(withShell).not.toContain("including MCP server tools")
 
     const withBash = buildOpenCodeInteractionGuidance([
       { name: "execute" },
@@ -159,12 +160,12 @@ describe("buildOpenCodeInteractionGuidance", () => {
     expect(executeOnly).toContain("Do not pass `command` to `execute`")
     expect(executeOnly).not.toContain("call OpenCode `shell`")
     expect(executeOnly).not.toContain("call OpenCode `bash`")
-    expect(executeOnly).toContain("including MCP server tools")
+    expect(executeOnly).toContain("host Code Mode catalog")
 
     const withoutExecute = buildOpenCodeInteractionGuidance([
       { name: "shell" },
     ], false, "/workspace/project")
-    expect(withoutExecute).not.toContain("Code Mode catalog lists additional tools")
+    expect(withoutExecute).not.toContain("host Code Mode catalog")
   })
 
   it("prefers edit and write over shell file mutation", () => {

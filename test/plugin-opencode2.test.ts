@@ -550,37 +550,63 @@ describe("opencode2 setup", () => {
     }
   })
 
-  test("exposes MCP tools directly instead of through Code Mode", async () => {
+  test("puts MCP tools on the direct catalog without editing server config", async () => {
     const { ctx, transforms } = fakeContext()
     const cleanup = await plugin.setup(ctx)
     const servers: Record<string, { type: string; codemode?: boolean }> = {
       github: { type: "local" },
       executor: { type: "local", codemode: true },
     }
-    transforms.get("mcp")?.({
-      list: () => Object.entries(servers),
-      update: (name: string, update: (config: { codemode?: boolean }) => void) => {
-        const config = servers[name]
-        if (config) update(config)
-      },
-    })
-    expect(servers.github?.codemode).toBe(false)
-    expect(servers.executor?.codemode).toBe(true)
-    await cleanup()
-  })
-
-  test("leaves MCP Code Mode alone when CURSOR_OPENCODE2_MCP_CODEMODE is set", async () => {
-    const previous = process.env.CURSOR_OPENCODE2_MCP_CODEMODE
-    process.env.CURSOR_OPENCODE2_MCP_CODEMODE = "1"
-    try {
-      const { ctx, registered } = fakeContext()
-      const cleanup = await plugin.setup(ctx)
-      expect(registered).not.toContain("mcp.transform")
-      await cleanup()
-    } finally {
-      if (previous === undefined) delete process.env.CURSOR_OPENCODE2_MCP_CODEMODE
-      else process.env.CURSOR_OPENCODE2_MCP_CODEMODE = previous
+    const tools = [
+      { id: "github_create_pull_request", options: { namespace: "github", codemode: true as boolean | undefined, permission: "github_create_pull_request" } },
+      { id: "executor_run", options: { namespace: "executor", codemode: true as boolean | undefined } },
+      { id: "opencode_session_rename", options: { namespace: "opencode", codemode: true as boolean | undefined } },
+    ]
+    const applyTools = () => {
+      transforms.get("tool")?.({
+        add: () => {},
+        list: () => tools,
+        update: (id: string, update: (tool: (typeof tools)[number]) => void) => {
+          const tool = tools.find((item) => item.id === id)
+          if (tool) update(tool)
+        },
+      })
     }
+
+    applyTools()
+    expect(tools[0]?.options.codemode).toBe(true)
+
+    transforms.get("mcp")?.({ list: () => Object.entries(servers) })
+    expect(servers.github?.codemode).toBeUndefined()
+    expect(servers.executor?.codemode).toBe(true)
+
+    applyTools()
+    expect(tools[0]?.options).toEqual({
+      namespace: "github",
+      permission: "github_create_pull_request",
+      codemode: false,
+    })
+    expect(tools[1]?.options.codemode).toBe(true)
+    expect(tools[2]?.options.codemode).toBe(true)
+
+    // Discovery reloads rebuild from the host's original registrations, then
+    // replay this transform over newly discovered tools too.
+    tools.push({ id: "github_search", options: { namespace: "github", codemode: true } })
+    applyTools()
+    expect(tools[3]?.options.codemode).toBe(false)
+
+    servers.github!.codemode = true
+    transforms.get("mcp")?.({ list: () => Object.entries(servers) })
+    for (const tool of tools) tool.options.codemode = true
+    applyTools()
+    expect(tools[0]?.options.codemode).toBe(true)
+    expect(tools[3]?.options.codemode).toBe(true)
+
+    delete servers.github
+    transforms.get("mcp")?.({ list: () => Object.entries(servers) })
+    applyTools()
+    expect(tools[0]?.options.codemode).toBe(true)
+    await cleanup()
   })
 
   test("sets up on a host without the mcp domain", async () => {

@@ -235,7 +235,6 @@ Pass either `accessToken` (JWT from OAuth or key exchange) or `apiKey` (raw `crs
 | `CURSOR_PROVIDER_DEBUG_FILE` | Debug log path (default: `debug-<pid>.log` under `$TMPDIR/cursor-provider-logs-<uid>/`) |
 | `CURSOR_OPENCODE2_DEV_ENTRY` | **Local OpenCode 2.0 only.** Absolute path to a built entry file (usually `dist/index.js`). Rewrites the AI SDK package to `aisdk:file://…` so the daemon imports your local build instead of `npm install`-ing the published package. Export it **before** `opencode2 service start`, then restart after rebuilds. Unset in production. See [OpenCode 2.0 local clone](docs/opencode-2.md#from-a-local-clone-cursor_opencode2_dev_entry). |
 | `CURSOR_OPENCODE2_TODOS` | **OpenCode 2.0 only.** Set to `1` or `true` to register plugin-owned `todowrite`/`todoread` (in-memory; no TUI sidebar). Off by default. OpenCode 1.x still uses the host builtin. |
-| `CURSOR_OPENCODE2_MCP_CODEMODE` | **OpenCode 2.0 only.** The plugin sets `codemode: false` on MCP servers that leave it unset, so Cursor sees MCP tools by name instead of a single Code Mode `execute` tool. Set to `1` or `true` to keep OpenCode's Code Mode default. An explicit per-server `codemode` is always kept. See [OpenCode 2.0 MCP tools](docs/opencode-2.md#mcp-tools). |
 | `XDG_CACHE_HOME` | Base for native OpenCode cache (`$XDG_CACHE_HOME/opencode/`) when no explicit `cacheDir` or structural host path bridge is installed |
 | `XDG_DATA_HOME` | When set, OpenCode `auth.json` is read from `$XDG_DATA_HOME/opencode/` instead of `~/.local/share/opencode/` |
 
