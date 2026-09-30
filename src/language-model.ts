@@ -1,6 +1,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { createHash } from "node:crypto"
+import { APICallError } from "@ai-sdk/provider"
 import type { LanguageModelV3, LanguageModelV3CallOptions, LanguageModelV3StreamResult, LanguageModelV3GenerateResult, LanguageModelV3StreamPart, LanguageModelV3Usage, LanguageModelV3FinishReason } from "@ai-sdk/provider"
 import type { CreateCursorOptions, CursorRetryOptions } from "./index.js"
 import {
@@ -131,8 +132,15 @@ import {
 } from "./protocol/blob-store.js"
 import {
   bindConversationId,
+  peekConversationId,
   resolveConversationGroupId,
 } from "./protocol/conversation-bind.js"
+import {
+  detectForeignHistory,
+  recordEmittedPart,
+  recordRunModel,
+  type ForeignHistoryReason,
+} from "./protocol/turn-provenance.js"
 import {
   clearPersistedConversationState,
   hydrateConversationState,
@@ -188,7 +196,7 @@ import { isCompactionSession } from "./compaction-marker.js"
 import { resolveSessionWorkspaceRoot } from "./session-directory.js"
 import type { SeedHistoryMessage } from "./protocol/request.js"
 import { assertCursorUserImageSupport, extractCursorPromptImages } from "./image-input.js"
-import { resolveCursorModelSupportsImages } from "./model-metadata.js"
+import { getDocumentedCursorModelContext, resolveCursorModelSupportsImages } from "./model-metadata.js"
 import {
   consumeCursorShellResult,
   registerCursorShellCall,
@@ -1109,15 +1117,28 @@ async function startSession(
     isCompaction,
     historyRewrite: providerOptions?.[CURSOR_HISTORY_REWRITE_OPTION] === true,
   })
+  // Another model (other provider, or another Cursor model) answered since this
+  // conversation's last checkpoint: resuming it would hide that work from Cursor.
+  const runModelId = resolveCursorWireModelId(providerOptions, modelId)
+  const foreignHistory: ForeignHistoryReason | undefined =
+    sessionKey && !resuming && !ephemeralRun && !resetState.reset && recovery?.kind !== "rebase"
+      ? detectForeignHistory({
+          sessionKey,
+          conversationId: peekConversationId(sessionKey),
+          modelId: runModelId,
+          prompt,
+        })
+      : undefined
   // Compaction must not reuse the prior conversation; its first normal turn
   // must also rebase so the summary-agent checkpoint cannot replace the normal
   // system prompt and OpenCode's newly compacted history.
   let bound = resuming
     ? { conversationId: resumeRecovery!.conversationId, reset: false, previousId: undefined }
     : bindConversationId(sessionKey, {
-        reset: resetState.reset || recovery?.kind === "rebase",
+        reset: resetState.reset || recovery?.kind === "rebase" || !!foreignHistory,
         ephemeral: ephemeralRun,
       })
+  if (sessionKey && !ephemeralRun) recordRunModel(sessionKey, bound.conversationId, runModelId)
   let conversationState = ephemeralRun
     ? undefined
     : resuming
@@ -1126,7 +1147,7 @@ async function startSession(
   let checkpointGraph: ConversationBlobGraphStats = conversationState
     ? inspectConversationBlobGraph(bound.conversationId, conversationState)
     : { count: 0, bytes: 0, complete: true }
-  const forcedResetReason: string | undefined = undefined
+  const forcedResetReason: string | undefined = foreignHistory ? `foreign-history:${foreignHistory}` : undefined
   // CLI soft-reuses incomplete / oversized graphs (100 MiB is export-only).
   // Never remint — warn and keep the sticky conversation + checkpoint.
   if (conversationState) {
@@ -1218,7 +1239,9 @@ async function startSession(
   }
   const history = extractPromptHistory(prompt, {
     preserveTrailingUser: recovery?.kind === "rebase",
-    toolResults: isCompaction ? "all" : (recovery?.kind === "rebase" ? "trailing" : "omit"),
+    // A foreign-history rebase replays every tool result: the other model's work
+    // exists only in OpenCode history, never in a Cursor checkpoint.
+    toolResults: isCompaction || foreignHistory ? "all" : (recovery?.kind === "rebase" ? "trailing" : "omit"),
   })
 
   await loadAvailableModels()
@@ -1289,6 +1312,17 @@ async function startSession(
     picked,
     maxMode: hintMaxMode,
   })
+
+  if (foreignHistory) {
+    assertForeignHistoryRebaseFits({
+      modelInfo,
+      cursorModelId,
+      maxMode,
+      history,
+      systemPrompt,
+      userText,
+    })
+  }
 
   // Do NOT pass callOptions.abortSignal into the h2 Run stream. OpenCode aborts
   // that signal when a turn ends with tool-calls; the Cursor stream must stay
@@ -2574,6 +2608,14 @@ export async function pump(
     if (streamClosed) return false
     try {
       controller.enqueue(part)
+      if (session.openCodeSessionId) {
+        recordEmittedPart(
+          session.openCodeSessionId,
+          session.conversationId,
+          session.cacheDiagnostics?.modelId,
+          part as { type: string; delta?: unknown; toolCallId?: unknown },
+        )
+      }
       return true
     } catch (e) {
       streamClosed = true
@@ -4345,6 +4387,46 @@ function appendSeedHistory(
     return
   }
   out.push({ role, content })
+}
+
+/** Share of the target context a foreign-history rebase may fill before compaction. */
+export const FOREIGN_HISTORY_REBASE_CONTEXT_SHARE = 0.8
+
+/**
+ * A foreign-history rebase replays the full host history. When that cannot fit,
+ * fail before opening a Run with an error hosts classify as context overflow
+ * (HTTP 413 + "prompt is too long"), so the host compacts and retries.
+ */
+export function assertForeignHistoryRebaseFits(input: {
+  modelInfo: ModelInfo | undefined
+  cursorModelId: string
+  maxMode: boolean
+  history: SeedHistoryMessage[]
+  systemPrompt: string | undefined
+  userText: string
+}): void {
+  const documented = getDocumentedCursorModelContext(input.cursorModelId)
+  const limit = input.maxMode
+    ? (input.modelInfo?.maxContextForMaxMode ?? documented?.maxContextForMaxMode ?? 1_000_000)
+    : (input.modelInfo?.maxContext ?? documented?.maxContext ?? 200_000)
+  const chars = input.history.reduce((sum, message) => sum + message.content.length, 0)
+    + (input.systemPrompt?.length ?? 0)
+    + input.userText.length
+  const tokens = estimateTokens(chars)
+  const budget = Math.floor(limit * FOREIGN_HISTORY_REBASE_CONTEXT_SHARE)
+  if (tokens <= budget) return
+  trace(
+    `foreign-history rebase too large: model=${input.cursorModelId} estimatedTokens=${tokens} ` +
+      `budget=${budget} limit=${limit} → requesting host compaction`,
+  )
+  throw new APICallError({
+    message: `prompt is too long: rebasing this session onto Cursor needs ~${tokens} tokens, ` +
+      `over ${budget} of the ${limit}-token context`,
+    url: "cursor://agent.v1.AgentService/Run",
+    requestBodyValues: {},
+    statusCode: 413,
+    isRetryable: false,
+  })
 }
 
 /** OpenCode session id header, if present. */

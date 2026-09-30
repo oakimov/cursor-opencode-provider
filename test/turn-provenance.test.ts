@@ -1,0 +1,297 @@
+import { afterAll, beforeEach, describe, expect, it } from "bun:test"
+import { mkdtemp, rm } from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { APICallError, type LanguageModelV3CallOptions } from "@ai-sdk/provider"
+import {
+  detectForeignHistory,
+  getTurnProvenance,
+  parseTurnProvenance,
+  recordEmittedPart,
+  recordRunModel,
+  resetTurnProvenanceForTests,
+  serializeTurnProvenance,
+} from "../src/protocol/turn-provenance.js"
+import {
+  assertForeignHistoryRebaseFits,
+  extractPromptHistory,
+  pump,
+  resetTurnStateForTests,
+} from "../src/language-model.js"
+import {
+  getPersistedConversation,
+  resetConversationPersistenceForTests,
+} from "../src/protocol/conversation-persistence.js"
+import { hydrateConversationState } from "../src/protocol/conversation-state.js"
+import {
+  resetConversationBindingsForTests,
+  restoreConversationBinding,
+} from "../src/protocol/conversation-bind.js"
+import { resetCheckpointsForTests } from "../src/protocol/checkpoint.js"
+import { resetConversationBlobsForTests } from "../src/protocol/blob-store.js"
+import { resetFrozenRequestContextsForTests } from "../src/context/frozen.js"
+import { encodeMessage } from "../src/protocol/messages.js"
+import type { CursorSession, Frame } from "../src/session.js"
+
+type Prompt = LanguageModelV3CallOptions["prompt"]
+
+const SESSION = "ses_mixed"
+const CONVERSATION = "conv-1"
+
+function promptEndingWith(assistant: Prompt[number]): Prompt {
+  return [
+    { role: "user", content: [{ type: "text", text: "first" }] },
+    assistant,
+    { role: "user", content: [{ type: "text", text: "next" }] },
+  ]
+}
+
+function assistantText(text: string): Prompt[number] {
+  return { role: "assistant", content: [{ type: "text", text }] }
+}
+
+function assistantToolCall(toolCallId: string, text = ""): Prompt[number] {
+  return {
+    role: "assistant",
+    content: [
+      ...(text ? [{ type: "text" as const, text }] : []),
+      { type: "tool-call", toolCallId, toolName: "read", input: { path: "a.ts" } },
+    ],
+  }
+}
+
+function detect(prompt: Prompt, modelId = "gpt-5") {
+  return detectForeignHistory({ sessionKey: SESSION, conversationId: CONVERSATION, modelId, prompt })
+}
+
+describe("detectForeignHistory", () => {
+  beforeEach(resetTurnProvenanceForTests)
+
+  it("has no opinion without a record for this conversation", () => {
+    expect(detect(promptEndingWith(assistantText("anything")))).toBeUndefined()
+    recordRunModel(SESSION, "other-conversation", "gpt-5")
+    expect(detect(promptEndingWith(assistantText("anything")))).toBeUndefined()
+  })
+
+  it("accepts the host echo of our own text regardless of whitespace", () => {
+    recordRunModel(SESSION, CONVERSATION, "gpt-5")
+    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "Done.\n\nThe  fix " })
+    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "is in place." })
+    expect(detect(promptEndingWith(assistantText("Done. The fix is in place.")))).toBeUndefined()
+  })
+
+  it("accepts an assistant turn carrying one of our tool call ids", () => {
+    recordRunModel(SESSION, CONVERSATION, "gpt-5")
+    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "tool-call", toolCallId: "call_ours" })
+    expect(detect(promptEndingWith(assistantToolCall("call_ours", "Reading it")))).toBeUndefined()
+  })
+
+  it("flags an assistant turn another model produced", () => {
+    recordRunModel(SESSION, CONVERSATION, "gpt-5")
+    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "Cursor answer" })
+    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "tool-call", toolCallId: "call_ours" })
+    expect(detect(promptEndingWith(assistantText("Local model answer")))).toBe("foreign-assistant")
+    expect(detect(promptEndingWith(assistantToolCall("call_theirs")))).toBe("foreign-assistant")
+  })
+
+  it("ignores reasoning when comparing and has no opinion on an empty turn", () => {
+    recordRunModel(SESSION, CONVERSATION, "gpt-5")
+    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "Answer" })
+    expect(detect(promptEndingWith({
+      role: "assistant",
+      content: [{ type: "reasoning", text: "private thoughts" }, { type: "text", text: "Answer" }],
+    }))).toBeUndefined()
+    expect(detect(promptEndingWith({ role: "assistant", content: [{ type: "reasoning", text: "x" }] })))
+      .toBeUndefined()
+  })
+
+  it("flags a switch to another Cursor model even when the last turn is ours", () => {
+    recordRunModel(SESSION, CONVERSATION, "gpt-5")
+    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "Answer" })
+    expect(detect(promptEndingWith(assistantText("Answer")), "claude-4.5-sonnet")).toBe("model-switch")
+  })
+
+  it("starts a fresh record when the conversation is reminted", () => {
+    recordRunModel(SESSION, CONVERSATION, "gpt-5")
+    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "Old" })
+    recordRunModel(SESSION, "conv-2", "claude-4.5-sonnet")
+    expect(getTurnProvenance(SESSION)).toEqual({
+      conversationId: "conv-2",
+      modelId: "claude-4.5-sonnet",
+      toolCallIds: [],
+      text: "",
+    })
+  })
+
+  it("round-trips through its persisted JSON form", () => {
+    recordRunModel(SESSION, CONVERSATION, "gpt-5")
+    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "tool-call", toolCallId: "call_ours" })
+    const value = getTurnProvenance(SESSION)!
+    expect(parseTurnProvenance(serializeTurnProvenance(value))).toEqual(value)
+    expect(parseTurnProvenance("{not json")).toBeUndefined()
+    expect(parseTurnProvenance("{}")).toBeUndefined()
+  })
+})
+
+describe("foreign-history rebase", () => {
+  it("replays every tool result as host observations", () => {
+    const history = extractPromptHistory([
+      { role: "user", content: [{ type: "text", text: "fix it" }] },
+      assistantToolCall("call_theirs", "Reading"),
+      {
+        role: "tool",
+        content: [{
+          type: "tool-result",
+          toolCallId: "call_theirs",
+          toolName: "read",
+          output: { type: "text", value: "file body" },
+        }],
+      },
+      assistantText("Fixed"),
+      { role: "user", content: [{ type: "text", text: "next" }] },
+    ], { toolResults: "all" })
+    const text = history.map((message) => message.content).join("\n")
+    expect(text).toContain("file body")
+    expect(text).toContain("Fixed")
+    expect(history.some((message) => message.role === "assistant" && message.content.includes("file body")))
+      .toBe(false)
+  })
+
+  it("passes when the rebased history fits the model context", () => {
+    expect(() => assertForeignHistoryRebaseFits({
+      modelInfo: { id: "m", maxContext: 1_000, variants: [] },
+      cursorModelId: "m",
+      maxMode: false,
+      history: [{ role: "user", content: "x".repeat(3_000) }],
+      systemPrompt: "system",
+      userText: "next",
+    })).not.toThrow()
+  })
+
+  it("raises a host-recognised context overflow when it does not fit", () => {
+    let thrown: unknown
+    try {
+      assertForeignHistoryRebaseFits({
+        modelInfo: { id: "m", maxContext: 1_000, maxContextForMaxMode: 100_000, variants: [] },
+        cursorModelId: "m",
+        maxMode: false,
+        history: [{ role: "user", content: "x".repeat(4_000) }],
+        systemPrompt: undefined,
+        userText: "next",
+      })
+    } catch (error) {
+      thrown = error
+    }
+    expect(APICallError.isInstance(thrown)).toBe(true)
+    expect((thrown as APICallError).statusCode).toBe(413)
+    expect((thrown as APICallError).message).toMatch(/prompt is too long/i)
+  })
+
+  it("uses the long-context window in max mode", () => {
+    expect(() => assertForeignHistoryRebaseFits({
+      modelInfo: { id: "m", maxContext: 1_000, maxContextForMaxMode: 100_000, variants: [] },
+      cursorModelId: "m",
+      maxMode: true,
+      history: [{ role: "user", content: "x".repeat(4_000) }],
+      systemPrompt: undefined,
+      userText: "next",
+    })).not.toThrow()
+  })
+})
+
+describe("provenance through a Cursor Run", () => {
+  const roots: string[] = []
+
+  beforeEach(() => {
+    resetTurnProvenanceForTests()
+    resetConversationPersistenceForTests()
+    resetConversationBindingsForTests()
+    resetCheckpointsForTests()
+    resetConversationBlobsForTests()
+    resetFrozenRequestContextsForTests()
+    resetTurnStateForTests()
+  })
+
+  afterAll(async () => {
+    await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })))
+  })
+
+  function textTurnSession(root: string, text: string): CursorSession {
+    const payloads = [
+      encodeMessage("AgentServerMessage", { interaction_update: { text_delta: { text } } }),
+      encodeMessage("AgentServerMessage", { conversation_checkpoint_update: Uint8Array.from([1, 2, 3]) }),
+      encodeMessage("AgentServerMessage", {
+        interaction_update: { turn_ended: { input_tokens: 3, output_tokens: 1 } },
+      }),
+    ]
+    let index = 0
+    const frames: AsyncIterator<Frame> = {
+      next: async () => index < payloads.length
+        ? { done: false, value: { flags: 0, payload: payloads[index++]! } }
+        : { done: true, value: undefined },
+    }
+    return {
+      sessionId: "provenance-run",
+      conversationId: CONVERSATION,
+      cacheDir: root,
+      openCodeSessionId: SESSION,
+      cacheDiagnostics: {
+        sessionKey: SESSION,
+        conversationId: CONVERSATION,
+        modelId: "gpt-5",
+        startedWithCheckpoint: false,
+        requestContextReused: false,
+        requestContextHash: "hash",
+        checkpointUpdates: 0,
+        tokenDetailUpdates: 0,
+        pumpPasses: 0,
+        stepStarts: 0,
+        stepCompletes: 0,
+        displayToolCalls: 0,
+        execRequests: 0,
+      },
+      stream: {
+        write() {},
+        end() {},
+        destroy() {},
+        frames: () => ({ [Symbol.asyncIterator]: () => frames }),
+      } as CursorSession["stream"],
+      frames,
+      pending: new Map(),
+      displayToolCalls: new Map(),
+      nextBridgedExecId: 900_000,
+      blobs: new Map(),
+      toolDescriptors: [],
+      requestContext: { rules_info_complete: true },
+      allowTools: true,
+      usageEstimate: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0, reasoningTokens: 0 },
+      pumpActive: true,
+      heartbeat: null,
+      expiresAt: Date.now() + 10_000,
+    } as unknown as CursorSession
+  }
+
+  it("records streamed text and restores it after a restart", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "cursor-provenance-"))
+    roots.push(root)
+    restoreConversationBinding(SESSION, CONVERSATION)
+    const session = textTurnSession(root, "Cursor wrote this")
+    await pump(session, {
+      enqueue() {},
+      error(error: unknown) { throw error },
+    } as unknown as ReadableStreamDefaultController<any>, { textId: "text", reasoningId: "reasoning" })
+
+    expect(detect(promptEndingWith(assistantText("Cursor wrote this")))).toBeUndefined()
+    expect(detect(promptEndingWith(assistantText("Somebody else")))).toBe("foreign-assistant")
+    expect((await getPersistedConversation(root, SESSION))?.turnProvenance).toBeDefined()
+
+    // Simulate a host restart: drop all in-memory state, then hydrate.
+    resetTurnProvenanceForTests()
+    resetConversationPersistenceForTests()
+    resetConversationBindingsForTests()
+    expect(detect(promptEndingWith(assistantText("Somebody else")))).toBeUndefined()
+    await hydrateConversationState(root, SESSION)
+    expect(detect(promptEndingWith(assistantText("Cursor wrote this")))).toBeUndefined()
+    expect(detect(promptEndingWith(assistantText("Somebody else")))).toBe("foreign-assistant")
+  })
+})
