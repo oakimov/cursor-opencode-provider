@@ -4049,24 +4049,73 @@ function extractToolResults(prompt: LanguageModelV3CallOptions["prompt"]): Extra
  * messages after the last non-tool message. Mid-prompt historical tool results
  * are ignored — they are conversation history, not replies for a held-open Run.
  */
+// OpenCode 2.x appends these host notes after the tool results of a step:
+// mid-turn system updates (skill / MCP availability changes) are lowered to a
+// user message wrapping `<system-update>`, and tool-result media is re-sent as
+// a user message starting with this caption.
+const SYSTEM_UPDATE_OPEN = "<system-update>"
+const SYSTEM_UPDATE_CLOSE = "</system-update>"
+const TOOL_MEDIA_CAPTION = "Attached media from tool result:"
+
+type HostTailNote = { text?: string }
+
+function hostTailNote(message: LanguageModelV3CallOptions["prompt"][number]): HostTailNote | undefined {
+  if (message.role === "system") return { text: message.content }
+  if (message.role !== "user" || !Array.isArray(message.content) || message.content.length === 0) return undefined
+  const [first] = message.content
+  if (first?.type === "text" && first.text === TOOL_MEDIA_CAPTION) return {}
+  const texts: string[] = []
+  for (const part of message.content) {
+    if (part.type !== "text") return undefined
+    const text = part.text.trim()
+    if (!text.startsWith(SYSTEM_UPDATE_OPEN) || !text.endsWith(SYSTEM_UPDATE_CLOSE)) return undefined
+    texts.push(text)
+  }
+  return { text: texts.join("\n") }
+}
+
+/**
+ * Split off host notes that trail the live tool results. They are not a new
+ * user turn: the held Run must still receive its tool results.
+ */
+function liveTail(prompt: LanguageModelV3CallOptions["prompt"]): { end: number; notes: string[] } {
+  let end = prompt.length
+  const notes: string[] = []
+  while (end > 0) {
+    const note = hostTailNote(prompt[end - 1])
+    if (!note) break
+    if (note.text) notes.unshift(note.text)
+    end--
+  }
+  return { end, notes }
+}
+
 export function extractTrailingToolResults(
   prompt: LanguageModelV3CallOptions["prompt"],
 ): ExtractedToolResult[] {
-  if (prompt.length === 0) return []
-  let i = prompt.length - 1
+  const { end, notes } = liveTail(prompt)
+  let i = end - 1
   while (i >= 0 && prompt[i].role === "tool") i--
-  // Continuations end with tool messages. Anything else (user/assistant/system)
+  // Continuations end with tool messages. Anything else (user/assistant)
   // means this is a fresh model call that merely carries tools in history.
-  if (i === prompt.length - 1) return []
-  return extractToolResults(prompt.slice(i + 1))
+  if (i === end - 1) return []
+  const results = extractToolResults(prompt.slice(i + 1, end))
+  // A Run continuation only carries exec results, so the host notes ride on the
+  // last one; otherwise Cursor would never see e.g. a removed skill.
+  const last = results.at(-1)
+  if (last && notes.length > 0) {
+    results[results.length - 1] = { ...last, output: [last.output, ...notes].filter(Boolean).join("\n\n") }
+  }
+  return results
 }
 
 /** Detect a host-owned canonical plan review, excluding Cursor exec replies. */
 export function hasApprovedUncorrelatedPlanStageResult(
   prompt: LanguageModelV3CallOptions["prompt"],
 ): boolean {
-  if (prompt.length === 0 || prompt[prompt.length - 1].role !== "tool") return false
-  for (let i = prompt.length - 1; i >= 0 && prompt[i].role === "tool"; i--) {
+  const { end } = liveTail(prompt)
+  if (end === 0 || prompt[end - 1].role !== "tool") return false
+  for (let i = end - 1; i >= 0 && prompt[i].role === "tool"; i--) {
     const message = prompt[i]
     if (!Array.isArray(message.content)) continue
     for (const part of message.content) {

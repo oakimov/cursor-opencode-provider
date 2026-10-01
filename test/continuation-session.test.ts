@@ -103,6 +103,8 @@ describe("extractTrailingToolResults", () => {
     expect(hasApprovedUncorrelatedPlanStageResult([stage("text", "cursor_live_8")])).toBe(false)
     expect(hasApprovedUncorrelatedPlanStageResult([stage("text"),
       { role: "user", content: [{ type: "text", text: "new request" }] }])).toBe(false)
+    expect(hasApprovedUncorrelatedPlanStageResult([stage("text"),
+      { role: "user", content: [{ type: "text", text: "<system-update>\nNew skills are available.\n</system-update>" }] }])).toBe(true)
   })
 
   it("returns only tool results after the last non-tool message", () => {
@@ -134,6 +136,43 @@ describe("extractTrailingToolResults", () => {
     ] as LanguageModelV3CallOptions["prompt"]
 
     expect(extractTrailingToolResults(prompt)).toEqual([])
+  })
+
+  it("sees through host notes OpenCode appends after live tool results", () => {
+    // OpenCode 2.x lowers a mid-turn skill/MCP change to a wrapped user message
+    // and re-sends tool-result media as a captioned user message, both right
+    // after the tool result. The call must stay a continuation.
+    const update = (text: string) => ({ role: "user", content: [{ type: "text", text: `<system-update>\n${text}\n</system-update>` }] })
+    const prompt = [
+      { role: "system", content: "base prompt" },
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+      toolMsg("live", 1),
+      { role: "user", content: [
+        { type: "text", text: "Attached media from tool result:" },
+        { type: "file", mediaType: "image/png", data: "iVBORw0KGgo=" },
+      ] },
+      update("The following skill IDs are no longer available: repro-r7."),
+      { role: "system", content: "MCP server instructions are no longer available." },
+    ] as LanguageModelV3CallOptions["prompt"]
+
+    const trailing = extractTrailingToolResults(prompt)
+    expect(trailing.map((r) => r.toolCallId)).toEqual(["cursor_live_1"])
+    // Notes ride on the last result so Cursor still sees them.
+    expect(trailing[0]!.output).toBe(
+      "ok\n\n<system-update>\nThe following skill IDs are no longer available: repro-r7.\n</system-update>" +
+        "\n\nMCP server instructions are no longer available.",
+    )
+    // A note after a real user message is still a fresh turn.
+    expect(extractTrailingToolResults([
+      toolMsg("old", 0),
+      { role: "user", content: [{ type: "text", text: "next" }] },
+      update("New skills are available."),
+    ] as LanguageModelV3CallOptions["prompt"])).toEqual([])
+    // Ordinary user text that merely mentions the tag is a fresh turn.
+    expect(extractTrailingToolResults([
+      toolMsg("old", 0),
+      { role: "user", content: [{ type: "text", text: "what is <system-update>?" }] },
+    ] as LanguageModelV3CallOptions["prompt"])).toEqual([])
   })
 
   it("returns empty for an empty prompt", () => {
