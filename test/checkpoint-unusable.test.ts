@@ -92,6 +92,31 @@ describe("checkpoint-unusable recovery", () => {
     expect(error.checkpointUnusable).toBeUndefined()
   })
 
+  it("does not reseed when a skipped frame could not be classified", async () => {
+    // A frame we cannot decode, or one with only an unknown top-level field,
+    // may have carried output or stateful activity: keep the replay barrier.
+    const undecodable: Frame = { flags: 0, payload: Uint8Array.from([0x0a, 0x7f, 0x01]) }
+    const unknownField: Frame = { flags: 0, payload: Uint8Array.from([0xe0, 0x03, 0x01]) }
+    for (const [name, frame] of [["undecodable", undecodable], ["unknown-field", unknownField]] as const) {
+      const error = await pumpError(fakeSession(name, [missingBlobRequest(0), frame, internalEndStream()]))
+      expect(error.checkpointUnusable).toBeUndefined()
+      expect(error.replaySafe).toBe(false)
+    }
+  })
+
+  it("still reseeds when a decoded KV read only fails the strict wire check", async () => {
+    // Cursor has been seen sending KV frames with extra fields: they decode as
+    // KV reads but trip the strict wire check (unknown-or-malformed-frame).
+    // They are still control frames, so the checkpoint can be reseeded.
+    const blobId = Array.from({ length: 32 }, (_, i) => 200 + (i % 50))
+    const args = [0x0a, 0x20, ...blobId, 0x18, 0x01]
+    const kv = [0x08, 0x00, 0x12, args.length, ...args]
+    const extendedRead: Frame = { flags: 0, payload: Uint8Array.from([0x22, kv.length, ...kv]) }
+    const error = await pumpError(fakeSession("extended-kv", [extendedRead, internalEndStream()]))
+    expect(error.checkpointUnusable).toBe(true)
+    expect(error.replaySafe).toBe(true)
+  })
+
   it("does not reseed once visible output was produced", async () => {
     const error = await pumpError(fakeSession("visible", [
       missingBlobRequest(0),

@@ -3088,6 +3088,7 @@ export async function pump(
       payload = decodeFramePayload(frame)
     } catch (e) {
       replaySafety.markBarrier("unknown-or-malformed-frame")
+      onlyControlFrames = false
       trace(`gunzip FAILED (skipping frame): flags=0x${frame.flags.toString(16)} len=${frame.payload.length} err=${(e as Error).message}`)
       continue
     }
@@ -3099,6 +3100,7 @@ export async function pump(
       // (protobufjs throws "index out of range: …" on length overruns). Log it
       // and keep pumping.
       replaySafety.markBarrier("unknown-or-malformed-frame")
+      onlyControlFrames = false
       const channel = responseRequiredChannel(payload)
       if (channel) {
         failRunProtocol(`Cursor ${channel} request could not be decoded`, RUN_REQUEST_DECODE_FAILED)
@@ -3135,7 +3137,14 @@ export async function pump(
       sessionManager.recordSemanticProgress(session)
     }
     if (replayFrame.barrier) replaySafety.markBarrier(replayFrame.barrier)
-    if (esm || execControl || interactionQuery || (iu && !iu.heartbeat)) onlyControlFrames = false
+    // Reseeding is allowed only while every frame so far was positively a
+    // control frame: KV, checkpoint update or heartbeat. Anything else, including
+    // unknown top-level fields, may have carried output or stateful activity.
+    const heartbeatOnly = !!iu && Object.keys(iu).every((key) => key === "heartbeat" || !iu[key])
+    const controlFrame = !esm && !execControl && !interactionQuery
+      && (!iu || heartbeatOnly)
+      && (!!kv || checkpointRaw != null || heartbeatOnly)
+    if (!controlFrame) onlyControlFrames = false
 
     {
       const iuKind = iu ? Object.keys(iu).find((k) => iu[k]) : undefined
