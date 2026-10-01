@@ -107,6 +107,48 @@ describe("detectForeignHistory", () => {
       .toBeUndefined()
   })
 
+  it("accepts our turn when OpenCode 1.x replays our reasoning as text after a model switch", () => {
+    // OpenCode 1.x session/message-v2.ts: when the request model differs from the
+    // message's model, reasoning parts are replayed as text parts in place.
+    trackTurnProvenance(SESSION, CONVERSATION)
+    beginEmittedStep(SESSION, CONVERSATION)
+    recordEmittedPart(SESSION, CONVERSATION, { type: "reasoning-delta", delta: "Check the file." })
+    recordEmittedPart(SESSION, CONVERSATION, { type: "text-delta", delta: "First." })
+    recordEmittedPart(SESSION, CONVERSATION, { type: "reasoning-delta", delta: "Then the test." })
+    recordEmittedPart(SESSION, CONVERSATION, { type: "text-delta", delta: "Done." })
+    const replayedAsText = { role: "assistant", content: [
+      { type: "text", text: "Check the file." },
+      { type: "text", text: "First." },
+      { type: "text", text: "Then the test." },
+      { type: "text", text: "Done." },
+    ] } as Prompt[number]
+    expect(detect(promptEndingWith(replayedAsText))).toBeUndefined()
+    // Same model: reasoning stays typed and the text parts alone match.
+    expect(detect(promptEndingWith({ role: "assistant", content: [
+      { type: "reasoning", text: "Check the file." },
+      { type: "text", text: "First." },
+      { type: "reasoning", text: "Then the test." },
+      { type: "text", text: "Done." },
+    ] }))).toBeUndefined()
+    // Reordered or foreign text still does not match.
+    expect(detect(promptEndingWith(assistantText("First.Check the file.Done.Then the test.")))).toBe("foreign-assistant")
+    expect(detect(promptEndingWith({ role: "assistant", content: [
+      { type: "text", text: "Other model thinking" },
+      { type: "text", text: "Done." },
+    ] }))).toBe("foreign-assistant")
+  })
+
+  it("records a reasoning-only step so its replay as text still matches", () => {
+    trackTurnProvenance(SESSION, CONVERSATION)
+    beginEmittedStep(SESSION, CONVERSATION)
+    recordEmittedPart(SESSION, CONVERSATION, { type: "text-delta", delta: "Earlier answer" })
+    beginEmittedStep(SESSION, CONVERSATION)
+    recordEmittedPart(SESSION, CONVERSATION, { type: "reasoning-delta", delta: "Only thinking" })
+    expect(getTurnProvenance(SESSION)).toMatchObject({ text: "", textWithReasoning: "Onlythinking" })
+    expect(detect(promptEndingWith(assistantText("Only thinking")))).toBeUndefined()
+    expect(detect(promptEndingWith(assistantText("Earlier answer")))).toBe("foreign-assistant")
+  })
+
   it("compares only against the latest step, not older Cursor turns", () => {
     trackTurnProvenance(SESSION, CONVERSATION)
     beginEmittedStep(SESSION, CONVERSATION)
@@ -164,13 +206,17 @@ describe("detectForeignHistory", () => {
       conversationId: "conv-2",
       toolCallIds: [],
       text: "",
+      textWithReasoning: "",
     })
   })
 
   it("round-trips through its persisted JSON form", () => {
     trackTurnProvenance(SESSION, CONVERSATION)
+    recordEmittedPart(SESSION, CONVERSATION, { type: "reasoning-delta", delta: "Thinking" })
+    recordEmittedPart(SESSION, CONVERSATION, { type: "text-delta", delta: "Answer" })
     recordEmittedPart(SESSION, CONVERSATION, { type: "tool-call", toolCallId: "call_ours" })
     const value = getTurnProvenance(SESSION)!
+    expect(value.textWithReasoning).toBe("ThinkingAnswer")
     expect(parseTurnProvenance(serializeTurnProvenance(value))).toEqual(value)
     expect(parseTurnProvenance("{not json")).toBeUndefined()
     expect(parseTurnProvenance("{}")).toBeUndefined()
