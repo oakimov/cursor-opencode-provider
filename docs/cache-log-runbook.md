@@ -111,6 +111,16 @@ Also inspect the outbound flags:
   checkpoint.
 - `compaction=true` and the subsequent `post-compaction-rebase` intentionally
   rotate Cursor conversation ids.
+- `conversation reset: reason=foreign-history:foreign-assistant` means the
+  host's latest assistant turn was not produced by this provider (another
+  provider or a local model answered), so the Run reseeds the full history with
+  every tool result. Expect one cold turn per return to Cursor. A direct switch
+  between Cursor models resumes the same conversation and never resets.
+- `conversation reset: reason=checkpoint-unusable` follows a `checkpoint
+  unusable:` trace: Cursor asked for a blob hash this client does not hold and
+  the resumed Run failed before any non-control frame, so it reseeds instead of
+  surfacing a retry-unsafe error. `found=false echoed=true` KV reads are inline
+  content echoed back and are normal; only `found=false echoed=false` is a miss.
 - `agent-change` and `system-prompt-change` remints are **removed**. Agent /
   system-prompt identity is diagnostics only; sticky conversations stay held
   (CLI keeps the same agentId across mode flips).
@@ -289,7 +299,8 @@ per-call ratio.
 
 - `continuity=cold` and `systemPromptSent=true`;
 - first chat turn, missing/expired restart snapshot, explicit reset, recovery
-  rebase, compaction, or post-compaction rebase.
+  rebase, compaction, post-compaction rebase, foreign-history reseed, or
+  checkpoint-unusable reseed.
 
 Low or zero cache read does not diagnose a regression here. For compaction,
 verify that `conversationGroupId` remains stable and that unchanged

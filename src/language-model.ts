@@ -139,7 +139,7 @@ import {
   beginEmittedStep,
   detectForeignHistory,
   recordEmittedPart,
-  recordRunModel,
+  trackTurnProvenance,
   type ForeignHistoryReason,
 } from "./protocol/turn-provenance.js"
 import {
@@ -851,11 +851,7 @@ async function doStreamImpl(
             return
           }
           if (activeSession.openCodeSessionId) {
-            beginEmittedStep(
-              activeSession.openCodeSessionId,
-              activeSession.conversationId,
-              activeSession.cacheDiagnostics?.modelId,
-            )
+            beginEmittedStep(activeSession.openCodeSessionId, activeSession.conversationId)
           }
           activeSession = await pumpWithRecovery({
             initialSession: activeSession,
@@ -1163,7 +1159,6 @@ async function startSession(
   // Another model (other provider or a local model) answered since this
   // conversation's last checkpoint: resuming it would hide that work from Cursor.
   // A Cursor-to-Cursor model switch resumes the same conversation, as in the CLI.
-  const runModelId = resolveCursorWireModelId(providerOptions, modelId)
   const foreignHistory: ForeignHistoryReason | undefined =
     sessionKey && !resuming && !ephemeralRun && !resetState.reset && recovery?.kind !== "rebase"
       ? detectForeignHistory({
@@ -1181,7 +1176,7 @@ async function startSession(
         reset: resetState.reset || recovery?.kind === "rebase" || !!foreignHistory,
         ephemeral: ephemeralRun,
       })
-  if (sessionKey && !ephemeralRun) recordRunModel(sessionKey, bound.conversationId, runModelId)
+  if (sessionKey && !ephemeralRun) trackTurnProvenance(sessionKey, bound.conversationId)
   let conversationState = ephemeralRun
     ? undefined
     : resuming
@@ -2678,7 +2673,6 @@ export async function pump(
         recordEmittedPart(
           session.openCodeSessionId,
           session.conversationId,
-          session.cacheDiagnostics?.modelId,
           part as { type: string; delta?: unknown; toolCallId?: unknown },
         )
       }

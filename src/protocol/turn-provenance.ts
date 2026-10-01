@@ -18,7 +18,6 @@ const MAX_TEXT_CHARS = 4 * 1024
 
 export type TurnProvenance = {
   conversationId: string
-  modelId?: string
   /** Tool call ids emitted in the latest non-empty step. */
   toolCallIds: string[]
   /** Whitespace-free text emitted in the latest non-empty step (first 4 KiB). */
@@ -49,17 +48,14 @@ function touch(sessionKey: string, entry: Entry): Entry {
   return entry
 }
 
-function entryFor(sessionKey: string, conversationId: string, modelId?: string): Entry {
+function entryFor(sessionKey: string, conversationId: string): Entry {
   const existing = provenanceBySession.get(sessionKey)
-  if (existing && existing.conversationId === conversationId) {
-    if (modelId) existing.modelId = modelId
-    return touch(sessionKey, existing)
-  }
-  return touch(sessionKey, { conversationId, modelId, toolCallIds: [], text: "", stepPending: false })
+  if (existing && existing.conversationId === conversationId) return touch(sessionKey, existing)
+  return touch(sessionKey, { conversationId, toolCallIds: [], text: "", stepPending: false })
 }
 
-function contentEntry(sessionKey: string, conversationId: string, modelId?: string): Entry {
-  const entry = entryFor(sessionKey, conversationId, modelId)
+function contentEntry(sessionKey: string, conversationId: string): Entry {
+  const entry = entryFor(sessionKey, conversationId)
   if (entry.stepPending) {
     entry.stepPending = false
     entry.toolCallIds = []
@@ -73,33 +69,36 @@ function contentEntry(sessionKey: string, conversationId: string, modelId?: stri
  * recorded until this one emits content, because hosts drop empty assistant
  * turns from history.
  */
-export function beginEmittedStep(sessionKey: string, conversationId: string, modelId?: string): void {
-  entryFor(sessionKey, conversationId, modelId).stepPending = true
+export function beginEmittedStep(sessionKey: string, conversationId: string): void {
+  entryFor(sessionKey, conversationId).stepPending = true
 }
 
 /** Record one stream part this provider handed to the host. */
 export function recordEmittedPart(
   sessionKey: string,
   conversationId: string,
-  modelId: string | undefined,
   part: { type: string; delta?: unknown; toolCallId?: unknown },
 ): void {
   if (part.type === "text-delta" && typeof part.delta === "string") {
     const delta = normalizeText(part.delta)
     if (!delta) return
-    const entry = contentEntry(sessionKey, conversationId, modelId)
+    const entry = contentEntry(sessionKey, conversationId)
     if (entry.text.length < MAX_TEXT_CHARS) entry.text = (entry.text + delta).slice(0, MAX_TEXT_CHARS)
     return
   }
   if (part.type === "tool-call" && typeof part.toolCallId === "string" && part.toolCallId) {
-    const entry = contentEntry(sessionKey, conversationId, modelId)
+    const entry = contentEntry(sessionKey, conversationId)
     if (entry.toolCallIds.length < MAX_TOOL_CALL_IDS) entry.toolCallIds.push(part.toolCallId)
   }
 }
 
-/** Remember which Cursor model a Run on this conversation was opened with. */
-export function recordRunModel(sessionKey: string, conversationId: string, modelId: string): void {
-  entryFor(sessionKey, conversationId, modelId)
+/**
+ * Bind provenance to the conversation a Run was opened on. A reminted
+ * conversation starts with an empty record, so it never inherits the previous
+ * conversation's steps.
+ */
+export function trackTurnProvenance(sessionKey: string, conversationId: string): void {
+  entryFor(sessionKey, conversationId)
 }
 
 export function getTurnProvenance(sessionKey: string): TurnProvenance | undefined {
@@ -107,7 +106,6 @@ export function getTurnProvenance(sessionKey: string): TurnProvenance | undefine
   if (!entry) return undefined
   return {
     conversationId: entry.conversationId,
-    ...(entry.modelId ? { modelId: entry.modelId } : {}),
     toolCallIds: [...entry.toolCallIds],
     text: entry.text,
   }
@@ -131,7 +129,6 @@ export function parseTurnProvenance(raw: string): TurnProvenance | undefined {
     if (typeof value.conversationId !== "string" || !value.conversationId) return undefined
     return {
       conversationId: value.conversationId,
-      ...(typeof value.modelId === "string" && value.modelId ? { modelId: value.modelId } : {}),
       toolCallIds: Array.isArray(value.toolCallIds)
         ? value.toolCallIds.filter((id): id is string => typeof id === "string").slice(0, MAX_TOOL_CALL_IDS)
         : [],

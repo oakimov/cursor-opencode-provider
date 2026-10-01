@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { pump, pumpWithRecovery, type CursorRunRecovery } from "../src/language-model.js"
+import { isSoleControlFrame, pump, pumpWithRecovery, type CursorRunRecovery } from "../src/language-model.js"
 import { encodeMessage } from "../src/protocol/messages.js"
 import type { CursorSession, Frame } from "../src/session.js"
 import { CursorProviderError } from "../src/errors.js"
@@ -162,5 +162,45 @@ describe("checkpoint-unusable recovery", () => {
     expect(finalSession).toBe(reseeded)
     expect(recoveries).toEqual([{ kind: "rebase", reason: "checkpoint-unusable" }])
     expect(parts.some((part) => part.type === "text-delta" && part.delta === "fresh answer")).toBe(true)
+  })
+})
+
+describe("isSoleControlFrame", () => {
+  const payload = (message: Record<string, unknown>) => encodeMessage("AgentServerMessage", message)
+  const unknownTopLevelField = [0xe0, 0x03, 0x01]
+
+  it("accepts exactly one KV request, checkpoint update, or heartbeat-only interaction update", () => {
+    expect(isSoleControlFrame(missingBlobRequest(0).payload)).toBe(true)
+    expect(isSoleControlFrame(payload({ conversation_checkpoint_update: Uint8Array.from([1, 2, 3]) }))).toBe(true)
+    expect(isSoleControlFrame(payload({ interaction_update: { heartbeat: {} } }))).toBe(true)
+  })
+
+  it("tolerates extra fields inside a KV request", () => {
+    const blobId = Array.from({ length: 32 }, (_, i) => 200 + (i % 50))
+    const args = [0x0a, 0x20, ...blobId, 0x18, 0x01]
+    const kv = [0x08, 0x00, 0x12, args.length, ...args]
+    expect(isSoleControlFrame(Uint8Array.from([0x22, kv.length, ...kv]))).toBe(true)
+  })
+
+  it("rejects interaction updates that carry anything but a heartbeat", () => {
+    expect(isSoleControlFrame(payload({ interaction_update: { text_delta: { text: "hi" } } }))).toBe(false)
+    expect(isSoleControlFrame(payload({ interaction_update: { turn_ended: { input_tokens: 1 } } }))).toBe(false)
+    // A heartbeat followed by a second interaction field in the same update.
+    const update = [0x6a, 0x00, 0x0a, 0x02, 0x0a, 0x00]
+    expect(isSoleControlFrame(Uint8Array.from([0x0a, update.length, ...update]))).toBe(false)
+  })
+
+  it("rejects extra or unknown top-level fields, other messages, and malformed bytes", () => {
+    const kvPlusUnknown = Uint8Array.from([...missingBlobRequest(1).payload, ...unknownTopLevelField])
+    const kvPlusCheckpoint = Uint8Array.from([
+      ...missingBlobRequest(1).payload,
+      ...payload({ conversation_checkpoint_update: Uint8Array.from([1]) }),
+    ])
+    expect(isSoleControlFrame(kvPlusUnknown)).toBe(false)
+    expect(isSoleControlFrame(kvPlusCheckpoint)).toBe(false)
+    expect(isSoleControlFrame(Uint8Array.from(unknownTopLevelField))).toBe(false)
+    expect(isSoleControlFrame(payload({ interaction_query: { id: 1 } }))).toBe(false)
+    expect(isSoleControlFrame(Uint8Array.from([0x0a, 0x7f, 0x01]))).toBe(false)
+    expect(isSoleControlFrame(new Uint8Array())).toBe(false)
   })
 })

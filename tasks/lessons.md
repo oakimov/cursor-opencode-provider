@@ -461,3 +461,14 @@
   unmapped `Legacy Enterprise Auto` docs row and forced a retag. Run the gate
   in the same turn as the bump, commit mapping/`pricing-data.ts` first, and
   treat “I’ll fix it after the tag” as forbidden.
+
+## 2026-10-01 — Trace the whole feature path before calling a gap
+
+- **Before flagging a capability as lost, follow it past the function under
+  review.** Reviewing PR #34 I reported tool-read images as "never reaching
+  Cursor" because `hostTailNote` drops the media caption and continuations
+  are text-only. That missed the existing design: held-Run continuations skip
+  media on purpose (`toolResultOutputToText`) and `cursorHistoryImageParts`
+  harvests tool-result and earlier-user images on the next fresh Run. Grep the
+  feature (images, media) across `src/` and read the code comments that state
+  intent before reporting a regression.

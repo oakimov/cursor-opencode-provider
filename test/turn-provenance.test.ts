@@ -10,9 +10,9 @@ import {
   MAX_PROVENANCE_SESSIONS,
   parseTurnProvenance,
   recordEmittedPart,
-  recordRunModel,
   resetTurnProvenanceForTests,
   serializeTurnProvenance,
+  trackTurnProvenance,
 } from "../src/protocol/turn-provenance.js"
 import {
   assertForeignHistoryRebaseFits,
@@ -71,34 +71,34 @@ describe("detectForeignHistory", () => {
 
   it("has no opinion without a record for this conversation", () => {
     expect(detect(promptEndingWith(assistantText("anything")))).toBeUndefined()
-    recordRunModel(SESSION, "other-conversation", "gpt-5")
+    trackTurnProvenance(SESSION, "other-conversation")
     expect(detect(promptEndingWith(assistantText("anything")))).toBeUndefined()
   })
 
   it("accepts the host echo of our own text regardless of whitespace", () => {
-    recordRunModel(SESSION, CONVERSATION, "gpt-5")
-    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "Done.\n\nThe  fix " })
-    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "is in place." })
+    trackTurnProvenance(SESSION, CONVERSATION)
+    recordEmittedPart(SESSION, CONVERSATION, { type: "text-delta", delta: "Done.\n\nThe  fix " })
+    recordEmittedPart(SESSION, CONVERSATION, { type: "text-delta", delta: "is in place." })
     expect(detect(promptEndingWith(assistantText("Done. The fix is in place.")))).toBeUndefined()
   })
 
   it("accepts an assistant turn carrying one of our tool call ids", () => {
-    recordRunModel(SESSION, CONVERSATION, "gpt-5")
-    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "tool-call", toolCallId: "call_ours" })
+    trackTurnProvenance(SESSION, CONVERSATION)
+    recordEmittedPart(SESSION, CONVERSATION, { type: "tool-call", toolCallId: "call_ours" })
     expect(detect(promptEndingWith(assistantToolCall("call_ours", "Reading it")))).toBeUndefined()
   })
 
   it("flags an assistant turn another model produced", () => {
-    recordRunModel(SESSION, CONVERSATION, "gpt-5")
-    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "Cursor answer" })
-    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "tool-call", toolCallId: "call_ours" })
+    trackTurnProvenance(SESSION, CONVERSATION)
+    recordEmittedPart(SESSION, CONVERSATION, { type: "text-delta", delta: "Cursor answer" })
+    recordEmittedPart(SESSION, CONVERSATION, { type: "tool-call", toolCallId: "call_ours" })
     expect(detect(promptEndingWith(assistantText("Local model answer")))).toBe("foreign-assistant")
     expect(detect(promptEndingWith(assistantToolCall("call_theirs")))).toBe("foreign-assistant")
   })
 
   it("ignores reasoning when comparing and has no opinion on an empty turn", () => {
-    recordRunModel(SESSION, CONVERSATION, "gpt-5")
-    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "Answer" })
+    trackTurnProvenance(SESSION, CONVERSATION)
+    recordEmittedPart(SESSION, CONVERSATION, { type: "text-delta", delta: "Answer" })
     expect(detect(promptEndingWith({
       role: "assistant",
       content: [{ type: "reasoning", text: "private thoughts" }, { type: "text", text: "Answer" }],
@@ -108,11 +108,11 @@ describe("detectForeignHistory", () => {
   })
 
   it("compares only against the latest step, not older Cursor turns", () => {
-    recordRunModel(SESSION, CONVERSATION, "gpt-5")
-    beginEmittedStep(SESSION, CONVERSATION, "gpt-5")
-    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "Done." })
-    beginEmittedStep(SESSION, CONVERSATION, "gpt-5")
-    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "Refactored the parser." })
+    trackTurnProvenance(SESSION, CONVERSATION)
+    beginEmittedStep(SESSION, CONVERSATION)
+    recordEmittedPart(SESSION, CONVERSATION, { type: "text-delta", delta: "Done." })
+    beginEmittedStep(SESSION, CONVERSATION)
+    recordEmittedPart(SESSION, CONVERSATION, { type: "text-delta", delta: "Refactored the parser." })
     // A foreign model answering "Done." must not match the older Cursor step.
     expect(detect(promptEndingWith(assistantText("Done.")))).toBe("foreign-assistant")
     expect(detect(promptEndingWith(assistantText("Refactored the parser.")))).toBeUndefined()
@@ -121,63 +121,55 @@ describe("detectForeignHistory", () => {
   })
 
   it("keeps the previous step when a new step emits nothing", () => {
-    recordRunModel(SESSION, CONVERSATION, "gpt-5")
-    beginEmittedStep(SESSION, CONVERSATION, "gpt-5")
-    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "tool-call", toolCallId: "call_ours" })
-    beginEmittedStep(SESSION, CONVERSATION, "gpt-5")
+    trackTurnProvenance(SESSION, CONVERSATION)
+    beginEmittedStep(SESSION, CONVERSATION)
+    recordEmittedPart(SESSION, CONVERSATION, { type: "tool-call", toolCallId: "call_ours" })
+    beginEmittedStep(SESSION, CONVERSATION)
     expect(detect(promptEndingWith(assistantToolCall("call_ours")))).toBeUndefined()
   })
 
   it("identifies a long step by its first 4 KiB of text", () => {
-    recordRunModel(SESSION, CONVERSATION, "gpt-5")
-    beginEmittedStep(SESSION, CONVERSATION, "gpt-5")
+    trackTurnProvenance(SESSION, CONVERSATION)
+    beginEmittedStep(SESSION, CONVERSATION)
     const long = "a".repeat(10_000)
-    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: long })
+    recordEmittedPart(SESSION, CONVERSATION, { type: "text-delta", delta: long })
     expect(getTurnProvenance(SESSION)!.text.length).toBe(4 * 1024)
     expect(detect(promptEndingWith(assistantText(long)))).toBeUndefined()
     expect(detect(promptEndingWith(assistantText("b" + long)))).toBe("foreign-assistant")
   })
 
   it("bounds the number of tracked sessions", () => {
-    for (let i = 0; i <= MAX_PROVENANCE_SESSIONS; i++) recordRunModel(`ses_${i}`, "conv", "gpt-5")
+    for (let i = 0; i <= MAX_PROVENANCE_SESSIONS; i++) trackTurnProvenance(`ses_${i}`, "conv")
     expect(getTurnProvenance("ses_0")).toBeUndefined()
     expect(getTurnProvenance(`ses_${MAX_PROVENANCE_SESSIONS}`)).toBeDefined()
   })
 
-  it("resumes across a direct switch to another Cursor model when the last turn is ours", () => {
-    recordRunModel(SESSION, CONVERSATION, "gpt-5")
-    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "Answer" })
+  it("keeps one record across Runs on the same conversation (Cursor model switch)", () => {
+    trackTurnProvenance(SESSION, CONVERSATION)
+    recordEmittedPart(SESSION, CONVERSATION, { type: "text-delta", delta: "Answer" })
     expect(detect(promptEndingWith(assistantText("Answer")))).toBeUndefined()
-    // The next Run on the new model keeps the same conversation and its record.
-    recordRunModel(SESSION, CONVERSATION, "claude-4.5-sonnet")
-    beginEmittedStep(SESSION, CONVERSATION, "claude-4.5-sonnet")
-    recordEmittedPart(SESSION, CONVERSATION, "claude-4.5-sonnet", { type: "text-delta", delta: "Second" })
+    // A Run on another Cursor model keeps the conversation, so it keeps the record.
+    trackTurnProvenance(SESSION, CONVERSATION)
+    beginEmittedStep(SESSION, CONVERSATION)
+    recordEmittedPart(SESSION, CONVERSATION, { type: "text-delta", delta: "Second" })
     expect(detect(promptEndingWith(assistantText("Second")))).toBeUndefined()
     expect(getTurnProvenance(SESSION)?.conversationId).toBe(CONVERSATION)
   })
 
-  it("flags Cursor A, then a foreign turn, then Cursor B as foreign history", () => {
-    recordRunModel(SESSION, CONVERSATION, "gpt-5")
-    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "Cursor A answer" })
-    // Another provider answered; the next Run comes from a different Cursor model.
-    expect(detect(promptEndingWith(assistantText("Local model answer")))).toBe("foreign-assistant")
-  })
-
   it("starts a fresh record when the conversation is reminted", () => {
-    recordRunModel(SESSION, CONVERSATION, "gpt-5")
-    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "Old" })
-    recordRunModel(SESSION, "conv-2", "claude-4.5-sonnet")
+    trackTurnProvenance(SESSION, CONVERSATION)
+    recordEmittedPart(SESSION, CONVERSATION, { type: "text-delta", delta: "Old" })
+    trackTurnProvenance(SESSION, "conv-2")
     expect(getTurnProvenance(SESSION)).toEqual({
       conversationId: "conv-2",
-      modelId: "claude-4.5-sonnet",
       toolCallIds: [],
       text: "",
     })
   })
 
   it("round-trips through its persisted JSON form", () => {
-    recordRunModel(SESSION, CONVERSATION, "gpt-5")
-    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "tool-call", toolCallId: "call_ours" })
+    trackTurnProvenance(SESSION, CONVERSATION)
+    recordEmittedPart(SESSION, CONVERSATION, { type: "tool-call", toolCallId: "call_ours" })
     const value = getTurnProvenance(SESSION)!
     expect(parseTurnProvenance(serializeTurnProvenance(value))).toEqual(value)
     expect(parseTurnProvenance("{not json")).toBeUndefined()

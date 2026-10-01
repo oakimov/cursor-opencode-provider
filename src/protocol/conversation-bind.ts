@@ -1,10 +1,7 @@
 import { createHash } from "node:crypto"
 import { clearCheckpoint } from "./checkpoint.js"
 import { clearConversationBlobs } from "./blob-store.js"
-import {
-  clearFrozenRequestContext,
-  transferFrozenRequestContext,
-} from "../context/frozen.js"
+import { transferFrozenRequestContext } from "../context/frozen.js"
 
 /**
  * OpenCode session key → active Cursor conversation_id.
