@@ -97,7 +97,16 @@ describe("checkpoint-unusable recovery", () => {
     // may have carried output or stateful activity: keep the replay barrier.
     const undecodable: Frame = { flags: 0, payload: Uint8Array.from([0x0a, 0x7f, 0x01]) }
     const unknownField: Frame = { flags: 0, payload: Uint8Array.from([0xe0, 0x03, 0x01]) }
-    for (const [name, frame] of [["undecodable", undecodable], ["unknown-field", unknownField]] as const) {
+    // A decodable KV request plus an unknown top-level field.
+    const kvPlusUnknown: Frame = {
+      flags: 0,
+      payload: Uint8Array.from([...missingBlobRequest(1).payload, 0xe0, 0x03, 0x01]),
+    }
+    for (const [name, frame] of [
+      ["undecodable", undecodable],
+      ["unknown-field", unknownField],
+      ["kv-plus-unknown", kvPlusUnknown],
+    ] as const) {
       const error = await pumpError(fakeSession(name, [missingBlobRequest(0), frame, internalEndStream()]))
       expect(error.checkpointUnusable).toBeUndefined()
       expect(error.replaySafe).toBe(false)

@@ -296,6 +296,31 @@ function responseRequiredChannel(payload: Uint8Array): ResponseRequiredChannel |
   return tag !== undefined ? RESPONSE_REQUIRED_CHANNEL_BY_FIELD.get(tag >> 3) : undefined
 }
 
+// AgentServerMessage fields that never carry output or stateful activity.
+const ASM_INTERACTION_UPDATE_FIELD = 1
+const ASM_CHECKPOINT_UPDATE_FIELD = 3
+const ASM_KV_SERVER_MESSAGE_FIELD = 4
+const INTERACTION_UPDATE_HEARTBEAT_FIELD = 13
+
+/**
+ * True when the raw frame holds exactly one control message: a KV request, a
+ * checkpoint update, or an interaction update that is only a heartbeat. Extra
+ * fields inside a KV request are tolerated (Cursor has sent them live); extra
+ * top-level fields are not.
+ */
+export function isSoleControlFrame(payload: Uint8Array): boolean {
+  const fields = readAllFieldsStrict(payload)
+  if (!fields || fields.length !== 1) return false
+  const [field] = fields
+  if (field!.wt !== 2) return false
+  if (field!.fn === ASM_KV_SERVER_MESSAGE_FIELD || field!.fn === ASM_CHECKPOINT_UPDATE_FIELD) return true
+  if (field!.fn !== ASM_INTERACTION_UPDATE_FIELD || !field!.bytes) return false
+  const update = readAllFieldsStrict(field!.bytes)
+  return update?.length === 1
+    && update[0]!.fn === INTERACTION_UPDATE_HEARTBEAT_FIELD
+    && update[0]!.wt === 2
+}
+
 export type CursorRetryPolicy = {
   maxAttempts: number
   baseDelayMs: number
@@ -3138,13 +3163,9 @@ export async function pump(
     }
     if (replayFrame.barrier) replaySafety.markBarrier(replayFrame.barrier)
     // Reseeding is allowed only while every frame so far was positively a
-    // control frame: KV, checkpoint update or heartbeat. Anything else, including
-    // unknown top-level fields, may have carried output or stateful activity.
-    const heartbeatOnly = !!iu && Object.keys(iu).every((key) => key === "heartbeat" || !iu[key])
-    const controlFrame = !esm && !execControl && !interactionQuery
-      && (!iu || heartbeatOnly)
-      && (!!kv || checkpointRaw != null || heartbeatOnly)
-    if (!controlFrame) onlyControlFrames = false
+    // control frame. Anything else, including unknown top-level fields, may have
+    // carried output or stateful activity.
+    if (!isSoleControlFrame(payload)) onlyControlFrames = false
 
     {
       const iuKind = iu ? Object.keys(iu).find((k) => iu[k]) : undefined
