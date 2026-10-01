@@ -38,6 +38,27 @@ describe("sessionIdToUuid / resolveConversationId", () => {
     expect(id).toBe(sessionIdToUuid("ses_affinity"))
   })
 
+  it("keys a subagent on its own session, not the parent affinity id", () => {
+    // OpenCode 2.x headers for a child session: affinity ids name the parent.
+    const child = resolveConversationId({
+      prompt: [],
+      headers: {
+        "x-opencode-session-id": "ses_child",
+        "x-opencode-parent-session-id": "ses_parent",
+        "x-session-affinity": "ses_parent",
+        "X-Session-Id": "ses_parent",
+        "x-opencode-session": "ses_parent",
+        "x-parent-session-id": "ses_parent",
+      },
+    } as LanguageModelV3CallOptions)
+    const parent = resolveConversationId({
+      prompt: [],
+      headers: { "x-opencode-session-id": "ses_parent", "X-Session-Id": "ses_parent" },
+    } as LanguageModelV3CallOptions)
+    expect(child).toBe(sessionIdToUuid("ses_child"))
+    expect(child).not.toBe(parent)
+  })
+
   it("falls back to a random UUID when no session header is present", () => {
     const a = resolveConversationId({ prompt: [] } as LanguageModelV3CallOptions)
     const b = resolveConversationId({ prompt: [] } as LanguageModelV3CallOptions)
