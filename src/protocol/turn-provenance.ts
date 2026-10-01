@@ -4,37 +4,74 @@ import type { LanguageModelV3CallOptions } from "@ai-sdk/provider"
 // host answers a turn with another model (another provider, or another Cursor
 // model) and then comes back, resuming the old checkpoint hides that work from
 // Cursor and has been observed to end Runs with Connect `internal` errors.
-// Remember what this provider emitted per OpenCode session so the next fresh
-// Run can tell whether the host's latest assistant turn is ours.
+// Remember what this provider emitted in its most recent step per OpenCode
+// session so the next fresh Run can tell whether the host's latest assistant
+// turn is ours.
 
+/** Mirrors MAX_TURN_STATE_SESSIONS; evicted sessions re-hydrate from disk. */
+export const MAX_PROVENANCE_SESSIONS = 256
 const MAX_TOOL_CALL_IDS = 256
 const MAX_TEXT_CHARS = 64 * 1024
 
 export type TurnProvenance = {
   conversationId: string
   modelId?: string
+  /** Tool call ids emitted in the latest non-empty step. */
   toolCallIds: string[]
-  /** Whitespace-free concatenation of emitted text, newest last, bounded. */
+  /** Whitespace-free text emitted in the latest non-empty step (first 64 KiB). */
   text: string
 }
 
 export type ForeignHistoryReason = "model-switch" | "foreign-assistant"
 
-const provenanceBySession = new Map<string, TurnProvenance>()
+type Entry = TurnProvenance & {
+  /** A new host step began; its first content replaces the recorded step. */
+  stepPending: boolean
+}
+
+const provenanceBySession = new Map<string, Entry>()
 
 function normalizeText(text: string): string {
   return text.replace(/\s+/g, "")
 }
 
-function entryFor(sessionKey: string, conversationId: string, modelId?: string): TurnProvenance {
+function touch(sessionKey: string, entry: Entry): Entry {
+  provenanceBySession.delete(sessionKey)
+  provenanceBySession.set(sessionKey, entry)
+  while (provenanceBySession.size > MAX_PROVENANCE_SESSIONS) {
+    const oldest = provenanceBySession.keys().next().value as string | undefined
+    if (!oldest) break
+    provenanceBySession.delete(oldest)
+  }
+  return entry
+}
+
+function entryFor(sessionKey: string, conversationId: string, modelId?: string): Entry {
   const existing = provenanceBySession.get(sessionKey)
   if (existing && existing.conversationId === conversationId) {
     if (modelId) existing.modelId = modelId
-    return existing
+    return touch(sessionKey, existing)
   }
-  const fresh: TurnProvenance = { conversationId, modelId, toolCallIds: [], text: "" }
-  provenanceBySession.set(sessionKey, fresh)
-  return fresh
+  return touch(sessionKey, { conversationId, modelId, toolCallIds: [], text: "", stepPending: false })
+}
+
+function contentEntry(sessionKey: string, conversationId: string, modelId?: string): Entry {
+  const entry = entryFor(sessionKey, conversationId, modelId)
+  if (entry.stepPending) {
+    entry.stepPending = false
+    entry.toolCallIds = []
+    entry.text = ""
+  }
+  return entry
+}
+
+/**
+ * Mark the start of one host step (one doStream). The previous step stays
+ * recorded until this one emits content, because hosts drop empty assistant
+ * turns from history.
+ */
+export function beginEmittedStep(sessionKey: string, conversationId: string, modelId?: string): void {
+  entryFor(sessionKey, conversationId, modelId).stepPending = true
 }
 
 /** Record one stream part this provider handed to the host. */
@@ -47,16 +84,13 @@ export function recordEmittedPart(
   if (part.type === "text-delta" && typeof part.delta === "string") {
     const delta = normalizeText(part.delta)
     if (!delta) return
-    const entry = entryFor(sessionKey, conversationId, modelId)
-    entry.text = (entry.text + delta).slice(-MAX_TEXT_CHARS)
+    const entry = contentEntry(sessionKey, conversationId, modelId)
+    if (entry.text.length < MAX_TEXT_CHARS) entry.text = (entry.text + delta).slice(0, MAX_TEXT_CHARS)
     return
   }
   if (part.type === "tool-call" && typeof part.toolCallId === "string" && part.toolCallId) {
-    const entry = entryFor(sessionKey, conversationId, modelId)
-    entry.toolCallIds.push(part.toolCallId)
-    if (entry.toolCallIds.length > MAX_TOOL_CALL_IDS) {
-      entry.toolCallIds.splice(0, entry.toolCallIds.length - MAX_TOOL_CALL_IDS)
-    }
+    const entry = contentEntry(sessionKey, conversationId, modelId)
+    if (entry.toolCallIds.length < MAX_TOOL_CALL_IDS) entry.toolCallIds.push(part.toolCallId)
   }
 }
 
@@ -67,15 +101,17 @@ export function recordRunModel(sessionKey: string, conversationId: string, model
 
 export function getTurnProvenance(sessionKey: string): TurnProvenance | undefined {
   const entry = provenanceBySession.get(sessionKey)
-  return entry ? { ...entry, toolCallIds: [...entry.toolCallIds] } : undefined
+  if (!entry) return undefined
+  return {
+    conversationId: entry.conversationId,
+    ...(entry.modelId ? { modelId: entry.modelId } : {}),
+    toolCallIds: [...entry.toolCallIds],
+    text: entry.text,
+  }
 }
 
 export function restoreTurnProvenance(sessionKey: string, value: TurnProvenance): void {
-  provenanceBySession.set(sessionKey, { ...value, toolCallIds: [...value.toolCallIds] })
-}
-
-export function clearTurnProvenance(sessionKey: string): void {
-  provenanceBySession.delete(sessionKey)
+  touch(sessionKey, { ...value, toolCallIds: [...value.toolCallIds], stepPending: false })
 }
 
 export function resetTurnProvenanceForTests(): void {
@@ -94,9 +130,9 @@ export function parseTurnProvenance(raw: string): TurnProvenance | undefined {
       conversationId: value.conversationId,
       ...(typeof value.modelId === "string" && value.modelId ? { modelId: value.modelId } : {}),
       toolCallIds: Array.isArray(value.toolCallIds)
-        ? value.toolCallIds.filter((id): id is string => typeof id === "string").slice(-MAX_TOOL_CALL_IDS)
+        ? value.toolCallIds.filter((id): id is string => typeof id === "string").slice(0, MAX_TOOL_CALL_IDS)
         : [],
-      text: typeof value.text === "string" ? value.text.slice(-MAX_TEXT_CHARS) : "",
+      text: typeof value.text === "string" ? value.text.slice(0, MAX_TEXT_CHARS) : "",
     }
   } catch {
     return undefined
@@ -139,6 +175,8 @@ export function detectForeignHistory(input: {
   }
   if (toolCallIds.length === 0 && !text) return undefined
   if (toolCallIds.some((id) => entry.toolCallIds.includes(id))) return undefined
-  if (text && entry.text.includes(text)) return undefined
+  // Compare against the latest step only: a foreign "Done." must not match an
+  // older Cursor turn that happened to contain the same words.
+  if (text && entry.text && text.slice(0, MAX_TEXT_CHARS) === entry.text) return undefined
   return "foreign-assistant"
 }

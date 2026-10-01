@@ -136,6 +136,7 @@ import {
   resolveConversationGroupId,
 } from "./protocol/conversation-bind.js"
 import {
+  beginEmittedStep,
   detectForeignHistory,
   recordEmittedPart,
   recordRunModel,
@@ -144,6 +145,7 @@ import {
 import {
   clearPersistedConversationState,
   hydrateConversationState,
+  hydrateTurnProvenance,
   persistConversationState,
 } from "./protocol/conversation-state.js"
 import { initializeConversationPersistence } from "./protocol/conversation-persistence.js"
@@ -823,6 +825,13 @@ async function doStreamImpl(
             trace(`pull: stream-start enqueue failed (cancelled) err=${(e as Error).message}`)
             return
           }
+          if (activeSession.openCodeSessionId) {
+            beginEmittedStep(
+              activeSession.openCodeSessionId,
+              activeSession.conversationId,
+              activeSession.cacheDiagnostics?.modelId,
+            )
+          }
           activeSession = await pumpWithRecovery({
             initialSession: activeSession,
             controller,
@@ -1050,6 +1059,10 @@ async function startSession(
         ...(restored.systemPromptHash ? { systemPromptHash: restored.systemPromptHash } : {}),
       })
     }
+    // Provenance has its own LRU; refill it if only that entry was evicted.
+    await hydrateTurnProvenance(cacheDir, sessionKey).catch((error) => {
+      trace(`turn provenance: restore failed sessionKey=${sessionKey}: ${String(error)}`)
+    })
   }
   const providerOptions = callOptions.providerOptions?.cursor as Record<string, unknown> | undefined
   const hostAgent = typeof providerOptions?.[CURSOR_HOST_AGENT_OPTION] === "string"
@@ -1283,9 +1296,10 @@ async function startSession(
         {
           supportsImages,
           // Content hashes are retained for the OpenCode session so growing
-          // history does not re-upload old screenshots. A recovery rebase opens
-          // a new Cursor conversation, so it must resend the same payload.
-          seenHistoryHashes: recovery?.kind === "rebase"
+          // history does not re-upload old screenshots. A recovery or
+          // foreign-history rebase opens a new Cursor conversation, so it must
+          // resend the same payload.
+          seenHistoryHashes: recovery?.kind === "rebase" || foreignHistory
             ? undefined
             : sentHistoryImageHashes(sessionKey),
           signal: callOptions.abortSignal,

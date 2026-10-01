@@ -68,6 +68,15 @@ export async function hydrateConversationState(
   }
 }
 
+/** Restore only turn provenance when its in-memory entry was evicted. */
+export async function hydrateTurnProvenance(cacheDir: string, sessionKey: string): Promise<void> {
+  if (getTurnProvenance(sessionKey)) return
+  const persisted = (await loadPersistedConversation(cacheDir, sessionKey)).value
+  if (!persisted?.turnProvenance) return
+  const provenance = parseTurnProvenance(persisted.turnProvenance)
+  if (provenance?.conversationId === persisted.conversationId) restoreTurnProvenance(sessionKey, provenance)
+}
+
 /** Persist the complete resumable state only after Cursor confirms TurnEnded. */
 export async function persistConversationState(
   cacheDir: string,

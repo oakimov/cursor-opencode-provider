@@ -4,8 +4,10 @@ import os from "node:os"
 import path from "node:path"
 import { APICallError, type LanguageModelV3CallOptions } from "@ai-sdk/provider"
 import {
+  beginEmittedStep,
   detectForeignHistory,
   getTurnProvenance,
+  MAX_PROVENANCE_SESSIONS,
   parseTurnProvenance,
   recordEmittedPart,
   recordRunModel,
@@ -22,7 +24,7 @@ import {
   getPersistedConversation,
   resetConversationPersistenceForTests,
 } from "../src/protocol/conversation-persistence.js"
-import { hydrateConversationState } from "../src/protocol/conversation-state.js"
+import { hydrateConversationState, hydrateTurnProvenance } from "../src/protocol/conversation-state.js"
 import {
   resetConversationBindingsForTests,
   restoreConversationBinding,
@@ -103,6 +105,33 @@ describe("detectForeignHistory", () => {
     }))).toBeUndefined()
     expect(detect(promptEndingWith({ role: "assistant", content: [{ type: "reasoning", text: "x" }] })))
       .toBeUndefined()
+  })
+
+  it("compares only against the latest step, not older Cursor turns", () => {
+    recordRunModel(SESSION, CONVERSATION, "gpt-5")
+    beginEmittedStep(SESSION, CONVERSATION, "gpt-5")
+    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "Done." })
+    beginEmittedStep(SESSION, CONVERSATION, "gpt-5")
+    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "Refactored the parser." })
+    // A foreign model answering "Done." must not match the older Cursor step.
+    expect(detect(promptEndingWith(assistantText("Done.")))).toBe("foreign-assistant")
+    expect(detect(promptEndingWith(assistantText("Refactored the parser.")))).toBeUndefined()
+    // Nor a fragment of the latest step.
+    expect(detect(promptEndingWith(assistantText("Refactored")))).toBe("foreign-assistant")
+  })
+
+  it("keeps the previous step when a new step emits nothing", () => {
+    recordRunModel(SESSION, CONVERSATION, "gpt-5")
+    beginEmittedStep(SESSION, CONVERSATION, "gpt-5")
+    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "tool-call", toolCallId: "call_ours" })
+    beginEmittedStep(SESSION, CONVERSATION, "gpt-5")
+    expect(detect(promptEndingWith(assistantToolCall("call_ours")))).toBeUndefined()
+  })
+
+  it("bounds the number of tracked sessions", () => {
+    for (let i = 0; i <= MAX_PROVENANCE_SESSIONS; i++) recordRunModel(`ses_${i}`, "conv", "gpt-5")
+    expect(getTurnProvenance("ses_0")).toBeUndefined()
+    expect(getTurnProvenance(`ses_${MAX_PROVENANCE_SESSIONS}`)).toBeDefined()
   })
 
   it("flags a switch to another Cursor model even when the last turn is ours", () => {
@@ -292,6 +321,11 @@ describe("provenance through a Cursor Run", () => {
     expect(detect(promptEndingWith(assistantText("Somebody else")))).toBeUndefined()
     await hydrateConversationState(root, SESSION)
     expect(detect(promptEndingWith(assistantText("Cursor wrote this")))).toBeUndefined()
+    expect(detect(promptEndingWith(assistantText("Somebody else")))).toBe("foreign-assistant")
+
+    // Only the provenance entry evicted while the binding stays in memory.
+    resetTurnProvenanceForTests()
+    await hydrateTurnProvenance(root, SESSION)
     expect(detect(promptEndingWith(assistantText("Somebody else")))).toBe("foreign-assistant")
   })
 })
