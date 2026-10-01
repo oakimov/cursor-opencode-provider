@@ -4477,7 +4477,12 @@ export function assertForeignHistoryRebaseFits(input: {
 /** OpenCode session id header, if present. */
 export function opencodeSessionKey(callOptions: LanguageModelV3CallOptions): string | undefined {
   const h = callOptions.headers ?? {}
+  // OpenCode 2.x sends x-session-id / x-session-affinity / x-opencode-session
+  // as the parent (or fork source) session so subagents share prompt-cache
+  // affinity. Only x-opencode-session-id names the requesting session; keying
+  // on the others makes a subagent take over its parent's Cursor conversation.
   const raw =
+    h["x-opencode-session-id"] ??
     h["x-session-id"] ??
     h["X-Session-Id"] ??
     h["x-session-affinity"] ??
