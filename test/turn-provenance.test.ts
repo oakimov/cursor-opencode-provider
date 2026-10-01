@@ -128,6 +128,16 @@ describe("detectForeignHistory", () => {
     expect(detect(promptEndingWith(assistantToolCall("call_ours")))).toBeUndefined()
   })
 
+  it("identifies a long step by its first 4 KiB of text", () => {
+    recordRunModel(SESSION, CONVERSATION, "gpt-5")
+    beginEmittedStep(SESSION, CONVERSATION, "gpt-5")
+    const long = "a".repeat(10_000)
+    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: long })
+    expect(getTurnProvenance(SESSION)!.text.length).toBe(4 * 1024)
+    expect(detect(promptEndingWith(assistantText(long)))).toBeUndefined()
+    expect(detect(promptEndingWith(assistantText("b" + long)))).toBe("foreign-assistant")
+  })
+
   it("bounds the number of tracked sessions", () => {
     for (let i = 0; i <= MAX_PROVENANCE_SESSIONS; i++) recordRunModel(`ses_${i}`, "conv", "gpt-5")
     expect(getTurnProvenance("ses_0")).toBeUndefined()

@@ -10,15 +10,17 @@ import type { LanguageModelV3CallOptions } from "@ai-sdk/provider"
 
 /** Mirrors MAX_TURN_STATE_SESSIONS; evicted sessions re-hydrate from disk. */
 export const MAX_PROVENANCE_SESSIONS = 256
-const MAX_TOOL_CALL_IDS = 256
-const MAX_TEXT_CHARS = 64 * 1024
+// Per-session footprint stays small: a step is identified by its first tool
+// call ids and the first 4 KiB of its text, which is enough to tell turns apart.
+const MAX_TOOL_CALL_IDS = 64
+const MAX_TEXT_CHARS = 4 * 1024
 
 export type TurnProvenance = {
   conversationId: string
   modelId?: string
   /** Tool call ids emitted in the latest non-empty step. */
   toolCallIds: string[]
-  /** Whitespace-free text emitted in the latest non-empty step (first 64 KiB). */
+  /** Whitespace-free text emitted in the latest non-empty step (first 4 KiB). */
   text: string
 }
 
