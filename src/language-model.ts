@@ -947,13 +947,15 @@ export async function pumpWithRecovery(input: {
       const delayMs = retryDelayMs(failure, attempt + 1, retryPolicy)
       trace(`Run retry backoff: attempt=${attempt + 1}/${maxRecoveries} delayMs=${delayMs}`)
       await sleepForRetry(delayMs, input.abortSignal)
-      const recovery: CursorRunRecovery = checkpoint
-        ? {
-            kind: "resume",
-            conversationId: pumpedSession.conversationId,
-            checkpoint: Uint8Array.from(checkpoint),
-          }
-        : { kind: "rebase" }
+      const recovery: CursorRunRecovery = failure.checkpointUnusable
+        ? { kind: "rebase", reason: "checkpoint-unusable" }
+        : checkpoint
+          ? {
+              kind: "resume",
+              conversationId: pumpedSession.conversationId,
+              checkpoint: Uint8Array.from(checkpoint),
+            }
+          : { kind: "rebase" }
       session = await input.recover(recovery)
       if (recovery.kind === "resume") {
         session.usageEstimate = { ...pumpedSession.usageEstimate }
@@ -969,7 +971,7 @@ export async function pumpWithRecovery(input: {
 }
 
 export type CursorRunRecovery =
-  | { kind: "rebase" }
+  | { kind: "rebase"; reason?: "checkpoint-unusable" }
   | { kind: "resume"; conversationId: string; checkpoint: Uint8Array }
 
 const heartbeatWritePendingBySession = new WeakMap<CursorSession, boolean>()
@@ -1130,6 +1132,9 @@ async function startSession(
     isCompaction,
     historyRewrite: providerOptions?.[CURSOR_HISTORY_REWRITE_OPTION] === true,
   })
+  // Cursor could not restore the stored checkpoint (missing blobs) before this
+  // turn produced anything: reseed from the full host history as a new turn.
+  const checkpointUnusable = recovery?.kind === "rebase" && recovery.reason === "checkpoint-unusable"
   // Another model (other provider, or another Cursor model) answered since this
   // conversation's last checkpoint: resuming it would hide that work from Cursor.
   const runModelId = resolveCursorWireModelId(providerOptions, modelId)
@@ -1160,7 +1165,9 @@ async function startSession(
   let checkpointGraph: ConversationBlobGraphStats = conversationState
     ? inspectConversationBlobGraph(bound.conversationId, conversationState)
     : { count: 0, bytes: 0, complete: true }
-  const forcedResetReason: string | undefined = foreignHistory ? `foreign-history:${foreignHistory}` : undefined
+  const forcedResetReason: string | undefined = foreignHistory
+    ? `foreign-history:${foreignHistory}`
+    : checkpointUnusable ? "checkpoint-unusable" : undefined
   // CLI soft-reuses incomplete / oversized graphs (100 MiB is export-only).
   // Never remint — warn and keep the sticky conversation + checkpoint.
   if (conversationState) {
@@ -1191,7 +1198,7 @@ async function startSession(
   }
 
   const lastUser = [...prompt].reverse().find((message) => message.role === "user")
-  let userText = recovery?.kind === "rebase"
+  let userText = recovery?.kind === "rebase" && !checkpointUnusable
     ? "Continue the interrupted turn from the conversation history above. Do not repeat completed work."
     : (extractUserText(lastUser) || ".")
   // After an approved SwitchMode, inject the Cursor CLI-shaped mode reminder
@@ -1251,10 +1258,10 @@ async function startSession(
     }
   }
   const history = extractPromptHistory(prompt, {
-    preserveTrailingUser: recovery?.kind === "rebase",
+    preserveTrailingUser: recovery?.kind === "rebase" && !checkpointUnusable,
     // A foreign-history rebase replays every tool result: the other model's work
     // exists only in OpenCode history, never in a Cursor checkpoint.
-    toolResults: isCompaction || foreignHistory ? "all" : (recovery?.kind === "rebase" ? "trailing" : "omit"),
+    toolResults: isCompaction || foreignHistory || checkpointUnusable ? "all" : (recovery?.kind === "rebase" ? "trailing" : "omit"),
   })
 
   await loadAvailableModels()
@@ -1327,7 +1334,7 @@ async function startSession(
     maxMode: hintMaxMode,
   })
 
-  if (foreignHistory) {
+  if (foreignHistory || checkpointUnusable) {
     assertForeignHistoryRebaseFits({
       modelInfo,
       cursorModelId,
@@ -1508,6 +1515,7 @@ async function startSession(
       switchModeInTurn: false,
     },
     openCodeSessionId: ephemeralRun ? undefined : sessionKey,
+    checkpointRebaseEligible: !ephemeralRun && !resuming && !recovery && !!conversationState,
     hostAgent,
     stableSystemPromptHash: frozenSystemPromptHash,
     postCompactionRebase: isCompaction,
@@ -2573,6 +2581,25 @@ export async function pump(
     switchModeInTurn: false,
   }
   cacheDiagnostics.pumpPasses++
+  // Only the first pass of a fresh Run resumed from a stored checkpoint, before
+  // anything but control frames (KV, heartbeat, checkpoint) arrived, may be
+  // reseeded after Cursor asked for blobs this client does not hold.
+  const checkpointRebaseCandidate = session.checkpointRebaseEligible === true
+    && cacheDiagnostics.pumpPasses === 1
+  let blobMiss = false
+  let onlyControlFrames = true
+  const finalizeFailure = (failure: CursorProviderError): CursorProviderError => {
+    if (checkpointRebaseCandidate && blobMiss && onlyControlFrames && failure.transient) {
+      trace(
+        `checkpoint unusable: Run failed after missing KV blobs before any output ` +
+          `sessionId=${session.sessionId} conversationId=${session.conversationId} err=${failure.message}`,
+      )
+      failure.replaySafe = true
+      failure.checkpointUnusable = true
+      return failure
+    }
+    return replaySafety.applyTo(failure)
+  }
   const { textId, reasoningId } = ids
   const advertisedToolNames = advertisedToolNamesFromDescriptors(session.toolDescriptors)
   const advertisedToolNameSet = new Set(
@@ -3025,13 +3052,13 @@ export async function pump(
             `Cursor Run frame stream interrupted: ${(error as Error).message}`,
             { cause: error },
           )
-      throw replaySafety.applyTo(failure)
+      throw finalizeFailure(failure)
     }
     if (next.done) {
       closeOpenSpans()
       trace("pump: frames iterator ended before turn_ended")
       const failure = new CursorRunInterruptedError()
-      throw replaySafety.applyTo(failure)
+      throw finalizeFailure(failure)
     }
     const frame = next.value as Frame
 
@@ -3051,7 +3078,7 @@ export async function pump(
       const failure = payload
         ? connectFrameError(payload)
         : new CursorRunInterruptedError()
-      throw replaySafety.applyTo(failure)
+      throw finalizeFailure(failure)
     }
 
     // decodeFramePayload can throw on a corrupt gzip payload (gunzipSync).
@@ -3108,6 +3135,7 @@ export async function pump(
       sessionManager.recordSemanticProgress(session)
     }
     if (replayFrame.barrier) replaySafety.markBarrier(replayFrame.barrier)
+    if (esm || execControl || interactionQuery || (iu && !iu.heartbeat)) onlyControlFrames = false
 
     {
       const iuKind = iu ? Object.keys(iu).find((k) => iu[k]) : undefined
@@ -3929,6 +3957,7 @@ export async function pump(
           `setDataLen=${(kv.set_blob_args as any)?.blob_data?.length ?? "-"}`,
       )
       const handled = handleKvServerMessage(kv, session)
+      if (handled?.kind === "get" && !handled.found) blobMiss = true
       if (handled) {
         try {
           await writeWithBackpressure(

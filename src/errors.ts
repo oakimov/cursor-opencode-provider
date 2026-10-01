@@ -25,6 +25,12 @@ export class CursorProviderError extends Error {
   readonly origin: CursorErrorOrigin
   readonly transient: boolean
   replaySafe: boolean
+  /**
+   * The Run failed because Cursor could not restore the resumed checkpoint
+   * (it requested blobs this client does not hold) before producing anything.
+   * Recovery must reseed a new conversation instead of resuming that checkpoint.
+   */
+  checkpointUnusable?: boolean
   readonly statusCode?: number
   readonly grpcStatus?: number | string
   readonly rstCode?: number

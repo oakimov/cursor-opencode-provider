@@ -220,6 +220,8 @@ export type CursorSession = {
   hostAgent?: string
   /** Stable host-system + provider-guidance identity for restart validation. */
   stableSystemPromptHash?: string
+  /** Fresh turn resumed from a stored checkpoint; a blob miss may reseed it. */
+  checkpointRebaseEligible?: boolean
   /** Completed compaction must rebase once before resuming a normal agent. */
   postCompactionRebase?: boolean
   /** Last real host catalog, retained only as a lifecycle-turn fallback. */
