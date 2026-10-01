@@ -1160,15 +1160,15 @@ async function startSession(
   // Cursor could not restore the stored checkpoint (missing blobs) before this
   // turn produced anything: reseed from the full host history as a new turn.
   const checkpointUnusable = recovery?.kind === "rebase" && recovery.reason === "checkpoint-unusable"
-  // Another model (other provider, or another Cursor model) answered since this
+  // Another model (other provider or a local model) answered since this
   // conversation's last checkpoint: resuming it would hide that work from Cursor.
+  // A Cursor-to-Cursor model switch resumes the same conversation, as in the CLI.
   const runModelId = resolveCursorWireModelId(providerOptions, modelId)
   const foreignHistory: ForeignHistoryReason | undefined =
     sessionKey && !resuming && !ephemeralRun && !resetState.reset && recovery?.kind !== "rebase"
       ? detectForeignHistory({
           sessionKey,
           conversationId: peekConversationId(sessionKey),
-          modelId: runModelId,
           prompt,
         })
       : undefined

@@ -1,9 +1,10 @@
 import type { LanguageModelV3CallOptions } from "@ai-sdk/provider"
 
 // A sticky Cursor conversation only knows what Cursor itself produced. When the
-// host answers a turn with another model (another provider, or another Cursor
-// model) and then comes back, resuming the old checkpoint hides that work from
-// Cursor and has been observed to end Runs with Connect `internal` errors.
+// host answers a turn with another model (another provider or a local model)
+// and then comes back, resuming the old checkpoint hides that work from Cursor.
+// A direct switch between two Cursor models is not foreign history: like the
+// Cursor CLI, the next Run resumes the same conversation with the new model.
 // Remember what this provider emitted in its most recent step per OpenCode
 // session so the next fresh Run can tell whether the host's latest assistant
 // turn is ours.
@@ -24,7 +25,7 @@ export type TurnProvenance = {
   text: string
 }
 
-export type ForeignHistoryReason = "model-switch" | "foreign-assistant"
+export type ForeignHistoryReason = "foreign-assistant"
 
 type Entry = TurnProvenance & {
   /** A new host step began; its first content replaces the recorded step. */
@@ -150,13 +151,11 @@ export function parseTurnProvenance(raw: string): TurnProvenance | undefined {
 export function detectForeignHistory(input: {
   sessionKey: string | undefined
   conversationId: string
-  modelId: string
   prompt: LanguageModelV3CallOptions["prompt"]
 }): ForeignHistoryReason | undefined {
   if (!input.sessionKey) return undefined
   const entry = provenanceBySession.get(input.sessionKey)
   if (!entry || entry.conversationId !== input.conversationId) return undefined
-  if (entry.modelId && entry.modelId !== input.modelId) return "model-switch"
 
   let lastAssistant: (typeof input.prompt)[number] | undefined
   for (let i = input.prompt.length - 1; i >= 0; i--) {

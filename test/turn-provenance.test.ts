@@ -62,8 +62,8 @@ function assistantToolCall(toolCallId: string, text = ""): Prompt[number] {
   }
 }
 
-function detect(prompt: Prompt, modelId = "gpt-5") {
-  return detectForeignHistory({ sessionKey: SESSION, conversationId: CONVERSATION, modelId, prompt })
+function detect(prompt: Prompt) {
+  return detectForeignHistory({ sessionKey: SESSION, conversationId: CONVERSATION, prompt })
 }
 
 describe("detectForeignHistory", () => {
@@ -144,10 +144,23 @@ describe("detectForeignHistory", () => {
     expect(getTurnProvenance(`ses_${MAX_PROVENANCE_SESSIONS}`)).toBeDefined()
   })
 
-  it("flags a switch to another Cursor model even when the last turn is ours", () => {
+  it("resumes across a direct switch to another Cursor model when the last turn is ours", () => {
     recordRunModel(SESSION, CONVERSATION, "gpt-5")
     recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "Answer" })
-    expect(detect(promptEndingWith(assistantText("Answer")), "claude-4.5-sonnet")).toBe("model-switch")
+    expect(detect(promptEndingWith(assistantText("Answer")))).toBeUndefined()
+    // The next Run on the new model keeps the same conversation and its record.
+    recordRunModel(SESSION, CONVERSATION, "claude-4.5-sonnet")
+    beginEmittedStep(SESSION, CONVERSATION, "claude-4.5-sonnet")
+    recordEmittedPart(SESSION, CONVERSATION, "claude-4.5-sonnet", { type: "text-delta", delta: "Second" })
+    expect(detect(promptEndingWith(assistantText("Second")))).toBeUndefined()
+    expect(getTurnProvenance(SESSION)?.conversationId).toBe(CONVERSATION)
+  })
+
+  it("flags Cursor A, then a foreign turn, then Cursor B as foreign history", () => {
+    recordRunModel(SESSION, CONVERSATION, "gpt-5")
+    recordEmittedPart(SESSION, CONVERSATION, "gpt-5", { type: "text-delta", delta: "Cursor A answer" })
+    // Another provider answered; the next Run comes from a different Cursor model.
+    expect(detect(promptEndingWith(assistantText("Local model answer")))).toBe("foreign-assistant")
   })
 
   it("starts a fresh record when the conversation is reminted", () => {
