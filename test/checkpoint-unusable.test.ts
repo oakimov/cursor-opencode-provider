@@ -83,6 +83,15 @@ describe("checkpoint-unusable recovery", () => {
     expect(error.replaySafe).toBe(true)
   })
 
+  it("does not treat an echoed content-as-id read as a blob miss", async () => {
+    const inlineId = new TextEncoder().encode('{"role":"user","content":"hi"}')
+    const error = await pumpError(fakeSession("echoed", [
+      serverFrame({ kv_server_message: { id: 0, get_blob_args: { blob_id: inlineId } } }),
+      internalEndStream(),
+    ]))
+    expect(error.checkpointUnusable).toBeUndefined()
+  })
+
   it("does not reseed once visible output was produced", async () => {
     const error = await pumpError(fakeSession("visible", [
       missingBlobRequest(0),

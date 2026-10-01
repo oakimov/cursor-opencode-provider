@@ -3957,7 +3957,9 @@ export async function pump(
           `setDataLen=${(kv.set_blob_args as any)?.blob_data?.length ?? "-"}`,
       )
       const handled = handleKvServerMessage(kv, session)
-      if (handled?.kind === "get" && !handled.found) blobMiss = true
+      // Content-as-id reads are answered by echoing the id back (`echoed`); only a
+      // hash we cannot serve means the checkpoint references state we lost.
+      if (handled?.kind === "get" && !handled.found && !handled.echoed) blobMiss = true
       if (handled) {
         try {
           await writeWithBackpressure(
