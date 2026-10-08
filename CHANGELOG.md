@@ -15,6 +15,7 @@
 - A rebuilt Cursor conversation (after compaction, an interrupted turn, a restart without its saved state, or returning from another model) keeps your `AGENTS.md`, skills and subagents; Cursor previously dropped them for the rest of the session ([#49](https://github.com/oakimov/cursor-opencode-provider/pull/49))
 - A tool waiting on a permission or question prompt keeps its Cursor turn however long you take to answer, instead of losing it after 10 minutes ([#49](https://github.com/oakimov/cursor-opencode-provider/pull/49))
 - A `git status` that fails or times out is reported to Cursor as incomplete instead of as a clean working tree ([#49](https://github.com/oakimov/cursor-opencode-provider/pull/49))
+- OpenCode 2 with several projects open renews a Cursor login and looks up its agent host once per process, not once per project
 
 ## [0.8.1] - 2026-10-08
 

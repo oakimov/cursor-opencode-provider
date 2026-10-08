@@ -2,11 +2,12 @@ import { createHash } from "node:crypto"
 import { fetchAgentUrl } from "./transport/connect.js"
 import { errorMessage, trace } from "./debug.js"
 import { CURSOR_API_HOST } from "./shared.js"
+import { processShared } from "./process-shared.js"
 
 const DEFAULT_API_BASE = `https://${CURSOR_API_HOST}`
 
 // In-process memo of the region-specific Run stream origin (agentnUrl). Resolved
-// once per process — the auth loader warms it, and the first startSession reuses
+// once per process (shared by every copy of this package that the host loads) — the auth loader warms it, and the first startSession reuses
 // it — and held for the process lifetime. Region routing is near-static, and
 // re-resolving mid-session would break a held-open bidi Run stream anyway.
 //
@@ -36,9 +37,9 @@ function resolveCacheKey(token: string, options: AgentUrlOptions): string {
   return `${tokenHash}|${normalizeApiBaseURL(options.apiBaseURL ?? options.baseURL)}|telem:${options.telemetryEnabled === true}`
 }
 
-const _resolved = new Map<string, string>()
+const _resolved = processShared("agent-url.resolved.v1", () => new Map<string, string>())
 // In-flight fetches share the same key as resolved URLs so concurrent callers dedup per account.
-const _inflight = new Map<string, Promise<string>>()
+const _inflight = processShared("agent-url.inflight.v1", () => new Map<string, Promise<string>>())
 
 /**
  * Resolve the Run stream origin for this account via the `GetServerConfig`
