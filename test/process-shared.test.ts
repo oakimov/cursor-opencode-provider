@@ -1,18 +1,32 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test"
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test"
+import { cpSync, mkdtempSync, rmSync, symlinkSync } from "node:fs"
+import { tmpdir } from "node:os"
+import path from "node:path"
+import { pathToFileURL } from "node:url"
 import * as agentUrlA from "../src/agent-url.js"
 import * as renewalA from "../src/auth-renewal.js"
-import { CursorAuthError } from "../src/errors.js"
+import { CursorAuthError, isRejectedCredentialError, toCursorProviderError } from "../src/errors.js"
 import { processShared } from "../src/process-shared.js"
 import { resetClientVersionCache, resolveClientVersion } from "../src/protocol/client-version.js"
 
-// OpenCode 2 imports a separate copy of the plugin's module graph for each
-// location it serves. A query string gives Bun the same: a second instance of
-// the module with its own top-level state.
-let copies = 0
-async function secondCopy<T>(specifier: string): Promise<T> {
-  copies += 1
-  return (await import(`${specifier}?copy=${copies}`)) as T
+// Copy the whole source graph: a query string on one module still shares its
+// dependencies, hiding failures involving distinct error classes.
+const graphDirs: string[] = []
+function secondGraph() {
+  const dir = mkdtempSync(path.join(tmpdir(), "cursor-module-graph-"))
+  graphDirs.push(dir)
+  cpSync(path.join(import.meta.dir, "../src"), path.join(dir, "src"), { recursive: true })
+  symlinkSync(path.join(import.meta.dir, "../node_modules"), path.join(dir, "node_modules"), "dir")
+  return {
+    load: <T>(file: string): Promise<T> => import(pathToFileURL(path.join(dir, "src", file)).href) as Promise<T>,
+  }
 }
+async function secondCopy<T>(specifier: string): Promise<T> {
+  return secondGraph().load<T>(specifier.replace("../src/", ""))
+}
+afterAll(() => {
+  for (const dir of graphDirs) rmSync(dir, { recursive: true, force: true })
+})
 
 const DAY_S = 86_400
 
@@ -94,20 +108,50 @@ describe("credential renewal across module copies", () => {
     expect(stub.paths).toEqual(["/oauth/token"])
     // A copy that asks later is handed the successor without another request.
     const renewalC = await secondCopy<typeof renewalA>("../src/auth-renewal.ts")
-    expect(renewalC.latestSessionTokens(tokens).accessToken).toBe(fresh)
+    expect(renewalC.latestSessionTokens(tokens, stub.base).accessToken).toBe(fresh)
     expect(stub.paths).toHaveLength(1)
   })
 
   it("raises a logout latched by one copy in another as that copy's own sign-in error", async () => {
-    const renewalB = await secondCopy<typeof renewalA>("../src/auth-renewal.ts")
+    const graph = secondGraph()
+    const renewalB = await graph.load<typeof renewalA>("auth-renewal.ts")
+    const errorsB = await graph.load<typeof import("../src/errors.js")>("errors.ts")
+    expect(errorsB.CursorAuthError).not.toBe(CursorAuthError)
     const stub = cursorStub(() => Response.json({ access_token: "", shouldLogout: true }))
     using _ = stub.server
     const token = sessionJwt(8 * DAY_S)
     const tokens = { accessToken: token, refreshToken: token }
     await renewalA.renewSessionIfDue(tokens, { baseUrl: stub.base }).catch(() => undefined)
     const failure = await renewalB.renewSessionIfDue(tokens, { baseUrl: stub.base, force: true }).catch((error: unknown) => error)
-    expect(failure).toBeInstanceOf(CursorAuthError)
+    expect(failure).toBeInstanceOf(errorsB.CursorAuthError)
     expect((failure as CursorAuthError).code).toBe("session_logout")
+    expect(stub.paths).toHaveLength(1)
+  })
+
+  it("keeps session successors scoped to the API base across copies", async () => {
+    const renewalB = await secondCopy<typeof renewalA>("../src/auth-renewal.ts")
+    const freshA = sessionJwt(0)
+    const freshB = sessionJwt(0)
+    const a = cursorStub(() => Response.json({ access_token: freshA }))
+    const b = cursorStub(() => Response.json({ access_token: freshB }))
+    using _a = a.server
+    using _b = b.server
+    const old = sessionJwt(8 * DAY_S)
+    const tokens = { accessToken: old, refreshToken: old }
+    expect((await renewalA.renewSessionIfDue(tokens, { baseUrl: a.base })).accessToken).toBe(freshA)
+    expect((await renewalB.renewSessionIfDue(tokens, { baseUrl: b.base })).accessToken).toBe(freshB)
+    expect(b.paths).toEqual(["/oauth/token"])
+    expect((await renewalB.renewSessionIfDue(tokens, { baseUrl: a.base })).accessToken).toBe(freshA)
+  })
+
+  it("honours a forced logout latch even before the session's renewal window", async () => {
+    const renewalB = await secondCopy<typeof renewalA>("../src/auth-renewal.ts")
+    const stub = cursorStub(() => Response.json({ access_token: "", shouldLogout: true }))
+    using _ = stub.server
+    const young = sessionJwt(0)
+    const tokens = { accessToken: young, refreshToken: young }
+    await expect(renewalA.renewSessionIfDue(tokens, { baseUrl: stub.base, force: true })).rejects.toThrow("ended")
+    await expect(renewalB.renewSessionIfDue(tokens, { baseUrl: stub.base })).rejects.toThrow("ended")
     expect(stub.paths).toHaveLength(1)
   })
 
@@ -115,8 +159,10 @@ describe("credential renewal across module copies", () => {
     const renewalB = await secondCopy<typeof renewalA>("../src/auth-renewal.ts")
     const stub = cursorStub(() => Response.json({ accessToken: keyJwt(3600), refreshToken: "unused" }))
     using _ = stub.server
-    const a = await renewalA.resolveApiKeyToken("crsr_shared_key", { baseUrl: stub.base })
-    const b = await renewalB.resolveApiKeyToken("crsr_shared_key", { baseUrl: stub.base })
+    const [a, b] = await Promise.all([
+      renewalA.resolveApiKeyToken("crsr_shared_key", { baseUrl: stub.base }),
+      renewalB.resolveApiKeyToken("crsr_shared_key", { baseUrl: stub.base }),
+    ])
     expect(b.accessToken).toBe(a.accessToken)
     expect(stub.paths).toEqual(["/auth/exchange_user_api_key"])
   })
@@ -149,6 +195,49 @@ describe("agent host across module copies", () => {
     globalThis.fetch = realFetch
     agentUrlA.resetAgentUrlCache()
     resetClientVersionCache()
+  })
+
+  it.each([
+    [401, "auth", false],
+    [503, "server", true],
+  ] as const)("rebuilds a shared HTTP %i failure in each caller's graph", async (status, origin, transient) => {
+    const graph = secondGraph()
+    const agentUrlB = await graph.load<typeof agentUrlA>("agent-url.ts")
+    const errorsB = await graph.load<typeof import("../src/errors.js")>("errors.ts")
+    expect(errorsB.CursorAuthError).not.toBe(CursorAuthError)
+    const fetchSuccess = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (!String(input).includes("GetServerConfig")) return fetchSuccess(input)
+      serverConfigCalls++
+      await Bun.sleep(5)
+      return new Response("failed", { status })
+    }) as typeof fetch
+    const token = keyJwt(3600)
+    const failures = await Promise.all([
+      agentUrlA.resolveAgentUrl(token).catch((error: unknown) => error),
+      agentUrlB.resolveAgentUrl(token).catch((error: unknown) => error),
+      agentUrlA.resolveAgentUrl(token).catch((error: unknown) => error),
+    ])
+    const a = toCursorProviderError(failures[0], { replaySafe: true })
+    const b = errorsB.toCursorProviderError(failures[1], { replaySafe: true })
+    expect([a.origin, b.origin]).toEqual([origin, origin])
+    expect([a.statusCode, b.statusCode]).toEqual([status, status])
+    expect([a.transient, b.transient]).toEqual([transient, transient])
+    expect([a.replaySafe, b.replaySafe]).toEqual([true, true])
+    expect(serverConfigCalls).toBe(1)
+    if (status === 401) {
+      expect(isRejectedCredentialError(a)).toBe(true)
+      expect(errorsB.isRejectedCredentialError(b)).toBe(true)
+    }
+    expect(failures[1]).toBeInstanceOf(errorsB.CursorProviderError)
+    expect(a).not.toBe(b)
+    expect(failures[2]).not.toBe(a)
+    toCursorProviderError(a, { replaySafe: false })
+    expect(b.replaySafe).toBe(true)
+    expect(toCursorProviderError(failures[2], { replaySafe: true }).replaySafe).toBe(true)
+    globalThis.fetch = fetchSuccess
+    expect(await agentUrlB.resolveAgentUrl(token)).toBe("https://agentn.us.api5.cursor.sh")
+    expect(serverConfigCalls).toBe(2)
   })
 
   it("asks GetServerConfig once per account, whichever copy asks", async () => {

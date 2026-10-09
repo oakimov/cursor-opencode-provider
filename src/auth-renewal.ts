@@ -151,27 +151,31 @@ export type SessionRenewal = {
 // Per credential, not per module copy: every location OpenCode 2 serves loads
 // its own copy, and each would otherwise renew the same login separately.
 const sessionStates = processShared("auth-renewal.session-states.v1", () => new Map<string, RenewalState>())
-/** Stored refresh token → newer session token this process obtained for it. */
-const sessionSuccessors = processShared("auth-renewal.session-successors.v1", () => new Map<string, string>())
+/** API base + stored refresh token → newer session token obtained there. */
+const sessionSuccessors = processShared("auth-renewal.session-successors.v2", () => new Map<string, string>())
 
 /**
  * Follow renewals this process already made, so a caller still holding an
  * older stored credential (persisting failed, or a host that persists only
  * later) gets the newest token instead of renewing again.
  */
-export function latestSessionTokens(tokens: SessionTokens): SessionTokens {
+export function latestSessionTokens(tokens: SessionTokens, baseUrl = API_BASE): SessionTokens {
   let current = tokens
   for (let hops = 0; hops < MAX_SESSION_SUCCESSORS; hops++) {
-    const next = sessionSuccessors.get(current.refreshToken)
+    const next = sessionSuccessors.get(`${baseUrl}\0${current.refreshToken}`)
     if (!next || next === current.refreshToken) break
     current = { accessToken: next, refreshToken: next }
   }
+  // A verified successor replaces the token it renewed even when issued in
+  // the same expiry second. A separately stored newer access token still wins.
+  if (tokens.accessToken === tokens.refreshToken) return current
   return longerLived(tokens.accessToken, current.accessToken) === current.accessToken ? current : tokens
 }
 
-function rememberSuccessor(refreshToken: string, accessToken: string): void {
-  sessionSuccessors.delete(refreshToken)
-  sessionSuccessors.set(refreshToken, accessToken)
+function rememberSuccessor(baseUrl: string, refreshToken: string, accessToken: string): void {
+  const key = `${baseUrl}\0${refreshToken}`
+  sessionSuccessors.delete(key)
+  sessionSuccessors.set(key, accessToken)
   while (sessionSuccessors.size > MAX_SESSION_SUCCESSORS) {
     const oldest = sessionSuccessors.keys().next().value
     if (oldest === undefined) break
@@ -195,22 +199,23 @@ export async function renewSessionIfDue(
   options: { baseUrl?: string; force?: boolean } = {},
 ): Promise<SessionRenewal> {
   const baseUrl = options.baseUrl ?? API_BASE
-  const base = latestSessionTokens(tokens)
+  const base = latestSessionTokens(tokens, baseUrl)
   const fromMemory = base.accessToken !== tokens.accessToken
-  if (!options.force && !isSessionRenewalDue(base.accessToken)) {
+  const state = stateFor(sessionStates, `${baseUrl}\0${base.refreshToken}`)
+  if (state.terminal) throw terminalError(state.terminal)
+  if (!options.force && !isSessionRenewalDue(base.accessToken) && !state.inflight) {
     return { accessToken: base.accessToken, renewed: fromMemory }
   }
 
-  const state = stateFor(sessionStates, `${baseUrl}\0${base.refreshToken}`)
-  if (!state.terminal && (options.force || state.retryAt === undefined || Date.now() >= state.retryAt)) {
+  if (state.inflight || options.force || state.retryAt === undefined || Date.now() >= state.retryAt) {
     state.inflight ??= (async () => {
       const result = await refreshCursorSession(base.refreshToken, baseUrl)
       if (result.ok) {
         const { expiresAtMs } = tokenTimes(result.accessToken)
-        if (expiresAtMs === undefined) {
-          recordTransientFailure(state, "session refresh returned a token without expiry")
+        if (expiresAtMs === undefined || !isUsable(result.accessToken, Date.now())) {
+          recordTransientFailure(state, "session refresh returned an unusable token")
         } else {
-          rememberSuccessor(base.refreshToken, result.accessToken)
+          rememberSuccessor(baseUrl, base.refreshToken, result.accessToken)
           recordSuccess(state)
           trace(`auth: session renewed exp=${isoTime(expiresAtMs)}`)
           return
@@ -238,7 +243,7 @@ export async function renewSessionIfDue(
     await state.inflight
   }
 
-  const renewed = latestSessionTokens(base)
+  const renewed = latestSessionTokens(base, baseUrl)
   if (renewed.accessToken !== base.accessToken) {
     return { accessToken: renewed.accessToken, renewed: true }
   }
@@ -294,7 +299,15 @@ export async function resolveApiKeyToken(
     state.inflight ??= (async () => {
       try {
         const pair = await exchangeApiKey(apiKey, baseUrl)
-        state.token = state.token ? longerLived(state.token, pair.accessToken) : pair.accessToken
+        if (isExchangeableApiKey(pair.accessToken) || tokenTimes(pair.accessToken).expiresAtMs === undefined ||
+            !isUsable(pair.accessToken, Date.now())) {
+          throw new AuthExchangeError("API key exchange returned an unusable token")
+        }
+        // A forced exchange follows a server rejection: keeping the rejected
+        // JWT on an expiry tie would retry the request with that same token.
+        state.token = options.force || !state.token
+          ? pair.accessToken
+          : longerLived(state.token, pair.accessToken)
         recordSuccess(state)
         trace(`auth: API key exchanged exp=${isoTime(tokenTimes(pair.accessToken).expiresAtMs)}`)
       } catch (error) {

@@ -107,7 +107,7 @@ describe("renewSessionIfDue", () => {
     await renewSessionIfDue({ accessToken: token, refreshToken: token }, { baseUrl: stub.base })
     const again = await renewSessionIfDue({ accessToken: token, refreshToken: token }, { baseUrl: stub.base })
     expect(again).toEqual({ accessToken: fresh, renewed: true })
-    expect(latestSessionTokens({ accessToken: token, refreshToken: token }).accessToken).toBe(fresh)
+    expect(latestSessionTokens({ accessToken: token, refreshToken: token }, stub.base).accessToken).toBe(fresh)
     expect(stub.requests).toHaveLength(1)
   })
 
@@ -139,6 +139,17 @@ describe("renewSessionIfDue", () => {
     const token = sessionJwt(DAY_S)
     const result = await renewSessionIfDue({ accessToken: token, refreshToken: token }, { baseUrl: stub.base, force: true })
     expect(result.accessToken).toBe(fresh)
+  })
+
+  it("uses a forced renewal with the same expiry instead of the rejected token", async () => {
+    const old = sessionJwt(0)
+    const fresh = sessionJwt(0)
+    const stub = cursorStub(() => Response.json({ access_token: fresh }))
+    using _ = stub.server
+    const tokens = { accessToken: old, refreshToken: old }
+    expect((await renewSessionIfDue(tokens, { baseUrl: stub.base, force: true })).accessToken).toBe(fresh)
+    expect((await renewSessionIfDue(tokens, { baseUrl: stub.base })).accessToken).toBe(fresh)
+    expect(stub.requests).toHaveLength(1)
   })
 
   it("keeps a valid session through a transient failure and backs off", async () => {
@@ -187,6 +198,19 @@ describe("renewSessionIfDue", () => {
     expect(stub.requests).toHaveLength(1)
   })
 
+  it("does not remember an expired refresh token returned as success", async () => {
+    const expired = sessionJwt(61 * DAY_S)
+    const stub = cursorStub(() => Response.json({ access_token: expired }))
+    using _ = stub.server
+    const old = sessionJwt(8 * DAY_S)
+    const tokens = { accessToken: old, refreshToken: old }
+    const renewal = await renewSessionIfDue(tokens, { baseUrl: stub.base })
+    expect(renewal.accessToken).toBe(old)
+    expect(renewal.retryAt).toBeGreaterThan(Date.now())
+    await renewSessionIfDue(tokens, { baseUrl: stub.base })
+    expect(stub.requests).toHaveLength(1)
+  })
+
   it("reports a sign-in policy block", async () => {
     const stub = cursorStub(() => Response.json({ access_token: "", shouldLogout: true, error: "sign_in_policy_violation" }))
     using _ = stub.server
@@ -216,6 +240,16 @@ describe("resolveApiKeyToken", () => {
     const second = await resolveApiKeyToken("crsr_renew", { baseUrl: stub.base })
     expect(second.accessToken).not.toBe(first.accessToken)
     expect(stub.requests.map((r) => r.path)).toEqual(["/auth/exchange_user_api_key", "/auth/exchange_user_api_key"])
+  })
+
+  it("uses a forced exchange with the same expiry instead of its rejected seed", async () => {
+    const old = keyJwt(3600)
+    const fresh = keyJwt(3600)
+    const stub = cursorStub(() => Response.json({ accessToken: fresh, refreshToken: "unused" }))
+    using _ = stub.server
+    expect((await resolveApiKeyToken("crsr_forced", { baseUrl: stub.base, seed: old, force: true })).accessToken).toBe(fresh)
+    expect((await resolveApiKeyToken("crsr_forced", { baseUrl: stub.base, seed: old })).accessToken).toBe(fresh)
+    expect(stub.requests).toHaveLength(1)
   })
 
   it("keys its cache by API base URL as well as the key", async () => {
@@ -278,6 +312,19 @@ describe("resolveApiKeyToken", () => {
     }
     expect(stub.requests).toHaveLength(1)
   })
+
+  it.each(["", "not-a-jwt", "crsr_returned_key", keyJwt(-60)])(
+    "rejects an unusable exchanged access token and backs off: %s", async (accessToken) => {
+      const stub = cursorStub(() => Response.json({ accessToken, refreshToken: "unused" }))
+      using _ = stub.server
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const error = await resolveApiKeyToken("crsr_invalid_result", { baseUrl: stub.base }).catch((e: unknown) => e)
+        expect(error).toBeInstanceOf(CursorServerError)
+        expect((error as CursorServerError).transient).toBe(true)
+      }
+      expect(stub.requests).toHaveLength(1)
+    },
+  )
 
   it("backs off on a rate limit instead of treating the key as rejected", async () => {
     let n = 0
