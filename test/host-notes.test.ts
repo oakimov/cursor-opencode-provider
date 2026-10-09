@@ -65,6 +65,7 @@ function liveSession(writes: Uint8Array[], root = "/tmp"): CursorSession {
     pumpActive: false,
     heartbeat: null,
     expiresAt: Date.now() + 10_000,
+    billing: { key: "run:test", prefixTokens: 0 },
   } as unknown as CursorSession
 }
 

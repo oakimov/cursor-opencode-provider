@@ -6,6 +6,7 @@ function heartbeatSession(overrides: Partial<CursorSession> = {}): CursorSession
   return {
     sessionId: `heartbeat-${Math.random().toString(16).slice(2)}`,
     conversationId: "heartbeat-conversation",
+    billing: { key: "run:heartbeat", prefixTokens: 0 },
     stream: {
       write() { return true },
       end() {},

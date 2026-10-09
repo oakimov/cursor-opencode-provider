@@ -633,6 +633,7 @@ function planSession(payloads: Uint8Array[], writes: Uint8Array[], advertised: s
     pumpActive: true,
     heartbeat: null,
     nextBridgedExecId: 900_000,
+    billing: { key: "run:test", prefixTokens: 0 },
   } as unknown as CursorSession
 }
 

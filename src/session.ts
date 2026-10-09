@@ -12,6 +12,7 @@ import type {
 import type { CursorConversationTokenDetails } from "./protocol/token-details.js"
 import type { HostNoteBatch } from "./protocol/host-notes.js"
 import type { ParallelStepState } from "./parallel-step.js"
+import type { OpenCodeModelCost } from "./pricing.js"
 
 export type Frame = { flags: number; payload: Uint8Array }
 
@@ -203,6 +204,15 @@ export type CursorSession = {
    * whether a low ratio came from a cold/rebased prefix, context growth, or a
    * multi-step agent Run.
    */
+  /** Cost reporting for this Run's steps (`src/billing.ts`). */
+  billing: {
+    /** Ledger key: the OpenCode session, or this Run for an ephemeral one. */
+    key: string
+    /** Catalog cost entry; absent for a model Cursor publishes no rate for. */
+    cost?: OpenCodeModelCost
+    /** Context the previous billed step already sent: read from cache on the next one. */
+    prefixTokens: number
+  }
   cacheDiagnostics?: {
     sessionKey?: string
     conversationId: string
