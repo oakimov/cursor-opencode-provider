@@ -9,6 +9,7 @@ import {
   shouldIsolateInSessionHelper,
 } from "../src/language-model.js"
 import { sessionManager, type CursorSession } from "../src/session.js"
+import { billingLedger } from "../src/billing.js"
 import { sessionFixture } from "./session-fixture.js"
 
 function turnEndedPayload(inputTokens: number, cacheRead: number): Uint8Array {
@@ -97,6 +98,18 @@ describe("fresh-turn prior drain", () => {
     expect(outcome).toBe("drained")
     expect(session.closed).toBe(true)
     expect(session.pending.size).toBe(0)
+  })
+
+  it("records what a drained prior Run cost for the next billed step to settle", async () => {
+    const session = fakeSessionWithPayloads([turnEndedPayload(5000, 4000)])
+    session.billing = { key: session.openCodeSessionId!, cost: { input: 2, output: 6, cache_read: 0.5 }, prefixTokens: 0 }
+    sessionManager.registerPending(900_000, session, "bridged", "todowrite", true)
+    try {
+      expect(await preparePriorSessionForFreshTurn(session.openCodeSessionId, { timeoutMs: 1_000 })).toBe("drained")
+      expect(billingLedger.outstanding(session.openCodeSessionId!)).toBeCloseTo((1_000 * 2 + 4_000 * 0.5 + 3 * 6) / 1e6, 12)
+    } finally {
+      billingLedger.clear()
+    }
   })
 
   it("cancels a real pending exec then drains turn_ended instead of superseding mid-tool", async () => {

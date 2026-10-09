@@ -197,7 +197,7 @@ Important fields:
 |---|---|
 | `source=checkpoint-current-run` | Current Run supplied fresh `tokenDetails`; preferred. |
 | `source=checkpoint-previous-turn` | No fresh details arrived, so the last snapshot is retained and marked stale in provider metadata. |
-| `source=occupancy-checkpoint-current-run` | Tool-call finish published the current Run's occupancy snapshot (display-only, `$0`). |
+| `source=occupancy-checkpoint-current-run` | Tool-call finish published the current Run's occupancy snapshot, billed as a one-call estimate (see `billing:` below). |
 | `source=occupancy-checkpoint-previous-turn` | Tool-call finish published the prior checkpoint occupancy because this Run has not yet received token details. |
 | `source=intermediate-zero` | Tool-call finish with no known checkpoint occupancy. Standard usage remains zero. |
 | `source=unavailable` | No checkpoint has ever supplied token details. Standard usage remains zero rather than pretending aggregate TurnEnded usage is context occupancy. |
@@ -216,14 +216,24 @@ the counters behind it, labelled by where they come from:
   held Run, plus `occupancyPrefixCache` (the prior turn's context).
 - `occupancy*` (tool-call boundaries with a snapshot,
   `source=occupancy-checkpoint-*`): `occupancyIn` is current `usedTokens`,
-  `occupancyCacheRead` the prior turn's context. Within one turn it does not
-  move, so it is 0 for every step of a conversation's first turn.
+  `occupancyCacheRead` / `occupancyCacheWrite` the split the step was billed
+  with — the previous step's context as cache read (see `billing:`).
 - `est*` (`source=intermediate-zero`, before any checkpoint with token
   details): the provider's char/4 estimate. Usage sent is zero.
 
 The final `TurnEnded` settles the billed occupancy exactly once. Two tool-call
 finishes with the same `v3In` are two steps with no checkpoint between them
 (occupancy is replaced, not summed, and carries `$0` cost metadata).
+
+Every finish is followed by a `billing:` line:
+
+| Field | Meaning |
+|---|---|
+| `step=estimate` | A tool-call step billed as one model call: the previous step's context as cache read, the rest new input. |
+| `step=turn-end` | The turn's last step, billed what is outstanding after `billing: turn real=…` added Cursor's real cost. |
+| `stepUsd` | What this step bills on both hosts (OpenCode 2 from its tokens, OpenCode 1.x from `copilot.totalNanoAiu`). |
+| `sessionRealUsd` / `sessionBilledUsd` | Ledger totals for the OpenCode session (in memory, since provider start). After a turn end they differ only by what one step could not carry. |
+| `pricing=unpriced` | No published rate (`default`/Auto): nothing is billed. |
 
 ### 4. Interpret the cache diagnosis
 

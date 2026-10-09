@@ -292,6 +292,7 @@ function bridgingSession(payloads: Uint8Array[], writes: Uint8Array[]): CursorSe
     pumpActive: true,
     heartbeat: null,
     nextBridgedExecId: 900_000,
+    billing: { key: "run:test", prefixTokens: 0 },
   } as unknown as CursorSession
 }
 

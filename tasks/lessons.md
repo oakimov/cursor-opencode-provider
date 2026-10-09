@@ -681,3 +681,11 @@
   semantics. `resume_action` looked like a cheaper rebuild but re-runs the
   model step from the last checkpoint and re-requests the tool under a new id;
   answering it would have needed guesswork or double execution.
+
+## 2026-10-09 — Check each host's cost formula, not one host's override
+
+- OpenCode 1.x honours `providerMetadata.copilot.totalNanoAiu`; OpenCode 2 has
+  no override and prices every step's tokens. A $0 override therefore hid the
+  cost on one host and billed every occupancy snapshot as a full prompt on the
+  other. Verify billing against both hosts' recorded session cost, not against
+  the provider's own metadata (`test/billing.test.ts` replicates both formulas).

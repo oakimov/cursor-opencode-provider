@@ -357,7 +357,8 @@ export function formatTurnUsageValidation(
  * The `finish:` trace. `v3*` is the usage sent to OpenCode. The second group is
  * labelled by where its numbers come from: `raw*` are Cursor's TurnEnded
  * request counters (whole Run), `occupancy*` the checkpoint snapshot a
- * tool-call boundary sends (`occupancyCacheRead` = prior turn's context), and
+ * tool-call boundary sends (its cache split as billed: the previous step's
+ * context, see `src/billing.ts`), and
  * `est*` the provider's char/4 estimate before any checkpoint arrived.
  */
 export function formatFinishTrace(input: {
@@ -375,7 +376,8 @@ export function formatFinishTrace(input: {
       (occupancy ? `occupancyPrefixCache=${occupancy.priorUsedTokens} ` : "")
     : occupancy
       ? `occupancyIn=${occupancy.usedTokens} occupancyOut=1 ` +
-        `occupancyCacheRead=${occupancy.priorUsedTokens} occupancyCacheWrite=0 `
+        `occupancyCacheRead=${usage.inputTokens?.cacheRead ?? 0} ` +
+        `occupancyCacheWrite=${usage.inputTokens?.cacheWrite ?? 0} `
       : `estIn=${estimate.inputTokens} estOut=${estimate.outputTokens} ` +
         `estCacheRead=${estimate.cacheRead} estCacheWrite=${estimate.cacheWrite} `
   return `finish: reason=${input.reason} ` +
@@ -416,20 +418,9 @@ export function emptyLanguageModelV3Usage(): LanguageModelV3Usage {
 }
 
 /**
- * OpenCode TUI/GUI replace each assistant message's `tokens` (they do not sum
- * occupancy). The TUI footer picks the last assistant with `tokens.output > 0`.
- * Session cost, however, adds every step-finish. Checkpoint occupancy is
- * therefore sent as a snapshot with `output=1` so the footer accepts it, and
- * callers attach {@link OPENCODE_DISPLAY_ONLY_COST_METADATA} so getUsage
- * reports $0 instead of billing the snapshot as a new prompt.
- */
-export const OPENCODE_DISPLAY_ONLY_COST_METADATA = {
-  copilot: { totalNanoAiu: 0 },
-} as const
-
-/**
- * Counters that mirror {@link occupancyUsageFromTokenDetails} for
- * {@link formatTurnUsageValidation}. Always validate occupancy finishes —
+ * Occupancy-shaped counters for {@link formatTurnUsageValidation}: `usedTokens`
+ * with `prior.usedTokens` of it cached, the shape every step finish sends
+ * (`shapeStepUsage` in `src/billing.ts`). Always validate occupancy finishes —
  * including TurnEnded/stop — against these, not against aggregate TurnEnded
  * request counters. Request cache ratios stay on `finish:` / cache diagnosis.
  */
@@ -447,21 +438,6 @@ export function occupancyValidationCounters(
     cacheWrite: 0,
     reasoningTokens: 0,
   }
-}
-
-export function occupancyUsageFromTokenDetails(
-  details: CursorConversationTokenDetails,
-  prior?: CursorConversationTokenDetails,
-): LanguageModelV3Usage {
-  const used = Math.max(0, Math.trunc(details.usedTokens))
-  if (used <= 0) return emptyLanguageModelV3Usage()
-  return buildLanguageModelV3UsageFromCounters(
-    occupancyValidationCounters(details, prior),
-    {
-      contextTotalTokens: used,
-      priorContextTokens: prior?.usedTokens,
-    },
-  )
 }
 
 /** Project nested V3 usage into the common flat AI-SDK counter shape. */

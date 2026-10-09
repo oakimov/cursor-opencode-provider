@@ -11,6 +11,7 @@ import {
   snapshotMirroredTodosBySession,
 } from "../src/language-model.js"
 import { sessionManager, type CursorSession, type Frame } from "../src/session.js"
+import { billingLedger } from "../src/billing.js"
 import { sessionFixture } from "./session-fixture.js"
 
 function writeVarint(out: number[], value: number): void {
@@ -1321,7 +1322,11 @@ describe("display-only ToolCall pump bridge", () => {
     })
     expect(finish.providerMetadata).toEqual({
       copilot: { totalNanoAiu: 0 },
-      cursor: { usageVersion: 3, occupancyOnly: true },
+      cursor: {
+        usageVersion: 3,
+        occupancyOnly: true,
+        billing: { stepUsd: 0, estimate: true, sessionRealUsd: 0, sessionBilledUsd: 0 },
+      },
     })
     expect(sessionManager.pendingFor(session.sessionId, 34)?.resultField).toBe("subagent_result")
     sessionManager.resolve(session.sessionId, 34)
@@ -1333,6 +1338,8 @@ describe("display-only ToolCall pump bridge", () => {
     const session = fakeSession([rawExecPayload(34, 28, rawSubagentArgs())], writes)
     session.tokenDetails = { usedTokens: 153_744, maxTokens: 256_000 }
     session.tokenDetailsFresh = true
+    // The context the previous step sent is read from cache on this one.
+    session.billing.prefixTokens = 123_651
     session.cacheDiagnostics = {
       conversationId: "display-bridge-conversation",
       priorTokenDetails: { usedTokens: 123_651, maxTokens: 256_000 },
@@ -1369,6 +1376,7 @@ describe("display-only ToolCall pump bridge", () => {
       cursor: {
         usageVersion: 3,
         occupancyOnly: true,
+        billing: { stepUsd: 0, estimate: true, sessionRealUsd: 0, sessionBilledUsd: 0 },
         context: {
           contextUsageVersion: 2,
           source: "checkpoint-current-run",
@@ -1383,6 +1391,33 @@ describe("display-only ToolCall pump bridge", () => {
     sessionManager.resolve(session.sessionId, 34)
   })
 
+
+  it("bills a priced tool-call step like one model call and tells both hosts the same amount", async () => {
+    const parts: any[] = []
+    const session = fakeSession([rawExecPayload(34, 28, rawSubagentArgs())], [])
+    session.tokenDetails = { usedTokens: 29_467, maxTokens: 256_000 }
+    session.tokenDetailsFresh = true
+    session.billing = { key: "ses_priced_step", cost: { input: 2, output: 6, cache_read: 0.5 }, prefixTokens: 22_944 }
+    const controller = {
+      enqueue(part: unknown) { parts.push(part) },
+      error(error: Error) { throw error },
+    } as unknown as ReadableStreamDefaultController<any>
+    try {
+      await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+      const finish = parts.find((part) => part.type === "finish" && part.finishReason?.unified === "tool-calls")
+      expect(finish.usage.inputTokens).toEqual({ total: 29_466, noCache: 6_522, cacheRead: 22_944, cacheWrite: 0 })
+      const usd = (6_522 * 2 + 22_944 * 0.5 + 6) / 1e6
+      expect(finish.providerMetadata.copilot.totalNanoAiu / 1e11).toBeCloseTo(usd, 9)
+      expect(finish.providerMetadata.cursor.billing).toEqual({
+        stepUsd: usd, estimate: true, sessionRealUsd: 0, sessionBilledUsd: usd,
+      })
+      // The next step reads this step's context from cache.
+      expect(session.billing.prefixTokens).toBe(29_467)
+    } finally {
+      sessionManager.resolve(session.sessionId, 34)
+      billingLedger.clear()
+    }
+  })
   it("routes Cursor guide through an enabled custom scout without changing local explore", async () => {
     const writes: Uint8Array[] = []
     const parts: any[] = []
