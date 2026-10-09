@@ -681,3 +681,7 @@
   semantics. `resume_action` looked like a cheaper rebuild but re-runs the
   model step from the last checkpoint and re-requests the tool under a new id;
   answering it would have needed guesswork or double execution.
+
+## 2026-10-09 — Test independent dependency graphs
+
+- Reloading an entry module with a query string does not reload its dependencies. Reproductions involving class identity must load a separate dependency graph and assert different constructors; success-path deduplication alone does not validate a shared promise's rejection path (`test/process-shared.test.ts`).

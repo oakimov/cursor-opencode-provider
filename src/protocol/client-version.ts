@@ -7,6 +7,7 @@ import {
 } from "../shared.js"
 import { opencodeGlobalCacheDir } from "../context/paths.js"
 import { withAbortDeadline } from "../deadline.js"
+import { processShared } from "../process-shared.js"
 
 const INSTALL_URL = "https://cursor.com/install"
 const REMOTE_TIMEOUT_MS = 5_000
@@ -15,15 +16,16 @@ const CLIENT_VERSION_RE = /^cli-[0-9A-Za-z][0-9A-Za-z._-]*$/
 
 type VersionCache = { version: string; fetchedAt: number }
 
-let cachedResolution: Promise<string> | undefined
+// Once per process, not per copy of this package the host loads.
+const cache = processShared("client-version.v1", (): { resolution?: Promise<string> } => ({}))
 
 export function resetClientVersionCache(): void {
-  cachedResolution = undefined
+  cache.resolution = undefined
 }
 
 export function resolveClientVersion(): Promise<string> {
-  cachedResolution ??= resolve()
-  return cachedResolution
+  cache.resolution ??= resolve()
+  return cache.resolution
 }
 
 async function resolve(): Promise<string> {
