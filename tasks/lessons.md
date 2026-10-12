@@ -742,3 +742,12 @@
   reads instead, settle read-ahead before returning the handle, and verify that
   the same handle still reads the complete snapshot on Node and Bun
   (`src/protocol/conversation-cache-header.ts`, `test/conversation-startup.mjs`).
+- `rename(src, dst)` ENOENT names either side. When another collector can
+  `rmdir` the shared destination directory, ENOENT does not prove the source
+  is gone; `lstat` the source before reporting it missing, and tolerate ENOENT
+  between `mkdir` and `chmod` of that directory
+  (`discardCacheCandidate`, `ensureCacheDirectory`).
+- A process-lifetime exemption from cleanup (pinning every loaded session)
+  silently disables periodic expiry on long-running servers. The per-file
+  operation queue already serializes in-process loads, writes and collection,
+  so a loaded session's snapshot can expire by its persisted age like any other.

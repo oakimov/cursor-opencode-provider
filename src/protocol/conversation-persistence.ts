@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
 import path from "node:path"
 import { constants as fsConstants } from "node:fs"
-import { chmod, link, mkdir, open, opendir, rename, rmdir, unlink, writeFile } from "node:fs/promises"
+import { chmod, link, lstat, mkdir, open, opendir, rename, rmdir, unlink, writeFile } from "node:fs/promises"
 import type { FileHandle } from "node:fs/promises"
 import { constants as zlibConstants, gunzip, gzip } from "node:zlib"
 import { promisify } from "node:util"
@@ -75,7 +75,8 @@ type MaintenanceState = {
 }
 const maintenanceRoots = new Map<string, MaintenanceState>()
 const fileOperations = new Map<string, Promise<void>>()
-const pinnedFiles = new Set<string>()
+/** `.${snapshot}.${pid}.${uuid}.tmp`, as written by writeConversationFile. */
+const WRITER_TEMP_FILE = /^\..+\.pb\.gz\.\d+\.[^.]+\.tmp$/
 type PersistenceTestPhase = "maintenance-start" | "before-quarantine" | "after-quarantine" | "full-decode"
 let testHook: ((phase: PersistenceTestPhase, filePath: string) => Promise<void> | void) | undefined
 
@@ -463,6 +464,7 @@ async function readConversationFileWithStatus(
     if (header.status === "metadata") {
       if (header.value.sessionKey !== expectedSessionKey) return discarded("invalid")
       if (!isFresh(header.value, now)) return discarded("expired")
+      if (header.value.schemaVersion !== CONVERSATION_CACHE_SCHEMA_VERSION) return discarded("invalid")
     }
     const compressed = await handle.readFile()
     if (compressed.length > MAX_CONVERSATION_CACHE_BYTES) return discarded("invalid")
@@ -494,15 +496,26 @@ async function discardCacheCandidate(
   signal?: AbortSignal,
 ): Promise<"removed" | "preserved" | "missing"> {
   const directory = quarantineDirectory(filePath)
-  await ensureCacheDirectory(directory)
   const quarantinePath = path.join(directory, `${randomUUID()}.snapshot`)
-  await testHook?.("before-quarantine", filePath)
-  signal?.throwIfAborted()
-  try {
-    await rename(filePath, quarantinePath)
-  } catch (error) {
-    if (errorCode(error) === "ENOENT") return "missing"
-    throw error
+  for (let attempt = 0; ; attempt++) {
+    await ensureCacheDirectory(directory)
+    if (attempt === 0) await testHook?.("before-quarantine", filePath)
+    signal?.throwIfAborted()
+    try {
+      await rename(filePath, quarantinePath)
+      break
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") throw error
+    }
+    // ENOENT names either side: the candidate is gone, or another collector
+    // removed this emptied quarantine directory after we created it.
+    try {
+      await lstat(filePath)
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") return "missing"
+      throw error
+    }
+    if (attempt === 2) return "preserved"
   }
   let removable = false
   try {
@@ -567,8 +580,18 @@ async function writeConversationFile(cacheDir: string, value: PersistedConversat
 }
 
 async function ensureCacheDirectory(directory: string): Promise<void> {
-  await mkdir(directory, { recursive: true, mode: 0o700 })
-  if (process.platform !== "win32") await chmod(directory, 0o700)
+  for (let attempt = 0; ; attempt++) {
+    await mkdir(directory, { recursive: true, mode: 0o700 })
+    if (process.platform === "win32") return
+    try {
+      await chmod(directory, 0o700)
+      return
+    } catch (error) {
+      // A concurrent collector can rmdir an emptied quarantine directory
+      // between mkdir and chmod; recreate it instead of failing the pass.
+      if (errorCode(error) !== "ENOENT" || attempt === 2) throw error
+    }
+  }
 }
 
 function queueWrite(store: ConversationStore, value: PersistedConversation): Promise<void> {
@@ -662,10 +685,8 @@ async function pruneConversationDirectory(cacheDir: string, now: number, signal:
       signal.throwIfAborted()
       if (!entry.isDirectory() || !entry.name.endsWith(".pb.gz")) continue
       const filePath = path.join(directory, entry.name)
-      if (pinnedFiles.has(filePath)) continue
-      await withFileOperation(filePath, async () => {
-        if (!pinnedFiles.has(filePath)) await recoverQuarantine(filePath, now, signal)
-      })
+      await maintainEntry(entry.name, signal, () =>
+        withFileOperation(filePath, () => recoverQuarantine(filePath, now, signal)))
     }
   }
   const entries = await opendir(directory)
@@ -674,15 +695,20 @@ async function pruneConversationDirectory(cacheDir: string, now: number, signal:
     if (!entry.isFile()) continue
     const filePath = path.join(directory, entry.name)
     if (entry.name.endsWith(".json")) {
-      await unlink(filePath).catch((error) => {
+      await maintainEntry(entry.name, signal, () => unlink(filePath).catch((error) => {
         if (errorCode(error) !== "ENOENT") throw error
-      })
+      }))
       continue
     }
-    if (!entry.name.endsWith(".pb.gz") || pinnedFiles.has(filePath)) continue
-    await withFileOperation(filePath, async () => {
+    if (WRITER_TEMP_FILE.test(entry.name)) {
+      await maintainEntry(entry.name, signal, () => collectWriterTemp(filePath, now, signal))
+      continue
+    }
+    if (!entry.name.endsWith(".pb.gz")) continue
+    // In-process loads/writes/deletes share this per-file queue, so a loaded
+    // session's snapshot still expires by its persisted age without restart.
+    await maintainEntry(entry.name, signal, () => withFileOperation(filePath, async () => {
       signal.throwIfAborted()
-      if (pinnedFiles.has(filePath)) return
       let handle
       try {
         handle = await openSnapshot(filePath)
@@ -698,7 +724,7 @@ async function pruneConversationDirectory(cacheDir: string, now: number, signal:
         const header = await readConversationCacheHeader(handle, signal)
         if (header.status === "invalid") status = "invalid"
         else if (header.status === "metadata" && !isFresh(header.value, now)) status = "expired"
-        if (!status || pinnedFiles.has(filePath)) return
+        if (!status) return
         signal.throwIfAborted()
         if (await discardCacheCandidate(filePath, identity, signal) === "removed") {
           recordStartupDiscard(cacheDir, entry.name, status)
@@ -707,8 +733,51 @@ async function pruneConversationDirectory(cacheDir: string, now: number, signal:
       } finally {
         await handle.close()
       }
-    })
+    }))
   }
+}
+
+/** One entry's I/O failure must not starve every later entry of collection. */
+async function maintainEntry(
+  fileName: string,
+  signal: AbortSignal,
+  operation: () => Promise<void>,
+): Promise<void> {
+  try {
+    await operation()
+  } catch (error) {
+    if (signal.aborted) throw error
+    trace(`conversation persistence: maintenance skipped file=${fileName}: ${String(error)}`)
+  }
+}
+
+/**
+ * A writer killed between writeFile and rename leaves its temp file behind.
+ * An in-flight writer's temp always carries a fresh timestamp, so only a
+ * readable expired prefix proves abandonment; unreadable temps are kept.
+ */
+async function collectWriterTemp(filePath: string, now: number, signal: AbortSignal): Promise<void> {
+  let handle
+  try {
+    handle = await openSnapshot(filePath)
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return
+    throw error
+  }
+  let expired = false
+  try {
+    if (!(await handle.stat()).isFile()) return
+    const header = await readConversationCacheHeader(handle, signal)
+    expired = header.status === "metadata" && !isFresh(header.value, now)
+  } finally {
+    await handle.close()
+  }
+  if (!expired) return
+  signal.throwIfAborted()
+  await unlink(filePath).catch((error) => {
+    if (errorCode(error) !== "ENOENT") throw error
+  })
+  trace(`conversation persistence: maintenance discarded abandoned temp file=${path.basename(filePath)}`)
 }
 
 function scheduleMaintenance(cacheDir: string, now: number, force = false): void {
@@ -812,15 +881,10 @@ async function getStore(
   const key = `${root}\0${sessionKey}`
   let pending = stores.get(key)
   if (!pending) {
-    const filePath = conversationCacheFilePath(root, sessionKey)
-    pinnedFiles.add(filePath)
     pending = loadStore(root, sessionKey, now)
     stores.set(key, pending)
     pending.catch(() => {
-      if (stores.get(key) === pending) {
-        stores.delete(key)
-        pinnedFiles.delete(filePath)
-      }
+      if (stores.get(key) === pending) stores.delete(key)
     })
   }
   return pending
@@ -889,7 +953,6 @@ export async function deletePersistedConversation(
 export function resetConversationPersistenceForTests(): void {
   for (const state of maintenanceRoots.values()) state.controller.abort()
   maintenanceRoots.clear()
-  pinnedFiles.clear()
   fileOperations.clear()
   testHook = undefined
   stores.clear()

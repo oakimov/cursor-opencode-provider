@@ -291,6 +291,82 @@ describe("bounded conversation maintenance", () => {
     await expect(loadPersistedConversation(cacheDir, sessionKey, now)).rejects.toThrow("not a regular file")
     expect((await stat(filePath)).isDirectory()).toBe(true)
   })
+
+  it("collects a snapshot loaded by this process once it expires", async () => {
+    const cacheDir = await root()
+    const filePath = await snapshot(cacheDir)
+    expect((await getPersistedConversation(cacheDir, sessionKey, now))?.conversationId).toBe("conversation-current")
+    await waitForConversationMaintenanceForTests(cacheDir, now)
+    expect((await stat(filePath)).isFile()).toBe(true)
+    await waitForConversationMaintenanceForTests(cacheDir, now + CONVERSATION_CACHE_TTL_MS + 1)
+    await expect(stat(filePath)).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("retries quarantine when another collector removes the emptied directory", async () => {
+    const cacheDir = await root()
+    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - CONVERSATION_CACHE_TTL_MS - 1)))
+    const directory = path.join(conversationCacheDirectoryPath(cacheDir), ".gc", path.basename(filePath))
+    setConversationPersistenceHookForTests(async (phase) => {
+      if (phase === "before-quarantine") await rm(directory, { recursive: true })
+    })
+    await waitForConversationMaintenanceForTests(cacheDir, now)
+    await expect(stat(filePath)).rejects.toMatchObject({ code: "ENOENT" })
+    expect((await loadPersistedConversation(cacheDir, sessionKey, now)).status).toBe("expired")
+  })
+
+  it("isolates one failing entry from the rest of the pass", async () => {
+    const cacheDir = await root()
+    const directory = conversationCacheDirectoryPath(cacheDir)
+    const expired = gzipSync(protobufSnapshot(now - CONVERSATION_CACHE_TTL_MS - 1))
+    await writeFile(path.join(directory, "a.pb.gz"), expired)
+    await writeFile(path.join(directory, "b.pb.gz"), expired)
+    let failed: string | undefined
+    setConversationPersistenceHookForTests((phase, filePath) => {
+      if (phase !== "before-quarantine" || failed) return
+      failed = filePath
+      throw new Error("injected entry failure")
+    })
+    await waitForConversationMaintenanceForTests(cacheDir, now)
+    const other = path.join(directory, path.basename(failed!) === "a.pb.gz" ? "b.pb.gz" : "a.pb.gz")
+    expect((await stat(failed!)).isFile()).toBe(true)
+    await expect(stat(other)).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("ages previous-schema snapshots by their persisted timestamp", async () => {
+    const cacheDir = await root()
+    const directory = conversationCacheDirectoryPath(cacheDir)
+    const previous = (updatedAt: number) => {
+      const bytes = Uint8Array.from(protobufSnapshot(updatedAt))
+      bytes[1] = CONVERSATION_CACHE_SCHEMA_VERSION - 1
+      return gzipSync(bytes)
+    }
+    const expiredPath = path.join(directory, "previous-expired.pb.gz")
+    await writeFile(expiredPath, previous(now - CONVERSATION_CACHE_TTL_MS - 1))
+    const freshPath = await snapshot(cacheDir, previous(now))
+    let decodes = 0
+    setConversationPersistenceHookForTests((phase) => { if (phase === "full-decode") decodes++ })
+    await waitForConversationMaintenanceForTests(cacheDir, now)
+    await expect(stat(expiredPath)).rejects.toMatchObject({ code: "ENOENT" })
+    expect((await stat(freshPath)).isFile()).toBe(true)
+    expect((await loadPersistedConversation(cacheDir, sessionKey, now)).status).toBe("invalid")
+    expect(decodes).toBe(0)
+  })
+
+  it("collects an orphaned writer temp file only after its persisted age expires", async () => {
+    const cacheDir = await root()
+    const directory = conversationCacheDirectoryPath(cacheDir)
+    const base = path.basename(conversationCacheFilePath(cacheDir, sessionKey))
+    const expiredTemp = path.join(directory, `.${base}.1.expired.tmp`)
+    const freshTemp = path.join(directory, `.${base}.2.fresh.tmp`)
+    const partialTemp = path.join(directory, `.${base}.3.partial.tmp`)
+    await writeFile(expiredTemp, gzipSync(protobufSnapshot(now - CONVERSATION_CACHE_TTL_MS - 1)))
+    await writeFile(freshTemp, gzipSync(protobufSnapshot(now)))
+    await writeFile(partialTemp, gzipSync(protobufSnapshot(now - CONVERSATION_CACHE_TTL_MS - 1)).subarray(0, 4))
+    await waitForConversationMaintenanceForTests(cacheDir, now)
+    await expect(stat(expiredTemp)).rejects.toMatchObject({ code: "ENOENT" })
+    expect((await stat(freshTemp)).isFile()).toBe(true)
+    expect((await stat(partialTemp)).isFile()).toBe(true)
+  })
 })
 
 describe("streaming snapshot metadata", () => {
@@ -301,7 +377,7 @@ describe("streaming snapshot metadata", () => {
       const result = parseConversationCacheHeader(bytes.subarray(0, length))
       if (result) {
         expect(result).toEqual({ status: "metadata", value: {
-          sessionKey, conversationId: "conversation-current", updatedAt: now,
+          schemaVersion: CONVERSATION_CACHE_SCHEMA_VERSION, sessionKey, conversationId: "conversation-current", updatedAt: now,
         } })
         metadataEnd = length
         break

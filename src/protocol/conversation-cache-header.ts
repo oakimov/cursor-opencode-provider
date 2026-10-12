@@ -5,8 +5,14 @@ import { CONVERSATION_CACHE_SCHEMA_VERSION } from "../shared.js"
 
 export const MAX_CACHE_HEADER_BYTES = 8 * 1024
 export const MAX_CACHE_HEADER_INPUT_BYTES = 128 * 1024
+/**
+ * Schema 3 wrote the same canonical fields 1-4 prefix as the current schema, so
+ * its persisted age is trustworthy even though its body is no longer loadable.
+ */
+const OLDEST_CANONICAL_PREFIX_SCHEMA_VERSION = 3
 
 export type ConversationCacheHeader = {
+  schemaVersion: number
   sessionKey: string
   conversationId: string
   updatedAt: number
@@ -45,7 +51,10 @@ export function parseConversationCacheHeader(bytes: Uint8Array): CacheHeaderResu
     // Only our writer's canonical prefix is eligible for metadata-only pruning.
     // Other protobuf orders remain loadable through the full decoder.
     if (varint() !== 8n) return { status: "indeterminate" }
-    if (varint() !== BigInt(CONVERSATION_CACHE_SCHEMA_VERSION)) return { status: "indeterminate" }
+    // A newer schema may lay out its prefix differently; never age it here.
+    const schemaVersion = varint()
+    if (schemaVersion < BigInt(OLDEST_CANONICAL_PREFIX_SCHEMA_VERSION) ||
+        schemaVersion > BigInt(CONVERSATION_CACHE_SCHEMA_VERSION)) return { status: "indeterminate" }
     if (varint() !== 18n) return { status: "indeterminate" }
     const sessionKey = string()
     if (varint() !== 26n) return { status: "indeterminate" }
@@ -55,7 +64,10 @@ export function parseConversationCacheHeader(bytes: Uint8Array): CacheHeaderResu
     if (!sessionKey || !conversationId || !Number.isSafeInteger(updatedAt) || updatedAt < 0) {
       return { status: "invalid" }
     }
-    return { status: "metadata", value: { sessionKey, conversationId, updatedAt } }
+    return {
+      status: "metadata",
+      value: { schemaVersion: Number(schemaVersion), sessionKey, conversationId, updatedAt },
+    }
   } catch (error) {
     // A fragmented varint/string is normal streaming input, not corrupt data.
     if (error === incomplete) return undefined
