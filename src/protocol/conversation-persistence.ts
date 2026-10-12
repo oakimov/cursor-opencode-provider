@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
 import path from "node:path"
 import { constants as fsConstants } from "node:fs"
+import type { Dirent } from "node:fs"
 import { chmod, link, lstat, mkdir, open, opendir, rename, rmdir, unlink, writeFile } from "node:fs/promises"
 import type { FileHandle } from "node:fs/promises"
 import { constants as zlibConstants, gunzip, gzip } from "node:zlib"
@@ -86,7 +87,8 @@ const maintenanceRoots = new Map<string, MaintenanceState>()
 const fileOperations = new Map<string, Promise<void>>()
 /** `.${snapshot}.${pid}.${uuid}.tmp`, as written by writeConversationFile. */
 const WRITER_TEMP_FILE = /^\..+\.pb\.gz\.\d+\.[^.]+\.tmp$/
-type PersistenceTestPhase = "maintenance-start" | "before-quarantine" | "after-quarantine" | "full-decode"
+type PersistenceTestPhase =
+  | "maintenance-start" | "before-quarantine" | "after-quarantine" | "full-decode" | "directory-opened"
 let testHook: ((phase: PersistenceTestPhase, filePath: string) => Promise<void> | void) | undefined
 
 function errorCode(error: unknown): unknown {
@@ -110,6 +112,32 @@ async function withFileOperation<T>(filePath: string, operation: () => Promise<T
 
 function quarantineDirectory(filePath: string): string {
   return path.join(path.dirname(filePath), ".gc", path.basename(filePath))
+}
+
+/**
+ * Entries of a directory another collector may remove at any time. Bun reads
+ * a Dir lazily, so that ENOENT can surface from iteration instead of opendir;
+ * either way the directory is treated as empty.
+ */
+async function* removableDirectoryEntries(directory: string): AsyncGenerator<Dirent> {
+  let handle
+  try {
+    handle = await opendir(directory)
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return
+    throw error
+  }
+  try {
+    await testHook?.("directory-opened", directory)
+  } catch (error) {
+    await handle.close()
+    throw error
+  }
+  try {
+    for await (const entry of handle) yield entry
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") throw error
+  }
 }
 
 function openSnapshot(filePath: string): Promise<FileHandle> {
@@ -403,35 +431,27 @@ async function openConversationFile(filePath: string): Promise<{ handle: FileHan
   let selected: { handle: FileHandle, sourcePath: string } | undefined
   let newest = -Infinity
   try {
-    let directory
-    try {
-      directory = await opendir(quarantineDirectory(filePath))
-    } catch (error) {
-      if (errorCode(error) !== "ENOENT") throw error
-    }
-    if (directory) {
-      for await (const entry of directory) {
-        if (!entry.isFile() || !entry.name.endsWith(".snapshot")) continue
-        const sourcePath = path.join(quarantineDirectory(filePath), entry.name)
-        let handle
-        try {
-          handle = await openSnapshot(sourcePath)
-        } catch (error) {
-          if (errorCode(error) === "ENOENT") continue
-          throw error
-        }
-        try {
-          const header = await readConversationCacheHeader(handle)
-          const updatedAt = header.status === "metadata" ? header.value.updatedAt : -Infinity
-          if (!selected || updatedAt > newest) {
-            await selected?.handle.close()
-            selected = { handle, sourcePath }
-            newest = updatedAt
-          } else await handle.close()
-        } catch (error) {
-          await handle.close()
-          throw error
-        }
+    for await (const entry of removableDirectoryEntries(quarantineDirectory(filePath))) {
+      if (!entry.isFile() || !entry.name.endsWith(".snapshot")) continue
+      const sourcePath = path.join(quarantineDirectory(filePath), entry.name)
+      let handle
+      try {
+        handle = await openSnapshot(sourcePath)
+      } catch (error) {
+        if (errorCode(error) === "ENOENT") continue
+        throw error
+      }
+      try {
+        const header = await readConversationCacheHeader(handle)
+        const updatedAt = header.status === "metadata" ? header.value.updatedAt : -Infinity
+        if (!selected || updatedAt > newest) {
+          await selected?.handle.close()
+          selected = { handle, sourcePath }
+          newest = updatedAt
+        } else await handle.close()
+      } catch (error) {
+        await handle.close()
+        throw error
       }
     }
     // A collector may have restored its candidate, or a writer published a new
@@ -637,14 +657,7 @@ function queueDelete(store: ConversationStore, expectedConversationId: string): 
 }
 
 async function recoverQuarantine(filePath: string, now: number, signal: AbortSignal): Promise<void> {
-  let directory
-  try {
-    directory = await opendir(quarantineDirectory(filePath))
-  } catch (error) {
-    if (errorCode(error) === "ENOENT") return
-    throw error
-  }
-  for await (const entry of directory) {
+  for await (const entry of removableDirectoryEntries(quarantineDirectory(filePath))) {
     signal.throwIfAborted()
     if (!entry.isFile() || !entry.name.endsWith(".snapshot")) continue
     const candidate = path.join(quarantineDirectory(filePath), entry.name)
@@ -683,20 +696,12 @@ async function pruneConversationDirectory(cacheDir: string, now: number, signal:
   const directory = conversationCacheDirectoryPath(cacheDir)
   // Recover crash leftovers before inspecting canonical names. Only per-session
   // directories are read, and readers use exactly the same recovery location.
-  let garbage
-  try {
-    garbage = await opendir(path.join(directory, ".gc"))
-  } catch (error) {
-    if (errorCode(error) !== "ENOENT") throw error
-  }
-  if (garbage) {
-    for await (const entry of garbage) {
-      signal.throwIfAborted()
-      if (!entry.isDirectory() || !entry.name.endsWith(".pb.gz")) continue
-      const filePath = path.join(directory, entry.name)
-      await maintainEntry(entry.name, signal, () =>
-        withFileOperation(filePath, () => recoverQuarantine(filePath, now, signal)))
-    }
+  for await (const entry of removableDirectoryEntries(path.join(directory, ".gc"))) {
+    signal.throwIfAborted()
+    if (!entry.isDirectory() || !entry.name.endsWith(".pb.gz")) continue
+    const filePath = path.join(directory, entry.name)
+    await maintainEntry(entry.name, signal, () =>
+      withFileOperation(filePath, () => recoverQuarantine(filePath, now, signal)))
   }
   const entries = await opendir(directory)
   for await (const entry of entries) {

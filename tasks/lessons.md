@@ -756,3 +756,7 @@
   the head (conversation id, timestamp, turn provenance) resident, hand the
   loaded snapshot to its first reader, and re-read the durable copy after the
   session's queued write (`takeConversation`).
+- Bun's `opendir` reads the directory lazily: a directory removed after
+  `opendir` throws `ENOENT scandir` from the `for await`, where Node yields no
+  entries. Iterate directories other collectors may remove through
+  `removableDirectoryEntries`, which treats ENOENT from either step as empty.

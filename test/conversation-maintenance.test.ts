@@ -327,6 +327,19 @@ describe("bounded conversation maintenance", () => {
     expect(await getPersistedTurnProvenance(cacheDir, sessionKey, later)).toBeUndefined()
   })
 
+  it("treats a quarantine removed after opendir as empty", async () => {
+    const cacheDir = await root()
+    const filePath = conversationCacheFilePath(cacheDir, sessionKey)
+    const directory = path.join(conversationCacheDirectoryPath(cacheDir), ".gc", path.basename(filePath))
+    await mkdir(directory, { recursive: true })
+    await writeFile(path.join(directory, "moved.snapshot"), gzipSync(protobufSnapshot(now, "moved")))
+    // Bun reads a Dir lazily, so this removal surfaces from iteration, not opendir.
+    setConversationPersistenceHookForTests(async (phase, opened) => {
+      if (phase === "directory-opened" && opened === directory) await rm(directory, { recursive: true })
+    })
+    expect(await loadPersistedConversation(cacheDir, sessionKey, now)).toEqual({ status: "missing" })
+  })
+
   it("collects a snapshot loaded by this process once it expires", async () => {
     const cacheDir = await root()
     const filePath = await snapshot(cacheDir)
