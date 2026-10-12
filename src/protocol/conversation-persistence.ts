@@ -37,9 +37,18 @@ export type PersistedConversation = {
   hostNote?: string
 }
 
+/** Small per-session facts kept for the process; full snapshots stay on disk. */
+type ConversationHead = {
+  conversationId: string
+  updatedAt: number
+  turnProvenance?: string
+}
+
 type ConversationStore = {
   cacheDir: string
   sessionKey: string
+  head?: ConversationHead
+  /** The snapshot decoded by loadStore, held only until its first reader takes it. */
   value?: PersistedConversation
   loadStatus: ConversationLoadStatus
   writeChain: Promise<void>
@@ -859,17 +868,53 @@ async function loadStore(cacheDir: string, sessionKey: string, now: number): Pro
       await candidate.pin?.close()
     }
   })
-  const value = loaded.value
+  const value = loaded.value && loaded.value.sessionKey === sessionKey && isFresh(loaded.value, now)
+    ? loaded.value
+    : undefined
   const loadStatus: ConversationLoadStatus = loaded.status === "missing"
     ? startupDiscardedStatuses.get(path.resolve(cacheDir))?.get(path.basename(filePath)) ?? "missing"
     : loaded.status
   return {
     cacheDir,
     sessionKey,
-    value: value && value.sessionKey === sessionKey && isFresh(value, now) ? value : undefined,
+    ...(value ? { head: conversationHead(value), value } : {}),
     loadStatus,
     writeChain: Promise.resolve(),
   }
+}
+
+function conversationHead(value: PersistedConversation): ConversationHead {
+  return {
+    conversationId: value.conversationId,
+    updatedAt: value.updatedAt,
+    ...(value.turnProvenance ? { turnProvenance: value.turnProvenance } : {}),
+  }
+}
+
+/**
+ * Hand the loaded snapshot to its first reader, then read the durable copy.
+ * Hydration needs it only while the session has no live binding, so keeping
+ * a process-lifetime clone of every checkpoint and blob graph buys nothing.
+ */
+async function takeConversation(store: ConversationStore, now: number): Promise<PersistedConversationLoad> {
+  const head = store.head
+  if (!head) return { status: store.loadStatus }
+  const held = store.value
+  store.value = undefined
+  if (held && isFresh(held, now)) return { status: "restored", value: held }
+  await store.writeChain.catch(() => {})
+  const filePath = conversationCacheFilePath(store.cacheDir, store.sessionKey)
+  const loaded = await withFileOperation(filePath, async () => {
+    const candidate = await readConversationFileWithStatus(filePath, store.sessionKey, now)
+    await candidate.pin?.close()
+    return candidate
+  })
+  // A persist/delete that ran meanwhile owns the head; only report this read.
+  if (store.head === head) {
+    store.head = loaded.value ? conversationHead(loaded.value) : undefined
+    store.loadStatus = loaded.status
+  }
+  return loaded.value ? { status: "restored", value: loaded.value } : { status: loaded.status }
 }
 
 async function getStore(
@@ -895,8 +940,7 @@ export async function getPersistedConversation(
   sessionKey: string,
   now = Date.now(),
 ): Promise<PersistedConversation | undefined> {
-  const store = await getStore(cacheDir, sessionKey, now)
-  return store.value ? cloneConversation(store.value) : undefined
+  return (await loadPersistedConversation(cacheDir, sessionKey, now)).value
 }
 
 /** Read a snapshot together with the reason restart hydration did not restore it. */
@@ -905,10 +949,18 @@ export async function loadPersistedConversation(
   sessionKey: string,
   now = Date.now(),
 ): Promise<PersistedConversationLoad> {
-  const store = await getStore(cacheDir, sessionKey, now)
-  return store.value
-    ? { status: "restored", value: cloneConversation(store.value) }
-    : { status: store.loadStatus }
+  return takeConversation(await getStore(cacheDir, sessionKey, now), now)
+}
+
+/** Turn provenance of the current snapshot, without decoding its payload. */
+export async function getPersistedTurnProvenance(
+  cacheDir: string,
+  sessionKey: string,
+  now = Date.now(),
+): Promise<{ conversationId: string, turnProvenance: string } | undefined> {
+  const head = (await getStore(cacheDir, sessionKey, now)).head
+  if (!head?.turnProvenance || !isFresh(head, now)) return undefined
+  return { conversationId: head.conversationId, turnProvenance: head.turnProvenance }
 }
 
 /** Replace one session's durable snapshot and refresh its 24-hour lease. */
@@ -921,13 +973,15 @@ export async function persistConversation(
   now = Date.now(),
 ): Promise<void> {
   const store = await getStore(cacheDir, value.sessionKey, now)
-  const snapshot = cloneConversation({
+  // queueWrite takes its own copy; the store keeps only the head.
+  const snapshot: PersistedConversation = {
     ...value,
     updatedAt: now,
-    toolCatalog: structuredClone(value.toolCatalog ?? []),
+    toolCatalog: value.toolCatalog ?? [],
     postCompactionRebase: value.postCompactionRebase === true,
-  })
-  store.value = snapshot
+  }
+  store.head = conversationHead(snapshot)
+  store.value = undefined
   store.loadStatus = "restored"
   startupDiscardedStatuses.get(path.resolve(cacheDir))?.delete(path.basename(
     conversationCacheFilePath(cacheDir, value.sessionKey),
@@ -943,11 +997,18 @@ export async function deletePersistedConversation(
   expectedConversationId?: string,
 ): Promise<void> {
   const store = await getStore(cacheDir, sessionKey)
-  const current = store.value
+  const current = store.head
   if (!current || (expectedConversationId && current.conversationId !== expectedConversationId)) return
+  store.head = undefined
   store.value = undefined
   store.loadStatus = "missing"
   await queueDelete(store, current.conversationId)
+}
+
+/** Full snapshots still held in memory; the store should keep heads only. */
+export async function retainedConversationSnapshotsForTests(): Promise<number> {
+  const settled = await Promise.allSettled(stores.values())
+  return settled.filter((result) => result.status === "fulfilled" && result.value.value).length
 }
 
 export function resetConversationPersistenceForTests(): void {

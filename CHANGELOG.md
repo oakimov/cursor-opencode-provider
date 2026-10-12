@@ -11,6 +11,7 @@
 
 - The first Cursor request after a restart no longer waits for every saved conversation to be decompressed; sessions restore on demand while bounded cache cleanup runs independently ([#68](https://github.com/oakimov/cursor-opencode-provider/issues/68))
 - Saved conversations now expire on a long-running server without a restart, including snapshots from the previous cache schema and temp files left by a save that was killed mid-write; concurrent cleanups no longer abort each other, and one unreadable file no longer stops the rest of a cleanup pass
+- Restored or saved conversations no longer keep a second full copy of their checkpoint and blobs in memory for the life of the process; only the conversation id, timestamp and turn provenance stay resident, and a later restore reads the snapshot from disk
 - OpenCode 2's generic SDK fallback no longer bypasses the plugin's current-credential resolver; new Runs resolve the active login even when the host already supplied an SDK
 - Occupancy diagnostics no longer count the footer's output token twice or report success when the diagnostic total disagrees with the sent snapshot
 - Estimated charges from interrupted Runs no longer reduce the charge for a later completed Run; only the matching Run's counters replace its estimates

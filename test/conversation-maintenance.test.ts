@@ -14,10 +14,12 @@ import {
   conversationCacheFilePath,
   deletePersistedConversation,
   getPersistedConversation,
+  getPersistedTurnProvenance,
   initializeConversationPersistence,
   loadPersistedConversation,
   persistConversation,
   resetConversationPersistenceForTests,
+  retainedConversationSnapshotsForTests,
   setConversationPersistenceHookForTests,
   waitForConversationMaintenanceForTests,
 } from "../src/protocol/conversation-persistence.js"
@@ -290,6 +292,39 @@ describe("bounded conversation maintenance", () => {
     await mkdir(filePath)
     await expect(loadPersistedConversation(cacheDir, sessionKey, now)).rejects.toThrow("not a regular file")
     expect((await stat(filePath)).isDirectory()).toBe(true)
+  })
+
+  it("does not retain full snapshots in memory after handing them out or writing them", async () => {
+    const cacheDir = await root()
+    await snapshot(cacheDir)
+    let decodes = 0
+    setConversationPersistenceHookForTests((phase) => { if (phase === "full-decode") decodes++ })
+    expect((await getPersistedConversation(cacheDir, sessionKey, now))?.conversationId).toBe("conversation-current")
+    expect(await retainedConversationSnapshotsForTests()).toBe(0)
+    expect(decodes).toBe(1)
+    // A later reader gets the durable copy, not a process-lifetime clone.
+    expect((await loadPersistedConversation(cacheDir, sessionKey, now)).value?.conversationId)
+      .toBe("conversation-current")
+    expect(decodes).toBe(2)
+    await persistConversation(cacheDir, {
+      sessionKey, conversationId: "written", checkpoint: new Uint8Array(1024 * 1024), blobs: [],
+      requestContext: { rules_info_complete: true }, turnProvenance: "{}",
+    }, now)
+    expect(await retainedConversationSnapshotsForTests()).toBe(0)
+    expect((await getPersistedConversation(cacheDir, sessionKey, now))?.checkpoint?.length).toBe(1024 * 1024)
+    expect(await getPersistedTurnProvenance(cacheDir, sessionKey, now))
+      .toEqual({ conversationId: "written", turnProvenance: "{}" })
+    expect(decodes).toBe(3)
+  })
+
+  it("reports a durable snapshot that expired while only its metadata was held", async () => {
+    const cacheDir = await root()
+    await persistConversation(cacheDir, {
+      sessionKey, conversationId: "idle", blobs: [], requestContext: { rules_info_complete: true },
+    }, now)
+    const later = now + CONVERSATION_CACHE_TTL_MS + 1
+    expect(await loadPersistedConversation(cacheDir, sessionKey, later)).toEqual({ status: "expired" })
+    expect(await getPersistedTurnProvenance(cacheDir, sessionKey, later)).toBeUndefined()
   })
 
   it("collects a snapshot loaded by this process once it expires", async () => {

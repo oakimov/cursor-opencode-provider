@@ -751,3 +751,8 @@
   silently disables periodic expiry on long-running servers. The per-file
   operation queue already serializes in-process loads, writes and collection,
   so a loaded session's snapshot can expire by its persisted age like any other.
+- A per-session store that caches the decoded snapshot duplicates the live
+  checkpoint/blob maps for every session the process ever touched. Keep only
+  the head (conversation id, timestamp, turn provenance) resident, hand the
+  loaded snapshot to its first reader, and re-read the durable copy after the
+  session's queued write (`takeConversation`).
