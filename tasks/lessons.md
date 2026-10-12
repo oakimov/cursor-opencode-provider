@@ -730,3 +730,15 @@
   renewal even though tests starting with an empty SDK pass. Keep the current
   integration resolver after captured host options, and preserve other
   providers' SDKs (`test/plugin-opencode2.test.ts`).
+
+## 2026-10-12 — Streaming cache metadata needs explicit byte and handle ownership
+
+- A full-buffer protobuf reader is not necessarily a streaming parser:
+  `protobufjs.Reader.uint64()` accepted a fragmented value before its terminating
+  byte. Prefix inspection must distinguish incomplete varints/strings from
+  complete metadata (`test/conversation-maintenance.test.ts`).
+- Disposing a file stream can close an externally supplied descriptor despite
+  `autoClose: false` on a runtime. Feed the inflater with bounded positional
+  reads instead, settle read-ahead before returning the handle, and verify that
+  the same handle still reads the complete snapshot on Node and Bun
+  (`src/protocol/conversation-cache-header.ts`, `test/conversation-startup.mjs`).

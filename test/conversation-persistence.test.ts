@@ -7,10 +7,10 @@ import {
   conversationCacheDirectoryPath,
   conversationCacheFilePath,
   getPersistedConversation,
-  initializeConversationPersistence,
   loadPersistedConversation,
   persistConversation,
   resetConversationPersistenceForTests,
+  waitForConversationMaintenanceForTests,
 } from "../src/protocol/conversation-persistence.js"
 import {
   hydrateConversationState,
@@ -209,7 +209,7 @@ describe("conversation restart persistence", () => {
     await mkdir(conversationCacheDirectoryPath(root), { recursive: true })
     await writeFile(legacyPath, JSON.stringify({ schemaVersion: 2, conversation: {} }))
 
-    await initializeConversationPersistence(root)
+    await waitForConversationMaintenanceForTests(root)
 
     await expect(stat(legacyPath)).rejects.toMatchObject({ code: "ENOENT" })
     expect((await loadPersistedConversation(root, sessionKey)).status).toBe("missing")
@@ -277,7 +277,7 @@ describe("conversation restart persistence", () => {
     })
   })
 
-  it("prunes records older than 24 hours at startup but keeps the exact boundary", async () => {
+  it("prunes records older than 24 hours in maintenance but keeps the exact boundary", async () => {
     const staleRoot = await cacheRoot()
     const boundaryRoot = await cacheRoot()
     const writtenAt = 1_900_000_000_000
@@ -291,13 +291,13 @@ describe("conversation restart persistence", () => {
     await persistConversation(boundaryRoot, value, writtenAt)
 
     clearMemory()
-    await initializeConversationPersistence(staleRoot, writtenAt + CONVERSATION_CACHE_TTL_MS + 1)
+    await waitForConversationMaintenanceForTests(staleRoot, writtenAt + CONVERSATION_CACHE_TTL_MS + 1)
     expect((await loadPersistedConversation(staleRoot, value.sessionKey)).status).toBe("expired")
     await expect(stat(conversationCacheFilePath(staleRoot, value.sessionKey)))
       .rejects.toMatchObject({ code: "ENOENT" })
 
     clearMemory()
-    await initializeConversationPersistence(boundaryRoot, writtenAt + CONVERSATION_CACHE_TTL_MS)
+    await waitForConversationMaintenanceForTests(boundaryRoot, writtenAt + CONVERSATION_CACHE_TTL_MS)
     expect((await getPersistedConversation(boundaryRoot, value.sessionKey))?.conversationId)
       .toBe(value.conversationId)
     expect((await stat(conversationCacheFilePath(boundaryRoot, value.sessionKey))).isFile()).toBe(true)
@@ -379,7 +379,7 @@ describe("conversation restart persistence", () => {
     const filePath = conversationCacheFilePath(root, sessionKey)
     await mkdir(conversationCacheDirectoryPath(root), { recursive: true })
     await writeFile(filePath, "not protobuf gzip", "utf-8")
-    await initializeConversationPersistence(root)
+    await waitForConversationMaintenanceForTests(root)
 
     await expect(stat(filePath)).rejects.toMatchObject({ code: "ENOENT" })
     expect((await loadPersistedConversation(root, sessionKey)).status).toBe("invalid")

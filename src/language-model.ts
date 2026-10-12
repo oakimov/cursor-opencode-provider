@@ -714,8 +714,8 @@ export function createCursorLanguageModel(
 ): LanguageModelV3 {
   // Host Path.cache / explicit override wins over XDG heuristics for this process.
   if (options.cacheDir) setHostCacheDirOverride(options.cacheDir)
-  // Start loading and pruning restart state as soon as the provider is built.
-  // startSession awaits this same per-cache-root initialization before binding.
+  // Prepare restart storage and schedule bounded background maintenance. Session
+  // hydration awaits directory readiness only, never the directory-wide sweep.
   void initializeConversationPersistence(opencodeGlobalCacheDir()).catch((error) => {
     trace(`conversation persistence: startup load failed: ${String(error)}`)
   })
