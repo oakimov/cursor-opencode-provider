@@ -20,6 +20,7 @@ import {
 import { applyCursorIntegration } from "../src/opencode2/integration.js"
 import { exposeDirectMcpTools, rememberDirectMcpNamespaces } from "../src/opencode2/mcp-direct.js"
 import { registerTodoTools } from "../src/opencode2/todo-tools.js"
+import { registerCursorImageSaveTool } from "../src/opencode2/image-save-tool.js"
 import { rememberHostSkillFiles } from "../src/context/skills.js"
 import type { HostModelInfo, HostPluginContext, HostProviderEditor, HostProviderInfo } from "./opencode2-host-contract.js"
 
@@ -78,9 +79,21 @@ void (() =>
   }))
 
 void (() => ctx.integration.transform(applyCursorIntegration))
+void (() => ctx.event.subscribe({ signal: new AbortController().signal }))
+void (() =>
+  ctx.permission.assert({
+    sessionID: "s",
+    agent: "build",
+    action: "edit",
+    resources: ["assets/image.png"],
+    save: ["*"],
+    metadata: { filepath: "/repo/assets/image.png" },
+    source: { type: "tool", messageID: "m", id: "c" },
+  }))
 void (() =>
   ctx.tool.transform((hostEditor) => {
     registerTodoTools(hostEditor)
+    registerCursorImageSaveTool(hostEditor, ctx)
     exposeDirectMcpTools(hostEditor, new Set(["github"]))
   }))
 void (() =>

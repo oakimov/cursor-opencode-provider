@@ -1,7 +1,7 @@
 import { describe, expect, test, beforeEach, afterEach, setSystemTime } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { APICallError } from "@ai-sdk/provider"
 import plugin from "../src/plugin-opencode2.js"
 import { CursorPlugin } from "../src/plugin.js"
@@ -36,6 +36,7 @@ import { createManagedTerminal } from "../src/terminal-runner.js"
 import { listenForHostSteers, matchEarlySteers, recordEarlySteer, resetHostSteersForTests } from "../src/host-steer.js"
 import { toolResultFailure } from "../src/opencode2/tool-results.js"
 import { stageCursorImage } from "../src/image-staging.js"
+import { IMAGE_PERMISSION_DENIED_PREFIX } from "../src/image-save.js"
 import { hostPlansDir, opencode2PlanDir, setHostCacheDirOverride, setNativePlansDir } from "../src/context/paths.js"
 import { hostSkillFiles, resetHostSkillFilesForTests } from "../src/context/skills.js"
 import { writeCache } from "../src/models.js"
@@ -846,7 +847,7 @@ describe("opencode2 setup", () => {
     expect(tools.map((t) => t.name)).not.toContain("custom_websearch")
   })
 
-  test("cursor_image_save commits staged bytes without a permission prompt", async () => {
+  test("cursor_image_save commits after containment when the host has no permission domain", async () => {
     const { ctx, transforms, sessionLocations } = fakeContext()
     await setupPlugin(ctx)
     let registered: {
@@ -872,6 +873,126 @@ describe("opencode2 setup", () => {
       rmSync(workspace, { recursive: true, force: true })
       rmSync(projectDir, { recursive: true, force: true })
     }
+  })
+
+  describe("cursor_image_save through the plugin permission domain", () => {
+    type AssertRequest = {
+      sessionID: string
+      agent?: string
+      action: string
+      resources: readonly string[]
+      save?: readonly string[]
+      metadata?: Record<string, unknown>
+      source?: { type: "tool"; messageID: string; id: string }
+    }
+    const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01])
+    const toolContext = { sessionID: "ses_perm", agent: "build", messageID: "msg_perm", id: "call_perm" }
+
+    type ImageSaveTool = {
+      execute: (input: { image_id: string }, context: Partial<typeof toolContext>) => Promise<{ output: { bytes: number } }>
+    }
+    const settle = (promise: Promise<unknown>) => promise.then(() => undefined, (error: unknown) => error)
+
+    async function withImageSave(
+      assert: (request: AssertRequest) => Promise<void>,
+      run: (tool: ImageSaveTool, dirs: { workspace: string; projectDir: string }) => Promise<void>,
+    ) {
+      const { ctx, transforms, sessionLocations } = fakeContext()
+      ctx.permission = { assert }
+      await setupPlugin(ctx)
+      let tool: ImageSaveTool | undefined
+      transforms.get("tool")!({ add: (value: ImageSaveTool) => { tool = value } })
+      const workspace = mkdtempSync(join(tmpdir(), "oc2-perm-ws-"))
+      const projectDir = mkdtempSync(join(tmpdir(), "oc2-perm-proj-"))
+      sessionLocations.set("ses_perm", workspace)
+      try {
+        await run(tool!, { workspace, projectDir })
+      } finally {
+        rmSync(workspace, { recursive: true, force: true })
+        rmSync(projectDir, { recursive: true, force: true })
+      }
+    }
+
+    test("asks external_directory then edit with native resources and the tool-call source", async () => {
+      const requests: AssertRequest[] = []
+      await withImageSave(async (request) => void requests.push(request), async (tool, { projectDir }) => {
+        const target = join(projectDir, "assets", "dot.png")
+        const image_id = stageCursorImage({ path: target, projectDir, mime: "image/png", data: png })
+        const result = await tool.execute({ image_id }, toolContext)
+        expect(result.output.bytes).toBe(png.length)
+        expect(readFileSync(target)).toEqual(Buffer.from(png))
+
+        const realTarget = join(realpathSync(projectDir), "assets", "dot.png")
+        const parentGlob = `${dirname(realTarget)}/*`
+        const source = { type: "tool" as const, messageID: "msg_perm", id: "call_perm" }
+        expect(requests).toEqual([
+          {
+            sessionID: "ses_perm", agent: "build", action: "external_directory",
+            resources: [parentGlob], save: [parentGlob],
+            metadata: { filepath: realTarget, parentDir: dirname(realTarget) }, source,
+          },
+          {
+            sessionID: "ses_perm", agent: "build", action: "edit",
+            resources: [realTarget], save: ["*"],
+            metadata: { filepath: realTarget, mime: "image/png", bytes: png.length, source: "cursor-generate-image" },
+            source,
+          },
+        ])
+      })
+    })
+
+    test("a target inside the session workspace asks only edit, by its relative path", async () => {
+      const requests: AssertRequest[] = []
+      await withImageSave(async (request) => void requests.push(request), async (tool, { workspace }) => {
+        const target = join(workspace, "assets", "dot.png")
+        const image_id = stageCursorImage({ path: target, projectDir: workspace, mime: "image/png", data: png })
+        await tool.execute({ image_id }, { sessionID: "ses_perm" })
+        expect(readFileSync(target)).toEqual(Buffer.from(png))
+        expect(requests).toHaveLength(1)
+        expect(requests[0]).toMatchObject({ sessionID: "ses_perm", action: "edit", resources: ["assets/dot.png"], save: ["*"] })
+        // A context without the call identity sends no source or agent.
+        expect(requests[0]).not.toHaveProperty("source")
+        expect(requests[0]).not.toHaveProperty("agent")
+      })
+    })
+
+    test.each(["external_directory", "edit"] as const)(
+      "a plain decline at %s reaches the host unchanged and writes nothing",
+      async (deny) => {
+        const decline = Object.assign(new Error("declined"), { _tag: "Permission.DeclinedError" })
+        const actions: string[] = []
+        await withImageSave(async (request) => {
+          actions.push(request.action)
+          if (request.action === deny) throw decline
+        }, async (tool, { projectDir }) => {
+          const image_id = stageCursorImage({
+            path: join(projectDir, "assets", "dot.png"), projectDir, mime: "image/png", data: png,
+          })
+          expect(await settle(tool.execute({ image_id }, toolContext))).toBe(decline)
+          expect(existsSync(join(projectDir, "assets"))).toBe(false)
+          expect(actions).toEqual(deny === "edit" ? ["external_directory", "edit"] : ["external_directory"])
+        })
+      },
+    )
+
+    test.each([
+      ["a deny rule", "Permission denied: edit"],
+      ["a rejection with feedback", "use the docs folder instead"],
+    ])("%s stays marked so Cursor receives permission_denied", async (_label, message) => {
+      // The host reports both as a tool error carrying the reason or feedback.
+      const failure = Object.assign(new Error(message), { _tag: "Tool.Error" })
+      await withImageSave(async (request) => {
+        if (request.action === "edit") throw failure
+      }, async (tool, { projectDir }) => {
+        const image_id = stageCursorImage({
+          path: join(projectDir, "assets", "dot.png"), projectDir, mime: "image/png", data: png,
+        })
+        const error = await settle(tool.execute({ image_id }, toolContext))
+        expect(error).toBeInstanceOf(Error)
+        expect((error as Error).message).toBe(`${IMAGE_PERMISSION_DENIED_PREFIX} ${message}`)
+        expect(existsSync(join(projectDir, "assets"))).toBe(false)
+      })
+    })
   })
 
   test.each(["id", "callID"] as const)("accepts the %s tool execution identifier", async (field) => {

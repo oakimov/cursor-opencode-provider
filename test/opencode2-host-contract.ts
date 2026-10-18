@@ -138,7 +138,18 @@ export type HostPluginContext = {
       }
     }>
   }
-  readonly event: { readonly subscribe: (...args: any[]) => any }
+  readonly event: { readonly subscribe: (options?: { readonly signal?: AbortSignal }) => any }
+  readonly permission: {
+    readonly assert: (input: {
+      sessionID: string
+      agent?: string
+      action: string
+      resources: readonly string[]
+      save?: readonly string[]
+      metadata?: Record<string, unknown>
+      source?: { type: "tool"; messageID: string; id: string }
+    }) => Promise<void>
+  }
   readonly integration: {
     readonly transform: HostTransform<HostIntegrationEditor>
     readonly reload: () => Promise<void>

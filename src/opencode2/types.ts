@@ -218,7 +218,10 @@ export type ToolOptions = {
   readonly pinned?: boolean
 }
 
-/** Public OpenCode 2 tool context. It deliberately has no permission `ask`. */
+/**
+ * Public OpenCode 2 tool context. It deliberately has no permission `ask`;
+ * plugins request approval through `PluginContext.permission` instead.
+ */
 export type ToolExecutionContext = {
   readonly sessionID: string
   readonly agent: string
@@ -358,7 +361,28 @@ export type SessionDomain = {
 // ── Events ──
 
 export type EventDomain = {
-  readonly subscribe: (...args: any[]) => any
+  readonly subscribe: (options?: { readonly signal?: AbortSignal }) => any
+}
+
+// ── Permissions ──
+
+/**
+ * Public plugin permission domain (`ctx.permission`), separate from the tool
+ * execution context. `assert` evaluates the session's rules and prompts when
+ * needed. A deny rule or a rejection with feedback rejects with a tool error
+ * carrying the reason; a plain rejection rejects with an error that must be
+ * rethrown unchanged so the host can end the step.
+ */
+export type PermissionDomain = {
+  readonly assert: (input: {
+    sessionID: string
+    agent?: string
+    action: string
+    resources: readonly string[]
+    save?: readonly string[]
+    metadata?: Record<string, unknown>
+    source?: { type: "tool"; messageID: string; id: string }
+  }) => Promise<void>
 }
 
 // ── Plugin ──
@@ -446,6 +470,8 @@ export type PluginContext = {
   readonly websearch?: WebSearchDomain
   readonly mcp?: McpDomain
   readonly skill?: SkillDomain
+  /** Absent on 2.0 snapshots that predate plugin permission assertions. */
+  readonly permission?: PermissionDomain
 }
 
 export type Cleanup = () => Promise<void> | void

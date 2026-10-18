@@ -31,6 +31,11 @@ Operator setup: [OpenCode 2.0](../../docs/opencode-2.md).
   verdicts. An output-only failure needs `x-should-retry: true` and no status:
   2.0 then continues after the shown output (`hostFacingError`,
   `test/errors.test.ts`, `test/run-error-host.test.ts`).
+- **A permission live test needs explicit `ask` rules.** 2.0.32's default
+  `build` agent starts with `* * allow`, so `permission.assert` passed without
+  a prompt and looked like a working gate. Scripted `opencode run` also waits
+  on an open non-TTY stdin before creating a session; give it `< /dev/null`
+  rather than blaming the shared data directory.
 - **A new plugin header does not prove a new SDK.** Pin the intended binary,
   isolate config, set the local provider entry before daemon start, and restart
   after rebuilding ([local setup](../../docs/opencode-2.md#from-a-local-clone-cursor_opencode2_dev_entry)).
@@ -47,6 +52,11 @@ Operator setup: [OpenCode 2.0](../../docs/opencode-2.md).
 - **Public ToolContext cannot request approval.** A second direct web-search
   path would omit the native prompt. Use the host backend hook; keep image save
   opaque, single-use and contained (`src/opencode2/image-save-tool.ts`).
+- **Plugin permission errors differ by kind.** `ctx.permission.assert` rejects a
+  deny rule or feedback with a tool error, but a plain decline only ends the
+  step if the tool rethrows it unchanged. Rethrowing every refusal raw, as a
+  first port did, also dropped Cursor's `permission_denied` for deny rules
+  (`test/plugin-opencode2.test.ts`, image save permission domain).
 - **`execute` is JavaScript, not an OS shell.** Native commands go to
   shell/bash; Task maps to `subagent` only when advertised
   (`test/tools.test.ts`).

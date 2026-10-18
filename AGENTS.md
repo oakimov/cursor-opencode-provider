@@ -105,7 +105,8 @@ The **1.18 v2** API and **OpenCode 2.0** are source-incompatible:
   fallbacks are off unless `CURSOR_OPENCODE2_TODOS=1`/`true` and the catalog lacks
   them. MCP placement changes tool options, preserves explicit server opt-ins,
   and never rewrites server config or delays startup. Web search uses the native
-  permission-gated backend; the public 2.0 `ToolContext` cannot request approval.
+  permission-gated backend; the public 2.0 `ToolContext` cannot request approval
+  (plugin code uses `ctx.permission.assert` where the host offers it).
 - Keep host hook/permission order intact: 1.x `shell.env` follows permission;
   2.0 `shell.create.before` preserves the command and shell basename through an
   executable adapter. Compaction/agent state comes from explicit host hooks.
@@ -265,8 +266,11 @@ The **1.18 v2** API and **OpenCode 2.0** are source-incompatible:
   preview only. Gate GenerateImage approval on advertised `cursor_image_save`.
   Stage bytes behind a single-use opaque `cursor_image_save` id,
   never a model-supplied path/content writer. Recheck symlink-aware containment.
-  Classic asks `external_directory` then `edit`; 2.0 uses catalog `edit` gating
-  plus containment when public `ask` is absent. Refusal is `permission_denied`.
+  Both hosts ask `external_directory` then `edit`: classic through `ask`, 2.0
+  through `ctx.permission.assert` with native resources and the tool-call
+  source, or catalog `edit` gating plus containment on snapshots without it.
+  Refusal is `permission_denied`, except that a 2.0 plain decline is rethrown
+  unchanged so the host ends the step.
   Do not return save-tool attachments or change the default project-assets
   location outside the worktree. Explicit workspace targets remain supported.
 

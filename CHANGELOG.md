@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- On OpenCode 2, saving a Cursor-generated image asks the same `external_directory` and `edit` permissions as OpenCode's own file writes when the host offers plugin permission checks. Declining ends the step as it does for native tools, and a deny rule or rejection with feedback reaches Cursor as a permission denial (based on [moritzWa#1](https://github.com/moritzWa/cursor-opencode-provider/pull/1) by [@moritzWa](https://github.com/moritzWa))
 - A Cursor Task with attached files hands the subagent exact file paths to open itself, keeps Cursor's description, and avoids extra parent reads, including runtime metadata attachments; unstatable attachments report failure ([#82](https://github.com/oakimov/cursor-opencode-provider/issues/82), based on a fix by [@nkoynov](https://github.com/nkoynov))
 - Shell results preserve whitespace when removing internal wrapper markers, retain partial output on stream failures, and keep successful timeout-shaped output unchanged in both native host projections ([#98](https://github.com/oakimov/cursor-opencode-provider/pull/98))
 - Like Cursor CLI, a shell call that fails in OpenCode, such as one in a missing working directory, reaches Cursor once as stderr instead of as both stdout and stderr, in streamed and unary shell results ([#101](https://github.com/oakimov/cursor-opencode-provider/issues/101), reported by [@nkoynov](https://github.com/nkoynov))

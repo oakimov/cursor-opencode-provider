@@ -156,7 +156,7 @@ A prompt sent before those servers finish connecting will not see their tools. O
 |---|---|
 | `config` hook registers provider + models | `ctx.provider.transform` + `editor.add` + `reload()` |
 | `auth` hook (OAuth + API key) | `ctx.integration.transform` + `/connect` |
-| `tool` hook (`custom_websearch`, `cursor_image_save`) | `ctx.tool.transform` registers handle-only `cursor_image_save` (`codemode: false`, `permission: "edit"`, output schema) so generated images can be committed. `todowrite`/`todoread` only when `CURSOR_OPENCODE2_TODOS=1` (or `true`) and the host catalog omits them. Off by default. OpenCode 2's native `websearch` tool owns permission checks and uses the provider registered through `ctx.websearch.transform`. The public 2.0 `ToolContext` has no permission-request method, so this entrypoint does not advertise a direct web-search fallback; image save uses catalog `edit` gating plus containment when `ask` is absent. |
+| `tool` hook (`custom_websearch`, `cursor_image_save`) | `ctx.tool.transform` registers handle-only `cursor_image_save` (`codemode: false`, `permission: "edit"`, output schema) so generated images can be committed. `todowrite`/`todoread` only when `CURSOR_OPENCODE2_TODOS=1` (or `true`) and the host catalog omits them. Off by default. OpenCode 2's native `websearch` tool owns permission checks and uses the provider registered through `ctx.websearch.transform`. The public 2.0 `ToolContext` has no permission-request method, so this entrypoint does not advertise a direct web-search fallback. Image save asks through the plugin `ctx.permission.assert` (see below). |
 | `event` hook (session activity) | `ctx.event.subscribe` |
 | `tool.execute.before` / `.after` | `ctx.tool.hook(...)` |
 | Post-approval `shell.env` injects the timeout wrapper for bash/zsh | `ctx.shell.hook("create.before")` installs a same-basename executable adapter. The command stays unchanged for the host's later permission scan; the payload uses the actual selected shell. |
@@ -190,7 +190,7 @@ A [decline without feedback bypasses the tool after hook](https://github.com/ano
 The permission and terminal-failure events release unstarted shell reservations
 immediately; running jobs retain their records.
 
-Generated-image saving uses the same handle-only `cursor_image_save` tool on classic and OpenCode 2.0. Classic/OCP surfaces raise `external_directory` then `edit` before the write. Stock OpenCode 2.0 has no public `ask`, so the 2.0 entrypoint still advertises the tool (`permission: "edit"` so agents that deny edits do not get it) and commits after containment; the id is opaque, so the model cannot write arbitrary files.
+Generated-image saving uses the same handle-only `cursor_image_save` tool on classic and OpenCode 2.0, advertised with `permission: "edit"` so agents that deny edits do not get it. Both raise `external_directory` for a target outside the session workspace (Cursor's default project `assets/` folder is outside it), then `edit`, before the write. OpenCode 2.0 asks through the plugin `ctx.permission.assert` with the same resources as its own `write` tool and the session, agent and tool call as source, so "always" choices and session rules apply. Declining ends the step like a native tool; a deny rule or a rejection with feedback reaches Cursor as `permission_denied`. 2.0 snapshots without the plugin permission domain commit after containment. The id is opaque, so the model cannot write arbitrary files.
 
 ## Task attachments
 
