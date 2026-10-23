@@ -347,7 +347,9 @@ If a Run drops immediately after completed tool results, before new output,
 the provider can rebuild from host history containing every observed exec's
 result. It sends the completed results once and asks Cursor to continue. A
 checkpoint predating those results is never resumed. Missing results, unknown
-activity or a new interaction keep the failure final.
+activity, a tool call Cursor ran itself or a new interaction keep the failure
+final. If the rebuilt history would fill more than 80% of the model's context,
+the provider reports a context overflow so the host compacts first.
 A checkpoint received while the completed result drains remains eligible.
 History recovery retains completed results from earlier resumed Runs too.
 

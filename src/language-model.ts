@@ -335,7 +335,7 @@ import {
   hostNoteText,
   wrapHostNotesForCursor,
 } from "./protocol/host-notes.js"
-import { analyzeReplayFrame, AttemptReplaySafety, describeFrameLayout } from "./replay-safety.js"
+import { analyzeReplayFrame, announcedCallsClaimed, AttemptReplaySafety, describeFrameLayout } from "./replay-safety.js"
 import { readAllFieldsStrict } from "./protocol/struct.js"
 import {
   cursorUsageCountersFromTurnEnded,
@@ -923,12 +923,15 @@ export function createCursorLanguageModel(
     try {
       return await doStreamImpl(modelId, options, callOptions, retryPolicy, retryBudget)
     } catch (error) {
-      const failure = toCursorProviderError(error, { replaySafe: true, fallback: "Cursor Run setup failed" })
       try {
         if (callOptions.abortSignal?.aborted) {
           forgetRetryBudget(opencodeSessionKey(callOptions), retryBudget)
           throw new CursorLocalCancellationError("Cursor Run setup cancelled", error)
         }
+        // Already shaped for the host: a context-overflow 413 must keep its
+        // status so the host compacts instead of retrying.
+        if (APICallError.isInstance(error)) throw error
+        const failure = toCursorProviderError(error, { replaySafe: true, fallback: "Cursor Run setup failed" })
         if (!failure.replaySafe && (failure.transient || failure.origin === "transport")) {
           throw retrySuppressedError(failure, "while opening the Run", retryBudget.retries + 1, retryPolicy.maxAttempts ?? 14)
         }
@@ -1209,7 +1212,8 @@ async function doStreamImpl(
               canRebaseFromHistory: (failed) => {
                 if (failed !== session || trailingToolResults.length === 0
                   || !failed.checkpointRevokedByHostResult || failed.pending.size > 0
-                  || failed.replaySafety?.historyRebaseUnsafe) return false
+                  || failed.replaySafety?.historyRebaseUnsafe
+                  || !announcedCallsClaimed(failed.replaySafety)) return false
                 const completed = new Set(extractToolResults(prompt)
                   .map(result => `${result.sessionId}:${result.execId}`))
                 const execs = failed.replaySafety?.execs
@@ -1368,6 +1372,7 @@ export async function pumpWithRecovery(input: {
       next.replaySafety = {
         ...pumpedSession.replaySafety,
         execs: pumpedSession.replaySafety?.execs?.slice(),
+        announcedCalls: pumpedSession.replaySafety?.announcedCalls?.slice(),
       }
       next.userTurnHostNotes = pumpedSession.userTurnHostNotes
       next.usageEstimate = { ...pumpedSession.usageEstimate }
@@ -1819,6 +1824,9 @@ async function startSession(
   // Cursor could not restore the stored checkpoint (missing blobs) before this
   // turn produced anything: reseed from the full host history as a new turn.
   const checkpointUnusable = recovery?.kind === "rebase" && recovery.reason === "checkpoint-unusable"
+  // The Run dropped right after completed host results: reseed the turn from
+  // the full history, every tool result included.
+  const completedResultsRebase = recovery?.kind === "rebase" && recovery.reason === "completed-tool-results"
   // Another model (other provider or a local model) answered since this
   // conversation's last checkpoint: resuming it would hide that work from Cursor.
   // A Cursor-to-Cursor model switch resumes the same conversation, as in the CLI.
@@ -1940,8 +1948,7 @@ async function startSession(
     liveTurnStart: liveTurn?.start,
     preserveTrailingUser: recovery?.kind === "rebase" && !checkpointUnusable && !unfinishedPriorRun,
     // A foreign-history rebase replays the other model's tool results too.
-    toolResults: isCompaction || foreignHistory || checkpointUnusable || unfinishedPriorRun
-      || (recovery?.kind === "rebase" && recovery.reason === "completed-tool-results")
+    toolResults: isCompaction || foreignHistory || checkpointUnusable || unfinishedPriorRun || completedResultsRebase
       ? "all" : (recovery?.kind === "rebase" ? "trailing" : "omit"),
   })
   const userTurnHostNotes = prepareUserTurnHostNotes({
@@ -2108,7 +2115,7 @@ async function startSession(
     model: modelInfo,
   })
 
-  if (foreignHistory || checkpointUnusable || unfinishedPriorRun) {
+  if (foreignHistory || checkpointUnusable || unfinishedPriorRun || completedResultsRebase) {
     assertForeignHistoryRebaseFits({
       modelInfo,
       cursorModelId,
@@ -5258,8 +5265,11 @@ export async function pump(
         trace(`replay frame unknown: layout=${layout} bytes=${payload.length}`)
       }
     }
-    if (replayFrame.barrier) replaySafety.markBarrier(replayFrame.barrier)
-    if (replayFrame.barrier === "non-control-exec") replaySafety.recordExec(esm?.id)
+    if (replayFrame.barrier === "display-tool-lifecycle") replaySafety.recordToolLifecycle(replayFrame.toolLifecycle)
+    else if (replayFrame.barrier) replaySafety.markBarrier(replayFrame.barrier)
+    if (replayFrame.barrier === "non-control-exec") {
+      replaySafety.recordExec(esm?.id, esm ? extractExecDisplayCallId(esm) : undefined)
+    }
     // Reseeding is allowed only while every frame so far was positively a
     // control frame. Anything else, including unknown top-level fields, may have
     // carried output or stateful activity.

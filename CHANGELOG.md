@@ -23,6 +23,8 @@
 - A Cursor switch to its read-only Ask mode (`chat`, `ask`, `search`) keeps the current OpenCode agent instead of selecting build, is allowed under a session edit deny, and `ask`/`search` now get Ask-mode guidance instead of permission to implement
 - On OpenCode 2.0, a Cursor-initiated plan or build switch waits for its matching plan-mode reminder, ignoring unrelated background notices, to prevent duplicate reminders; selecting the current agent keeps the running turn
 - The turn after a plan-mode switch keeps the previous context as its cached prefix, including after a restart, instead of reporting it all as uncached input; the cancelled Run before it now logs a cache diagnosis
+- A Run that drops right after OpenCode's tool results rebuilds the turn from history instead of failing with "automatic retry unsafe"; calls Cursor ran itself still end the turn ([#112](https://github.com/oakimov/cursor-opencode-provider/issues/112), reported by [@nkoynov](https://github.com/nkoynov))
+- A history rebuild that cannot fit the model's context reaches OpenCode as a context overflow, so it compacts the session instead of retrying until "Cursor Run setup failed" ([#113](https://github.com/oakimov/cursor-opencode-provider/issues/113), reported by [@nkoynov](https://github.com/nkoynov))
 
 ## [0.8.3] - 2026-10-18
 

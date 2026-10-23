@@ -171,7 +171,8 @@ The **1.18 v2** API and **OpenCode 2.0** are source-incompatible:
 - Compaction/rebase discards old checkpoints/blobs, transfers stable workspace
   context/comparison state and admits a new baseline. Direct Cursor model
   switches keep the conversation. Foreign-provider history rebuilds with every
-  tool result; oversized foreign seeds fail before opening so the host compacts.
+  tool result; oversized foreign or completed-result seeds fail before opening
+  with a host-shaped 413 so the host compacts.
 - Persist atomic per-session gzip protobuf snapshots under the native/bridged
   host cache: checkpoint, reachable blobs, baseline, catalogs, provenance, notes,
   lost requests and steer receipts. Keep all blobs if reachability is uncertain.

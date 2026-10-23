@@ -173,7 +173,16 @@ These are failure lessons shared by both hosts, not a replacement for
   unknown frames still forbid that host retry (`test/run-interruption.test.ts`).
   Immediately after completed host results, history recovery needs every observed
   exec's result, no new output, and no opaque interaction or unknown frame.
-  Seed all completed tool steps; retaining only the last result loses earlier work. Never use the stale
+  Its first tests sent execs without the `tool_call_started` Cursor sends before
+  each one, so the lifecycle barrier blocked every live rebuild
+  ([#112](https://github.com/oakimov/cursor-opencode-provider/issues/112)).
+  Correlate lifecycle frames with execs by call id: only a call no host exec
+  claimed, or an unknown completion, blocks the rebuild (`announcedCallsClaimed`).
+  Seed all completed tool steps; retaining only the last result loses earlier work,
+  and that full seed needs the same context-fit check as a foreign-history rebase.
+  An `APICallError` 413 is already host-shaped: wrapping it as a setup failure made
+  OpenCode retry instead of compacting
+  ([#113](https://github.com/oakimov/cursor-opencode-provider/issues/113)). Never use the stale
   checkpoint for that recovery. A later tool result must not erase an earlier
   uncheckpointed follow-up's barrier: that follow-up may be absent from the
   host prompt. Only a newer eligible checkpoint clears the revocation.

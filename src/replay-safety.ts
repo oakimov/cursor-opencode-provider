@@ -19,10 +19,21 @@ const OUTPUT_ONLY_BARRIERS: ReadonlySet<ReplayBarrierReason> = new Set([
 /** Plain Run-owned state retained across host tool-step pump calls. */
 export type ReplaySafetyState = {
   statefulBarrier?: ReplayBarrierReason
-  /** Every exec needs its owner's host result; ids can restart on a resumed Run. */
-  execs?: Array<{ sessionId: string; id: number }>
-  /** History cannot represent opaque interactions, unknown frames or started display work. */
+  /**
+   * Every exec needs its owner's host result; ids can restart on a resumed Run.
+   * `callId` is the display call the exec claims.
+   */
+  execs?: Array<{ sessionId: string; id: number; callId?: string }>
+  /** Display calls Cursor announced; history holds one only through the host exec that claims it. */
+  announcedCalls?: string[]
+  /** History cannot represent opaque interactions, unknown frames or unclaimed display work. */
   historyRebaseUnsafe?: boolean
+}
+
+/** Whether a host exec claimed every display call Cursor announced, so history holds each one. */
+export function announcedCallsClaimed(state: ReplaySafetyState | undefined): boolean {
+  const claimed = new Set(state?.execs?.flatMap((exec) => exec.callId ? [exec.callId] : []))
+  return (state?.announcedCalls ?? []).every((callId) => claimed.has(callId))
 }
 
 export class AttemptReplaySafety {
@@ -37,24 +48,49 @@ export class AttemptReplaySafety {
   }
 
   markBarrier(reason: ReplayBarrierReason): void {
-    if (!OUTPUT_ONLY_BARRIERS.has(reason)) {
-      this.stateful = true
-      this.state.statefulBarrier ??= reason
-      if (reason !== "non-control-exec") this.state.historyRebaseUnsafe = true
-    }
-    if (this.barrierReason) return
-    this.barrierReason = reason
-    trace(`replay barrier: reason=${reason} sessionId=${this.sessionId}`)
+    this.mark(reason, reason === "non-control-exec")
   }
 
-  recordExec(id: unknown): void {
+  /**
+   * A display lifecycle frame. A started call stays a stateful barrier but
+   * blocks a history rebuild only until a host exec claims it; completion of a
+   * claimed call adds nothing history lacks. Calls Cursor runs itself, and
+   * frames without a call id, cannot be rebuilt.
+   */
+  recordToolLifecycle(lifecycle: ReplayToolLifecycle | undefined): void {
+    const claimed = !!lifecycle && !!this.state.execs?.some((exec) => exec.callId === lifecycle.callId)
+    if (lifecycle?.kind === "completed" && claimed) {
+      trace(`replay: display completion of claimed callId=${lifecycle.callId} sessionId=${this.sessionId}`)
+      return
+    }
+    if (lifecycle?.kind === "started" && !claimed) {
+      const announced = this.state.announcedCalls ??= []
+      if (!announced.includes(lifecycle.callId)) announced.push(lifecycle.callId)
+      this.mark("display-tool-lifecycle", true)
+      return
+    }
+    this.mark("display-tool-lifecycle", false)
+  }
+
+  recordExec(id: unknown, callId?: string): void {
     const execs = this.state.execs ??= []
     if (typeof id !== "number" || !Number.isSafeInteger(id)
       || execs.some(exec => exec.sessionId === this.sessionId && exec.id === id)) {
       this.state.historyRebaseUnsafe = true
       return
     }
-    execs.push({ sessionId: this.sessionId, id })
+    execs.push({ sessionId: this.sessionId, id, ...(callId ? { callId } : {}) })
+  }
+
+  private mark(reason: ReplayBarrierReason, historyRepresentable: boolean): void {
+    if (!OUTPUT_ONLY_BARRIERS.has(reason)) {
+      this.stateful = true
+      this.state.statefulBarrier ??= reason
+      if (!historyRepresentable) this.state.historyRebaseUnsafe = true
+    }
+    if (this.barrierReason) return
+    this.barrierReason = reason
+    trace(`replay barrier: reason=${reason} sessionId=${this.sessionId}`)
   }
 
   applyTo(failure: CursorProviderError): CursorProviderError {
@@ -78,8 +114,12 @@ export type DecodedReplayFrame = {
   interactionQuery?: Record<string, unknown>
 }
 
+export type ReplayToolLifecycle = { kind: "started" | "completed"; callId: string }
+
 export type ReplayFrameAnalysis = {
   barrier?: ReplayBarrierReason
+  /** Set for a well-formed lifecycle frame with a call id. */
+  toolLifecycle?: ReplayToolLifecycle
 }
 
 // Field numbers follow Cursor CLI 2026.09.28 `agent.v1`; the extracted
@@ -232,10 +272,19 @@ export function analyzeReplayFrame(
     || !decodedMatchesWire(topLevel, decoded)
     || !!decoded.execControl
 
+  const started = decoded.interactionUpdate?.tool_call_started as Record<string, unknown> | undefined
+  const completed = decoded.interactionUpdate?.tool_call_completed as Record<string, unknown> | undefined
+  if (started || completed) {
+    const callId = (started ?? completed)?.call_id
+    return {
+      barrier: "display-tool-lifecycle",
+      ...(!malformed && typeof callId === "string" && callId.length > 0
+        ? { toolLifecycle: { kind: started ? "started" : "completed", callId } }
+        : {}),
+    }
+  }
   let barrier: ReplayBarrierReason | undefined
-  if (decoded.interactionUpdate?.tool_call_started || decoded.interactionUpdate?.tool_call_completed) {
-    barrier = "display-tool-lifecycle"
-  } else if (malformed || (topLevel.fn === 4 && !validKv)) {
+  if (malformed || (topLevel.fn === 4 && !validKv)) {
     barrier = "unknown-or-malformed-frame"
   } else if (topLevel.fn === 1 && decoded.interactionUpdate?.user_message_appended) {
     barrier = "stateful-interaction"

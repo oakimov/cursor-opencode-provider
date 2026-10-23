@@ -177,7 +177,8 @@ partial inputs renew that deadline, while client heartbeats do not. The 120 s
 transport read-idle watchdog remains a backstop. A drop immediately after
 completed tool results can rebuild from complete host history
 before new output; missing results or unrepresented activity remain final.
-Recovery retains the latest eligible checkpoint across token renewal, including
+A rebuild too large for the model's context is reported as a context overflow
+(413) so the host can compact. Recovery retains the latest eligible checkpoint across token renewal, including
 a rejected credential on an untouched resumed attempt. Checkpoints received
 while a completed tool result drains remain eligible. Follow-ups retain
 checkpoints received while opening the new Run. Two resumed attempts that stream without saving a

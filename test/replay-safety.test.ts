@@ -1,5 +1,12 @@
 import { describe, expect, it } from "bun:test"
-import { analyzeReplayFrame, describeFrameLayout } from "../src/replay-safety.js"
+import { CursorTransportError } from "../src/errors.js"
+import {
+  analyzeReplayFrame,
+  announcedCallsClaimed,
+  AttemptReplaySafety,
+  describeFrameLayout,
+  type ReplaySafetyState,
+} from "../src/replay-safety.js"
 import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
 
 function varint(value: number): number[] {
@@ -107,6 +114,84 @@ describe("user-message-appended updates", () => {
     ])))
     expect(analyzeReplayFrame(mixed, { interactionUpdate: decoded.interaction_update }).barrier)
       .toBe("unknown-or-malformed-frame")
+  })
+})
+
+describe("display tool lifecycle", () => {
+  // Independent bytes from the shipped CLI descriptors: InteractionUpdate
+  // tool_call_started #2 / tool_call_completed #3; both updates carry call_id #1.
+  const lifecycleFrame = (field: 2 | 3, callId?: string) =>
+    updateFrame(field, callId === undefined ? [] : lengthDelimited(1, new TextEncoder().encode(callId)))
+  const analyze = (field: 2 | 3, callId?: string) => {
+    const frame = lifecycleFrame(field, callId)
+    const decoded = decodeMessage<{ interaction_update: Record<string, unknown> }>("AgentServerMessage", frame)
+    return analyzeReplayFrame(frame, { interactionUpdate: decoded.interaction_update })
+  }
+  const failure = () => new CursorTransportError("Cursor Run transport interrupted", { transient: true, replaySafe: true })
+
+  it("correlates started and completed frames by call id", () => {
+    expect(analyze(2, "call-1")).toEqual({
+      barrier: "display-tool-lifecycle", toolLifecycle: { kind: "started", callId: "call-1" },
+    })
+    expect(analyze(3, "call-1")).toEqual({
+      barrier: "display-tool-lifecycle", toolLifecycle: { kind: "completed", callId: "call-1" },
+    })
+  })
+
+  it("does not correlate a frame without a call id or with another member", () => {
+    expect(analyze(2)).toEqual({ barrier: "display-tool-lifecycle" })
+    const frame = lifecycleFrame(2, "call-1")
+    const decoded = decodeMessage<{ interaction_update: Record<string, unknown> }>("AgentServerMessage", frame)
+    const mixed = Uint8Array.from(lengthDelimited(1, Uint8Array.from([
+      ...lengthDelimited(2, Uint8Array.from(lengthDelimited(1, new TextEncoder().encode("call-1")))),
+      ...lengthDelimited(13),
+    ])))
+    expect(analyzeReplayFrame(mixed, { interactionUpdate: decoded.interaction_update }))
+      .toEqual({ barrier: "display-tool-lifecycle" })
+  })
+
+  it("lets history represent a call its host exec claimed", () => {
+    const state: ReplaySafetyState = {}
+    const toolStep = new AttemptReplaySafety("run-1", state)
+    toolStep.recordToolLifecycle(analyze(2, "call-1").toolLifecycle)
+    expect(announcedCallsClaimed(state)).toBe(false)
+    toolStep.markBarrier("non-control-exec")
+    toolStep.recordExec(1, "call-1")
+    expect(toolStep.applyTo(failure())).toMatchObject({ replaySafe: false, replayBarrier: "stateful" })
+    expect(state.historyRebaseUnsafe).toBeUndefined()
+    expect(announcedCallsClaimed(state)).toBe(true)
+
+    // The completion Cursor sends after the delivered result marks nothing.
+    const continuation = new AttemptReplaySafety("run-1", state)
+    continuation.recordToolLifecycle(analyze(3, "call-1").toolLifecycle)
+    const continued = continuation.applyTo(failure())
+    expect(continued.replayBarrier).toBeUndefined()
+    expect(continued.replaySafe).toBe(false)
+    expect(state.historyRebaseUnsafe).toBeUndefined()
+  })
+
+  it("keeps blocking calls no host exec claimed and unknown lifecycle frames", () => {
+    const cursorRun: ReplaySafetyState = {}
+    const run = new AttemptReplaySafety("run-1", cursorRun)
+    run.recordToolLifecycle(analyze(2, "web-1").toolLifecycle)
+    expect(announcedCallsClaimed(cursorRun)).toBe(false)
+    run.recordToolLifecycle(analyze(3, "web-1").toolLifecycle)
+    expect(cursorRun.historyRebaseUnsafe).toBe(true)
+
+    for (const record of [
+      (safety: AttemptReplaySafety) => safety.recordToolLifecycle(analyze(3, "never-started").toolLifecycle),
+      (safety: AttemptReplaySafety) => safety.recordToolLifecycle(analyze(2).toolLifecycle),
+      (safety: AttemptReplaySafety) => {
+        safety.recordExec(1, "call-1")
+        safety.recordToolLifecycle(analyze(2, "call-1").toolLifecycle)
+      },
+    ]) {
+      const state: ReplaySafetyState = {}
+      const safety = new AttemptReplaySafety("run-1", state)
+      record(safety)
+      expect(state.historyRebaseUnsafe).toBe(true)
+      expect(safety.applyTo(failure()).replayBarrier).toBe("stateful")
+    }
   })
 })
 
