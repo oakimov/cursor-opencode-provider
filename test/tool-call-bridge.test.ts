@@ -490,6 +490,10 @@ describe("tool-call-bridge", () => {
   })
 
   it("extracts display call ids from exec args variants", () => {
+    expect(extractExecDisplayCallId({
+      id: 2,
+      shell_args: { command: "ls", tool_call_id: "shell_0" },
+    })).toBe("shell_0")
     expect(
       extractExecDisplayCallId({
         id: 3,

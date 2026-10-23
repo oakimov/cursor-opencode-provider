@@ -170,6 +170,35 @@ describe("display tool lifecycle", () => {
     expect(state.historyRebaseUnsafe).toBeUndefined()
   })
 
+  it("retains a preceding Run's display claim across resume", () => {
+    const state: ReplaySafetyState = {}
+    const previous = new AttemptReplaySafety("run-1", state)
+    previous.recordToolLifecycle(analyze(2, "call-1").toolLifecycle)
+    previous.markBarrier("non-control-exec")
+    previous.recordExec(1, "call-1")
+    previous.recordToolLifecycle(analyze(3, "call-1").toolLifecycle)
+
+    const resumed = new AttemptReplaySafety("run-2", state)
+    resumed.recordToolLifecycle(analyze(3, "call-1").toolLifecycle)
+    expect(state.historyRebaseUnsafe).toBeUndefined()
+    expect(announcedCallsClaimed(state)).toBe(true)
+    expect(resumed.applyTo(failure()).replayBarrier).toBeUndefined()
+  })
+
+  it("keeps malformed nested lifecycle fields from claiming completed work", () => {
+    const callId = lengthDelimited(1, new TextEncoder().encode("call-1"))
+    for (const body of [
+      [...callId, ...callId],
+      [...callId, ...lengthDelimited(99)],
+      [...callId, ...varint(3 << 3), 0],
+    ]) {
+      const frame = updateFrame(3, body)
+      const decoded = decodeMessage<{ interaction_update: Record<string, unknown> }>("AgentServerMessage", frame)
+      expect(analyzeReplayFrame(frame, { interactionUpdate: decoded.interaction_update }))
+        .toEqual({ barrier: "display-tool-lifecycle" })
+    }
+  })
+
   it("keeps blocking calls no host exec claimed and unknown lifecycle frames", () => {
     const cursorRun: ReplaySafetyState = {}
     const run = new AttemptReplaySafety("run-1", cursorRun)

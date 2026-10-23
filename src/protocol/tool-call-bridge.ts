@@ -754,6 +754,7 @@ export function extractExecDisplayCallId(execMsg: Record<string, unknown>): stri
     "grep_args",
     "ls_args",
     "delete_args",
+    "shell_args",
     "shell_stream_args",
     "background_shell_spawn_args",
     "mcp_args",

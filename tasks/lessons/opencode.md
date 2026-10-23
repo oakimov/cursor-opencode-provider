@@ -178,6 +178,10 @@ These are failure lessons shared by both hosts, not a replacement for
   ([#112](https://github.com/oakimov/cursor-opencode-provider/issues/112)).
   Correlate lifecycle frames with execs by call id: only a call no host exec
   claimed, or an unknown completion, blocks the rebuild (`announcedCallsClaimed`).
+  Include unary `shell_args` and validate the lifecycle envelope from wire bytes:
+  decoded duplicate or unknown fields otherwise authorize a malformed completion
+  ([#114](https://github.com/oakimov/cursor-opencode-provider/pull/114),
+  `test/replay-safety.test.ts`, `test/run-error-host.test.ts`).
   Seed all completed tool steps; retaining only the last result loses earlier work,
   and that full seed needs the same context-fit check as a foreign-history rebase.
   An `APICallError` 413 is already host-shaped: wrapping it as a setup failure made

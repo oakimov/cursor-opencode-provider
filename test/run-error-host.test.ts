@@ -238,8 +238,11 @@ describe("checkpoint eligibility across host results", () => {
     }, 30_000)
   }
 
-  for (const [nextId, incomplete, opaque] of [[1, false, false], [2, false, false], [2, true, false], [2, false, true]] as const) {
-    it(`recovers after a resumed Run's completed exec (id=${nextId}, incomplete=${incomplete}, opaque=${opaque})`, async () => {
+  for (const [nextId, incomplete, opaque, lateCompletion] of [
+    [1, false, false, false], [2, false, false, false], [2, true, false, false],
+    [2, false, true, false], [2, false, false, true],
+  ] as const) {
+    it(`recovers after a resumed Run's completed exec (id=${nextId}, incomplete=${incomplete}, opaque=${opaque}, lateCompletion=${lateCompletion})`, async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-resumed-result-"))
       const requests: Array<{ conversation_id: string; action: { resume_action?: unknown; user_message_action?: { user_message: { text: string } } } }> = []
       const contexts: Uint8Array[] = []
@@ -251,6 +254,7 @@ describe("checkpoint eligibility across host results", () => {
           if (requests.length === 3) { send({ interaction_update: { turn_ended: {} } }); stream.end(); return }
           send({ exec_server_message: { id: 90, request_context_args: {} } })
           if (requests.length === 1 && opaque) stream.write(frame(Uint8Array.of(0xa2, 0x06, 0)))
+          send({ interaction_update: { tool_call_started: { call_id: `command-${requests.length}` } } })
           send({ exec_server_message: { id: requests.length === 1 ? 1 : nextId,
             shell_args: { command: `echo step-${requests.length}`, tool_call_id: `command-${requests.length}` } } })
         } else if (message.exec_client_message) {
@@ -262,11 +266,16 @@ describe("checkpoint eligibility across host results", () => {
           const key = `${requests.length}:${close?.id}`
           if (!close || close.id !== (requests.length === 1 ? 1 : nextId) || delivered.has(key)) return
           delivered.add(key)
+          send({ interaction_update: { tool_call_completed: { call_id: `command-${requests.length}` } } })
           if (requests.length === 1) {
             send({ conversation_checkpoint_update: Uint8Array.of(10, 1, 9) })
             send({ interaction_update: { thinking_delta: { text: "checkpointed first result" } } })
             stream.end(frame(Buffer.from('{"error":{"code":"unavailable"}}'), 2))
-          } else stream.end()
+          } else {
+            // A resumed conversation can still complete an older display call.
+            if (lateCompletion) send({ interaction_update: { tool_call_completed: { call_id: "command-1" } } })
+            stream.end()
+          }
         }
       }
       cacheHttp2SessionForTests(ORIGIN, client)
@@ -274,7 +283,7 @@ describe("checkpoint eligibility across host results", () => {
         const model = createCursor({ name: "cursor", accessToken: "test-token", agentBaseURL: ORIGIN, cacheDir: root,
           workspaceRoot: root, retry: { baseDelayMs: 1, maxDelayMs: 1 } }).languageModel("composer-2.5")
         const prompt: LanguageModelV3CallOptions["prompt"] = [{ role: "user", content: [{ type: "text", text: "Run both commands" }] }]
-        const options: LanguageModelV3CallOptions = { prompt, headers: { "x-opencode-session-id": `ses_resume_owners_${nextId}_${incomplete}_${opaque}` },
+        const options: LanguageModelV3CallOptions = { prompt, headers: { "x-opencode-session-id": `ses_resume_owners_${nextId}_${incomplete}_${opaque}_${lateCompletion}` },
           tools: [{ type: "function", name: "bash", inputSchema: { type: "object", properties: { command: { type: "string" } } } }] }
         appendResult(prompt, await readParts(model, options), "first command completed")
         appendResult(prompt, await readParts(model, options), "second command completed")
@@ -312,8 +321,9 @@ describe("checkpoint eligibility across host results", () => {
   }
 
   for (const scenario of [
-    "complete", "announced", "missing-history", "unknown", "unrepresented-exec", "duplicate-exec",
+    "complete", "announced", "announced-shell", "missing-history", "unknown", "unrepresented-exec", "duplicate-exec",
     "followup-before-result", "new-output", "final-error", "cursor-run-call", "unannounced-completion", "oversized",
+    "malformed-completion", "repeated-completion-id",
   ] as const) {
     it(`recovers a post-result drop only from represented completed work (${scenario})`, async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-result-history-"))
@@ -321,8 +331,10 @@ describe("checkpoint eligibility across host results", () => {
       const requests: RunRequest[] = []
       const delivered: number[] = []
       // Cursor announces each host call before its exec and closes it after the result.
-      const lifecycle = scenario === "announced" || scenario === "cursor-run-call"
+      const lifecycle = scenario === "announced" || scenario === "announced-shell" || scenario === "cursor-run-call"
         || scenario === "unannounced-completion" || scenario === "oversized"
+        || scenario === "malformed-completion" || scenario === "repeated-completion-id"
+      const shellVariant = scenario === "announced-shell" ? "shell_args" : "shell_stream_args"
       scripted = (stream, message) => {
         const send = (value: Record<string, unknown>) => stream.write(frame(encodeMessage("AgentServerMessage", value)))
         const shell = (callId: string, command: string) => ({ shell_tool_call: { args: { command, tool_call_id: callId } } })
@@ -351,19 +363,26 @@ describe("checkpoint eligibility across host results", () => {
           // A call Cursor runs itself: announced, never claimed by a host exec.
           if (scenario === "cursor-run-call") send({ interaction_update: { tool_call_started: { call_id: "cursor-internal" } } })
           started("first", "echo first")
-          send({ exec_server_message: { id: 1, shell_stream_args: { command: "echo first", tool_call_id: "first" } } })
+          send({ exec_server_message: { id: 1, [shellVariant]: { command: "echo first", tool_call_id: "first" } } })
         } else if (message.exec_client_message) {
           const id = (message.exec_client_message as { id: number }).id
           // A result is complete with its exit; a large stdout arrives first.
-          const shellStream = (message.exec_client_message as { shell_stream?: { exit?: unknown } }).shell_stream
-          if (!shellStream?.exit || delivered.includes(id)) return
+          const shellReply = message.exec_client_message as { shell_stream?: { exit?: unknown }; shell_result?: unknown }
+          if ((!shellReply.shell_stream?.exit && !shellReply.shell_result) || delivered.includes(id)) return
           delivered.push(id)
           if (id === 1) {
             completed("first", "echo first")
             started("second", "echo second")
-            send({ exec_server_message: { id: 2, shell_stream_args: { command: "echo second", tool_call_id: "second" } } })
+            send({ exec_server_message: { id: 2, [shellVariant]: { command: "echo second", tool_call_id: "second" } } })
           } else {
             completed("second", "echo second")
+            if (scenario === "malformed-completion" || scenario === "repeated-completion-id") {
+              // Independent lifecycle wire: completion #3, call_id #1.
+              // The decoder discards the unknown field or duplicate call id.
+              const callId = [0x0a, 5, ...Buffer.from("first")]
+              const body = [...callId, ...(scenario === "malformed-completion" ? [0x9a, 0x06, 0] : callId)]
+              stream.write(frame(Uint8Array.from([0x0a, body.length + 2, 0x1a, body.length, ...body])))
+            }
             if (scenario === "unannounced-completion") send({ interaction_update: { tool_call_completed: { call_id: "never-started" } } })
             if (scenario === "new-output") send({ interaction_update: { text_delta: { text: "new output" } } })
             if (scenario === "final-error") stream.end(frame(Buffer.from('{"error":{"code":"permission_denied"}}'), 2))
@@ -399,7 +418,7 @@ describe("checkpoint eligibility across host results", () => {
           prompt.push({ role: "tool", content: [{ type: "tool-result", toolCallId: call.toolCallId, toolName: call.toolName, output: { type: "text", value: output } }] })
         }
         if (scenario === "missing-history") prompt.splice(1, 2)
-        if (scenario === "complete" || scenario === "announced") {
+        if (scenario === "complete" || scenario === "announced" || scenario === "announced-shell") {
           const parts = await read()
           expect(parts.some(part => part.type === "finish" && part.finishReason.unified === "stop")).toBe(true)
           expect(parts.some(part => part.type === "tool-call")).toBe(false)

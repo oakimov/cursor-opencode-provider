@@ -200,6 +200,14 @@ function validInteractionUpdateWire(
     return !!decoded.user_message_appended && appended?.length === 1
       && appended[0]!.fn === 1 && appended[0]!.wt === 2
   }
+  if (update.fn === 2 || update.fn === 3) {
+    // ToolCallStarted / ToolCallCompleted: call_id #1, tool_call #2,
+    // model_call_id #3. A decoder can discard unknown or repeated fields;
+    // those bytes must not authorize a history rebuild.
+    const lifecycle = update.bytes ? readAllFieldsStrict(update.bytes) : undefined
+    return !!lifecycle && lifecycle.every((field) => [1, 2, 3].includes(field.fn))
+      && [1, 2, 3].every((field) => optionalField(lifecycle, field, 2))
+  }
   if (![1, 4].includes(update.fn)) return true
   const delta = update.bytes ? (readAllFieldsStrict(update.bytes) ?? []) : []
   const text = delta.filter((field) => field.fn === 1)
