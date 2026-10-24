@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 import type { LanguageModelV3CallOptions } from "@ai-sdk/provider"
 import { extractTrailingToolResults, extractPromptHistory, hasApprovedUncorrelatedPlanStageResult } from "../src/language-model.js"
 import { nativeToolFailure, nativeToolRefusal, preserveNativeToolResults, toolResultFailure, TOOL_RESULT_STATUS_KEY } from "../src/opencode2/tool-results.js"
@@ -6,6 +6,7 @@ import { buildExecClientMessages, buildTypedExecResult } from "../src/protocol/t
 import { CURSOR_PLAN_STAGE_TOOL } from "../src/protocol/create-plan.js"
 import { decodeMessageSparse, encodeMessage } from "../src/protocol/messages.js"
 import { readAllFields } from "../src/protocol/struct.js"
+import { captureCursorShellResult, CURSOR_TIMEOUT_BACKGROUND, registerCursorShellCall, resetCursorShellCalls } from "../src/shell-timeout.js"
 
 const id = "cursor_native_1"
 const errorValue = { error: { type: "permission.rejected", message: "Permission denied: edit" }, content: [] }
@@ -40,6 +41,50 @@ describe("native OpenCode result status", () => {
     const messages = preserveNativeToolResults(native(type, value))
     expect(extractTrailingToolResults(lower(messages))[0]?.error).toBeUndefined()
     expect(toolResultFailure(messages[0].content[0].providerMetadata, id)).toBeUndefined()
+  })
+
+  // OpenCode 2.1.4 stores a failed shell's exit as its own text block after the
+  // output: packages/core/src/tool/plugin/shell.ts resultMessages, shell/result.ts notice.
+  test.each([
+    ["unterminated output", "partial", "partial\nExited with code 3"],
+    ["terminated output", "partial\n", "partial\nExited with code 3"],
+    ["empty output", "", "Exited with code 3"],
+  ])("keeps a shell's exit notice on its own line after %s, live and in rebuilt history", (_, output, expected) => {
+    const messages = preserveNativeToolResults([{ role: "tool", content: [{ type: "tool-result", id, name: "shell",
+      result: { type: "content", value: [{ type: "text", text: output }, { type: "text", text: "Exited with code 3" }] } }] }])
+    const result = extractTrailingToolResults(lower(messages))[0]!
+    expect(result).toMatchObject({ output: expected })
+    expect(result.error).toBeUndefined()
+    const history = extractPromptHistory(lower(messages), { toolResults: "all", preserveTrailingUser: true })
+    expect(history.at(-1)!.content).toEndWith(`"status":"completed"}:\n${expected}`)
+  })
+
+  describe("a wrapped shell's exit notice", () => {
+    const shellResult = (callID: string, blocks: string[]) => preserveNativeToolResults([{ role: "tool", content: [{ type: "tool-result", id: callID, name: "shell",
+      result: { type: "content", value: blocks.map(text => ({ type: "text", text })) } }] }])
+    const register = (callID: string, exit: number, raw: string) => {
+      registerCursorShellCall(callID, { shell_stream: true, command: "make", working_directory: "/tmp", timeout_ms: 1000, timeout_behavior: CURSOR_TIMEOUT_BACKGROUND, hard_timeout_ms: 300 })
+      return captureCursorShellResult(callID, raw, { exit })
+    }
+    afterEach(() => resetCursorShellCalls())
+
+    test.each([
+      ["an exit", 2, "out\n\n__CURSOR_SHELL_EXIT__2\n", "out\n", "Exited with code 2"],
+      ["a hard timeout", 124, "out\n__CURSOR_SHELL_TIMEOUT__300\n", "out\nTimed out after 300ms.\n", "Exited with code 124"],
+    ])("leaves Cursor's stdout and keeps rebuilt history for %s", (_, exit, raw, clean, notice) => {
+      const callID = `cursor_wrapped_${exit}`
+      expect(register(callID, exit, raw)).toBe(clean)
+      const messages = shellResult(callID, [clean, notice])
+      expect(extractTrailingToolResults(lower(messages))[0]!.output).toBe(clean)
+      const history = extractPromptHistory(lower(messages), { toolResults: "all", preserveTrailingUser: true })
+      expect(history.at(-1)!.content).toEndWith(`${clean}${notice}`)
+    })
+
+    test("stays when it does not match the captured exit or no exit was captured", () => {
+      register("cursor_wrapped_7", 2, "out\n__CURSOR_SHELL_EXIT__2\n")
+      expect(extractTrailingToolResults(lower(shellResult("cursor_wrapped_7", ["out", "Exited with code 3"])))[0]!.output).toBe("out\nExited with code 3")
+      expect(extractTrailingToolResults(lower(shellResult("cursor_unregistered_8", ["out", "Exited with code 2"])))[0]!.output).toBe("out\nExited with code 2")
+    })
   })
 
   test("a completed result overwrites stale failure metadata", () => {

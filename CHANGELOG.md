@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A shell command Cursor runs with a foreground window (most of them) now ends with its own exit code in OpenCode, not 0. The provider's wrapper printed the code for Cursor and then exited 0, so OpenCode stored every such command as a success, clients showed no failure, and a turn rebuilt from OpenCode's history lost the code. A hard timeout exits 124 after its timeout notice; a command handed off to the background still exits 0. On OpenCode 2 the stored result of a failed command now ends with OpenCode's own `Exited with code N` line, which a rebuilt turn keeps on its own line after the output; the live result leaves it out of Cursor's stdout, which gets the code as its exit code. OpenCode 1.x keeps a command's exit only in its metadata, so the provider now adds the same line to the model's copy of a failed shell result there too.
+
 ## [0.8.4] - 2026-10-24
 
 ### Changed

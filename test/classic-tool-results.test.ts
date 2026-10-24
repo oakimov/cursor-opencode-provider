@@ -83,6 +83,45 @@ describe("classic interruption projection", () => {
     expect(normalizeClassicInterruptedResults(messages)).toEqual(messages)
   })
 
+  test("projects a failed shell's exit into rebuilt history but not into Cursor's stdout", () => {
+    registerCursorShellCall(callID, { shell_stream: true, timeout_behavior: 2, command: "make" })
+    const stored = captureCursorShellResult(callID, "make: *** No rule\n\n__CURSOR_SHELL_EXIT__2\n", { exit: 2 })
+    expect(stored).toBe("make: *** No rule\n")
+    const messages = native({ status: "completed", input: {}, output: stored, metadata: { exit: 2 } })
+    const state = normalizeClassicInterruptedResults(messages)[0].parts[0].state
+    expect(state.output).toBe("make: *** No rule\n\n\nExited with code 2")
+    expect(messages[0]!.parts[0]!.state.output).toBe(stored)
+    const history = extractPromptHistory(lower(state), { toolResults: "all", preserveTrailingUser: true })
+    expect(history.at(-1)!.content).toEndWith("make: *** No rule\n\n\nExited with code 2")
+    expect(extractTrailingToolResults(lower(state))[0]!.output).toBe(stored)
+    expect(consumeCursorShellResult(callID, stored).outcome).toEqual({ kind: "exit", code: 2 })
+  })
+
+  test("a timed-out shell keeps OpenCode's timeout block instead of the wrapper's exit", () => {
+    const state = normalizeClassicInterruptedResults(native({ status: "completed", input: {}, output: "Timed out after 5ms.\n", metadata: { exit: 124, cursorShellTimeoutMs: 5 } }))[0].parts[0].state
+    expect(state.output).toBe("(no output)\n\n<shell_metadata>\nshell tool terminated command after exceeding timeout 5 ms.\n</shell_metadata>")
+  })
+
+  test.each([
+    { tool: "bash", callID, exit: 0 },
+    { tool: "bash", callID, exit: null },
+    { tool: "bash", callID, exit: -1 },
+    { tool: "bash", callID, exit: 1.5 },
+    { tool: "bash", callID, exit: "2" },
+    { tool: "read", callID, exit: 2 },
+    { tool: "bash", callID: "host-owned", exit: 2 },
+  ])("leaves an exit it cannot trust unprojected: %p", ({ tool, callID: id, exit }) => {
+    const messages = [{ info: { role: "assistant" }, parts: [{ type: "tool", tool, callID: id, state: { status: "completed", output: "out", metadata: { exit } } }] }]
+    expect(normalizeClassicInterruptedResults(messages)).toEqual(messages)
+  })
+
+  test("the live result keeps an exit notice that does not match the captured exit", () => {
+    registerCursorShellCall(callID, { shell_stream: true, timeout_behavior: 2, command: "make" })
+    captureCursorShellResult(callID, "out\n__CURSOR_SHELL_EXIT__3\n", { exit: 3 })
+    const state = normalizeClassicInterruptedResults(native({ status: "completed", input: {}, output: "out", metadata: { exit: 2 } }))[0].parts[0].state
+    expect(extractTrailingToolResults(lower(state))[0]!.output).toBe("out\n\nExited with code 2")
+  })
+
   test("does not alter calls without Cursor correlation", () => {
     const messages = native({ status: "error", error: "aborted", metadata: { interrupted: true, output: "partial" } }, "host-owned")
     expect(normalizeClassicInterruptedResults(messages)).toEqual(messages)

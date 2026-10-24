@@ -31,7 +31,7 @@ import {
   queueHostAgentModeSwitch,
   resetHostAgentModeSwitchForTests,
 } from "../src/host-agent-mode.js"
-import { consumeCursorShellResult, registerCursorShellCall, resetCursorShellCalls } from "../src/shell-timeout.js"
+import { consumeCursorShellResult, CURSOR_TIMEOUT_BACKGROUND, registerCursorShellCall, resetCursorShellCalls } from "../src/shell-timeout.js"
 import { createManagedTerminal } from "../src/terminal-runner.js"
 import { listenForHostSteers, matchEarlySteers, recordEarlySteer, resetHostSteersForTests } from "../src/host-steer.js"
 import { toolResultFailure } from "../src/opencode2/tool-results.js"
@@ -1909,6 +1909,24 @@ describe("opencode2 setup", () => {
     expect(result.content[0]?.text).toBe(raw)
     expect(result.metadata.output).toBe(raw)
     expect(consumeCursorShellResult(id, result.content[0]!.text)).toEqual({ output: raw, outcome: { kind: "exit", code: 0 } })
+  })
+
+  test("shell execute.after keeps a wrapped command's real exit beside the host's own notice", async () => {
+    const { ctx, hooks } = fakeContext()
+    await setupPlugin(ctx)
+    const id = "cursor_shell_wrapped_exit"
+    registerCursorShellCall(id, { shell_stream: true, command: "make", working_directory: "/tmp", timeout_ms: 30_000, timeout_behavior: CURSOR_TIMEOUT_BACKGROUND })
+    const raw = "make: *** No rule\n\n__CURSOR_SHELL_EXIT__2\n"
+    const result = {
+      output: { output: raw, exit: 2, truncated: false, status: "completed" },
+      content: [{ type: "text", text: raw }, { type: "text", text: "Exited with code 2" }],
+      metadata: { exit: 2, truncated: false, status: "completed" },
+    }
+    await hooks.get("tool.execute.after")!({ tool: "shell", id, status: "completed", input: { command: "make" }, result })
+    expect(result.output).toMatchObject({ output: "make: *** No rule\n", exit: 2 })
+    expect(result.content.map(part => part.text)).toEqual(["make: *** No rule\n", "Exited with code 2"])
+    expect(result.metadata.exit).toBe(2)
+    expect(consumeCursorShellResult(id, "make: *** No rule\n")).toEqual({ output: "make: *** No rule\n", outcome: { kind: "exit", code: 2 } })
   })
 
   test("shell execute.after preserves an error status that the native SDK turns into text", async () => {

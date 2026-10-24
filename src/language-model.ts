@@ -325,6 +325,7 @@ import {
   registerCursorShellCall,
   resolveCursorShellPath,
   shellPolicyFromMetadata,
+  withoutHostShellExitNotice,
   type CursorShellPolicy,
 } from "./shell-timeout.js"
 import {
@@ -6552,7 +6553,7 @@ function extractToolResultContent(prompt: LanguageModelV3CallOptions["prompt"]):
       if (p.type !== "tool-result") continue
       const toolCallId = (p.toolCallId as string) ?? ""
       const failure = toolResultFailure(p.providerOptions, toolCallId)
-      const normalized = toolResultOutputToText(p.output)
+      const normalized = toolResultOutputToText(withoutHostShellExitNotice(toolCallId, p.output))
       const text = failure?.text ?? normalized.text
       const isError = failure !== undefined || normalized.isError
       const media = isError ? [] : toolResultOutputMedia(p.output)
@@ -6848,14 +6849,15 @@ function toolResultOutputToText(output: unknown): { text: string; isError: boole
     return { text: JSON.stringify(o.value ?? null), isError }
   }
   if (o.type === "content" && Array.isArray(o.value)) {
-    // Media is returned separately by toolResultOutputMedia.
-    const text = o.value
-      .map((c) => {
-        if (!c || typeof c !== "object") return ""
-        const cp = c as Record<string, unknown>
-        return cp.type === "text" ? String(cp.text ?? "") : ""
-      })
-      .join("")
+    // Media is returned separately by toolResultOutputMedia. A shell's exit
+    // notice is its own block and must not run into unterminated output.
+    const text = o.value.reduce<string>((joined, c) => {
+      if (!c || typeof c !== "object") return joined
+      const cp = c as Record<string, unknown>
+      const part = cp.type === "text" ? String(cp.text ?? "") : ""
+      if (!part) return joined
+      return joined && !joined.endsWith("\n") ? `${joined}\n${part}` : joined + part
+    }, "")
     return { text, isError }
   }
   return { text: JSON.stringify(output), isError }

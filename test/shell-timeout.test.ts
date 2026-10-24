@@ -273,17 +273,30 @@ describe("Cursor shell timeout translation", () => {
   async function runSoftBackground(command: string, shell: string, overrides: Record<string, unknown> = {}) {
     const policy = { command, workingDirectory: tmpdir(), timeoutMs: 2000, timeoutBehavior: CURSOR_TIMEOUT_BACKGROUND, shellPath: "/bin/sh", ...overrides }
     const proc = Bun.spawn([shell, "-c", buildSoftBackgroundCommand(policy)], { stdout: "pipe", stderr: "pipe" })
-    const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
-    return { stdout, stderr }
+    const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
+    return { stdout, stderr, exitCode }
   }
 
   it.each(["/bin/sh", "/bin/bash", "/bin/dash"].flatMap(shell => [
-    [shell, "printf done; exit 3", "done\n__CURSOR_SHELL_EXIT__3\n"],
-    [shell, "kill -TERM $$", "\n__CURSOR_SHELL_EXIT__143\n"],
-  ]))("reports the command's own status under %s for %s, without job notices", async (shell, command, expected) => {
+    [shell, "printf done", "done\n__CURSOR_SHELL_EXIT__0\n", 0],
+    [shell, "printf done; exit 3", "done\n__CURSOR_SHELL_EXIT__3\n", 3],
+    [shell, "kill -TERM $$", "\n__CURSOR_SHELL_EXIT__143\n", 143],
+  ] as const))("reports the command's own status under %s for %s, without job notices", async (shell, command, expected, exitCode) => {
     if (!existsSync(shell)) return
-    expect(await runSoftBackground(command, shell)).toEqual({ stdout: expected, stderr: "" })
+    expect(await runSoftBackground(command, shell)).toEqual({ stdout: expected, stderr: "", exitCode })
   })
+
+  it("exits 0 when it hands a still-running command off to the background", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "cursor-soft-handoff-"))
+    try {
+      const pidFile = path.join(root, "pid")
+      const { stdout, exitCode } = await runSoftBackground(`echo $$ >'${pidFile}'; printf started; exec sleep 30`, "/bin/sh", { timeoutMs: 300 })
+      process.kill(Number(readFileSync(pidFile, "utf8")), "SIGKILL")
+      expect(stdout).toMatch(/^started\n__CURSOR_SHELL_BACKGROUND__\d+:/)
+      expect(exitCode).toBe(0)
+      rmSync(stdout.match(/__CURSOR_SHELL_BACKGROUND__\d+:([^\n]+)/)![1]!, { force: true })
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 15_000)
 
   it.each([
     ["stops promptly", "exec sleep 30"],
@@ -292,8 +305,8 @@ describe("Cursor shell timeout translation", () => {
     const root = mkdtempSync(path.join(tmpdir(), "cursor-soft-timeout-"))
     try {
       const pidFile = path.join(root, "pid")
-      const { stdout, stderr } = await runSoftBackground(`echo $$ >'${pidFile}'; printf before; ${command}`, "/bin/sh", { timeoutMs: 1000, hardTimeoutMs: 300 })
-      expect({ stdout, stderr }).toEqual({ stdout: "before\n__CURSOR_SHELL_TIMEOUT__300\n", stderr: "" })
+      const result = await runSoftBackground(`echo $$ >'${pidFile}'; printf before; ${command}`, "/bin/sh", { timeoutMs: 1000, hardTimeoutMs: 300 })
+      expect(result).toEqual({ stdout: "before\n__CURSOR_SHELL_TIMEOUT__300\n", stderr: "", exitCode: 124 })
       expect(() => process.kill(Number(readFileSync(pidFile, "utf8")), 0)).toThrow()
     } finally { rmSync(root, { recursive: true, force: true }) }
   }, 15_000)
@@ -396,6 +409,24 @@ describe("Cursor shell timeout translation", () => {
     expect(raw).toContain("__CURSOR_SHELL_EXIT__")
     expect(captureCursorShellResult(id, raw)).toBe("INNER_OK\n")
     releaseCursorShellEnv(id)
+  })
+
+  it("hands the host shell the wrapped command's own exit status", () => {
+    setCursorShellPath("/bin/bash")
+    const id = "cursor_session_env_exec_status"
+    const command = "echo failing; exit 5"
+    registerCursorShellCall(id, metadata({ timeout_behavior: CURSOR_TIMEOUT_BACKGROUND, timeout_ms: 2_000, command }))
+    prepareCursorShellArgs(id, { command, timeout: 30_000 })
+    const result = Bun.spawnSync(["bash", "-c", command], {
+      env: { ...process.env, ...cursorShellEnvForCall(id)! },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    expect(result.exitCode).toBe(5)
+    const raw = result.stdout.toString()
+    expect(raw).toBe("failing\n\n__CURSOR_SHELL_EXIT__5\n")
+    expect(captureCursorShellResult(id, raw, { exit: result.exitCode })).toBe("failing\n")
+    expect(consumeCursorShellResult(id, "failing\n").outcome).toEqual({ kind: "exit", code: 5 })
   })
 
   it("exec-replaces the native OpenCode 1 shell tool's zsh -c command", () => {

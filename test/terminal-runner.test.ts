@@ -287,13 +287,47 @@ fs.createReadStream(job + "/pipe").on("data", chunk => fs.writeSync(fd, chunk))
     if (!fs.existsSync(shell)) return
     const terminal = job("printf done; exit 7")
     const launched = await launch(terminal, shell)
-    expect(launched.stdout).toContain("__CURSOR_SHELL_EXIT__7")
+    expect(launched.stdout).toBe("done\n__CURSOR_SHELL_EXIT__7\n")
+    expect(launched.code).toBe(7)
     const record = await waitDone(terminal)
     expect(record).toContain('status: failed')
     expect(record).toContain('exit_code: 7')
     expect(record).toContain('cwd: ' + JSON.stringify(root))
     expect(record).toContain('command: "printf done; exit 7"')
   })
+
+  it.each([
+    ["true", 0],
+    ["false", 1],
+    ["cursor-no-such-command-xyz", 127],
+  ] as const)("exits the launcher with the status of %s so the host records it", async (command, code) => {
+    const terminal = job(command)
+    const launched = await launch(terminal)
+    expect(launched.code).toBe(code)
+    expect(launched.stdout).toEndWith(`\n__CURSOR_SHELL_EXIT__${code}\n`)
+    const id = `cursor_exit_${code}`
+    registerCursorShellCall(id, { shell_stream: true, command, working_directory: root, timeout_ms: 2000, timeout_behavior: CURSOR_TIMEOUT_BACKGROUND })
+    const clean = captureCursorShellResult(id, launched.stdout, { exit: launched.code })
+    expect(clean).not.toContain("__CURSOR_SHELL_EXIT__")
+    if (code === 127) expect(clean).toContain("cursor-no-such-command-xyz")
+    expect(consumeCursorShellResult(id, clean).outcome).toEqual({ kind: "exit", code })
+    expect(await waitDone(terminal)).toContain(`exit_code: ${code}`)
+  })
+
+  const publish = `printf '%s\\n' "$code" >"$job/done"`
+  const invalid = "done\nTerminal record has no valid exit status\n\n__CURSOR_SHELL_EXIT__1\n"
+  it.each([
+    ["filled late", `: >"$job/done"; sleep 1; ${publish}`, "done\n__CURSOR_SHELL_EXIT__7\n", 7],
+    ["malformed", `printf 'lost\\n' >"$job/done"`, invalid, 1],
+    ["never filled", `: >"$job/done"; exit 0`, invalid, 1],
+  ] as const)("reads a %s exit status only once it is complete and valid", async (_, replacement, stdout, code) => {
+    const terminal = job("printf done; exit 7")
+    const runner = path.join(terminal.directory, "runner.sh")
+    const script = fs.readFileSync(runner, "utf8")
+    expect(script.split(publish)).toHaveLength(2)
+    fs.writeFileSync(runner, script.replace(publish, replacement))
+    expect(await launch(terminal)).toMatchObject({ stdout, code })
+  }, 15_000)
 
   it("initializes explicit background records before returning a distinct shell id and pid", async () => {
     const terminal = job("sleep 0.5; printf later", { backgroundSpawn: true })
@@ -335,8 +369,9 @@ fs.createReadStream(job + "/pipe").on("data", chunk => fs.writeSync(fd, chunk))
   it("reports a hard timeout as a timeout when its command is still being stopped at the window's end", async () => {
     const terminal = job("printf before; trap '' TERM; exec sleep 30", { timeoutMs: 1000, hardTimeoutMs: 300 })
     const started = Date.now()
-    const { stdout } = await launch(terminal)
+    const { stdout, code } = await launch(terminal)
     expect(stdout).toBe("before\n__CURSOR_SHELL_TIMEOUT__300\n")
+    expect(code).toBe(124)
     // One TERM grace and the cancellation drain fit the settle bound, so the
     // result comes from the finished record.
     expect(fs.existsSync(path.join(terminal.directory, "settle-expired"))).toBe(false)
@@ -352,7 +387,7 @@ fs.createReadStream(job + "/pipe").on("data", chunk => fs.writeSync(fd, chunk))
     const launched = launch(terminal)
     expect(await waitFor(() => fs.existsSync(path.join(terminal.directory, "timedout")), 4000)).toBe(true)
     process.kill(Number(fs.readFileSync(path.join(terminal.directory, "ready"), "utf8")), "SIGKILL")
-    expect((await launched).stdout).toBe("\n__CURSOR_SHELL_TIMEOUT__200\n")
+    expect(await launched).toMatchObject({ stdout: "\n__CURSOR_SHELL_TIMEOUT__200\n", code: 124 })
     jobs.pop()
   }, 15_000)
 
@@ -365,6 +400,7 @@ fs.createReadStream(job + "/pipe").on("data", chunk => fs.writeSync(fd, chunk))
     const terminal = job("printf before; kill -TERM $$", { shellPath: payloadShell })
     const launched = await launch(terminal, "/bin/sh", { ...process.env, PATH: `${bin}:${process.env.PATH}` })
     expect(launched.stdout).toBe("before\n__CURSOR_SHELL_EXIT__143\n")
+    expect(launched.code).toBe(143)
     expect(fs.readFileSync(terminal.file, "utf8")).not.toContain("Terminated")
   })
 
@@ -492,9 +528,10 @@ fs.createReadStream(job + "/pipe").on("data", chunk => fs.writeSync(fd, chunk))
 
   it("hands off a command that printed nothing in its window without a head error", async () => {
     const terminal = job("sleep 3", { timeoutMs: 500 })
-    const { stdout, stderr } = await launch(terminal)
+    const { stdout, stderr, code } = await launch(terminal)
     expect(stdout).toMatch(/^\n__CURSOR_SHELL_BACKGROUND__\d+:\d+:/)
     expect(stderr).toBe("")
+    expect(code).toBe(0)
   })
 
   it("returns the foreground window's output with a soft handoff", async () => {

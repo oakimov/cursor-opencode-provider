@@ -1,4 +1,4 @@
-import { restoreOpenCodeTimeout } from "./shell-timeout.js"
+import { restoreOpenCodeTimeout, withHostShellExitNotice } from "./shell-timeout.js"
 
 /**
  * OpenCode 1 exposes interrupted partial output as successful SDK output:
@@ -7,7 +7,9 @@ import { restoreOpenCodeTimeout } from "./shell-timeout.js"
  * own metadata block (tool/shell.ts L542-L589). Preserve failure in the model
  * projection while retaining progress text. A timed-out shell is stored with
  * a display notice in place of that block and only `state.output` reaches the
- * model, so the projection restores the block. Stored messages are not mutated.
+ * model, so the projection restores the block. A non-zero exit lives only in
+ * metadata, so the projection appends it as OpenCode 2 does. Stored messages
+ * are not mutated.
  */
 const record = (value: unknown): Record<string, unknown> | undefined =>
   value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined
@@ -25,6 +27,11 @@ export function normalizeClassicInterruptedResults(messages: readonly unknown[])
       if (state.status === "completed" && part.tool === "bash" && typeof state.output === "string"
         && typeof timeoutMs === "number" && Number.isSafeInteger(timeoutMs) && timeoutMs >= 0) {
         return { ...part, state: { ...state, output: restoreOpenCodeTimeout(state.output, timeoutMs) } }
+      }
+      const exit = metadata?.exit
+      if (state.status === "completed" && part.tool === "bash" && typeof state.output === "string"
+        && typeof exit === "number" && Number.isSafeInteger(exit) && exit > 0) {
+        return { ...part, state: { ...state, output: withHostShellExitNotice(state.output, exit) } }
       }
       const partialError = state.status === "error" && metadata?.interrupted === true
       // Null exit and the native trailing block must agree. Ordinary successful
