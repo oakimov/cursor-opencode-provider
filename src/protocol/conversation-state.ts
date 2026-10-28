@@ -302,6 +302,8 @@ export async function hydrateConversationState(
 /** Restore only turn provenance when its in-memory entry was evicted. */
 export async function hydrateTurnProvenance(cacheDir: string, sessionKey: string): Promise<void> {
   if (getTurnProvenance(sessionKey)) return
+  // The disk misses the latest save, so its provenance predates the turns some copy holds.
+  if (snapshots.bySession.get(snapshotKey(cacheDir, sessionKey))?.unsaved) return
   const persisted = await getPersistedTurnProvenance(cacheDir, sessionKey)
   if (!persisted) return
   const provenance = parseTurnProvenance(persisted.turnProvenance)

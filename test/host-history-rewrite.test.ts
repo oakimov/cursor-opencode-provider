@@ -16,7 +16,7 @@ import {
   setConversationPersistenceHookForTests,
 } from "../src/protocol/conversation-persistence.js"
 import {
-  hydrateConversationState, onCopyStateReplaced, persistConversationState, resetSnapshotGenerationsForTests,
+  hydrateConversationState, hydrateTurnProvenance, onCopyStateReplaced, persistConversationState, resetSnapshotGenerationsForTests,
   snapshotGenerationRecordsForTests,
 } from "../src/protocol/conversation-state.js"
 import { getTurnProvenance, resetTurnProvenanceForTests, restoreTurnProvenance } from "../src/protocol/turn-provenance.js"
@@ -495,6 +495,33 @@ test("a checkpoint another request receives while the binding changes during the
   } finally {
     setConversationPersistenceHookForTests()
     other.persistence.resetConversationPersistenceForTests()
+    resetCheckpointsForTests()
+  }
+})
+
+test("a copy behind another copy's failed save does not refill its provenance from the older snapshot", async () => {
+  const cache = root()
+  const other = await otherGraph()
+  const sessionKey = "unsaved-provenance"
+  const conversationId = peekConversationId(sessionKey)
+  const stale = { conversationId, toolCallIds: [], text: "Older answer", textWithReasoning: "Older answer" }
+  setCheckpoint(conversationId, checkpointBytes)
+  try {
+    restoreTurnProvenance(sessionKey, stale)
+    await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    await other.state.hydrateConversationState(cache, sessionKey)
+    other.persistence.setConversationPersistenceHookForTests(phase => {
+      if (phase === "before-write") throw new Error("disk full")
+    })
+    expect(await rejectionMessage(other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })))
+      .toContain("disk full")
+    expect(await hydrateConversationState(cache, sessionKey)).toBeUndefined()
+    await hydrateTurnProvenance(cache, sessionKey)
+    expect(getTurnProvenance(sessionKey)).toBeUndefined()
+  } finally {
+    other.persistence.setConversationPersistenceHookForTests()
+    other.persistence.resetConversationPersistenceForTests()
+    resetTurnProvenanceForTests()
     resetCheckpointsForTests()
   }
 })
