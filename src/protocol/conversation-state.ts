@@ -45,9 +45,9 @@ import {
 
 // Every snapshot write or delete that lands gets a process-wide generation, and writes still queued are counted per
 // module copy; each copy's entry in `held` is the generation it last wrote (landed or failed), restored or adopted.
-// Only a bound session consults its record (an unbound one restores from disk), so a record is evicted only once its
-// session is unbound and no write or read is using it. Generations are never reused: a copy whose record was evicted
-// counts as never having held one.
+// A record is evicted only once its session is unbound and no write or read is using it; up to the cap's worth whose
+// latest save failed stay past it. Generations are never reused: a copy whose record was evicted counts as never having
+// held one.
 type SnapshotRecord = {
   sessionKey: string
   generation: number
@@ -73,11 +73,16 @@ function snapshotRecord(key: string, sessionKey: string): SnapshotRecord {
   return record
 }
 
-function pruneSnapshotRecords(keep: string): void {
-  for (const [key, record] of snapshots.bySession) {
+function pruneSnapshotRecords(keep?: string): void {
+  if (snapshots.bySession.size <= MAX_ACTIVE_CONVERSATION_BINDINGS) return
+  const idle = [...snapshots.bySession].filter(([key, record]) => key !== keep && record.queued.size === 0
+    && record.reading === 0 && boundConversationId(record.sessionKey) === undefined)
+  // A failed save's record keeps copies behind off the older snapshot on disk, also once the binding is gone.
+  let spareFailed = idle.filter(([, record]) => record.unsaved).length - MAX_ACTIVE_CONVERSATION_BINDINGS
+  for (const [key, record] of idle) {
     if (snapshots.bySession.size <= MAX_ACTIVE_CONVERSATION_BINDINGS) return
-    if (key === keep || record.queued.size > 0 || record.reading > 0) continue
-    if (boundConversationId(record.sessionKey) === undefined) snapshots.bySession.delete(key)
+    if (record.unsaved && spareFailed-- <= 0) continue
+    snapshots.bySession.delete(key)
   }
 }
 
@@ -116,6 +121,8 @@ async function trackedSnapshotWrite(cacheDir: string, sessionKey: string, write:
     const left = (record.queued.get(copyId) ?? 1) - 1
     if (left > 0) record.queued.set(copyId, left)
     else record.queued.delete(copyId)
+    // Records skipped while queued would otherwise stay past the cap until another record is created.
+    pruneSnapshotRecords()
   }
 }
 
@@ -145,16 +152,6 @@ function replaceCopyState(
   forgetTurnProvenance(sessionKey)
   for (const reset of copyStateResets) reset(sessionKey)
   if (servedBefore || newerElsewhere || heldElsewhere) clearCheckpoint(conversationId)
-}
-
-/**
- * An unbound session's binding, and maybe its record, were evicted, but this copy's checkpoint for the conversation
- * the session binds next was not: unless this copy holds the latest generation, it may lack turns another copy ran.
- */
-function adoptUnboundState(key: string, generation: number, sessionKey: string, restored: string | undefined): void {
-  const record = snapshotRecord(key, sessionKey)
-  if (record.held.get(copyId) !== generation) clearCheckpoint(restored ?? sessionIdToUuid(sessionKey))
-  record.held.set(copyId, generation)
 }
 
 export function resetSnapshotGenerationsForTests(): void {
@@ -187,21 +184,22 @@ export async function hydrateConversationState(
   const bound = boundConversationId(sessionKey)
   let generation = 0
   let loaded: PersistedConversationLoad | undefined
+  // An unbound session binds its default conversation id next, which a checkpoint of this copy may still hold.
+  const conversationId = bound ?? sessionIdToUuid(sessionKey)
   for (let attempt = 0; attempt < 3 && !loaded; attempt++) {
-    if (bound !== undefined) {
-      // This copy's own queued writes hold state no newer than its memory; another copy's may.
-      if (attempt === 0 && holdsLatestSnapshot(key) && !queuedWrite(key, true)) return undefined
-      await settleConversationStateWrites(cacheDir, sessionKey)
-      if (holdsLatestSnapshot(key)) return undefined
-      if (snapshots.bySession.get(key)?.unsaved) {
-        trace(`conversation persistence: hydration skipped sessionKey=${sessionKey} status=unsaved`)
-        if (boundConversationId(sessionKey) === bound) {
-          replaceCopyState(key, snapshotRecord(key, sessionKey).generation, sessionKey, bound, true)
-        }
-        return undefined
+    // This copy's own queued writes hold state no newer than its memory; another copy's may.
+    if (bound !== undefined && attempt === 0 && holdsLatestSnapshot(key) && !queuedWrite(key, true)) return undefined
+    await settleConversationStateWrites(cacheDir, sessionKey)
+    // An unbound session still restores process-shared state an eviction may have dropped, unless the disk is behind.
+    if (bound !== undefined && holdsLatestSnapshot(key)) return undefined
+    if (snapshots.bySession.get(key)?.unsaved) {
+      trace(`conversation persistence: hydration skipped sessionKey=${sessionKey} status=unsaved`)
+      if (boundConversationId(sessionKey) === bound && !holdsLatestSnapshot(key)) {
+        replaceCopyState(key, snapshotRecord(key, sessionKey).generation, sessionKey, conversationId, true)
       }
-      await forgetCachedConversation(cacheDir, sessionKey)
+      return undefined
     }
+    await forgetCachedConversation(cacheDir, sessionKey)
     const record = snapshotRecord(key, sessionKey)
     generation = record.generation
     record.reading++
@@ -216,8 +214,8 @@ export async function hydrateConversationState(
   }
   if (!loaded) {
     trace(`conversation persistence: hydration skipped sessionKey=${sessionKey} status=still-writing`)
-    if (bound !== undefined && boundConversationId(sessionKey) === bound) {
-      replaceCopyState(key, snapshotRecord(key, sessionKey).generation, sessionKey, bound, true)
+    if (boundConversationId(sessionKey) === bound) {
+      replaceCopyState(key, snapshotRecord(key, sessionKey).generation, sessionKey, conversationId, true)
     }
     return undefined
   }
@@ -225,9 +223,18 @@ export async function hydrateConversationState(
   if (bound !== undefined && (heldGeneration(key) === generation || boundConversationId(sessionKey) !== bound)) {
     return undefined
   }
-  // This copy was behind: what is on disk (a snapshot, or none after a delete) replaces its per-session state.
-  if (bound !== undefined) replaceCopyState(key, generation, sessionKey, bound)
-  else adoptUnboundState(key, generation, sessionKey, loaded.value?.conversationId)
+  if (heldGeneration(key) !== generation) {
+    // This copy was behind: what is on disk (a snapshot, or none after a delete) replaces its per-session state.
+    if (bound !== undefined) replaceCopyState(key, generation, sessionKey, bound)
+    // The binding, and maybe the record, were evicted but this copy's per-session state was not.
+    else if (loaded.value) replaceCopyState(key, generation, sessionKey, loaded.value.conversationId, true)
+    else {
+      // State kept for a session this copy never ran (host notes before its first Run) stays, but a checkpoint of
+      // the default conversation may lack turns another copy ran.
+      clearCheckpoint(conversationId)
+      snapshotRecord(key, sessionKey).held.set(copyId, generation)
+    }
+  }
   const persisted = loaded.value
   if (!persisted) {
     trace(

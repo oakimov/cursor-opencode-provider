@@ -9,6 +9,7 @@ import {
 } from "../src/host-history-rewrite.js"
 import {
   bindConversationId, MAX_ACTIVE_CONVERSATION_BINDINGS, peekConversationId, resetConversationBindingsForTests,
+  sessionIdToUuid,
 } from "../src/protocol/conversation-bind.js"
 import {
   conversationCacheFilePath, getPersistedConversation, resetConversationPersistenceForTests,
@@ -749,6 +750,116 @@ test("a copy behind drops its older checkpoint once another copy took up the ses
     other.persistence.resetConversationPersistenceForTests()
     other.checkpoint.resetCheckpointsForTests()
     resetCheckpointsForTests()
+  }
+})
+
+test("an unbound copy behind drops its older checkpoint while another copy's latest save failed, and that copy keeps its own", async () => {
+  const cache = root()
+  const other = await otherGraph()
+  const sessionKey = "unbound-then-unsaved"
+  const conversationId = peekConversationId(sessionKey)
+  const newer = encodeMessage("ConversationStateStructure", { token_details: { used_tokens: 7, max_tokens: 9 } })
+  setCheckpoint(conversationId, checkpointBytes)
+  try {
+    await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    expect((await other.state.hydrateConversationState(cache, sessionKey))?.conversationId).toBe(conversationId)
+    other.checkpoint.setCheckpoint(conversationId, newer)
+    other.persistence.setConversationPersistenceHookForTests(phase => {
+      if (phase === "before-write") throw new Error("disk full")
+    })
+    expect(await rejectionMessage(other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })))
+      .toContain("disk full")
+    other.persistence.setConversationPersistenceHookForTests()
+    // The binding is gone; the record of the failed save outlives the cap.
+    for (let index = 0; index < MAX_ACTIVE_CONVERSATION_BINDINGS; index++) {
+      bindConversationId(`busy-${index}`)
+      expect(await hydrateConversationState(cache, `busy-${index}`)).toBeUndefined()
+    }
+    expect(await hydrateConversationState(cache, sessionKey)).toBeUndefined()
+    expect(getCheckpoint(conversationId)).toBeUndefined()
+    expect(await other.state.hydrateConversationState(cache, sessionKey)).toBeUndefined()
+    expect(other.checkpoint.getCheckpoint(conversationId)).toEqual(newer)
+  } finally {
+    other.persistence.setConversationPersistenceHookForTests()
+    other.persistence.resetConversationPersistenceForTests()
+    other.checkpoint.resetCheckpointsForTests()
+    resetCheckpointsForTests()
+  }
+})
+
+test("an unbound copy that gives up restoring drops its older checkpoint", async () => {
+  const cache = root()
+  const other = await otherGraph()
+  const sessionKey = "unbound-always-writing"
+  const conversationId = peekConversationId(sessionKey)
+  setCheckpoint(conversationId, checkpointBytes)
+  let saves = 0
+  try {
+    await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    await other.state.hydrateConversationState(cache, sessionKey)
+    await other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    for (let index = 0; index < MAX_ACTIVE_CONVERSATION_BINDINGS; index++) bindConversationId(`busy-${index}`)
+    setConversationPersistenceHookForTests(async phase => {
+      if (phase !== "full-decode") return
+      saves++
+      await other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    })
+    expect(await hydrateConversationState(cache, sessionKey)).toBeUndefined()
+    expect(saves).toBe(3)
+    expect(getCheckpoint(conversationId)).toBeUndefined()
+  } finally {
+    setConversationPersistenceHookForTests()
+    other.persistence.resetConversationPersistenceForTests()
+    other.checkpoint.resetCheckpointsForTests()
+    resetCheckpointsForTests()
+  }
+})
+
+test("an unbound copy behind takes a snapshot without provenance over its own older state", async () => {
+  const cache = root()
+  const other = await otherGraph()
+  const sessionKey = "unbound-behind-provenance"
+  const conversationId = peekConversationId(sessionKey)
+  const stale = { conversationId, toolCallIds: [], text: "Older answer", textWithReasoning: "Older answer" }
+  const replaced: string[] = []
+  onCopyStateReplaced(key => replaced.push(key))
+  setCheckpoint(conversationId, checkpointBytes)
+  try {
+    restoreTurnProvenance(sessionKey, stale)
+    await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    await other.state.hydrateConversationState(cache, sessionKey)
+    other.provenance.forgetTurnProvenance(sessionKey)
+    await other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    for (let index = 0; index < MAX_ACTIVE_CONVERSATION_BINDINGS; index++) {
+      bindConversationId(`busy-${index}`)
+      expect(await hydrateConversationState(cache, `busy-${index}`)).toBeUndefined()
+    }
+    replaced.length = 0
+    expect((await hydrateConversationState(cache, sessionKey))?.conversationId).toBe(conversationId)
+    expect(getTurnProvenance(sessionKey)).toBeUndefined()
+    expect(replaced).toEqual([sessionKey])
+  } finally {
+    other.persistence.resetConversationPersistenceForTests()
+    resetTurnProvenanceForTests()
+    resetCheckpointsForTests()
+  }
+})
+
+test("at most the cap's worth of unbound failed-save records stay past the cap, also after concurrent saves", async () => {
+  const cache = root()
+  setConversationPersistenceHookForTests(phase => {
+    if (phase === "before-write") throw new Error("disk full")
+  })
+  try {
+    const failures = await Promise.all(Array.from({ length: 2 * MAX_ACTIVE_CONVERSATION_BINDINGS + 88 }, (_, index) => {
+      const sessionKey = `failed-${index}`
+      return rejectionMessage(persistConversationState(cache, { sessionKey, conversationId: sessionIdToUuid(sessionKey),
+        requestContext: { rules_info_complete: true } }))
+    }))
+    expect(failures.every(message => message.includes("disk full"))).toBe(true)
+    expect(snapshotGenerationRecordsForTests()).toBe(MAX_ACTIVE_CONVERSATION_BINDINGS)
+  } finally {
+    setConversationPersistenceHookForTests()
   }
 })
 

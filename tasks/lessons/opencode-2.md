@@ -50,7 +50,8 @@ Operator setup: [OpenCode 2.x](../../docs/opencode-2.md).
   latest generation (wrote, restored or adopted it) decides. It also outlives an evicted binding: an unbound
   session's default conversation id comes back, so a copy restoring it from
   disk, or finding no snapshot, drops its checkpoint unless it holds the
-  latest generation. Tests need a copy that served the session before, and
+  latest generation, and takes the bound path's write wait, failed-save
+  check and state reset. Tests need a copy that served the session before, and
   one whose record was evicted since, not only one that never did
   (`hydrateConversationState`, `test/host-history-rewrite.test.ts`).
 - **`isRetryable: false` does not stop a retry.** 2.x classifies an
