@@ -722,6 +722,36 @@ test("a copy holding the latest generation keeps its checkpoint when its binding
   }
 })
 
+test("a copy behind drops its older checkpoint once another copy took up the session without a snapshot", async () => {
+  const cache = root()
+  const other = await otherGraph()
+  const sessionKey = "adopted-cold-elsewhere"
+  const conversationId = peekConversationId(sessionKey)
+  const newer = encodeMessage("ConversationStateStructure", { token_details: { used_tokens: 7, max_tokens: 9 } })
+  setCheckpoint(conversationId, checkpointBytes)
+  try {
+    await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    expect((await other.state.hydrateConversationState(cache, sessionKey))?.conversationId).toBe(conversationId)
+    other.checkpoint.setCheckpoint(conversationId, newer)
+    await other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    for (let index = 0; index < MAX_ACTIVE_CONVERSATION_BINDINGS; index++) {
+      bindConversationId(`busy-${index}`)
+      expect(await hydrateConversationState(cache, `busy-${index}`)).toBeUndefined()
+    }
+    writeFileSync(other.persistence.conversationCacheFilePath(cache, sessionKey), "not a snapshot")
+    // The other copy returns first, finds no snapshot, and its next Run binds the session again before saving.
+    expect(await other.state.hydrateConversationState(cache, sessionKey)).toBeUndefined()
+    expect(other.checkpoint.getCheckpoint(conversationId)).toBeUndefined()
+    expect(peekConversationId(sessionKey)).toBe(conversationId)
+    expect(await hydrateConversationState(cache, sessionKey)).toBeUndefined()
+    expect(getCheckpoint(conversationId)).toBeUndefined()
+  } finally {
+    other.persistence.resetConversationPersistenceForTests()
+    other.checkpoint.resetCheckpointsForTests()
+    resetCheckpointsForTests()
+  }
+})
+
 test("snapshot generation records of bound sessions are kept past the cap", async () => {
   const cache = root()
   for (let index = 0; index < MAX_ACTIVE_CONVERSATION_BINDINGS; index++) {

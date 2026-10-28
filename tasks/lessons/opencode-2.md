@@ -46,8 +46,8 @@ Operator setup: [OpenCode 2.x](../../docs/opencode-2.md).
   it; when it cannot (failed latest save, missing snapshot, writes that never
   settle) it drops its own checkpoint and seeds host history. A per-copy
   checkpoint outlives an evicted shared record, so "never held a generation"
-  does not mean "holds no older checkpoint"; whether another copy wrote the
-  latest generation decides. It also outlives an evicted binding: an unbound
+  does not mean "holds no older checkpoint"; whether another copy holds the
+  latest generation (wrote, restored or adopted it) decides. It also outlives an evicted binding: an unbound
   session's default conversation id comes back, so a copy restoring it from
   disk, or finding no snapshot, drops its checkpoint unless it holds the
   latest generation. Tests need a copy that served the session before, and
