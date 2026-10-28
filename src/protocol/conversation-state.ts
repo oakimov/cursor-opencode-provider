@@ -186,6 +186,14 @@ export async function hydrateConversationState(
   let loaded: PersistedConversationLoad | undefined
   // An unbound session binds its default conversation id next, which a checkpoint of this copy may still hold.
   const conversationId = bound ?? sessionIdToUuid(sessionKey)
+  const entryCheckpoint = getCheckpoint(conversationId)
+  // A concurrent request moved, created or evicted the binding meanwhile. Unless this copy holds the latest
+  // generation, the checkpoint it started with may lack turns another copy ran; one set since is that request's own.
+  const bindingMoved = (): boolean => {
+    if (boundConversationId(sessionKey) === bound) return false
+    if (!holdsLatestSnapshot(key) && getCheckpoint(conversationId) === entryCheckpoint) clearCheckpoint(conversationId)
+    return true
+  }
   for (let attempt = 0; attempt < 3 && !loaded; attempt++) {
     // This copy's own queued writes hold state no newer than its memory; another copy's may.
     if (bound !== undefined && attempt === 0 && holdsLatestSnapshot(key) && !queuedWrite(key, true)) return undefined
@@ -194,7 +202,7 @@ export async function hydrateConversationState(
     if (bound !== undefined && holdsLatestSnapshot(key)) return undefined
     if (snapshots.bySession.get(key)?.unsaved) {
       trace(`conversation persistence: hydration skipped sessionKey=${sessionKey} status=unsaved`)
-      if (boundConversationId(sessionKey) === bound && !holdsLatestSnapshot(key)) {
+      if (!bindingMoved() && !holdsLatestSnapshot(key)) {
         replaceCopyState(key, snapshotRecord(key, sessionKey).generation, sessionKey, conversationId, true)
       }
       return undefined
@@ -214,15 +222,14 @@ export async function hydrateConversationState(
   }
   if (!loaded) {
     trace(`conversation persistence: hydration skipped sessionKey=${sessionKey} status=still-writing`)
-    if (boundConversationId(sessionKey) === bound) {
+    if (!bindingMoved()) {
       replaceCopyState(key, snapshotRecord(key, sessionKey).generation, sessionKey, conversationId, true)
     }
     return undefined
   }
-  // A concurrent request in this copy already restored this generation, or moved the binding meanwhile.
-  if (bound !== undefined && (heldGeneration(key) === generation || boundConversationId(sessionKey) !== bound)) {
-    return undefined
-  }
+  if (bindingMoved()) return undefined
+  // A concurrent request in this copy already restored this generation.
+  if (bound !== undefined && heldGeneration(key) === generation) return undefined
   if (heldGeneration(key) !== generation) {
     // This copy was behind: what is on disk (a snapshot, or none after a delete) replaces its per-session state.
     if (bound !== undefined) replaceCopyState(key, generation, sessionKey, bound)

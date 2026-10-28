@@ -129,6 +129,9 @@ const otherGraph = async () => {
   }
 }
 const checkpointBytes = encodeMessage("ConversationStateStructure", { token_details: { used_tokens: 1, max_tokens: 2 } })
+const evictBindings = () => {
+  for (let index = 0; index < MAX_ACTIVE_CONVERSATION_BINDINGS; index++) bindConversationId(`busy-${index}`)
+}
 
 test("a module copy that never served the bound conversation restores its snapshot", async () => {
   const cache = root()
@@ -347,6 +350,148 @@ test("a copy behind leaves its state alone when its own request moves the bindin
     expect(next).toBeDefined()
     expect(replaced).toEqual([])
     expect(peekConversationId(sessionKey)).toBe(next!)
+  } finally {
+    setConversationPersistenceHookForTests()
+    other.persistence.resetConversationPersistenceForTests()
+    resetCheckpointsForTests()
+  }
+})
+
+test("an unbound copy leaves a binding another request creates during its read alone", async () => {
+  const cache = root()
+  const other = await otherGraph()
+  const sessionKey = "bound-during-unbound-read"
+  const conversationId = peekConversationId(sessionKey)
+  const replaced: string[] = []
+  onCopyStateReplaced(key => replaced.push(key))
+  setCheckpoint(conversationId, checkpointBytes)
+  try {
+    await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    await other.state.hydrateConversationState(cache, sessionKey)
+    await other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    evictBindings()
+    let next: string | undefined
+    setConversationPersistenceHookForTests(phase => {
+      if (phase === "full-decode" && !next) next = bindConversationId(sessionKey, { reset: true }).conversationId
+    })
+    expect(await hydrateConversationState(cache, sessionKey)).toBeUndefined()
+    expect(next).toBeDefined()
+    expect(replaced).toEqual([])
+    expect(peekConversationId(sessionKey)).toBe(next!)
+  } finally {
+    setConversationPersistenceHookForTests()
+    other.persistence.resetConversationPersistenceForTests()
+    resetCheckpointsForTests()
+  }
+})
+
+test("a copy behind drops its older checkpoint when its binding is evicted during the read", async () => {
+  const cache = root()
+  const other = await otherGraph()
+  const sessionKey = "evicted-during-read"
+  const conversationId = peekConversationId(sessionKey)
+  setCheckpoint(conversationId, checkpointBytes)
+  try {
+    await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    await other.state.hydrateConversationState(cache, sessionKey)
+    await other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    let evicted = false
+    setConversationPersistenceHookForTests(phase => {
+      if (phase === "full-decode" && !evicted) {
+        evicted = true
+        evictBindings()
+      }
+    })
+    expect(await hydrateConversationState(cache, sessionKey)).toBeUndefined()
+    expect(evicted).toBe(true)
+    expect(peekConversationId(sessionKey)).toBe(conversationId)
+    expect(getCheckpoint(conversationId)).toBeUndefined()
+  } finally {
+    setConversationPersistenceHookForTests()
+    other.persistence.resetConversationPersistenceForTests()
+    resetCheckpointsForTests()
+  }
+})
+
+test("a copy behind drops its older checkpoint when its binding is evicted while another copy's save fails", async () => {
+  const cache = root()
+  const other = await otherGraph()
+  const sessionKey = "evicted-during-failed-save"
+  const conversationId = peekConversationId(sessionKey)
+  setCheckpoint(conversationId, checkpointBytes)
+  try {
+    await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    await other.state.hydrateConversationState(cache, sessionKey)
+    other.persistence.setConversationPersistenceHookForTests(phase => {
+      if (phase !== "before-write") return
+      evictBindings()
+      throw new Error("disk full")
+    })
+    const failing = rejectionMessage(other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } }))
+    expect(await hydrateConversationState(cache, sessionKey)).toBeUndefined()
+    expect(await failing).toContain("disk full")
+    expect(peekConversationId(sessionKey)).toBe(conversationId)
+    expect(getCheckpoint(conversationId)).toBeUndefined()
+  } finally {
+    other.persistence.setConversationPersistenceHookForTests()
+    other.persistence.resetConversationPersistenceForTests()
+    other.checkpoint.resetCheckpointsForTests()
+    resetCheckpointsForTests()
+  }
+})
+
+test("a copy that gives up restoring drops its older checkpoint when its binding is evicted meanwhile", async () => {
+  const cache = root()
+  const other = await otherGraph()
+  const sessionKey = "evicted-while-writing"
+  const conversationId = peekConversationId(sessionKey)
+  setCheckpoint(conversationId, checkpointBytes)
+  let saves = 0
+  try {
+    await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    await other.state.hydrateConversationState(cache, sessionKey)
+    await other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    setConversationPersistenceHookForTests(async phase => {
+      if (phase !== "full-decode") return
+      if (++saves === 3) evictBindings()
+      await other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    })
+    expect(await hydrateConversationState(cache, sessionKey)).toBeUndefined()
+    expect(saves).toBe(3)
+    expect(peekConversationId(sessionKey)).toBe(conversationId)
+    expect(getCheckpoint(conversationId)).toBeUndefined()
+  } finally {
+    setConversationPersistenceHookForTests()
+    other.persistence.resetConversationPersistenceForTests()
+    other.checkpoint.resetCheckpointsForTests()
+    resetCheckpointsForTests()
+  }
+})
+
+test("a checkpoint another request receives while the binding changes during the read stays", async () => {
+  const cache = root()
+  const other = await otherGraph()
+  const newer = encodeMessage("ConversationStateStructure", { token_details: { used_tokens: 7, max_tokens: 9 } })
+  try {
+    for (const evict of [false, true]) {
+      const sessionKey = evict ? "evicted-then-checkpointed" : "reset-then-checkpointed"
+      const conversationId = peekConversationId(sessionKey)
+      setCheckpoint(conversationId, checkpointBytes)
+      await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+      await other.state.hydrateConversationState(cache, sessionKey)
+      await other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+      let current: string | undefined
+      setConversationPersistenceHookForTests(phase => {
+        if (phase !== "full-decode" || current) return
+        // The request binds the session again (or a reset rebinds it) and its Run receives a checkpoint.
+        if (evict) evictBindings()
+        current = evict ? conversationId : bindConversationId(sessionKey, { reset: true }).conversationId
+        setCheckpoint(current, newer)
+      })
+      expect(await hydrateConversationState(cache, sessionKey)).toBeUndefined()
+      expect(getCheckpoint(current!)).toEqual(newer)
+      setConversationPersistenceHookForTests()
+    }
   } finally {
     setConversationPersistenceHookForTests()
     other.persistence.resetConversationPersistenceForTests()
