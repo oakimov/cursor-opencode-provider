@@ -1,13 +1,15 @@
-import { afterEach, describe, expect, it, setSystemTime } from "bun:test"
+import { afterEach, beforeEach, describe, expect, it, setSystemTime } from "bun:test"
 import { execFile } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
 import { buildRequestContext, resetWorkspaceFactsForTests } from "../src/context/build.js"
+import { getHostCacheDirOverride, setHostCacheDirOverride } from "../src/context/paths.js"
 
 const execFileAsync = promisify(execFile)
 const roots: string[] = []
+let previousCache: string | undefined
 
 async function repo(): Promise<string> {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cursor-workspace-facts-")))
@@ -20,9 +22,18 @@ async function repo(): Promise<string> {
 const status = (context: Record<string, unknown>) =>
   (context.git_repos as Array<{ status: string }>)[0]!.status
 
+// A built request context creates the workspace's project folder under the host cache.
+beforeEach(() => {
+  previousCache = getHostCacheDirOverride()
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-workspace-facts-cache-"))
+  roots.push(cache)
+  setHostCacheDirOverride(cache)
+})
+
 afterEach(() => {
   setSystemTime()
   resetWorkspaceFactsForTests()
+  setHostCacheDirOverride(previousCache)
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true })
 })
 
