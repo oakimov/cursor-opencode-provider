@@ -1143,7 +1143,7 @@ describe("opencode2 setup", () => {
     }
   })
 
-  test("the aisdk sdk hook resolves the token per Run, not when the SDK is built", async () => {
+  test("the aisdk sdk hook resolves the token per Run, not when the SDK is built", () => withTempHostCache(async () => {
     const { ctx, hooks } = fakeContext()
     let resolves = 0
     ctx.integration.connection = {
@@ -1162,7 +1162,7 @@ describe("opencode2 setup", () => {
     expect(resolves).toBe(before)
     expect(typeof cleanup).toBe("function")
     if (typeof cleanup === "function") await cleanup()
-  })
+  }))
 
   test("a preloaded Cursor SDK still resolves current credentials before opening a Run", () => withTempHostCache(async () => {
     const { ctx, hooks } = fakeContext()

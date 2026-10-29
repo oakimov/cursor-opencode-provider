@@ -19,7 +19,9 @@ import {
 import { createCursor } from "../src/index.js"
 import { resetClientVersionCache } from "../src/protocol/client-version.js"
 import { CursorProtocolError, CursorTransportError } from "../src/errors.js"
-import { withTempHostCache } from "./host-cache.js"
+import { useTempHostCache } from "./host-cache.js"
+
+useTempHostCache()
 
 const INSTALLER_FIXTURE = `var x="https://downloads.cursor.com/lab/2026.07.09-a3815c0/";`
 
@@ -314,7 +316,7 @@ describe("Run transport lifecycle", () => {
 })
 
 describe("explicit agent Run host overrides", () => {
-  it("rejects non-*.cursor.sh hosts before opening a Run stream", () => withTempHostCache(async () => {
+  it("rejects non-*.cursor.sh hosts before opening a Run stream", async () => {
     const model = createCursor({
       name: "cursor",
       accessToken: "token",
@@ -326,9 +328,9 @@ describe("explicit agent Run host overrides", () => {
         prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
       } as LanguageModelV3CallOptions),
     ).rejects.toThrow("Invalid Cursor agent base URL override")
-  }))
+  })
 
-  it("surfaces GetServerConfig failure from the model call", () => withTempHostCache(async () => {
+  it("surfaces GetServerConfig failure from the model call", async () => {
     const realFetch = globalThis.fetch
     resetClientVersionCache()
     globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -358,7 +360,7 @@ describe("explicit agent Run host overrides", () => {
       globalThis.fetch = realFetch
       resetClientVersionCache()
     }
-  }))
+  })
 
   it("retains unary HTTP status text and response bodies", async () => {
     const realFetch = globalThis.fetch
