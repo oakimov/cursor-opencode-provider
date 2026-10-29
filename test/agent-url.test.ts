@@ -2,6 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test"
 import { resolveAgentUrl, resetAgentUrlCache } from "../src/agent-url.js"
 import { CURSOR_API_HOST, SERVER_CONFIG_PATH } from "../src/shared.js"
 import { resetClientVersionCache } from "../src/protocol/client-version.js"
+import { useTempHostCache } from "./host-cache.js"
+
+useTempHostCache()
 
 // ResolveClientVersion fetches the installer script when nothing is cached; the
 // resolver's GetServerConfig fetch runs alongside it, so the mock must answer both.

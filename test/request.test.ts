@@ -5,6 +5,7 @@ import { buildLiveRequestContext } from "../src/protocol/tools.js"
 import { SYSTEM_INSTRUCTIONS_RULE_PATH, systemInstructionsRule } from "../src/context/build.js"
 import { decodeMessage, decodeMessageSparse, encodeMessage, getMessageTypes } from "../src/protocol/messages.js"
 import { readAllFields } from "../src/protocol/struct.js"
+import { withTempHostCache } from "./host-cache.js"
 
 const vendorRunRequest: {
   descriptor: string
@@ -169,7 +170,7 @@ describe("buildRunRequest", () => {
     expect(decoded.run_request.mcp_tools?.mcp_tools ?? []).toHaveLength(0)
   })
 
-  it("advertises slim tool names on LIVE request_context, not #7 or fs descriptors", () => {
+  it("advertises slim tool names on LIVE request_context, not #7 or fs descriptors", () => withTempHostCache(async () => {
     const tools = [
       { name: "read", description: "Read", inputSchema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] } },
       { name: "bash", description: "Shell", inputSchema: { type: "object", properties: { command: { type: "string" } } } },
@@ -202,9 +203,9 @@ describe("buildRunRequest", () => {
     const descriptor = readAllFields(metaOpts!).find((field) => field.fn === 2)?.bytes
     const tool = readAllFields(descriptor!).find((field) => field.fn === 5)?.bytes
     expect(readAllFields(tool!).map((field) => field.fn)).toEqual([1])
-  })
+  }))
 
-  it("splits LIVE mcp_meta descriptors by real MCP server", () => {
+  it("splits LIVE mcp_meta descriptors by real MCP server", () => withTempHostCache(async () => {
     const tools = [
       { name: "read", description: "Read", inputSchema: { type: "object" } },
       {
@@ -234,7 +235,7 @@ describe("buildRunRequest", () => {
     ])
     expect(descriptors[1].tools[0].tool_name).toBe("create_pull_request")
     expect(rc.mcp_meta_tool_options.mcp_descriptors).toHaveLength(3)
-  })
+  }))
 
   it("sends an empty mcp_tools list when no tools are given", () => {
     const data = buildRunRequest({ text: "hi", modelId: "m", conversationId: "c" })

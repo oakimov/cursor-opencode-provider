@@ -37,6 +37,7 @@ import {
   resetHostAgentModeSwitchForTests,
 } from "../src/host-agent-mode.js"
 import { reapBackgroundSpawn } from "./background-spawn.js"
+import { withTempHostCache } from "./host-cache.js"
 
 // Characters safeLabel must remove from emitted names/keys (issue #2).
 const INVALID = new RegExp("[()<>&\"'`]")
@@ -688,7 +689,7 @@ describe("CursorPlugin shell result hooks", () => {
     expect(stored.parts[0]!.state.output).toBe("partial\nTimed out after 30000ms.\n")
   })
 
-  it("keeps soft-background Bash command original and injects wrap via shell.env", async () => {
+  it("keeps soft-background Bash command original and injects wrap via shell.env", () => withTempHostCache(async () => {
     const plugin = await CursorPlugin({ directory: process.cwd() } as never)
     await plugin.config?.({ shell: "/bin/bash" } as never)
     const callID = "cursor_hook_2"
@@ -732,9 +733,9 @@ describe("CursorPlugin shell result hooks", () => {
       callID: "ordinary-call",
     } as never, ordinaryEnv as never)
     expect(ordinaryEnv.env).toEqual({})
-  })
+  }))
 
-  it("wraps background_shell_spawn via shell.env without rewriting args.command", async () => {
+  it("wraps background_shell_spawn via shell.env without rewriting args.command", () => withTempHostCache(async () => {
     const plugin = await CursorPlugin({ directory: process.cwd() } as never)
     await plugin.config?.({ shell: "/bin/bash" } as never)
     const callID = "cursor_hook_bg_spawn"
@@ -761,9 +762,9 @@ describe("CursorPlugin shell result hooks", () => {
     expect(envOut.env.BASH_ENV).toBeString()
     const injector = await Bun.file(envOut.env.BASH_ENV).text()
     expect(injector).toContain("exec /bin/sh")
-  })
+  }))
 
-  it("replaces background fallback with a short wrapper command for sh", async () => {
+  it("replaces background fallback with a short wrapper command for sh", () => withTempHostCache(async () => {
     const plugin = await CursorPlugin({ directory: process.cwd() } as never)
     await plugin.config?.({ shell: "/bin/sh" } as never)
     const callID = "cursor_hook_bg_spawn_sh"
@@ -794,7 +795,7 @@ describe("CursorPlugin shell result hooks", () => {
     })
     expect(result.stdout.toString()).toContain("__CURSOR_BACKGROUND_SHELL__")
     await reapBackgroundSpawn(result.stdout.toString())
-  })
+  }))
 
   it("keeps timeout-shaped successful stdout in output and metadata.output", async () => {
     const plugin = await CursorPlugin({ directory: process.cwd() } as never)

@@ -8,6 +8,9 @@ import * as renewalA from "../src/auth-renewal.js"
 import { CursorAuthError, isRejectedCredentialError, toCursorProviderError } from "../src/errors.js"
 import { processShared } from "../src/process-shared.js"
 import { resetClientVersionCache, resolveClientVersion } from "../src/protocol/client-version.js"
+import { useTempHostCache } from "./host-cache.js"
+
+useTempHostCache()
 
 // Copy the whole source graph: a query string on one module still shares its
 // dependencies, hiding failures involving distinct error classes.

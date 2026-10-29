@@ -18,6 +18,7 @@ import {
   resetCursorShellCalls,
 } from "../src/shell-timeout.js"
 import { sessionFixture } from "./session-fixture.js"
+import { withTempHostCache } from "./host-cache.js"
 
 let _seq = 0
 function fakeSession(id?: string): CursorSession {
@@ -1059,7 +1060,7 @@ describe("refreshHeldSessionToolCatalog", () => {
     expect(listed.map((tool) => tool.tool_name)).not.toContain("websearch")
   })
 
-  it("grows the conversation overlay so the next Run reuses RequestContext after MCP tools appear", async () => {
+  it("grows the conversation overlay so the next Run reuses RequestContext after MCP tools appear", () => withTempHostCache(async () => {
     const live = fakeSession("mcp-reuse")
     live.openCodeSessionId = "ses_mcp_reuse"
     const schema = { type: "object", properties: {} }
@@ -1085,5 +1086,5 @@ describe("refreshHeldSessionToolCatalog", () => {
       mergedConfig: { mcp: {} },
     })
     expect(next.reused).toBe(true)
-  })
+  }))
 })

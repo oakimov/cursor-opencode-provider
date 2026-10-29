@@ -9,6 +9,7 @@ import * as gitDiscovery from "../src/context/git.js"
 import { buildEnv, workspaceRootFromRequestContext } from "../src/context/env.js"
 import { opencodeProjectDir } from "../src/context/paths.js"
 import { encodeMessage, decodeMessage } from "../src/protocol/messages.js"
+import { withTempHostCache } from "./host-cache.js"
 
 describe("buildRequestContext", () => {
   let root: string
@@ -130,7 +131,7 @@ describe("buildRequestContext", () => {
     }
   })
 
-  it("builds an encodable RequestContext without duplicating host rules or skills", async () => {
+  it("builds an encodable RequestContext without duplicating host rules or skills", () => withTempHostCache(async () => {
     const ctx = await buildRequestContext({
       workspaceRoot: root,
       tools: [{ name: "read", description: "Read a file", inputSchema: { type: "object", properties: {} } }],
@@ -149,7 +150,7 @@ describe("buildRequestContext", () => {
     const decoded = decodeMessage("RequestContext", bytes) as Record<string, unknown>
     const decodedRules = decoded.rules
     expect(decodedRules === undefined || (Array.isArray(decodedRules) && decodedRules.length === 0)).toBe(true)
-  })
+  }))
 
   it("advertises Cursor metadata under ~/.cache/opencode/projects, not the workspace", async () => {
     const prevCache = process.env.XDG_CACHE_HOME
@@ -187,7 +188,7 @@ describe("buildRequestContext", () => {
     }
   })
 
-  it("splits only config-backed MCP tools and preserves custom underscore names", async () => {
+  it("splits only config-backed MCP tools and preserves custom underscore names", () => withTempHostCache(async () => {
     const ctx = await buildRequestContext({
       workspaceRoot: root,
       tools: [
@@ -207,7 +208,7 @@ describe("buildRequestContext", () => {
       ["opencode", "custom_helper"],
     ])
     expect(ctx.tools).toBeUndefined()
-  })
+  }))
 })
 
 describe("loadMergedConfig OPENCODE_DISABLE_PROJECT_CONFIG", () => {
