@@ -272,6 +272,55 @@ describe("Run transport lifecycle", () => {
     )
   })
 
+  it("reports a Run closed once Cursor ends its response, while the request side is still open", async () => {
+    const origin = "https://agentn.ended-response-test.cursor.sh"
+    const server = http2.createServer()
+    const sessions = new Set<http2.ServerHttp2Session>()
+    server.on("session", (session) => sessions.add(session))
+    server.on("stream", (stream) => {
+      stream.on("error", () => {})
+      stream.respond({ ":status": 200, "content-type": "application/connect+proto" })
+      stream.end()
+    })
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+    const client = http2.connect(`http://127.0.0.1:${(server.address() as net.AddressInfo).port}`)
+    client.on("error", () => {})
+    await new Promise<void>((resolve, reject) => {
+      client.once("connect", () => resolve())
+      client.once("error", reject)
+    })
+    const savedClientVersion = process.env.CURSOR_CLIENT_VERSION
+    process.env.CURSOR_CLIENT_VERSION = "cli-ended-response-test"
+    resetClientVersionCache()
+    cacheHttp2SessionForTests(origin, client)
+    try {
+      const run = await bidiRunStream("token", { baseURL: origin })
+      // A Run waiting on the host is kept when Cursor ends it, and can be asked
+      // at that moment, before the stream has closed, whether it takes writes.
+      const closedAtEnd = new Promise<boolean>((resolve) => run.onTerminal(() => resolve(run.isClosed())))
+      try {
+        for await (const _ of run.frames()) { /* Cursor sends nothing before ending */ }
+      } catch { /* a bare end is not a finished turn */ }
+      expect(await closedAtEnd).toBe(true)
+      expect(run.isClosed()).toBe(true)
+      let failure: unknown
+      try {
+        await run.write(Uint8Array.of(0, 0, 0, 0, 0))
+      } catch (error) {
+        failure = error
+      }
+      expect(failure).toBeInstanceOf(CursorTransportError)
+      run.destroy()
+    } finally {
+      closeCachedHttp2SessionsForTests()
+      for (const session of sessions) session.destroy()
+      await new Promise((resolve) => server.close(resolve))
+      if (savedClientVersion === undefined) delete process.env.CURSOR_CLIENT_VERSION
+      else process.env.CURSOR_CLIENT_VERSION = savedClientVersion
+      resetClientVersionCache()
+    }
+  })
+
   it("advertises only the response compression it can decode", async () => {
     const origin = "https://agentn.accept-encoding-test.cursor.sh"
     const server = http2.createServer()

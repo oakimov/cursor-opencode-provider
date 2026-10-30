@@ -612,7 +612,7 @@ describe("history images through a full provider Run", () => {
     expect(sentImages(2)).toEqual([...resent])
   }), 30_000)
 
-  it("sends again the image of a turn whose Run failed after a checkpoint", () => withRoot(async (root) => {
+  it("skips the image of a turn whose Run failed after a checkpoint and was resumed to its end", () => withRoot(async (root) => {
     const sessionKey = "ses_images_failed"
     onRun = (run, message) => {
       const index = runs.indexOf(run)
@@ -631,9 +631,11 @@ describe("history images through a full provider Run", () => {
 
     expect(sentImages(1)).toEqual([IMAGE_B])
     // Run recovery resumes the turn on the checkpoint the failed Run received.
+    // That checkpoint arrived after IMAGE_B, and the resumed Run ended the turn
+    // on a checkpoint extending it, so the next turn does not send it again.
     expect(sentCheckpoint(2)).toEqual(checkpoint(30))
     expect(sentCheckpoint(3)).toEqual(checkpoint(3))
-    expect(sentImages(3)).toEqual([IMAGE_B])
+    expect(sentImages(3)).toEqual([])
   }), 30_000)
 
   it("sends every image again after a compaction", () => withRoot(async (root) => {

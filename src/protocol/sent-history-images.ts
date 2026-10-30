@@ -84,6 +84,33 @@ export function runHistoryImages(held?: ReadonlySet<string>): RunHistoryImages {
   return { held: [...(held ?? [])], checkpointed: [], sent: [] }
 }
 
+/** The images a checkpoint that arrived at `arrival` holds: those the Run stood on and those it sent before. */
+export function historyImagesHeldAt(run: RunHistoryImages, arrival = Infinity): string[] {
+  return newest([
+    ...run.held,
+    ...run.checkpointed,
+    ...run.sent.filter((image) => image.afterArrival < arrival).map((image) => image.hash),
+  ])
+}
+
+/**
+ * A Run that resumes another Run's checkpoint continues that turn. The images
+ * the checkpoint holds count, like the Run's own, once its turn ends on a
+ * checkpoint of its own.
+ */
+export function carryHistoryImages(run: RunHistoryImages, hashes: readonly string[]): void {
+  for (const hash of hashes) {
+    if (!run.held.includes(hash) && !run.checkpointed.includes(hash)) run.checkpointed.push(hash)
+  }
+}
+
+/** The image is in this Run's conversation: held by its checkpoint, or sent by the Run. */
+export function runHasHistoryImage(run: RunHistoryImages, hash: string): boolean {
+  return run.held.includes(hash)
+    || run.checkpointed.includes(hash)
+    || run.sent.some((image) => image.hash === hash)
+}
+
 /** `lastArrival`: the last frame arrival once the images are written. */
 export function noteHistoryImagesSent(run: RunHistoryImages, hashes: readonly string[], lastArrival = 0): void {
   run.sent.push(...hashes.map((hash) => ({ hash, afterArrival: lastArrival })))

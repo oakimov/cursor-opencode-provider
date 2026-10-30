@@ -231,6 +231,26 @@ The **1.18 v2** API and **OpenCode 2.x** are source-incompatible:
   stay final.
   Missing-blob recovery is limited to the initial control-only checkpoint path
   (`isSoleControlFrame`); unknown/mixed frames keep the normal replay barrier.
+- A delivered result admits later checkpoints only after Cursor completes its
+  call id. Results without one can never be acknowledged: Cursor's copies of a
+  Run's input images (matched by content hash) need no completion; a generated
+  image's write takes its one open GenerateImage call id. Keep every other
+  uncorrelated result waiting. Input images still save through
+  `cursor_image_save`; a name taken by other bytes, on disk, staged or reserved
+  by a save still waiting for permission, moves to the first free
+  `<name>-<hash12>[-<n>]<ext>`, reported in the WriteResult; never overwrite.
+- Cursor CLI fires an input image's copy and ignores its result. Answer it when
+  staged; the save step stays `answered` (not owed, no heartbeat, writes
+  nothing). A clean close while only answered steps remain, or after their
+  result was delivered and before the pump plays the queue, keeps the Run and
+  its queued frames; anything owed still closes it. `classify` never closes an
+  answered step on an ended stream, announced or not.
+  A Run Cursor ended (`isClosed()`, which includes a finished response before
+  the stream closes) takes no further replies or injected notes; notes wait
+  for the next user turn. A declined or failed copy, or one saved under another
+  name, gets a note naming the path the model knows.
+- A Run resuming a checkpoint carries the images that checkpoint holds
+  (`resumeCheckpointImages`) as checkpointed, confirmed by its own turn end.
 - Carry an uncheckpointed request only on its unchanged checkpoint; persist it
   on failure. Retry equality uses the previous attempt's own live text. New
   checkpoints, host Stop and history rebuild drop it; unseeded history must not
