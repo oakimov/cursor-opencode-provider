@@ -14,6 +14,8 @@
 
 ### Fixed
 
+- A dropped network no longer ends a Cursor turn after 10 connection attempts. While this computer cannot reach Cursor, the turn waits up to 3 hours (backoff capped at 30 seconds, resuming as soon as a network probe succeeds) and then continues. Silence on a dead connection is waited out the same way. A turn that already did work and has no checkpoint to resume is still not replayed ([#142](https://github.com/oakimov/cursor-opencode-provider/issues/142)).
+
 - Run requests advertise only gzip response compression, which the provider can decode, instead of also offering brotli ([@nkoynov](https://github.com/nkoynov)).
 - OpenCode 2 resumes a session's saved Cursor conversation again when its next turn runs in a newly loaded Location (after a session move, or when an idle Location loads again), instead of re-sending the whole history uncached, also when the session moves back to a Location that is still loaded. A Location still running a Run for the session keeps its live state. While the latest save has failed or cannot be read, a Location behind it starts from host history instead of resuming the older snapshot or its own older checkpoint. A rewrite after another provider's compaction still starts fresh ([@nkoynov](https://github.com/nkoynov)).
 - Managed shell output excludes terminal-record footers even when completion races a timeout or background handoff ([#128](https://github.com/oakimov/cursor-opencode-provider/pull/128), [@oakimov](https://github.com/oakimov)).

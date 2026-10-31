@@ -15,6 +15,7 @@ import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
 import { sessionManager, type CursorSession, type Frame } from "../src/session.js"
 import { CursorRunInterruptedError } from "../src/transport/connect.js"
 import { CursorAuthError, CursorRetryExhaustedError, CursorServerError, CursorTransportError, hostFacingError } from "../src/errors.js"
+import { setOfflineClockForTests } from "../src/offline.js"
 import { writeStreamMessage } from "../src/stream-write.js"
 import { sessionFixture } from "./session-fixture.js"
 
@@ -442,6 +443,39 @@ describe("interrupted Cursor Run handling", () => {
   }
 
   const turnEnded = () => serverFrame({ interaction_update: { turn_ended: { input_tokens: 1, output_tokens: 1 } } })
+
+  it("waits out a network outage without spending the attempt budget", async () => {
+    const offline = () => new CursorTransportError("Cursor HTTP/2 connection failed", {
+      transient: true,
+      replaySafe: true,
+      code: "ENOTFOUND",
+    })
+    const dropped = fakeSession("dropped", [])
+    dropped.frames = { next: async () => { throw offline() } }
+    let opens = 0
+    setOfflineClockForTests({
+      now: () => 5_000,
+      windowMs: 60_000,
+      sleep: async () => {},
+      reachable: async () => true,
+    })
+    try {
+      const finalSession = await pumpWithRecovery({
+        initialSession: dropped,
+        controller: controller([]),
+        retryPolicy: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1 },
+        recover: async () => {
+          opens++
+          if (opens <= 5) throw offline()
+          return fakeSession("back-online", [turnEnded()])
+        },
+      })
+      expect(finalSession.sessionId).toBe("back-online")
+      expect(opens).toBe(6)
+    } finally {
+      setOfflineClockForTests(undefined)
+    }
+  })
 
   it("renews a rejected credential once and reopens before any output, outside the retry budget", async () => {
     let renewals = 0
