@@ -199,7 +199,9 @@ function occupancyUsage(
   details: { usedTokens: number; maxTokens: number },
   prior?: { usedTokens: number },
 ) {
-  return shapeStepUsage({ usedTokens: details.usedTokens, prefixTokens: prior?.usedTokens ?? 0, prices: undefined }).usage
+  return shapeStepUsage({
+    usedTokens: details.usedTokens, prefixTokens: prior?.usedTokens ?? 0, outputTokens: 1, prices: undefined,
+  }).usage
 }
 
 describe("occupancy snapshot usage", () => {

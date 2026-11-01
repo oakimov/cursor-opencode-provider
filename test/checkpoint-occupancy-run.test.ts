@@ -148,7 +148,7 @@ it.each([false, true])("keeps measured occupancy on a zero-token checkpoint (res
       [reply, checkpoint(45_000, "next"), turnEnded],
     )
     const first = [{ role: "user", content: [{ type: "text", text: "first" }] }]
-    await finishOf(model, first)
+    const firstFinish = await finishOf(model, first)
     if (restart) {
       await settleRunSavesForTests()
       sessionManager.dispose()
@@ -167,7 +167,10 @@ it.each([false, true])("keeps measured occupancy on a zero-token checkpoint (res
     expect(sentStates[0]).toBeUndefined()
     // The second Run echoes the zero-token terminal checkpoint byte for byte.
     expect(decodeConversationTokenDetails(sentStates[1])?.usedTokens).toBe(0)
-    expect(second.usage.inputTokens.total).toBe(44_999)
+    // With no occupancy to carry it, the first Run's output goes to the next turn-end.
+    expect(firstFinish.usage.outputTokens.total).toBe(0)
+    expect(second.usage.outputTokens.total).toBe(20)
+    expect(second.usage.inputTokens.total).toBe(44_980)
     expect(second.usage.inputTokens.cacheRead).toBe(40_000)
   } finally {
     await settleRunSavesForTests()

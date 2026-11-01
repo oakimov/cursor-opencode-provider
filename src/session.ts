@@ -931,6 +931,7 @@ export class SessionManager {
     session.stream = next
     // Preserve session totals but give the replacement Run its own estimates.
     session.billing.estimatedUsd = 0
+    session.billing.estimatedOutputTokens = 0
     delete session.billing.ledgerEpoch
     if (runId !== undefined) session.runId = runId
     session.frames = next.frames()[Symbol.asyncIterator]()
