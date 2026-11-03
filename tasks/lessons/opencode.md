@@ -483,6 +483,11 @@ These are failure lessons shared by both hosts, not a replacement for
 - **Book charges only after accepted delivery.** Cancelled estimates must not
   credit another Run. Aggregate counters cannot prove per-call tiers; compare
   both hosts' pricing formulas (`test/billing.test.ts`).
+  Output estimates need the same Run ownership: subtracting cumulative reported
+  output from measured session totals lets one overestimate erase later Runs'
+  tokens. Track the pending remainder per completed Run, estimate reasoning
+  separately, and retain delivered totals without marking dropped reasoning as
+  reported (`test/billing.test.ts`, `test/display-bridge-pump.test.ts`).
 - **Diagnostics need the same bounds as usage.** Unclamped prefixes and a
   double-counted footer token created false validations. An aggregate cache
   ratio cannot locate a miss; compare identities, hashes and categories, and

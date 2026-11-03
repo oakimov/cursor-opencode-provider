@@ -149,6 +149,15 @@ Use the wrapper directory, rather than the provider source root, as the local pl
 - **Rebuild after every change** (`bun run build`). The daemon reads `dist/`, not `src/`.
 - **Plugin reload does not refresh the running AI SDK.** The daemon caches SDKs and language models separately from plugin hooks. A new plugin `copy=#…` header can therefore appear while turns still use earlier code. Fully restart the daemon after rebuilding; for cost-reporting changes, confirm fresh `billing: step=` records on tool and final finishes.
 
+## Usage and cost
+
+Tool steps report estimates of streamed output and reasoning; the final step
+reconciles them with Cursor's Run counters. Input plus output still equals the
+latest checkpoint occupancy. Estimates and the one-token display minimum can
+exceed measured output, and output at its catalog rate can raise the minimum
+settlement cost. See [accounting limits](../README.md#known-limitations) and
+the [billing diagnostics](cache-log-runbook.md#3-validate-the-totals-sent-to-opencode).
+
 ## Workspace directory
 
 OpenCode 2.x's long-lived daemon often starts from `$HOME` (or another spawn cwd), so `process.cwd()` is not the active project. The provider resolves the session workspace in this order:

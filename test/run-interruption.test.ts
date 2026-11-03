@@ -1362,9 +1362,9 @@ describe("interrupted Cursor Run handling", () => {
     const finish = parts.find((part) => part.type === "finish")
     expect(finish.usage.inputTokens.total + finish.usage.outputTokens.total).toBe(150)
     expect(finish.usage.outputTokens).toEqual({
-      total: 1,
-      text: 1,
-      reasoning: 0,
+      total: 50,
+      text: 43,
+      reasoning: 7,
     })
     expect(finish.providerMetadata.cursor).toMatchObject({
       inputTokensRaw: 100,
@@ -1422,13 +1422,11 @@ describe("interrupted Cursor Run handling", () => {
         + finish.usage.inputTokens.cacheRead
         + finish.usage.inputTokens.cacheWrite,
     ).toBe(finish.usage.inputTokens.total)
-    // Held-Run TurnEnded counters are cumulative; this finish only covers the
-    // last generation slice. Display usage is checkpoint occupancy (output=1)
-    // so host tok/s stays sane. Exact request counters stay under *Raw.
+    // The token total stays checkpoint occupancy; Cursor's output is part of it.
     expect(finish.usage.outputTokens).toEqual({
-      total: 1,
-      text: 1,
-      reasoning: 0,
+      total: 3_206,
+      text: 2_726,
+      reasoning: 480,
     })
     expect(finish.providerMetadata.copilot).toEqual({ totalNanoAiu: 0 })
     expect(finish.providerMetadata.cursor).toMatchObject({
@@ -1490,10 +1488,11 @@ describe("interrupted Cursor Run handling", () => {
 
     const finish = parts.find((part) => part.type === "finish")
     expect(finish.usage.inputTokens.total + finish.usage.outputTokens.total).toBe(103_144)
+    // The char/4 Run estimate stays diagnostic; TurnEnded's counters are reported.
     expect(finish.usage.outputTokens).toEqual({
-      total: 1,
-      text: 1,
-      reasoning: 0,
+      total: 1_391,
+      text: 866,
+      reasoning: 525,
     })
     expect(finish.providerMetadata.copilot).toEqual({ totalNanoAiu: 0 })
     expect(finish.providerMetadata.cursor).toMatchObject({

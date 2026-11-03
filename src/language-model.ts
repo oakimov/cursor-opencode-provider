@@ -374,6 +374,7 @@ import {
   billingLedger,
   cursorRunCost,
   hostStepPrices,
+  maxOutputWithinUsd,
   nanoAiuForUsd,
   shapeStepUsage,
   turnEndedCostUsd,
@@ -5006,10 +5007,15 @@ export async function pump(
   // the cancel lands — controller.enqueue on a cancelled controller throws.
   // safeEnqueue swallows that throw and tracks the close so we stop pumping.
   let streamClosed = false
+  /** Model output this step streamed to the host: its output estimate until `TurnEnded`. */
+  let stepOutputChars = 0
+  let stepReasoningChars = 0
   const safeEnqueue = (part: V3Part): boolean => {
     if (streamClosed) return false
     try {
       controller.enqueue(part)
+      stepOutputChars += streamedOutputChars(part)
+      if (part.type === "reasoning-delta") stepReasoningChars += part.delta.length
       if (session.openCodeSessionId) {
         recordEmittedPart(
           session.openCodeSessionId,
@@ -5463,14 +5469,13 @@ export async function pump(
     closeOpenSpans()
     const est = session.usageEstimate
     // OpenCode TUI/GUI replace each assistant message's tokens (they do not
-    // sum occupancy) and the TUI footer requires tokens.output > 0. Cost is
-    // added per step-finish. Emit checkpoint occupancy snapshots at tool-call
-    // boundaries and once more at TurnEnded/stop, each billed through
-    // `src/billing.ts`. Held-Run TurnEnded counters are cumulative across
-    // every tool step, but this finish only spans the last generation slice —
-    // putting output_tokens/reasoning there makes host tok/s
-    // (generated/stepElapsed) absurd. Keep exact request counters under
-    // providerMetadata.cursor.*Raw. Char/4 usageEstimate stays traces-only.
+    // sum occupancy) and the TUI footer requires tokens.output > 0. Cost and
+    // output are added per step-finish. Emit checkpoint occupancy snapshots at
+    // tool-call boundaries and once more at TurnEnded/stop, each billed through
+    // `src/billing.ts`. Held-Run TurnEnded counters are cumulative across every
+    // tool step, so a tool step reports its streamed output as an estimate and
+    // TurnEnded reports the rest of Cursor's output_tokens. Exact request
+    // counters stay under providerMetadata.cursor.*Raw.
     const tokenDetails = session.tokenDetails
     const occupancyDetails =
       tokenDetails && tokenDetails.usedTokens > 0 ? tokenDetails : undefined
@@ -5483,12 +5488,45 @@ export async function pump(
     // like one model call; the turn's last step reconciles the catalog-priced
     // aggregate counters. Either way its token total stays the occupancy snapshot.
     const billing = session.billing
+    const stepOutput = te
+      ? billingLedger.outstandingOutput(billing.key)
+      : { output: estimateTokens(stepOutputChars), reasoning: estimateTokens(stepReasoningChars) }
+    stepOutputChars = 0
+    stepReasoningChars = 0
+    // A tool step costs what a one-call estimate with a single output token
+    // would: held Runs split into many steps already overstate cached input,
+    // and pricing the estimated output on top would bill ahead of TurnEnded.
+    const estimatePrices = !te && occupancyDetails
+      ? hostStepPrices(billing.cost, occupancyDetails.usedTokens - 1)
+      : undefined
+    const targetUsd = !billing.cost || !occupancyDetails
+      ? undefined
+      : te
+        ? billingLedger.outstanding(billing.key)
+        : shapeStepUsage({
+            usedTokens: occupancyDetails.usedTokens,
+            prefixTokens: billing.prefixTokens,
+            outputTokens: 1,
+            prices: estimatePrices,
+          }).costUsd
+    // Estimated output that target cannot carry is left for TurnEnded to report.
+    const stepOutputTokens = !occupancyDetails
+      ? 0
+      : Math.min(
+          occupancyDetails.usedTokens,
+          Math.max(1, stepOutput.output),
+          estimatePrices && targetUsd !== undefined
+            ? maxOutputWithinUsd(occupancyDetails.usedTokens, estimatePrices, targetUsd)
+            : Number.POSITIVE_INFINITY,
+        )
     const shaped = occupancyDetails && !settledUsage
       ? shapeStepUsage({
           usedTokens: occupancyDetails.usedTokens,
           prefixTokens: billing.prefixTokens,
-          prices: hostStepPrices(billing.cost, occupancyDetails.usedTokens - 1),
-          ...(te && billing.cost ? { targetUsd: billingLedger.outstanding(billing.key) } : {}),
+          outputTokens: stepOutputTokens,
+          reasoningTokens: stepOutput.reasoning,
+          prices: hostStepPrices(billing.cost, occupancyDetails.usedTokens - stepOutputTokens),
+          ...(targetUsd !== undefined ? { targetUsd } : {}),
         })
       : undefined
     const stepCostUsd = shaped?.costUsd ?? 0
@@ -5555,6 +5593,7 @@ export async function pump(
         occupancyValidationCounters(
           occupancyDetails,
           { usedTokens: cached, maxTokens: occupancyDetails.maxTokens },
+          usage.outputTokens.total ?? 0,
         ),
         usage,
         occupancyDetails,
@@ -5583,15 +5622,22 @@ export async function pump(
       if (reason.unified === "tool-calls") scheduleHeldRunSave(session)
     }
     if (delivered && shaped && occupancyDetails) {
-      billingLedger.recordBilled(billing.key, shaped.costUsd, te ? undefined : billing)
+      billingLedger.recordBilled(billing.key, shaped.costUsd, te ? undefined : billing, {
+        output: shaped.usage.outputTokens.total ?? 0,
+        reasoning: shaped.usage.outputTokens.reasoning ?? 0,
+      })
       billing.prefixTokens = occupancyDetails.usedTokens
     }
     const booked = billingLedger.totals(billing.key)
+    const bookedOutput = billingLedger.outputTotals(billing.key)
     trace(
       `billing: step=${te ? "turn-end" : "estimate"} pricing=${billing.cost ? "priced" : "unpriced"} ` +
         `delivered=${delivered} stepUsd=${(delivered ? stepCostUsd : 0).toFixed(6)} ` +
         `sessionRealUsd=${booked.realUsd.toFixed(6)} sessionBilledUsd=${booked.billedUsd.toFixed(6)} ` +
-        `sessionEstimatedUsd=${billingLedger.estimated(billing.key).toFixed(6)} key=${billing.key}`,
+        `sessionEstimatedUsd=${billingLedger.estimated(billing.key).toFixed(6)} ` +
+        `stepOutput=${delivered && shaped ? shaped.usage.outputTokens.total ?? 0 : 0} ` +
+        `sessionRealOutput=${bookedOutput.real.output} sessionReportedOutput=${bookedOutput.reported.output} ` +
+        `key=${billing.key}`,
     )
   }
 
@@ -5980,6 +6026,9 @@ export async function pump(
       }
       const turnEnded = iu.turn_ended as Record<string, unknown>
       recordTurnEndedCost(session, turnEnded)
+      // TurnEnded counts what this Run streamed; a reopened Run estimates only its own output.
+      stepOutputChars = 0
+      stepReasoningChars = 0
       if (session.openCodeSessionId) finishEmittedStep(session.openCodeSessionId, session.conversationId)
       confirmRunImagesAtTurnEnd(session)
       await persistTerminalCheckpoint(session)
@@ -7870,20 +7919,30 @@ export function estimateTokens(chars: number): number {
   return Math.ceil(chars / 4)
 }
 
+/** Characters of model output in a part streamed to the host. */
+function streamedOutputChars(part: V3Part): number {
+  if (part.type === "text-delta" || part.type === "reasoning-delta") return part.delta.length
+  if (part.type === "tool-call" && !part.providerExecuted) return part.input.length
+  return 0
+}
+
 /**
- * Add the catalog-priced cost for a finished Run to its session's ledger. Called
- * once per `TurnEnded`, including Runs no OpenCode step reports (a drained
- * prior Run, a progress-only continuation); a later priced turn-end attempts to settle it.
+ * Add the catalog-priced cost and output tokens for a finished Run to its
+ * session's ledger. Called once per `TurnEnded`, including Runs no OpenCode step
+ * reports (a drained prior Run, a progress-only continuation); a later turn-end
+ * attempts to settle them.
  */
 function recordTurnEndedCost(session: CursorSession, turnEnded: Record<string, unknown>): void {
-  const realUsd = turnEndedCostUsd(
-    session.billing.cost,
-    cursorUsageCountersFromTurnEnded(turnEnded),
-    session.tokenDetails?.usedTokens ?? 0,
+  const counters = cursorUsageCountersFromTurnEnded(turnEnded)
+  const realUsd = turnEndedCostUsd(session.billing.cost, counters, session.tokenDetails?.usedTokens ?? 0)
+  billingLedger.recordReal(session.billing.key, realUsd ?? 0, session.billing, {
+    output: counters.outputTokens,
+    reasoning: counters.reasoningTokens,
+  })
+  trace(
+    `billing: turn real=${realUsd === undefined ? "unpriced" : realUsd.toFixed(6)} ` +
+      `output=${counters.outputTokens} reasoning=${counters.reasoningTokens} key=${session.billing.key}`,
   )
-  if (realUsd === undefined) return
-  billingLedger.recordReal(session.billing.key, realUsd, session.billing)
-  trace(`billing: turn real=${realUsd.toFixed(6)} key=${session.billing.key}`)
 }
 
 /** Preserve exact request-local Cursor counters as diagnostics. */

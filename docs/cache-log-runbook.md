@@ -195,7 +195,7 @@ Every completed Run emits `turn usage validation:`. Begin with `status`:
   category sum disagreed with its own breakdown total. Inspect the individual
   checks before attributing it to provider accounting. Occupancy finishes
   (tool-call and TurnEnded/stop) validate against
-  occupancy-shaped counters (`output=1`, `cacheRead=prior`); aggregate
+  occupancy-shaped counters (reported output plus the shaped input/cache split); aggregate
   TurnEnded request ratios live on `finish:` / `cache diagnosis:` and are not
   required to equal the occupancy prefix ratio. Preserve the complete line and
   the preceding checkpoint/TurnEnded lines before changing cache behavior.
@@ -211,10 +211,10 @@ Important fields:
 | `source=intermediate-zero` | Tool-call finish with no known checkpoint occupancy. Standard usage remains zero. |
 | `source=unavailable` | No checkpoint has ever supplied token details. Standard usage remains zero rather than pretending aggregate TurnEnded usage is context occupancy. |
 | `cursor=used/max(percent)` | Cursor's authoritative context occupancy. |
-| `occupancyTotal` | Occupancy-shaped validation counters: exactly `usedTokens`, split into `usedTokens - 1` input and one output token (both zero for an empty snapshot). Every finish with token details validates against these; disagreement with `sentTotal` is a mismatch. |
+| `occupancyTotal` | Occupancy-shaped validation counters: exactly `usedTokens`, split into reported output and the remaining input (both zero for an empty snapshot). Every finish with token details validates against these; disagreement with `sentTotal` is a mismatch. |
 | `rawTotal` | Only on a finish without token details: aggregate `TurnEnded` input + output, request work rather than context occupancy. |
 | `sentTotal` | AI SDK input + output sent to OpenCode. With token details, this must equal Cursor `usedTokens`. |
-| `occupancyCachedRatio` | Cached input divided by `usedTokens - 1`, with the cached prefix bounded to the available input. TurnEnded request cache ratios are on `finish:` / cache diagnosis, never here. (`rawCachedRatio` appears instead only beside `rawTotal`.) |
+| `occupancyCachedRatio` | Shaped cached input divided by `usedTokens - reported output`, bounded to the available input. TurnEnded request cache ratios are on `finish:` / cache diagnosis, never here. (`rawCachedRatio` appears instead only beside `rawTotal`.) |
 | `sentCachedRatio` | Occupancy (`cacheRead` + `cacheWrite`) / sent input. Should match `occupancyCachedRatio`. |
 | `breakdownMatch` | `true`: category sum and breakdown total match current occupancy/limit. `stale`: self-consistent breakdown with a different occupancy or limit. `false`: category sum disagrees with breakdown total. `unavailable`: no breakdown. |
 
@@ -224,9 +224,10 @@ the counters behind it, labelled by where they come from:
 - `raw*` (only with `reason=stop`): Cursor's `TurnEnded` counters for the whole
   held Run, plus `occupancyPrefixCache` (the prior turn's context).
 - `occupancy*` (tool-call boundaries with a snapshot,
-  `source=occupancy-checkpoint-*`): `occupancyIn` is current `usedTokens - 1` (zero for an empty snapshot),
+  `source=occupancy-checkpoint-*`): `occupancyIn` is current `usedTokens - reported output` (zero for an empty snapshot),
   `occupancyCacheRead` / `occupancyCacheWrite` the split the step was billed
-  with — the previous step's context as cache read (see `billing:`).
+  with, adjusted from the previous step's cached context to carry output at its
+  output rate (see `billing:`).
 - `est*` (`source=intermediate-zero`, before any checkpoint with token
   details): the provider's char/4 estimate. Usage sent is zero.
 
@@ -245,12 +246,23 @@ prefix was recorded:
 | `stepUsd` | What this step bills on both hosts (OpenCode 2 from its tokens, OpenCode 1.x from `copilot.totalNanoAiu`). |
 | `sessionRealUsd` / `sessionBilledUsd` | Confirmed catalog-priced cost and accepted host charges for the OpenCode session (in memory, since provider start). |
 | `sessionEstimatedUsd` | Unconfirmed charges owned by Runs that have not supplied terminal counters. Only the matching Run's counters replace its estimates; interrupted Runs do not create credits against later Runs. |
+| `stepOutput` | Output accepted by this finish: a characters / 4 estimate on tool steps, or outstanding measured output at turn-end, bounded to occupancy with a one-token display minimum. Reasoning is estimated separately and reconciled within its owning Run. |
+| `sessionRealOutput` / `sessionReportedOutput` | Cursor's measured output and output accepted by host finishes. Estimates or the display minimum can make reported output higher; that surplus never reduces a later Run's output. |
 | `delivered` | Whether the stream consumer accepted the finish; ledger totals contain accepted finishes only. |
 | `pricing=unpriced` | No published rate (`default`/Auto): nothing is billed. |
 
 The outstanding balance is `sessionRealUsd + sessionEstimatedUsd -
 sessionBilledUsd`, including rounding and the minimum/maximum charge the
 snapshot can carry; it may persist across turns.
+
+Output reconciliation is separate from cost settlement. Only a Run's own
+delivered estimates are subtracted from its counters. Measured output that no
+accepted finish could carry waits for a later turn-end. Already delivered
+overestimates cannot be retracted. Reasoning that no remaining output can carry
+is not attributed to later Runs, and the reported totals still describe only
+what was actually delivered. Output balances share the cost ledger's process
+lifetime and bounded session retention. Per-step output and tok/s remain
+approximate; `*Raw` retains Cursor's exact Run counters.
 
 The ledger's `real` label refers to counters priced at catalog rates, not a
 reported invoice amount. Aggregate counters cannot identify per-call pricing
