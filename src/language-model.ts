@@ -547,6 +547,30 @@ function waitsForNetwork(failure: CursorProviderError, policy: CursorRetryPolicy
   return policy.maxAttempts === undefined && failure.transient && isOfflineFailure(failure)
 }
 
+/** An outage has no open Run for the native host's Stop listener to cancel. */
+async function waitForNetwork(
+  outage: OfflineWait,
+  failure: CursorProviderError,
+  owner: { signal?: AbortSignal; stoppedWithSessionId?: string; requestedAt: number },
+): Promise<void> {
+  const stop = new AbortController()
+  const cancel = () => stop.abort()
+  owner.signal?.addEventListener("abort", cancel, { once: true })
+  const unsubscribe = onHostInterrupt((sessionId, reason, at) => {
+    if (reason !== "shutdown" && sessionId && sessionId === owner.stoppedWithSessionId && owner.requestedAt <= at) cancel()
+  })
+  const previousStop = owner.stoppedWithSessionId ? hostInterrupts.get(owner.stoppedWithSessionId) : undefined
+  if (owner.signal?.aborted || (previousStop && owner.requestedAt < previousStop.at)) cancel()
+  try {
+    if (stop.signal.aborted) throw new CursorLocalCancellationError("Cursor retry cancelled")
+    await waitOffline(outage, failure, stop.signal)
+    if (stop.signal.aborted) throw new CursorLocalCancellationError("Cursor retry cancelled")
+  } finally {
+    owner.signal?.removeEventListener("abort", cancel)
+    unsubscribe()
+  }
+}
+
 function sleepForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(new CursorLocalCancellationError("Cursor retry cancelled"))
   return new Promise((resolve, reject) => {
@@ -1017,13 +1041,14 @@ export function createCursorLanguageModel(
     const retryPolicy = resolveRetryPolicy(options.retry)
     const retryBudget = turnRetryBudget(opencodeSessionKey(callOptions),
       retryTurnKey(callOptions.prompt), retryTurnKey(callOptions.prompt, true))
+    const requestedAt = Date.now()
     let outage: OfflineWait | undefined
     for (;;) {
       try {
-        return await doStreamImpl(modelId, options, callOptions, retryPolicy, retryBudget)
+        return await doStreamImpl(modelId, options, callOptions, retryPolicy, retryBudget, requestedAt)
       } catch (error) {
         try {
-          if (callOptions.abortSignal?.aborted) {
+          if (error instanceof CursorLocalCancellationError || callOptions.abortSignal?.aborted) {
             forgetRetryBudget(opencodeSessionKey(callOptions), retryBudget)
             throw new CursorLocalCancellationError("Cursor Run setup cancelled", error)
           }
@@ -1039,9 +1064,15 @@ export function createCursorLanguageModel(
               `err=${failure.message} — waiting for the network`)
             retryBudget.stallStartedAt = undefined
             try {
-              await waitOffline(outage, failure, callOptions.abortSignal)
+              await waitForNetwork(outage, failure, {
+                signal: callOptions.abortSignal,
+                stoppedWithSessionId: opencodeSessionKey(callOptions),
+                requestedAt,
+              })
             } catch (waitError) {
-              if (callOptions.abortSignal?.aborted) forgetRetryBudget(opencodeSessionKey(callOptions), retryBudget)
+              if (waitError instanceof CursorLocalCancellationError || callOptions.abortSignal?.aborted) {
+                forgetRetryBudget(opencodeSessionKey(callOptions), retryBudget)
+              }
               throw waitError
             }
             continue
@@ -1098,6 +1129,7 @@ async function doStreamImpl(
   callOptions: LanguageModelV3CallOptions,
   retryPolicy: CursorRetryPolicy,
   retryBudget: RetryBudget,
+  requestedAt: number,
 ): Promise<LanguageModelV3StreamResult> {
   await restoreSessionState(opencodeSessionKey(callOptions), opencodeGlobalCacheDir())
   const rewriteSessionKey = opencodeSessionKey(callOptions)
@@ -1126,7 +1158,10 @@ async function doStreamImpl(
   const credentialRenewable = Boolean(options.getAccessToken)
     || (!options.accessToken && options.apiKey !== undefined && isExchangeableApiKey(options.apiKey))
   let prefetchedToken: string | undefined
-  const requestedAt = Date.now()
+  const recoveryStop = new AbortController()
+  const runSignal = callOptions.abortSignal
+    ? AbortSignal.any([callOptions.abortSignal, recoveryStop.signal])
+    : recoveryStop.signal
   // pumpWithRecovery owns the complete per-turn attempt budget.  Opening a
   // replacement session here must be a single attempt; otherwise setup retry
   // loops nest inside recovery and `maxAttempts` no longer caps total Runs.
@@ -1138,7 +1173,7 @@ async function doStreamImpl(
     const token = prefetched !== undefined && !forceRefresh
       ? prefetched
       : await resolveRunBearerToken(options, forceRefresh)
-    const opened = await startSession(modelId, token, callOptions, options, { ...startOptions, requestedAt })
+    const opened = await startSession(modelId, token, { ...callOptions, abortSignal: runSignal }, options, { ...startOptions, requestedAt })
     cancelIfHostStoppedSince(opened)
     return opened
   }
@@ -1349,7 +1384,7 @@ async function doStreamImpl(
             activeSession = await pumpWithRecovery({
               initialSession: activeSession,
               controller,
-              abortSignal: callOptions.abortSignal,
+              abortSignal: runSignal,
               retryPolicy,
               retryBudget,
               canRebaseFromHistory: (failed) => {
@@ -1432,6 +1467,9 @@ async function doStreamImpl(
           cancelForHostInterrupt(activeSession, "stream-cancelled")
           return
         }
+        // Recovery closes the failed Run before waiting. There is then no
+        // active Run to cancel, but the consumer still owns that wait.
+        if (pumpingThisStream && activeSession.closed) recoveryStop.abort()
         trace("ReadableStream cancel() → closeUnlessPending")
         if (!activeSession.hostInterrupted) sessionManager.closeUnlessPending(activeSession)
       },
@@ -1715,7 +1753,11 @@ export async function pumpWithRecovery(input: {
         )
         retryBudget.stallStartedAt = undefined
         sessionManager.close(pumpedSession, "remote-error", failure)
-        await waitOffline(outage, failure, input.abortSignal)
+        await waitForNetwork(outage, failure, {
+          signal: input.abortSignal,
+          stoppedWithSessionId: stoppedWith(pumpedSession),
+          requestedAt: pumpedSession.requestedAt ?? pumpedSession.createdAt,
+        })
         await reopenAttempt(pumpedSession, failure, checkpoint)
         attempt--
         continue

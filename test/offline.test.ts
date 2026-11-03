@@ -73,7 +73,23 @@ describe("offline wait", () => {
     await waitOffline(outage, dns())
     const exhausted = await waitOffline(outage, dns()).then(() => undefined, (error: unknown) => error)
     expect(exhausted).toBeInstanceOf(CursorRetryExhaustedError)
-    expect((exhausted as Error).message).toBe("Cursor Run failed after 4 attempts: Cursor stayed unreachable for 1 minutes")
+    expect((exhausted as Error).message).toBe("Cursor Run failed after 3 attempts: Cursor stayed unreachable for 1 minute")
+  })
+
+  it("counts the current failed attempt when the window expires before a wait starts", async () => {
+    let now = 0
+    setOfflineClockForTests({ now: () => now, windowMs: 1_000 })
+    const outage = startOfflineWait()
+    now = 1_000
+    await expect(waitOffline(outage, dns())).rejects.toMatchObject({ attempts: 1 })
+  })
+
+  it("keeps cyclic and non-error causes bounded", () => {
+    const cyclic = { cause: undefined as unknown }
+    cyclic.cause = cyclic
+    expect(isOfflineFailure(cyclic)).toBe(false)
+    expect(isOfflineFailure(null)).toBe(false)
+    expect(isOfflineFailure("ENOTFOUND")).toBe(false)
   })
 
   it("cancels the wait on Stop, including a Stop before it starts", async () => {

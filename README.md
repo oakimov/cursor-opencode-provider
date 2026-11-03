@@ -362,8 +362,10 @@ resolution or routing failed before any host answered (`ENOTFOUND`, `EAI_AGAIN`,
 `ENETDOWN`, `ENETUNREACH`, `EHOSTDOWN`, `EHOSTUNREACH`, also when resolving an
 HTTPS proxy), does not spend those counts. The turn retries with a backoff that
 grows to 30 seconds, for up to 3 hours per outage; a Run that opens starts a
-new outage window. A host name that never resolves is waited out the same way,
-and Stop cancels the wait. Refused or reset connections, connect timeouts and
+new outage window. A host name that never resolves is waited out the same way.
+Stop cancels the wait on both OpenCode majors, including before a Run opens;
+cancelling the SDK stream cancels a recovery wait too. Nested name-resolution
+errors from connection discovery follow the same policy. Refused or reset connections, connect timeouts and
 silence still spend the counts above. Replay guards still apply: a turn that
 already did work and has no checkpoint to resume is not replayed. An explicit
 `retry.maxAttempts` turns this wait off.

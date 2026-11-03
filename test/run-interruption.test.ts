@@ -17,6 +17,7 @@ import { CursorRunInterruptedError } from "../src/transport/connect.js"
 import { CursorAuthError, CursorLocalCancellationError, CursorRetryExhaustedError, CursorServerError, CursorTransportError, hostFacingError } from "../src/errors.js"
 import { newRetryBudget } from "../src/retry-budget.js"
 import { setOfflineClockForTests } from "../src/offline.js"
+import { notifyHostInterrupt } from "../src/host-interrupt.js"
 import { writeStreamMessage } from "../src/stream-write.js"
 import { sessionFixture } from "./session-fixture.js"
 
@@ -596,6 +597,31 @@ describe("interrupted Cursor Run handling", () => {
         recover: async () => { opens++; return fakeSession("unexpected", [turnEnded()]) },
       })).rejects.toBeInstanceOf(CursorLocalCancellationError)
       expect(opens).toBe(0)
+    } finally {
+      setOfflineClockForTests(undefined)
+    }
+  })
+
+  it("stops a recovery outage on the native host interrupt without an aborted signal", async () => {
+    const initial = fakeSession("native-stop-outage", [])
+    initial.openCodeSessionId = "ses_native_stop_outage"
+    initial.requestedAt = Date.now() - 100
+    let opens = 0
+    setOfflineClockForTests({ now: () => 0, sleep: async (_delay, signal) => {
+      await notifyHostInterrupt(initial.openCodeSessionId, "user")
+      if (signal?.aborted) throw new CursorLocalCancellationError("Cursor retry cancelled")
+    } })
+    try {
+      await expect(pumpWithRecovery({
+        initialSession: initial,
+        controller: controller([]),
+        retryPolicy: { baseDelayMs: 1, maxDelayMs: 1 },
+        recover: async () => {
+          if (++opens === 1) throw offline()
+          return fakeSession("unexpected-reopen", [turnEnded()])
+        },
+      })).rejects.toBeInstanceOf(CursorLocalCancellationError)
+      expect(opens).toBe(1)
     } finally {
       setOfflineClockForTests(undefined)
     }

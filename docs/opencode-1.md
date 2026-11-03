@@ -187,6 +187,10 @@ stored messages are preserved.
 
 ## Interrupted model requests
 
+Name-resolution and routing outages wait inside the provider under the
+[shared retry limits](../README.md#retry-limits). Stop cancels that wait,
+including while a turn is opening or recovering.
+
 OpenCode retries a transient failure after only text or reasoning when the
 turn has no new checkpoint. An unfinished tool display row also permits retry
 if no exec or started tool lifecycle arrived; it closes without execution.

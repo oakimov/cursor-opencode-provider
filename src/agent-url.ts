@@ -9,6 +9,7 @@ import {
   CursorProviderError,
   CursorServerError,
   CursorTransportError,
+  offlineNetworkCode,
   toCursorProviderError,
   type CursorProviderErrorOptions,
 } from "./errors.js"
@@ -103,6 +104,7 @@ export async function resolveAgentUrl(
       const reason = errorMessage(err)
       trace(`agent-url: GetServerConfig failed (${reason}); no fallback agent host will be used`)
       const failure = toCursorProviderError(err, { replaySafe: true })
+      const networkCode = offlineNetworkCode(failure)
       return { failure: {
         message: failure.message,
         origin: failure.origin,
@@ -113,6 +115,9 @@ export async function resolveAgentUrl(
         rstCode: failure.rstCode,
         code: failure.code,
         retryAfterMs: failure.retryAfterMs,
+        // Share only the network code, not an arbitrary fetch error or its
+        // module graph. Node fetch keeps DNS errors on cause, not on code.
+        cause: networkCode ? { code: networkCode } : undefined,
       } }
     } finally {
       _inflight.delete(cacheKey)

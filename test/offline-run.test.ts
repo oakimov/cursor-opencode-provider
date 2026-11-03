@@ -4,6 +4,8 @@ import http2 from "node:http2"
 import os from "node:os"
 import path from "node:path"
 import { createCursor } from "../src/index.js"
+import { CursorLocalCancellationError } from "../src/errors.js"
+import { notifyHostInterrupt } from "../src/host-interrupt.js"
 import { setHostCacheDirOverride } from "../src/context/paths.js"
 import { resetTurnStateForTests, settleRunSavesForTests } from "../src/language-model.js"
 import { mapAvailableModelsResponse, writeCache } from "../src/models.js"
@@ -27,6 +29,7 @@ const savedProxy = new Map<string, string | undefined>()
 let server: http2.Http2Server
 let client: http2.ClientHttp2Session
 let runs = 0
+let dropNextRun = false
 
 function frame(payload: Uint8Array): Buffer {
   const header = Buffer.alloc(5)
@@ -60,6 +63,11 @@ beforeAll(async () => {
         pending = pending.subarray(5 + length)
         if (!message.run_request) continue
         runs++
+        if (dropNextRun) {
+          dropNextRun = false
+          stream.end()
+          continue
+        }
         stream.write(frame(reply))
         stream.write(frame(turnEnded))
       }
@@ -89,6 +97,7 @@ afterEach(async () => {
   setOfflineClockForTests(undefined)
   setHostCacheDirOverride(undefined)
   runs = 0
+  dropNextRun = false
 })
 
 afterAll(async () => {
@@ -181,4 +190,99 @@ it("stops waiting while opening the turn on Stop", async () => {
   })
   expect(calls).toBe(1)
   expect(runs).toBe(0)
+})
+
+it("stops a setup outage on the native host interrupt without an aborted signal", async () => {
+  let calls = 0
+  setOfflineClockForTests({ now: () => 0, sleep: async (_delay, signal) => {
+    await notifyHostInterrupt("ses_offline_run", "user", Date.now() + 1)
+    if (signal?.aborted) throw new CursorLocalCancellationError("Cursor retry cancelled")
+  } })
+  await withModel(async () => {
+    if (++calls === 1) throw networkError("ENOTFOUND")
+    return "example-token"
+  }, async (model) => {
+    await expect(model.doStream(call())).rejects.toThrow("cancelled")
+  })
+  expect(calls).toBe(1)
+  expect(runs).toBe(0)
+})
+
+it("honors a native Stop received before setup enters its outage wait", async () => {
+  let calls = 0
+  let sleeps = 0
+  setOfflineClockForTests({ now: () => 0, sleep: async () => { sleeps++ } })
+  await withModel(async () => {
+    calls++
+    await notifyHostInterrupt("ses_offline_run", "user", Date.now() + 1)
+    throw networkError("ENOTFOUND")
+  }, async (model) => {
+    await expect(model.doStream(call())).rejects.toThrow("cancelled")
+  })
+  expect(calls).toBe(1)
+  expect(sleeps).toBe(0)
+  expect(runs).toBe(0)
+})
+
+it("keeps the outage wait through another session's Stop and a shutdown save", async () => {
+  let calls = 0
+  setOfflineClockForTests({ now: () => 0, sleep: async (_delay, signal) => {
+    await notifyHostInterrupt("ses_other_offline_run", "user", Date.now() + 1)
+    await notifyHostInterrupt(undefined, "shutdown")
+    expect(signal?.aborted).toBe(false)
+  } })
+  await withModel(async () => {
+    if (++calls === 1) throw networkError("ENOTFOUND")
+    return "example-token"
+  }, async (model) => {
+    expect(await drain((await model.doStream(call())).stream)).toContain("finish")
+  })
+  expect(calls).toBe(2)
+  expect(runs).toBe(1)
+})
+
+for (const code of ["EAI_AGAIN", "EHOSTDOWN"]) {
+  it(`waits out ${code} from the credential source before opening the turn`, async () => {
+    let calls = 0
+    setOfflineClockForTests({ now: () => 0, sleep: async () => {} })
+    await withModel(async () => {
+      if (++calls === 1) throw networkError(code)
+      return "example-token"
+    }, async (model) => {
+      expect(await drain((await model.doStream(call())).stream)).toContain("finish")
+    })
+    expect(calls).toBe(2)
+    expect(runs).toBe(1)
+  })
+}
+
+it("cancels the recovery wait when the stream consumer cancels without a host event", async () => {
+  dropNextRun = true
+  let calls = 0
+  let cancelled = false
+  let cancelStream: (() => Promise<void>) | undefined
+  let waited!: () => void
+  const waiting = new Promise<void>((resolve) => { waited = resolve })
+  setOfflineClockForTests({ now: () => 0, sleep: async (_delay, signal) => {
+    try {
+      await cancelStream!()
+      cancelled = signal?.aborted === true
+      // Settle the pump even before the fix, so this regression leaks no wait.
+      throw new CursorLocalCancellationError("Cursor retry cancelled")
+    } finally {
+      waited()
+    }
+  } })
+  await withModel(async () => {
+    if (++calls > 1) throw networkError("ENOTFOUND")
+    return "example-token"
+  }, async (model) => {
+    const { stream } = await model.doStream(call())
+    cancelStream = () => stream.cancel()
+    await waiting
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(cancelled).toBe(true)
+  })
+  expect(calls).toBe(2)
+  expect(runs).toBe(1)
 })

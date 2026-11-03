@@ -2,7 +2,7 @@ import {
   CursorLocalCancellationError,
   CursorRetryExhaustedError,
   CursorTransportError,
-  errorCode,
+  offlineNetworkCode,
   type CursorProviderError,
 } from "./errors.js"
 
@@ -10,22 +10,6 @@ import {
 export const OFFLINE_RETRY_WINDOW_MS = 3 * 60 * 60_000
 const OFFLINE_BASE_DELAY_MS = 500
 const OFFLINE_MAX_DELAY_MS = 30_000
-
-/**
- * Local evidence that this computer has no usable network: name resolution or
- * routing failed before any host answered. A refused, reset or silent
- * connection means something answered or may still answer, so those failures
- * keep the normal retry budget. The reopen itself is the reachability check:
- * it uses the Run's own origin and proxy, which a separate probe would not.
- */
-const OFFLINE_CODES = new Set([
-  "ENOTFOUND",
-  "EAI_AGAIN",
-  "ENETDOWN",
-  "ENETUNREACH",
-  "EHOSTDOWN",
-  "EHOSTUNREACH",
-])
 
 export type OfflineClock = {
   now?: () => number
@@ -46,12 +30,13 @@ export function startOfflineWait(): OfflineWait {
   return { since: (testClock?.now ?? Date.now)(), attempts: 0 }
 }
 
-export function isOfflineFailure(error: unknown, seen = new Set<unknown>()): boolean {
-  if (!error || typeof error !== "object" || seen.has(error)) return false
-  seen.add(error)
-  const code = errorCode(error)
-  if (code && OFFLINE_CODES.has(code)) return true
-  return isOfflineFailure((error as { cause?: unknown }).cause, seen)
+/**
+ * Name-resolution/routing failures keep the outage window. Refused, reset or
+ * silent connections keep the normal budget. The reopen tests reachability
+ * through the Run's own origin and proxy, without a separate fixed-host probe.
+ */
+export function isOfflineFailure(error: unknown): boolean {
+  return offlineNetworkCode(error) !== undefined
 }
 
 /** Full-jitter backoff, capped, matching the Run retry delay shape. */
@@ -68,15 +53,18 @@ export async function waitOffline(wait: OfflineWait, failure: CursorProviderErro
   const now = testClock?.now ?? Date.now
   const sleep = testClock?.sleep ?? defaultSleep
   const windowMs = testClock?.windowMs ?? OFFLINE_RETRY_WINDOW_MS
+  // Each call follows one failed attempt. A wait that exhausts the window
+  // never opens another Run, so it must not count that unmade attempt.
+  wait.attempts++
   if (now() - wait.since >= windowMs) throw offlineWindowError(failure, wait, windowMs)
-  await sleep(offlineDelayMs(wait.attempts++), signal)
+  await sleep(offlineDelayMs(wait.attempts - 1), signal)
   if (now() - wait.since >= windowMs) throw offlineWindowError(failure, wait, windowMs)
 }
 
 function offlineWindowError(failure: CursorProviderError, wait: OfflineWait, windowMs: number): CursorRetryExhaustedError {
   const minutes = Math.max(1, Math.round(windowMs / 60_000))
-  return new CursorRetryExhaustedError(wait.attempts + 1, new CursorTransportError(
-    `Cursor stayed unreachable for ${minutes} minutes`,
+  return new CursorRetryExhaustedError(wait.attempts, new CursorTransportError(
+    `Cursor stayed unreachable for ${minutes} ${minutes === 1 ? "minute" : "minutes"}`,
     { transient: true, replaySafe: true, code: failure.code, cause: failure },
   ))
 }
