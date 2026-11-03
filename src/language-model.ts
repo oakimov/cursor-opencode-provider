@@ -2474,6 +2474,7 @@ async function startSession(
     ...(historyImages ? { historyImages } : {}),
     tokenDetails: priorTokenDetails,
     tokenDetailsFresh: false,
+    occupancyHasMedia: images.length > 0,
     cacheDiagnostics: {
       sessionKey,
       conversationId,
@@ -3382,12 +3383,13 @@ export async function drainSessionUntilTurnEnded(
         if (bytes && bytes.length > 0) {
           cancellationCheckpoint = true
           if (session.cacheDiagnostics) session.cacheDiagnostics.checkpointUpdates++
-          setCheckpoint(session.conversationId, bytes)
+          setCheckpoint(session.conversationId, bytes, checkpointObservation(session))
           noteCheckpoint(session.openCodeSessionId, bytes)
           acceptResumeCheckpoint(session, bytes, frame)
           markEarlySteersCheckpointed(session.openCodeSessionId, session.sessionId)
           noteRunImageCheckpoint(session, bytes, frame)
-          const tokenDetails = decodeConversationTokenDetails(bytes)
+          const rawTokenDetails = decodeConversationTokenDetails(bytes)
+          const tokenDetails = rawTokenDetails?.usedTokens === 0 ? rawTokenDetails : checkpointTokenDetails(session.conversationId, bytes)
           if (tokenDetails && !(cancelling && tokenDetails.usedTokens === 0
             && (session.tokenDetails?.usedTokens ?? 0) > 0)) {
             if (session.cacheDiagnostics) session.cacheDiagnostics.tokenDetailUpdates++
@@ -3491,6 +3493,8 @@ export async function drainSessionUntilTurnEnded(
         outcome = "busy"
         break
       }
+      if (iu?.step_started && session.cacheDiagnostics) session.cacheDiagnostics.stepStarts++
+      if (iu?.step_completed && session.cacheDiagnostics) session.cacheDiagnostics.stepCompletes++
       if (iu?.heartbeat || iu?.step_started || iu?.step_completed) continue
       if (iu?.tool_call_completed) {
         // Display close of a call Cursor already has its answer for (the
@@ -4049,6 +4053,7 @@ async function deliverContinuationResultsNow(
             images,
           })
           if (images.length > 0) {
+            session.occupancyHasMedia = true
             deliveredImageHashes = r.imageHashes?.slice(0, images.length) ?? []
             trace(`continuation: ${images.length} tool-result image(s) on ${pending.resultField} execId=${r.execId}`)
           }
@@ -5389,7 +5394,9 @@ export async function pump(
     const occupancyDetails =
       tokenDetails && tokenDetails.usedTokens > 0 ? tokenDetails : undefined
     const contextSource: CursorContextUsageSource | undefined = tokenDetails
-      ? session.tokenDetailsFresh
+      ? tokenDetails.rawUsedTokens !== undefined
+        ? "checkpoint-held-spike"
+        : session.tokenDetailsFresh
         ? "checkpoint-current-run"
         : "checkpoint-previous-turn"
       : undefined
@@ -5873,21 +5880,23 @@ export async function pump(
       const bytes = normalizeCheckpointBytes(checkpointRaw)
       if (bytes && bytes.length > 0) {
         cacheDiagnostics.checkpointUpdates++
-        setCheckpoint(session.conversationId, bytes)
+        setCheckpoint(session.conversationId, bytes, checkpointObservation(session))
         noteCheckpoint(session.openCodeSessionId, bytes)
         if (!isPlanTurnEnding()) acceptResumeCheckpoint(session, bytes, frame)
         markEarlySteersCheckpointed(session.openCodeSessionId, session.sessionId)
         noteRunImageCheckpoint(session, bytes, frame)
-        const tokenDetails = decodeConversationTokenDetails(bytes)
+        const rawTokenDetails = decodeConversationTokenDetails(bytes)
+        const tokenDetails = rawTokenDetails?.usedTokens === 0 ? rawTokenDetails : checkpointTokenDetails(session.conversationId, bytes)
         if (tokenDetails && !(isPlanTurnEnding() && tokenDetails.usedTokens === 0
           && (session.tokenDetails?.usedTokens ?? 0) > 0)) {
           cacheDiagnostics.tokenDetailUpdates++
           session.tokenDetails = tokenDetails
           session.tokenDetailsFresh = true
         }
-        const context = tokenDetails
-          ? ` context=${tokenDetails.usedTokens}/${tokenDetails.maxTokens} ` +
-            `categories=${formatCursorTokenCategories(tokenDetails)}`
+        const context = rawTokenDetails
+          ? ` context=${rawTokenDetails.usedTokens}/${rawTokenDetails.maxTokens} ` +
+            `categories=${formatCursorTokenCategories(rawTokenDetails)}` +
+            (tokenDetails?.rawUsedTokens !== undefined ? ` acceptedContext=${tokenDetails.usedTokens} source=checkpoint-held-spike` : "")
           : " context=unavailable"
         trace(
           `checkpoint: stored ${bytes.length}B for conversationId=${session.conversationId}${context}`,
@@ -7833,6 +7842,16 @@ function streamedOutputChars(part: V3Part): number {
   if (part.type === "text-delta" || part.type === "reasoning-delta") return part.delta.length
   if (part.type === "tool-call" && !part.providerExecuted) return part.input.length
   return 0
+}
+
+function checkpointObservation(session: CursorSession) {
+  return {
+    // A pump can resume on a queued duplicate received before host results.
+    // Only an inbound step-start or a different Run advances the observation.
+    boundary: `${session.runId ?? session.sessionId}:${session.cacheDiagnostics?.stepStarts ?? 0}`,
+    model: session.cacheDiagnostics?.modelId,
+    bypass: session.occupancyHasMedia,
+  }
 }
 
 /**

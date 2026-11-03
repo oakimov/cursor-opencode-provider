@@ -463,6 +463,12 @@ These are failure lessons shared by both hosts, not a replacement for
   add step costs; Run-wide generation inflated tok/s. Use checkpoint occupancy,
   retain stale markers, and keep raw counters distinct from synthetic billing
   partitions (`test/usage-from-turn-ended.test.ts`).
+  Checkpoint pairs can carry identical token readings while other state changes;
+  a second pair member does not confirm an occupancy jump. Confirmation needs
+  an independent observation, and a pending reading must survive a zero-token
+  terminal state and restart. Keep the accepted count separate from resume
+  bytes, and match recovery readings by their full token evidence
+  (`test/checkpoint-occupancy.test.ts`, `test/checkpoint-occupancy-run.test.ts`).
 - **Book charges only after accepted delivery.** Cancelled estimates must not
   credit another Run. Aggregate counters cannot prove per-call tiers; compare
   both hosts' pricing formulas (`test/billing.test.ts`).

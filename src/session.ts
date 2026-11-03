@@ -193,6 +193,8 @@ export type DeliveryOutcome =
   | { kind: "missing"; reason: "missing-process-local-state"; framesWritten: number }
 
 export type CursorSession = {
+  /** Known media can change token occupancy without proportional character growth. */
+  occupancyHasMedia?: boolean
   /**
    * Stable per-Run-stream id (distinct from Cursor's own conversation_id).
    * Tags toolCallIds so two concurrent Run streams with overlapping exec ids
