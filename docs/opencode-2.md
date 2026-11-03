@@ -52,6 +52,13 @@ requirement fails, the next Cursor request reports the error and retries saving
 on a later request. No extra configuration is needed. See the
 [compaction acceptance checks](host-compat-acceptance.md#opencode-2-foreign-compaction).
 
+## Network interruptions
+
+Name-resolution and routing outages wait inside the provider under the
+[shared retry limits](../README.md#retry-limits). Native Stop cancels the wait
+even before a Run opens or while its replacement cannot connect. Another
+session's Stop does not cancel this turn.
+
 ## From npm
 
 ```json

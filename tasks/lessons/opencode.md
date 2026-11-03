@@ -232,6 +232,23 @@ These are failure lessons shared by both hosts, not a replacement for
   checkpoint; new output or stateful activity must prevent it
   (`AttemptReplaySafety`, `test/parallel-pump.test.ts`,
   `test/run-interruption.test.ts`, `test/run-error-host.test.ts`).
+- **Wait for the network only on local evidence, and let the reopen test it.**
+  The first offline wait ([#143](https://github.com/oakimov/cursor-opencode-provider/pull/143))
+  counted a refused connection and a proxy failure as offline and ended the wait
+  when a DNS lookup of a fixed API host succeeded. A refused Run then reopened
+  every half second for three hours, a proxy-only network that cannot resolve
+  that host stalled for three hours, and the existing suite started doing live
+  DNS. Classify by name-resolution and routing codes only, keep one outage's
+  backoff growing, respect an explicit `maxAttempts`, and clear the stall run
+  the skipped `reserveRetry` would have cleared (`test/offline.test.ts`,
+  `test/offline-run.test.ts`, `test/run-interruption.test.ts`). Keep the same
+  offline-code set in generic error classification, and preserve allowlisted
+  nested DNS/routing codes when sharing discovery failures across module graphs:
+  Node fetch puts them on `cause`. An outage has no live Run for the normal
+  interrupt listener to cancel; subscribe the wait itself to native Stop,
+  retain the original request time across setup retries, and connect consumer
+  cancellation to recovery waits. Cover pre-wait Stop and unrelated-session
+  events too. Count failed attempts rather than a final wait with no reopen.
 - **A helper must not take over its parent.** A smaller catalog was mistaken for
   a helper despite carrying the parent's pending result. Reconcile that result
   first; isolate genuine helpers (`test/fresh-turn-drain.test.ts`). An empty

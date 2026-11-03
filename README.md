@@ -357,6 +357,18 @@ OpenCode 2.x's interruption notices keep the same budget as the original request
 including when a plugin appends recognized `<system-reminder>` or
 `<system-update>` text parts. These notes remain in the request sent to Cursor;
 attachments and ordinary follow-up text still identify a new request.
+A failure that shows this computer has no usable network, because name
+resolution or routing failed before any host answered (`ENOTFOUND`, `EAI_AGAIN`,
+`ENETDOWN`, `ENETUNREACH`, `EHOSTDOWN`, `EHOSTUNREACH`, also when resolving an
+HTTPS proxy), does not spend those counts. The turn retries with a backoff that
+grows to 30 seconds, for up to 3 hours per outage; a Run that opens starts a
+new outage window. A host name that never resolves is waited out the same way.
+Stop cancels the wait on both OpenCode majors, including before a Run opens;
+cancelling the SDK stream cancels a recovery wait too. Nested name-resolution
+errors from connection discovery follow the same policy. Refused or reset connections, connect timeouts and
+silence still spend the counts above. Replay guards still apply: a turn that
+already did work and has no checkpoint to resume is not replayed. An explicit
+`retry.maxAttempts` turns this wait off.
 OpenCode may stop earlier under its own retry policy.
 
 Like Cursor CLI, an active Run with no pending host work fails after **30 seconds
