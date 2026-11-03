@@ -4,6 +4,7 @@ import http2 from "node:http2"
 import os from "node:os"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
+import { resetClientVersionCache } from "../src/protocol/client-version.js"
 import { bidiRunStream, closeCachedHttp2SessionsForTests, getSession } from "../src/transport/connect.js"
 
 // Each case runs in a child process against a local HTTP/2 server whose own
@@ -213,9 +214,12 @@ describe("cached HTTP/2 session ref", () => {
       connected.push(session)
       return session
     }) as typeof http2.connect)
-    const keys = ["HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"] as const
+    const keys = ["HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "CURSOR_CLIENT_VERSION"] as const
     const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
     for (const key of keys) delete process.env[key]
+    // A pinned version: resolving it otherwise fetches Cursor's installer and caches the result.
+    process.env.CURSOR_CLIENT_VERSION = "cli-session-ref-test"
+    resetClientVersionCache()
     const origin = "https://agentn.session-ref-test.cursor.sh"
     try {
       const session = await getSession(origin)
@@ -235,6 +239,7 @@ describe("cached HTTP/2 session ref", () => {
         if (saved[key] === undefined) delete process.env[key]
         else process.env[key] = saved[key]
       }
+      resetClientVersionCache()
       closeCachedHttp2SessionsForTests()
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }

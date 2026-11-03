@@ -64,6 +64,7 @@ import type {
   PermissionAssertInput,
 } from "../src/opencode2/types.js"
 import type { ModelInfo } from "../src/models.js"
+import { withTempHostCache } from "./host-cache.js"
 
 const DAY_S = 86_400
 
@@ -1142,7 +1143,7 @@ describe("opencode2 setup", () => {
     }
   })
 
-  test("the aisdk sdk hook resolves the token per Run, not when the SDK is built", async () => {
+  test("the aisdk sdk hook resolves the token per Run, not when the SDK is built", () => withTempHostCache(async () => {
     const { ctx, hooks } = fakeContext()
     let resolves = 0
     ctx.integration.connection = {
@@ -1161,9 +1162,9 @@ describe("opencode2 setup", () => {
     expect(resolves).toBe(before)
     expect(typeof cleanup).toBe("function")
     if (typeof cleanup === "function") await cleanup()
-  })
+  }))
 
-  test("a preloaded Cursor SDK still resolves current credentials before opening a Run", async () => {
+  test("a preloaded Cursor SDK still resolves current credentials before opening a Run", () => withTempHostCache(async () => {
     const { ctx, hooks } = fakeContext()
     const cleanup = await setupPlugin(ctx)
     await new Promise((resolve) => setTimeout(resolve, 0))
@@ -1206,7 +1207,7 @@ describe("opencode2 setup", () => {
     } finally {
       await cleanup()
     }
-  })
+  }))
 
   test("the sdk hook preserves another provider's preloaded SDK", async () => {
     const { ctx, hooks } = fakeContext()

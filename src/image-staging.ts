@@ -20,6 +20,8 @@
  */
 
 import { randomUUID } from "node:crypto"
+import fs from "node:fs"
+import path from "node:path"
 
 export type PendingCursorImage = {
   id: string
@@ -53,10 +55,14 @@ const MAX_PENDING = 8
 // graphs. Keep the one-use handles in the process registry so both graphs see
 // the same staged bytes. The UUID handle remains the only tool input.
 const PENDING_IMAGES = Symbol.for("cursor-opencode-provider.pending-images")
+const SAVING_IMAGES = Symbol.for("cursor-opencode-provider.saving-images")
 const globals = globalThis as typeof globalThis & {
   [PENDING_IMAGES]?: Map<string, PendingCursorImage>
+  [SAVING_IMAGES]?: Map<string, PendingCursorImage>
 }
 const pending = globals[PENDING_IMAGES] ??= new Map<string, PendingCursorImage>()
+/** Claimed images whose save, permission wait included, has not finished; they keep their path. */
+const saving = globals[SAVING_IMAGES] ??= new Map<string, PendingCursorImage>()
 
 export class StagedImageTooLargeError extends Error {
   constructor(bytes: number) {
@@ -100,7 +106,8 @@ export function stageCursorImage(input: StageCursorImageInput, now = Date.now())
 /**
  * Claim a staged image. Single use: a replayed or guessed id finds nothing, so
  * the commit tool cannot be driven twice or by a caller that never had a real
- * handle.
+ * handle. The claimed image keeps its path reserved until
+ * {@link finishCursorImageSave}.
  */
 export function takePendingCursorImage(
   id: string,
@@ -110,7 +117,60 @@ export function takePendingCursorImage(
   if (!image) return undefined
   pending.delete(id)
   if (now - image.createdAt > STAGED_IMAGE_TTL_MS) return undefined
+  saving.set(id, image)
   return image
+}
+
+/** The save of a claimed image ended, written or not; its path is free again. */
+export function finishCursorImageSave(id: string): void {
+  saving.delete(id)
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && Buffer.from(a.buffer, a.byteOffset, a.length)
+    .equals(Buffer.from(b.buffer, b.byteOffset, b.length))
+}
+
+/** Whether `target` is free for `data`: absent, or already holding those bytes. */
+function holdsOnlyBytes(target: string, data: Uint8Array): boolean {
+  for (const image of [...pending.values(), ...saving.values()]) {
+    if (image.path === target && !sameBytes(image.data, data)) return false
+  }
+  let stat: fs.Stats
+  try {
+    stat = fs.lstatSync(target)
+  } catch {
+    return true
+  }
+  // A link or directory is never overwritten through; the save refuses links.
+  if (!stat.isFile()) return false
+  if (stat.size !== data.length) return false
+  try {
+    return sameBytes(fs.readFileSync(target), data)
+  } catch {
+    return false
+  }
+}
+
+/** Names tried beside a taken one before an image is refused rather than overwrite a file. */
+const MAX_DISTINCT_NAMES = 100
+
+/**
+ * A Run's input images often share a file name (three different `cvs.png`).
+ * Cursor writes each to `assets/<name>`, so the later ones would replace the
+ * earlier. Keep an image whose name is taken by other bytes, on disk, staged or
+ * being saved, beside it as `<name>-<hash12><ext>`, or `<name>-<hash12>-<n><ext>`
+ * when that is taken too; the WriteResult reports that path.
+ */
+export function distinctInputImagePath(target: string, data: Uint8Array, hash: string): string {
+  if (holdsOnlyBytes(target, data)) return target
+  const extension = path.extname(target)
+  const stem = `${target.slice(0, target.length - extension.length)}-${hash.slice(0, 12)}`
+  for (let n = 1; n <= MAX_DISTINCT_NAMES; n++) {
+    const candidate = `${stem}${n === 1 ? "" : `-${n}`}${extension}`
+    if (holdsOnlyBytes(candidate, data)) return candidate
+  }
+  throw new Error(`No free name for the image beside ${target}; nothing was overwritten.`)
 }
 
 /** Drop a staged image whose turn ended without committing it. */
@@ -121,6 +181,7 @@ export function discardPendingCursorImage(id: string): void {
 /** Test seam. */
 export function clearPendingCursorImages(): void {
   pending.clear()
+  saving.clear()
 }
 
 export function pendingCursorImageCount(): number {
