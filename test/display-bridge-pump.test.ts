@@ -187,6 +187,7 @@ describe("display-only ToolCall pump bridge", () => {
   afterEach(() => {
     sessionManager.dispose()
     resetTurnStateForTests()
+    billingLedger.clear()
   })
 
   it("rejects a shell call with only a file path, then emits the corrected command", async () => {
@@ -1456,7 +1457,10 @@ describe("display-only ToolCall pump bridge", () => {
     const finish = parts.find((part) =>
       part.type === "finish" && part.finishReason?.unified === "tool-calls"
     )
-    expect(finish.usage.outputTokens.total).toBe(1)
+    // The step's output is estimated from the tool call it streamed.
+    const call = parts.find((part) => part.type === "tool-call")
+    expect(finish.usage.outputTokens).toEqual({ total: Math.ceil(call.input.length / 4), text: Math.ceil(call.input.length / 4), reasoning: 0 })
+    expect(finish.usage.outputTokens.total).toBeGreaterThan(1)
     expect(finish.usage.inputTokens.total + finish.usage.outputTokens.total).toBe(153_744)
     expect(finish.usage.inputTokens.cacheRead).toBe(123_651)
     expect(finish.providerMetadata).toEqual({
@@ -1493,11 +1497,17 @@ describe("display-only ToolCall pump bridge", () => {
     try {
       await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
       const finish = parts.find((part) => part.type === "finish" && part.finishReason?.unified === "tool-calls")
-      expect(finish.usage.inputTokens).toEqual({ total: 29_466, noCache: 6_522, cacheRead: 22_944, cacheWrite: 0 })
+      const output = Math.ceil(parts.find((part) => part.type === "tool-call").input.length / 4)
+      expect(finish.usage.outputTokens.total).toBe(output)
+      expect(finish.usage.inputTokens.total).toBe(29_467 - output)
+      // The estimate costs what a one-call step with a single output token did; the split carries the output.
       const usd = (6_522 * 2 + 22_944 * 0.5 + 6) / 1e6
-      expect(finish.providerMetadata.copilot.totalNanoAiu / 1e11).toBeCloseTo(usd, 9)
+      const input = finish.usage.inputTokens
+      const tokenUsd = (input.noCache * 2 + input.cacheRead * 0.5 + output * 6) / 1e6
+      expect(Math.abs(tokenUsd - usd)).toBeLessThan(2e-6)
+      expect(finish.providerMetadata.copilot.totalNanoAiu / 1e11).toBeCloseTo(tokenUsd, 9)
       expect(finish.providerMetadata.cursor.billing).toEqual({
-        stepUsd: usd, estimate: true, sessionRealUsd: 0, sessionBilledUsd: usd, sessionEstimatedUsd: usd,
+        stepUsd: tokenUsd, estimate: true, sessionRealUsd: 0, sessionBilledUsd: tokenUsd, sessionEstimatedUsd: tokenUsd,
       })
       // The next step reads this step's context from cache.
       expect(session.billing.prefixTokens).toBe(29_467)
@@ -1564,6 +1574,66 @@ describe("display-only ToolCall pump bridge", () => {
       const finish = nextParts.find((part) => part.type === "finish")
       expect(Math.abs(finish.providerMetadata.cursor.billing.stepUsd - 0.048)).toBeLessThan(2e-6)
       expect(Math.abs(billingLedger.outstanding(key))).toBeLessThan(2e-6)
+      // The abandoned Run's output estimate stays reported; the completed Run reports all of its own.
+      expect(finish.usage.outputTokens.total).toBe(500)
+      expect(billingLedger.outstandingOutput(key)).toEqual({ output: 0, reasoning: 0 })
+    } finally {
+      billingLedger.clear()
+    }
+  })
+
+  it.each([20, 1_000])("reports a held Run's output and reasoning once across its steps (thinking repeats: %s)", async (repeats) => {
+    // Counters of a recorded GPT 5.6 held Run (debug log TurnEnded wire fields 1-5).
+    const recorded = {
+      input_tokens: 4_433_942,
+      output_tokens: 18_118,
+      cache_read: 4_204_282,
+      cache_write: 229_585,
+      reasoning_tokens: 12_919,
+    }
+    const thinking = "Checking which subagent fits. ".repeat(repeats)
+    const text = "Delegating the investigation.".repeat(10)
+    const session = fakeSession([
+      encodeMessage("AgentServerMessage", { interaction_update: { thinking_delta: { text: thinking } } }),
+      textDeltaPayload(text),
+      rawExecPayload(34, 28, rawSubagentArgs()),
+      encodeMessage("AgentServerMessage", { interaction_update: { turn_ended: recorded } }),
+    ], [])
+    session.billing = { key: "ses_held_output", cost: { input: 2, output: 6, cache_read: 0.5 }, prefixTokens: 190_000 }
+    const parts: any[] = []
+    const controller = {
+      enqueue(part: unknown) { parts.push(part) },
+      close() {},
+      error(error: Error) { throw error },
+    } as unknown as ReadableStreamDefaultController<any>
+    try {
+      session.tokenDetails = { usedTokens: 210_000, maxTokens: 1_000_000 }
+      await pump(session, controller, { textId: "t", reasoningId: "r" })
+      const call = parts.find((part) => part.type === "tool-call")
+      sessionManager.resolve(session.sessionId, 34)
+      session.tokenDetails = { usedTokens: 228_566, maxTokens: 1_000_000 }
+      await pump(session, controller, { textId: "t", reasoningId: "r" })
+
+      const [toolStep, turnEnd] = parts.filter((part) => part.type === "finish")
+      const estimate = Math.ceil((thinking.length + text.length + call.input.length) / 4)
+      const reasoning = Math.ceil(thinking.length / 4)
+      expect(toolStep.usage.outputTokens).toEqual({ total: estimate, text: estimate - reasoning, reasoning })
+      expect(toolStep.usage.inputTokens.total).toBe(210_000 - estimate)
+      expect(toolStep.providerMetadata.cursor.billing.estimate).toBe(true)
+      expect(turnEnd.usage.outputTokens).toEqual({
+        total: 18_118 - estimate,
+        text: 18_118 - estimate - (12_919 - reasoning),
+        reasoning: 12_919 - reasoning,
+      })
+      expect(turnEnd.usage.inputTokens.total + turnEnd.usage.outputTokens.total).toBe(228_566)
+      expect(toolStep.usage.outputTokens.total + turnEnd.usage.outputTokens.total).toBe(18_118)
+      expect(toolStep.usage.outputTokens.reasoning + turnEnd.usage.outputTokens.reasoning).toBe(12_919)
+      expect(billingLedger.outstandingOutput(session.billing.key)).toEqual({ output: 0, reasoning: 0 })
+      // Both hosts still bill one amount: the step's tokens at catalog rates and its totalNanoAiu.
+      const input = turnEnd.usage.inputTokens
+      const tokenUsd = (input.noCache * 2 + input.cacheRead * 0.5 + turnEnd.usage.outputTokens.total * 6) / 1e6
+      expect(turnEnd.providerMetadata.cursor.billing.stepUsd).toBeCloseTo(tokenUsd, 12)
+      expect(turnEnd.providerMetadata.copilot.totalNanoAiu / 1e11).toBeCloseTo(tokenUsd, 9)
     } finally {
       billingLedger.clear()
     }
@@ -1987,14 +2057,14 @@ describe("display-only ToolCall pump bridge", () => {
 
     const finish = parts.find((part) => part.type === "finish")
     expect(finish).toBeDefined()
-    expect(finish!.usage.inputTokens.total).toBe(139)
+    expect(finish!.usage.inputTokens.total).toBe(100)
     expect(
       finish!.usage.inputTokens.noCache
         + finish!.usage.inputTokens.cacheRead
         + finish!.usage.inputTokens.cacheWrite,
-    ).toBe(139)
+    ).toBe(100)
     expect(finish!.usage.inputTokens.cacheWrite).toBe(0)
-    expect(finish!.usage.outputTokens).toEqual({ total: 1, text: 1, reasoning: 0 })
+    expect(finish!.usage.outputTokens).toEqual({ total: 40, text: 31, reasoning: 9 })
     expect(finish!.providerMetadata).toMatchObject({
       copilot: { totalNanoAiu: 0 },
       cursor: {
