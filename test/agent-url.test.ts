@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test"
+import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test"
 import { resolveAgentUrl, resetAgentUrlCache } from "../src/agent-url.js"
 import { CURSOR_API_HOST, SERVER_CONFIG_PATH } from "../src/shared.js"
 import { resetClientVersionCache } from "../src/protocol/client-version.js"
 import { useTempHostCache } from "./host-cache.js"
+import { isOfflineFailure } from "../src/offline.js"
 
 useTempHostCache()
 
@@ -137,6 +138,25 @@ describe("resolveAgentUrl", () => {
     await expect(resolveAgentUrl(fakeJwt(3600))).rejects.toThrow(
       "GetServerConfig network request failed",
     )
+  })
+
+  it("retains nested DNS failure codes for concurrent callers' offline waits", async () => {
+    const mock = spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("fetch failed", {
+      cause: Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }),
+    }))
+    try {
+      const failures = await Promise.all([
+        resolveAgentUrl(fakeJwt(3600)).catch((error: unknown) => error),
+        resolveAgentUrl(fakeJwt(3600)).catch((error: unknown) => error),
+      ])
+      for (const failure of failures) {
+        expect(failure).toMatchObject({ origin: "transport", transient: true, replaySafe: true })
+        expect(isOfflineFailure(failure)).toBe(true)
+      }
+      expect(failures[0]).not.toBe(failures[1])
+    } finally {
+      mock.mockRestore()
+    }
   })
 
   it("does not memoize empty agentUrlConfig — the next call retries and self-heals", async () => {

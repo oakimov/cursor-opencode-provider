@@ -295,15 +295,33 @@ export class CursorRetryExhaustedError extends CursorProviderError {
   }
 }
 
+const OFFLINE_NETWORK_CODES = new Set([
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ENETDOWN",
+  "ENETUNREACH",
+  "EHOSTDOWN",
+  "EHOSTUNREACH",
+])
+
+/** A local name-resolution/routing failure, including a fetch wrapper's cause. */
+export function offlineNetworkCode(error: unknown): string | undefined {
+  const seen = new Set<unknown>()
+  while (error && typeof error === "object" && !seen.has(error)) {
+    seen.add(error)
+    const code = errorCode(error)
+    if (code && OFFLINE_NETWORK_CODES.has(code)) return code
+    error = (error as { cause?: unknown }).cause
+  }
+  return undefined
+}
+
 const TRANSIENT_NETWORK_CODES = new Set([
+  ...OFFLINE_NETWORK_CODES,
   "ECONNABORTED",
   "ECONNREFUSED",
   "ECONNRESET",
-  "EHOSTUNREACH",
-  "ENETDOWN",
   "ENETRESET",
-  "ENETUNREACH",
-  "ENOTFOUND",
   "EPIPE",
   "ERR_HTTP2_GOAWAY_SESSION",
   "ERR_HTTP2_SESSION_ERROR",
@@ -389,7 +407,7 @@ export function toCursorProviderError(
     return error
   }
 
-  const code = errorCode(error)
+  const code = errorCode(error) ?? offlineNetworkCode(error)
   const name = error instanceof Error ? error.name : "Error"
   const message = error instanceof Error ? error.message : ""
   if (name.startsWith("Auth") || /access token|api key|authentication/i.test(message)) {
