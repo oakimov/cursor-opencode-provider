@@ -93,6 +93,17 @@ describe("offline wait", () => {
     }
   })
 
+  it("sleeps the real backoff when no test clock is set", async () => {
+    const random = spyOn(Math, "random").mockReturnValue(0)
+    try {
+      const outage = startOfflineWait()
+      await waitOffline(outage, dns(), new AbortController().signal)
+      expect(outage.attempts).toBe(1)
+    } finally {
+      random.mockRestore()
+    }
+  })
+
   it("uses a 3 hour window by default", () => {
     expect(OFFLINE_RETRY_WINDOW_MS).toBe(3 * 60 * 60_000)
   })
