@@ -231,6 +231,11 @@ The **1.18 v2** API and **OpenCode 2.x** are source-incompatible:
   stay final.
   Missing-blob recovery is limited to the initial control-only checkpoint path
   (`isSoleControlFrame`); unknown/mixed frames keep the normal replay barrier.
+- Only local evidence of no network (`isOfflineFailure`: name-resolution and
+  routing codes, anywhere in the cause chain) waits instead of spending the
+  budget, behind the same replay guards, never under an explicit `maxAttempts`.
+  The reopen is the reachability check; never probe a fixed host. One outage
+  shares its 3 h window and growing backoff; a Run that opens ends it.
 - Carry an uncheckpointed request only on its unchanged checkpoint; persist it
   on failure. Retry equality uses the previous attempt's own live text. New
   checkpoints, host Stop and history rebuild drop it; unseeded history must not

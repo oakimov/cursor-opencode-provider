@@ -5,7 +5,7 @@ import { createHash } from "node:crypto"
 import { APICallError } from "@ai-sdk/provider"
 import protobuf from "protobufjs"
 import { newRetryBudget, turnRetryBudget, forgetRetryBudget, reserveRetry, resetRetryBudgetsForTests, type RetryBudget } from "./retry-budget.js"
-import { offlineHold, waitUntilReachable } from "./offline.js"
+import { isOfflineFailure, startOfflineWait, waitOffline, type OfflineWait } from "./offline.js"
 import type { LanguageModelV3, LanguageModelV3CallOptions, LanguageModelV3StreamResult, LanguageModelV3GenerateResult, LanguageModelV3StreamPart, LanguageModelV3Usage, LanguageModelV3FinishReason } from "@ai-sdk/provider"
 import type { CreateCursorOptions, CursorRetryOptions } from "./index.js"
 import {
@@ -534,6 +534,15 @@ function retryDelayMs(error: CursorProviderError, attempt: number, policy: Curso
   return Math.floor(Math.random() * ceiling)
 }
 
+/**
+ * A connectivity failure waits for the network instead of spending a retry,
+ * unless an explicit `retry.maxAttempts` caps the turn's attempts. Callers
+ * clear `stallStartedAt`, as reserving any non-stall failure would.
+ */
+function waitsForNetwork(failure: CursorProviderError, policy: CursorRetryPolicy): boolean {
+  return policy.maxAttempts === undefined && failure.transient && isOfflineFailure(failure)
+}
+
 function sleepForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(new CursorLocalCancellationError("Cursor retry cancelled"))
   return new Promise((resolve, reject) => {
@@ -957,7 +966,7 @@ export function createCursorLanguageModel(
     const retryPolicy = resolveRetryPolicy(options.retry)
     const retryBudget = turnRetryBudget(opencodeSessionKey(callOptions),
       retryTurnKey(callOptions.prompt), retryTurnKey(callOptions.prompt, true))
-    let offlineSince: number | undefined
+    let outage: OfflineWait | undefined
     for (;;) {
       try {
         return await doStreamImpl(modelId, options, callOptions, retryPolicy, retryBudget)
@@ -973,10 +982,17 @@ export function createCursorLanguageModel(
           const failure = toCursorProviderError(error, { replaySafe: true, fallback: "Cursor Run setup failed" })
           // A laptop with no network must not burn the 10-attempt budget. OpenCode
           // stops the turn once this throws, so the wait stays inside the provider.
-          if (failure.transient && failure.replaySafe && await offlineHold(failure)) {
-            offlineSince ??= Date.now()
-            trace(`Run setup offline: code=${failure.code ?? "none"} err=${failure.message} — waiting for the network`)
-            await waitUntilReachable(failure, callOptions.abortSignal, offlineSince)
+          if (failure.replaySafe && waitsForNetwork(failure, retryPolicy)) {
+            outage ??= startOfflineWait()
+            trace(`Run setup offline: code=${failure.code ?? "none"} attempt=${outage.attempts + 1} ` +
+              `err=${failure.message} — waiting for the network`)
+            retryBudget.stallStartedAt = undefined
+            try {
+              await waitOffline(outage, failure, callOptions.abortSignal)
+            } catch (waitError) {
+              if (callOptions.abortSignal?.aborted) forgetRetryBudget(opencodeSessionKey(callOptions), retryBudget)
+              throw waitError
+            }
             continue
           }
           if (!failure.replaySafe && (failure.transient || failure.origin === "transport")) {
@@ -1406,7 +1422,7 @@ export async function pumpWithRecovery(input: {
   let resumedAttempt = false
   let noProgressResumes = 0
   let openingFailure: CursorProviderError | undefined
-  let offlineSince: number | undefined
+  let outage: OfflineWait | undefined
   input.onSession?.(session)
 
   const reopen = async (
@@ -1510,7 +1526,10 @@ export async function pumpWithRecovery(input: {
     const pumpedSession = session
     const pumpStartedAt = Date.now()
     const pumpOwner = Symbol("cursor-pump")
-    if (!openingFailure) sessionManager.beginPump(pumpedSession, pumpOwner)
+    // A Run that opened proves the network worked; a later outage gets its own window.
+    const runOpened = !openingFailure
+    if (runOpened) outage = undefined
+    if (runOpened) sessionManager.beginPump(pumpedSession, pumpOwner)
     // OpenCode 1.x stops a turn by aborting the signal, before the AI SDK cancels
     // the stream. Cancel at Cursor, as the stream's cancel() does, so Cursor ends
     // the Run on a checkpoint; a reply still waiting for drain would hold the
@@ -1621,23 +1640,23 @@ export async function pumpWithRecovery(input: {
         }
       }
       const historyRecovery = failure.replayBarrier === undefined && input.canRebaseFromHistory?.(pumpedSession)
-      // Wifi dropping looks like a hung stream or a failed reopen. Wait it out
+      // A dropped network fails the reopen before any host answers. Wait it out
       // when we can still resume or replay safely. A stateful turn with no
       // checkpoint stays fail-closed: waiting does not make that replay safe.
       const canRecoverOffline = failure.replaySafe || checkpoint !== undefined || historyRecovery
-      if (failure.transient && canRecoverOffline && await offlineHold(failure)) {
-        offlineSince ??= Date.now()
+      if (canRecoverOffline && waitsForNetwork(failure, retryPolicy)) {
+        outage ??= startOfflineWait()
         trace(
           `Run offline: sessionId=${pumpedSession.sessionId} code=${failure.code ?? "none"} ` +
-            `err=${failure.message} — waiting for the network`,
+            `attempt=${outage.attempts + 1} err=${failure.message} — waiting for the network`,
         )
+        retryBudget.stallStartedAt = undefined
         sessionManager.close(pumpedSession, "remote-error", failure)
-        await waitUntilReachable(failure, input.abortSignal, offlineSince)
+        await waitOffline(outage, failure, input.abortSignal)
         await reopenAttempt(pumpedSession, failure, checkpoint)
         attempt--
         continue
       }
-      offlineSince = undefined
       if (!failure.replaySafe && !checkpoint && !historyRecovery) {
         // Cursor CLI sends the same action again. Shown output keeps the
         // provider from doing so; the host can, unless a side effect would repeat.

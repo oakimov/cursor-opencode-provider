@@ -14,7 +14,8 @@ import {
 import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
 import { sessionManager, type CursorSession, type Frame } from "../src/session.js"
 import { CursorRunInterruptedError } from "../src/transport/connect.js"
-import { CursorAuthError, CursorRetryExhaustedError, CursorServerError, CursorTransportError, hostFacingError } from "../src/errors.js"
+import { CursorAuthError, CursorLocalCancellationError, CursorRetryExhaustedError, CursorServerError, CursorTransportError, hostFacingError } from "../src/errors.js"
+import { newRetryBudget } from "../src/retry-budget.js"
 import { setOfflineClockForTests } from "../src/offline.js"
 import { writeStreamMessage } from "../src/stream-write.js"
 import { sessionFixture } from "./session-fixture.js"
@@ -444,34 +445,157 @@ describe("interrupted Cursor Run handling", () => {
 
   const turnEnded = () => serverFrame({ interaction_update: { turn_ended: { input_tokens: 1, output_tokens: 1 } } })
 
-  it("waits out a network outage without spending the attempt budget", async () => {
-    const offline = () => new CursorTransportError("Cursor HTTP/2 connection failed", {
-      transient: true,
-      replaySafe: true,
-      code: "ENOTFOUND",
-    })
-    const dropped = fakeSession("dropped", [])
-    dropped.frames = { next: async () => { throw offline() } }
+  const offline = () => new CursorTransportError("Cursor HTTP/2 connection failed", {
+    transient: true,
+    replaySafe: true,
+    code: "ENOTFOUND",
+  })
+  const droppedBy = (id: string, failure: () => Error) => {
+    const dropped = fakeSession(id, [])
+    dropped.frames = { next: async () => { throw failure() } }
+    return dropped
+  }
+  /** A fake clock whose sleeps advance it, so the outage window is real. */
+  const advancingClock = (windowMs = 60_000, stepMs = 1) => {
+    let now = 1_000
+    setOfflineClockForTests({ now: () => now, windowMs, sleep: async (delayMs) => { now += Math.max(stepMs, delayMs) } })
+  }
+
+  it("waits out a network outage longer than the transport budget", async () => {
     let opens = 0
-    setOfflineClockForTests({
-      now: () => 5_000,
-      windowMs: 60_000,
-      sleep: async () => {},
-      reachable: async () => true,
-    })
+    advancingClock(60 * 60_000)
     try {
       const finalSession = await pumpWithRecovery({
-        initialSession: dropped,
+        initialSession: droppedBy("dropped", offline),
         controller: controller([]),
-        retryPolicy: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1 },
+        retryPolicy: { baseDelayMs: 1, maxDelayMs: 1 },
         recover: async () => {
           opens++
-          if (opens <= 5) throw offline()
+          if (opens <= 15) throw offline()
           return fakeSession("back-online", [turnEnded()])
         },
       })
       expect(finalSession.sessionId).toBe("back-online")
-      expect(opens).toBe(6)
+      expect(opens).toBe(16)
+    } finally {
+      setOfflineClockForTests(undefined)
+    }
+  })
+
+  it("keeps the budget for a refused connection instead of reopening for the whole window", async () => {
+    const refused = () => new CursorTransportError("Cursor HTTP/2 connection failed", {
+      transient: true,
+      replaySafe: true,
+      code: "ECONNREFUSED",
+    })
+    let opens = 0
+    advancingClock()
+    try {
+      await expect(pumpWithRecovery({
+        initialSession: droppedBy("refused", refused),
+        controller: controller([]),
+        retryPolicy: { baseDelayMs: 1, maxDelayMs: 1 },
+        recover: async () => { opens++; throw refused() },
+      })).rejects.toBeInstanceOf(CursorRetryExhaustedError)
+      expect(opens).toBe(10)
+    } finally {
+      setOfflineClockForTests(undefined)
+    }
+  })
+
+  it("respects an explicit retry.maxAttempts ceiling during an outage", async () => {
+    let opens = 0
+    advancingClock()
+    try {
+      await expect(pumpWithRecovery({
+        initialSession: droppedBy("capped", offline),
+        controller: controller([]),
+        retryPolicy: { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 1 },
+        recover: async () => { opens++; throw offline() },
+      })).rejects.toThrow("Cursor Run failed after 3 attempts")
+      expect(opens).toBe(2)
+    } finally {
+      setOfflineClockForTests(undefined)
+    }
+  })
+
+  it("fails once one outage outlasts its window, and gives a later outage its own window", async () => {
+    let opens = 0
+    advancingClock(10_000, 4_000)
+    try {
+      await expect(pumpWithRecovery({
+        initialSession: droppedBy("long-outage", offline),
+        controller: controller([]),
+        retryPolicy: { baseDelayMs: 1, maxDelayMs: 1 },
+        recover: async () => { opens++; throw offline() },
+      })).rejects.toThrow("Cursor stayed unreachable")
+      expect(opens).toBe(2)
+    } finally {
+      setOfflineClockForTests(undefined)
+    }
+
+    opens = 0
+    advancingClock(10_000, 4_000)
+    try {
+      // 2 waits, a Run that opens and drops, then 2 more: 16 s in all, but no
+      // single outage reaches the 10 s window.
+      const finalSession = await pumpWithRecovery({
+        initialSession: droppedBy("first-outage", offline),
+        controller: controller([]),
+        retryPolicy: { baseDelayMs: 1, maxDelayMs: 1 },
+        recover: async () => {
+          opens++
+          if (opens === 2) return droppedBy("second-outage", offline)
+          if (opens === 4) return fakeSession("back-online", [turnEnded()])
+          throw offline()
+        },
+      })
+      expect(finalSession.sessionId).toBe("back-online")
+    } finally {
+      setOfflineClockForTests(undefined)
+    }
+  })
+
+  it("does not let a stall before an outage expire the stall window after it", async () => {
+    const stalled = () => new CursorTransportError("Cursor Run sent no frames for 30000ms", {
+      transient: true,
+      replaySafe: true,
+      code: "CURSOR_SEMANTIC_IDLE_TIMEOUT",
+    })
+    const retryBudget = newRetryBudget()
+    retryBudget.stallStartedAt = Date.now() - 200_000
+    let opens = 0
+    advancingClock()
+    try {
+      const finalSession = await pumpWithRecovery({
+        initialSession: droppedBy("dropped", offline),
+        controller: controller([]),
+        retryPolicy: { baseDelayMs: 1, maxDelayMs: 1 },
+        retryBudget,
+        recover: async () => {
+          opens++
+          return opens === 1 ? droppedBy("stalled", stalled) : fakeSession("back-online", [turnEnded()])
+        },
+      })
+      expect(finalSession.sessionId).toBe("back-online")
+    } finally {
+      setOfflineClockForTests(undefined)
+    }
+  })
+
+  it("stops waiting for the network on Stop", async () => {
+    const stop = new AbortController()
+    let opens = 0
+    setOfflineClockForTests({ sleep: async () => { stop.abort(); throw new CursorLocalCancellationError("Cursor retry cancelled") } })
+    try {
+      await expect(pumpWithRecovery({
+        initialSession: droppedBy("stopped", offline),
+        controller: controller([]),
+        abortSignal: stop.signal,
+        retryPolicy: { baseDelayMs: 1, maxDelayMs: 1 },
+        recover: async () => { opens++; return fakeSession("unexpected", [turnEnded()]) },
+      })).rejects.toBeInstanceOf(CursorLocalCancellationError)
+      expect(opens).toBe(0)
     } finally {
       setOfflineClockForTests(undefined)
     }
