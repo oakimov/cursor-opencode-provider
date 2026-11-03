@@ -23,8 +23,11 @@ agent protocol. TypeScript ESM; Bun installs/tests; `tsc` builds `dist/`.
   `reapBackgroundSpawn`, `stopProcessesUsing`), and restore the process-wide
   host cache root that `createCursor({ cacheDir })` sets. `test/preload.ts`
   gives every `bun test` run a private TMPDIR and fails the run when anything
-  is left in it; Node test scripts import `test/node-tmpdir.mjs` first for the
-  same guard.
+  is left in it, including the native host cache (`XDG_CACHE_HOME`) it points
+  there; give a test that builds context, opens a Run, sets up a plugin or
+  resolves the client version its own cache root (`withTempHostCache` or
+  `useTempHostCache`, `test/host-cache.ts`). Node test scripts
+  import `test/node-tmpdir.mjs` first for the TMPDIR guard.
 
 ## Non-negotiable provider / compatibility-layer boundary
 

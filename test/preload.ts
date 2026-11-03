@@ -13,6 +13,18 @@ process.env.TMPDIR = runTmp
 process.env.TMP = runTmp
 process.env.TEMP = runTmp
 
+/**
+ * The native host cache root (`$XDG_CACHE_HOME/opencode`) lives in it too, so a
+ * test that does not set its own cache root never writes to the operator's
+ * real cache. Anything left there fails the run like any other leftover,
+ * except the transpiler cache of the `bun` processes tests spawn.
+ */
+const HOST_CACHE_HOME = "xdg-cache"
+const hostCacheHome = path.join(runTmp, HOST_CACHE_HOME)
+fs.mkdirSync(hostCacheHome)
+process.env.XDG_CACHE_HOME = hostCacheHome
+const hostCacheLeftovers = () => fs.readdirSync(hostCacheHome).filter((entry) => entry !== "bun")
+
 const removeRunTmp = () => fs.rmSync(runTmp, { recursive: true, force: true })
 process.on("exit", removeRunTmp)
 
@@ -27,6 +39,7 @@ function leftoverFiles(): string[] {
 
 afterAll(() => {
   const left = fs.readdirSync(runTmp)
+    .filter((entry) => entry !== HOST_CACHE_HOME || hostCacheLeftovers().length > 0)
   const files = leftoverFiles()
   removeRunTmp()
   if (left.length > 0) {

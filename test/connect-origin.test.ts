@@ -19,6 +19,9 @@ import {
 import { createCursor } from "../src/index.js"
 import { resetClientVersionCache } from "../src/protocol/client-version.js"
 import { CursorProtocolError, CursorTransportError } from "../src/errors.js"
+import { useTempHostCache } from "./host-cache.js"
+
+useTempHostCache()
 
 const INSTALLER_FIXTURE = `var x="https://downloads.cursor.com/lab/2026.07.09-a3815c0/";`
 
