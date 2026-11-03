@@ -224,10 +224,13 @@ describe("BillingLedger", () => {
   it("keeps session balances across separately evaluated module instances", async () => {
     const copy = await import(new URL("../src/billing.ts?ledger-copy", import.meta.url).href)
     const run = {}
-    billingLedger.recordBilled("shared-session", 0.08, run)
-    copy.billingLedger.recordReal("shared-session", 0.1, run)
+    billingLedger.recordBilled("shared-session", 0.08, run, { output: 300, reasoning: 200 })
+    copy.billingLedger.recordReal("shared-session", 0.1, run, { output: 500, reasoning: 400 })
     expect(billingLedger.estimated("shared-session")).toBe(0)
     expect(billingLedger.outstanding("shared-session")).toBeCloseTo(0.02, 12)
+    expect(billingLedger.outstandingOutput("shared-session")).toEqual({ output: 200, reasoning: 200 })
+    copy.billingLedger.recordBilled("shared-session", 0, undefined, { output: 200, reasoning: 200 })
+    expect(billingLedger.outputTotals("shared-session").reported).toEqual({ output: 500, reasoning: 400 })
     billingLedger.clear()
     billingLedger.recordReal("shared-session", 0.2)
     copy.billingLedger.recordBilled("shared-session", 0.05)
@@ -288,6 +291,52 @@ describe("BillingLedger", () => {
     expect(ledger.totals("s")).toEqual({ realUsd: 0, billedUsd: 0 })
   })
 
+  it("does not spend an overestimated Run's output against a later Run", () => {
+    const ledger = new BillingLedger()
+    const run = {}
+    ledger.recordBilled("s", 0, run, { output: 1_200, reasoning: 0 })
+    ledger.recordReal("s", 0, run, { output: 1_000, reasoning: 0 })
+    expect(ledger.outstandingOutput("s")).toEqual({ output: 0, reasoning: 0 })
+    // Occupancy finishes retain the host's one-token display minimum.
+    ledger.recordBilled("s", 0, undefined, { output: 1, reasoning: 0 })
+    ledger.recordReal("s", 0, {}, { output: 500, reasoning: 100 })
+    expect(ledger.outstandingOutput("s")).toEqual({ output: 500, reasoning: 100 })
+    expect(ledger.outputTotals("s").reported).toEqual({ output: 1_201, reasoning: 0 })
+  })
+
+  it.each([false, true])("retains a Run's delivered output across ledger eviction (another step: %s)", (anotherStep) => {
+    const ledger = new BillingLedger()
+    const run = {}
+    ledger.recordBilled("s", 0.01, run, { output: 300, reasoning: 200 })
+    for (let i = 0; i < 1_024; i++) ledger.recordReal(`other-${i}`, 0.01)
+    if (anotherStep) ledger.recordBilled("s", 0.01, run, { output: 100, reasoning: 50 })
+    ledger.recordReal("s", 0.1, run, { output: 1_000, reasoning: 800 })
+    expect(ledger.outstandingOutput("s")).toEqual({
+      output: anotherStep ? 600 : 700,
+      reasoning: anotherStep ? 550 : 600,
+    })
+  })
+
+  it("reconciles reasoning already reported by tool steps", () => {
+    const ledger = new BillingLedger()
+    const run = {}
+    ledger.recordBilled("s", 0, run, { output: 300, reasoning: 200 })
+    ledger.recordReal("s", 0, run, { output: 1_000, reasoning: 800 })
+    expect(ledger.outstandingOutput("s")).toEqual({ output: 700, reasoning: 600 })
+    ledger.recordBilled("s", 0, undefined, { output: 700, reasoning: 600 })
+    expect(ledger.outputTotals("s").reported).toEqual({ output: 1_000, reasoning: 800 })
+  })
+
+  it("does not spend an overestimated Run's reasoning against a later Run", () => {
+    const ledger = new BillingLedger()
+    const run = {}
+    ledger.recordBilled("s", 0, run, { output: 300, reasoning: 300 })
+    ledger.recordReal("s", 0, run, { output: 400, reasoning: 200 })
+    ledger.recordBilled("s", 0, undefined, ledger.outstandingOutput("s"))
+    ledger.recordReal("s", 0, {}, { output: 200, reasoning: 100 })
+    expect(ledger.outstandingOutput("s")).toEqual({ output: 200, reasoning: 100 })
+  })
+
   it("does not carry reasoning a settling step's output could not hold", () => {
     const ledger = new BillingLedger()
     const run = {}
@@ -295,6 +344,7 @@ describe("BillingLedger", () => {
     ledger.recordReal("s", 0, run, { output: 18_118, reasoning: 12_919 })
     expect(ledger.outstandingOutput("s")).toEqual({ output: 8_118, reasoning: 8_118 })
     ledger.recordBilled("s", 0, undefined, { output: 8_118, reasoning: 8_118 })
+    expect(ledger.outputTotals("s").reported).toEqual({ output: 18_118, reasoning: 8_118 })
     ledger.recordReal("s", 0, {}, { output: 100, reasoning: 0 })
     expect(ledger.outstandingOutput("s")).toEqual({ output: 100, reasoning: 0 })
   })
@@ -387,10 +437,13 @@ describe("turn-end settlement through a Run", () => {
       serverFrame({ conversation_checkpoint_update: checkpoint(40_000) }),
       turn(60_000, 50_000, 500),
     ], 30_000)
-    billingLedger.recordBilled(session.billing.key, 0.08, session.billing)
+    billingLedger.recordBilled(session.billing.key, 0.08, session.billing, { output: 300, reasoning: 200 })
     sessionManager.replaceStream(session, session.stream, "new-run")
     expect(session.billing.estimatedUsd).toBe(0)
+    expect(session.billing.estimatedOutputTokens).toBe(0)
+    expect(session.billing.estimatedReasoningTokens).toBe(0)
     const finish = await finishOf(session)
+    expect(finish.usage.outputTokens.total).toBe(500)
     expect(Math.abs(finish.providerMetadata.cursor.billing.stepUsd - 0.048)).toBeLessThan(2e-6)
     expect(finish.providerMetadata.cursor.billing.sessionEstimatedUsd).toBeCloseTo(0.08, 12)
   })
@@ -438,12 +491,15 @@ describe("turn-end settlement through a Run", () => {
     }
     expect(billingLedger.totals("ses_cancelled").realUsd).toBeCloseTo(0.048, 12)
     expect(billingLedger.totals("ses_cancelled").billedUsd).toBe(0)
+    expect(billingLedger.outputTotals("ses_cancelled").reported).toEqual({ output: 0, reasoning: 0 })
+    expect(billingLedger.outstandingOutput("ses_cancelled")).toEqual({ output: 500, reasoning: 0 })
     expect(session.billing.prefixTokens).toBe(30_000)
     const next = await finishOf(pricedRun("after-cancel", "ses_cancelled", [
       serverFrame({ conversation_checkpoint_update: checkpoint(40_000) }),
       turn(10_000, 10_000, 0),
     ], 30_000))
     expect(Math.abs(next.providerMetadata.cursor.billing.stepUsd - 0.053)).toBeLessThan(2e-6)
+    expect(next.usage.outputTokens.total).toBe(500)
   })
 
   it("bills the catalog-priced turn cost on both hosts while reporting the occupancy snapshot", async () => {

@@ -1582,7 +1582,7 @@ describe("display-only ToolCall pump bridge", () => {
     }
   })
 
-  it("reports a held Run's TurnEnded output once across its steps", async () => {
+  it.each([20, 1_000])("reports a held Run's output and reasoning once across its steps (thinking repeats: %s)", async (repeats) => {
     // Counters of a recorded GPT 5.6 held Run (debug log TurnEnded wire fields 1-5).
     const recorded = {
       input_tokens: 4_433_942,
@@ -1591,7 +1591,7 @@ describe("display-only ToolCall pump bridge", () => {
       cache_write: 229_585,
       reasoning_tokens: 12_919,
     }
-    const thinking = "Checking which subagent fits. ".repeat(20)
+    const thinking = "Checking which subagent fits. ".repeat(repeats)
     const text = "Delegating the investigation.".repeat(10)
     const session = fakeSession([
       encodeMessage("AgentServerMessage", { interaction_update: { thinking_delta: { text: thinking } } }),
@@ -1616,16 +1616,18 @@ describe("display-only ToolCall pump bridge", () => {
 
       const [toolStep, turnEnd] = parts.filter((part) => part.type === "finish")
       const estimate = Math.ceil((thinking.length + text.length + call.input.length) / 4)
-      expect(toolStep.usage.outputTokens).toEqual({ total: estimate, text: estimate, reasoning: 0 })
+      const reasoning = Math.ceil(thinking.length / 4)
+      expect(toolStep.usage.outputTokens).toEqual({ total: estimate, text: estimate - reasoning, reasoning })
       expect(toolStep.usage.inputTokens.total).toBe(210_000 - estimate)
       expect(toolStep.providerMetadata.cursor.billing.estimate).toBe(true)
       expect(turnEnd.usage.outputTokens).toEqual({
         total: 18_118 - estimate,
-        text: 18_118 - estimate - 12_919,
-        reasoning: 12_919,
+        text: 18_118 - estimate - (12_919 - reasoning),
+        reasoning: 12_919 - reasoning,
       })
       expect(turnEnd.usage.inputTokens.total + turnEnd.usage.outputTokens.total).toBe(228_566)
       expect(toolStep.usage.outputTokens.total + turnEnd.usage.outputTokens.total).toBe(18_118)
+      expect(toolStep.usage.outputTokens.reasoning + turnEnd.usage.outputTokens.reasoning).toBe(12_919)
       expect(billingLedger.outstandingOutput(session.billing.key)).toEqual({ output: 0, reasoning: 0 })
       // Both hosts still bill one amount: the step's tokens at catalog rates and its totalNanoAiu.
       const input = turnEnd.usage.inputTokens

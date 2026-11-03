@@ -100,6 +100,15 @@ without a variant retains Cursor's declared default effort for that tier.
 Saved 500k variants on the base/Fast entries remain valid after upgrading;
 reselect the dedicated 500k entry to use its full host context budget.
 
+## Usage and cost
+
+Tool steps report estimates of streamed output and reasoning; the final step
+reconciles them with Cursor's Run counters. Input plus output still equals the
+latest checkpoint occupancy. Estimates and the one-token display minimum can
+exceed measured output, and output at its catalog rate can raise the minimum
+settlement cost. See [accounting limits](../README.md#known-limitations) and
+the [billing diagnostics](cache-log-runbook.md#3-validate-the-totals-sent-to-opencode).
+
 ## Planning and session edit rules
 
 Cursor tools use the route advertised for the current turn. Call a supplied

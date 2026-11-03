@@ -21,8 +21,9 @@
  *
  * Output tokens follow the same ledger: a tool step reports a char/4 estimate
  * of what it streamed, and the turn's last step reports Cursor's `output_tokens`
- * (and `reasoning_tokens`) minus what earlier steps already reported, so the
- * host's per-message output sums to Cursor's counts.
+ * (and `reasoning_tokens`) minus that Run's estimates. Already delivered
+ * estimates cannot be retracted; an overestimate never reduces a later Run's
+ * output. The host's one-token display minimum can also exceed the remainder.
  */
 import type { LanguageModelV3Usage } from "@ai-sdk/provider"
 import { getCursorModelCost, hasCursorFastPricing, type OpenCodeModelCost } from "./pricing.js"
@@ -213,7 +214,12 @@ export function nanoAiuForUsd(usd: number): number {
 }
 
 /** Estimates belong to one Run and are replaced only by that Run's counters. */
-export type RunCostEstimate = { estimatedUsd?: number; estimatedOutputTokens?: number; ledgerEpoch?: object }
+export type RunCostEstimate = {
+  estimatedUsd?: number
+  estimatedOutputTokens?: number
+  estimatedReasoningTokens?: number
+  ledgerEpoch?: object
+}
 /** Output tokens, `reasoning` a subset of `output` as in Cursor's `TurnEnded`. */
 export type OutputTokens = { output: number; reasoning: number }
 type LedgerTotals = { realUsd: number; billedUsd: number }
@@ -221,7 +227,7 @@ type LedgerEntry = LedgerTotals & {
   estimatedUsd: number
   realOutput: OutputTokens
   reportedOutput: OutputTokens
-  estimatedOutputTokens: number
+  pendingOutput: OutputTokens
 }
 
 const NO_OUTPUT: OutputTokens = { output: 0, reasoning: 0 }
@@ -252,7 +258,7 @@ export class BillingLedger {
         estimatedUsd: 0,
         realOutput: { ...NO_OUTPUT },
         reportedOutput: { ...NO_OUTPUT },
-        estimatedOutputTokens: 0,
+        pendingOutput: { ...NO_OUTPUT },
       }
       while (this.entries.size >= MAX_LEDGERS) {
         const oldest = this.entries.keys().next().value as string | undefined
@@ -276,13 +282,16 @@ export class BillingLedger {
     // stay provisionally covered, including Runs already closed by the host.
     const ownEstimates = run?.ledgerEpoch === entry
     entry.estimatedUsd = Math.max(0, entry.estimatedUsd - (ownEstimates ? run.estimatedUsd ?? 0 : 0))
-    entry.estimatedOutputTokens = Math.max(
-      0,
-      entry.estimatedOutputTokens - (ownEstimates ? run.estimatedOutputTokens ?? 0 : 0),
-    )
+    // Reconcile within the owning Run. Delivered estimates cannot be refunded,
+    // but their excess must never consume another Run's measured output.
+    const remaining = Math.max(0, real.output - (run?.estimatedOutputTokens ?? 0))
+    const reasoning = Math.max(0, real.reasoning - (run?.estimatedReasoningTokens ?? 0))
+    entry.pendingOutput.output += remaining
+    entry.pendingOutput.reasoning += Math.min(remaining, reasoning)
     if (run) {
       run.estimatedUsd = 0
       run.estimatedOutputTokens = 0
+      run.estimatedReasoningTokens = 0
     }
   }
 
@@ -296,22 +305,23 @@ export class BillingLedger {
     entry.reportedOutput.output += reported.output
     entry.reportedOutput.reasoning += reported.reasoning
     if (run) {
-      // An evicted session starts a new ledger; its old Run estimate must not
-      // replace another Run's estimates in the new entry.
+      // An evicted session starts a new cost ledger; its old cost estimate
+      // must not replace another Run's estimates there. Output estimates stay
+      // with the live Run, whose counters still cover all its delivered steps.
       if (run.ledgerEpoch !== entry) {
         run.estimatedUsd = 0
-        run.estimatedOutputTokens = 0
       }
       run.ledgerEpoch = entry
       entry.estimatedUsd += billedUsd
       run.estimatedUsd = (run.estimatedUsd ?? 0) + billedUsd
-      entry.estimatedOutputTokens += reported.output
       run.estimatedOutputTokens = (run.estimatedOutputTokens ?? 0) + reported.output
-    } else if (entry.realOutput.output + entry.estimatedOutputTokens <= entry.reportedOutput.output) {
-      // Estimates report no reasoning, so a settling step's output can be too
-      // small for Cursor's reasoning; once no output is left to carry it, the
-      // rest would skew later turns.
-      entry.reportedOutput.reasoning = Math.max(entry.reportedOutput.reasoning, entry.realOutput.reasoning)
+      run.estimatedReasoningTokens = (run.estimatedReasoningTokens ?? 0) + reported.reasoning
+    } else {
+      entry.pendingOutput.output = Math.max(0, entry.pendingOutput.output - reported.output)
+      entry.pendingOutput.reasoning = Math.min(
+        entry.pendingOutput.output,
+        Math.max(0, entry.pendingOutput.reasoning - reported.reasoning),
+      )
     }
   }
 
@@ -322,15 +332,13 @@ export class BillingLedger {
   }
 
   /**
-   * Output tokens Cursor reported (plus unconfirmed estimates) not yet reported
-   * to the host. Estimates never count reasoning, so reasoning is only Cursor's.
+   * Measured output not yet reported to the host, after reconciling each Run's
+   * own estimates. Surplus estimates and display tokens create no future debt.
    */
   outstandingOutput(key: string): OutputTokens {
     const entry = this.entries.get(key)
     if (!entry) return { ...NO_OUTPUT }
-    const output = Math.max(0, entry.realOutput.output + entry.estimatedOutputTokens - entry.reportedOutput.output)
-    const reasoning = Math.max(0, entry.realOutput.reasoning - entry.reportedOutput.reasoning)
-    return { output, reasoning: Math.min(output, reasoning) }
+    return { ...entry.pendingOutput }
   }
 
   outputTotals(key: string): { real: OutputTokens; reported: OutputTokens } {
@@ -357,7 +365,7 @@ export class BillingLedger {
 // Plugin and SDK loaders can evaluate separate copies of this package in one
 // process. Share plain ledger data, rather than a class instance owned by one
 // module graph, so session balances survive those loader transitions.
-const BILLING_ENTRIES = Symbol.for("cursor-opencode-provider.billing-ledger.v3")
+const BILLING_ENTRIES = Symbol.for("cursor-opencode-provider.billing-ledger.v4")
 const processState = globalThis as typeof globalThis & {
   [BILLING_ENTRIES]?: Map<string, LedgerEntry>
 }

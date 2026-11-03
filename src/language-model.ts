@@ -4918,11 +4918,13 @@ export async function pump(
   let streamClosed = false
   /** Model output this step streamed to the host: its output estimate until `TurnEnded`. */
   let stepOutputChars = 0
+  let stepReasoningChars = 0
   const safeEnqueue = (part: V3Part): boolean => {
     if (streamClosed) return false
     try {
       controller.enqueue(part)
       stepOutputChars += streamedOutputChars(part)
+      if (part.type === "reasoning-delta") stepReasoningChars += part.delta.length
       if (session.openCodeSessionId) {
         recordEmittedPart(
           session.openCodeSessionId,
@@ -5397,8 +5399,9 @@ export async function pump(
     const billing = session.billing
     const stepOutput = te
       ? billingLedger.outstandingOutput(billing.key)
-      : { output: estimateTokens(stepOutputChars), reasoning: 0 }
+      : { output: estimateTokens(stepOutputChars), reasoning: estimateTokens(stepReasoningChars) }
     stepOutputChars = 0
+    stepReasoningChars = 0
     // A tool step costs what a one-call estimate with a single output token
     // would: held Runs split into many steps already overstate cached input,
     // and pricing the estimated output on top would bill ahead of TurnEnded.
@@ -5934,6 +5937,7 @@ export async function pump(
       recordTurnEndedCost(session, turnEnded)
       // TurnEnded counts what this Run streamed; a reopened Run estimates only its own output.
       stepOutputChars = 0
+      stepReasoningChars = 0
       if (session.openCodeSessionId) finishEmittedStep(session.openCodeSessionId, session.conversationId)
       confirmRunImagesAtTurnEnd(session)
       await persistTerminalCheckpoint(session)
