@@ -51,7 +51,11 @@ changed static categories, changed limits, or substantial character growth uses
 the raw reading directly. A zero-token cancellation does not confirm a
 candidate. Its saved accepted measurement and pending decision survive restart;
 incoming zero-token finishes retain their existing behavior. Known model or
-media changes bypass confirmation until a new positive baseline has arrived.
+media changes bypass confirmation for the next positive reading only; a
+zero-token checkpoint carries that reset forward. Media counts from the first
+measured checkpoint that arrives after the prompt or tool result carrying it,
+once Cursor has completed every delivered result. A checkpoint queued while the
+tool ran cannot hold the image and does not consume the reset.
 
 ## State and integration
 

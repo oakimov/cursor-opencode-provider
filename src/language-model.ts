@@ -2474,7 +2474,7 @@ async function startSession(
     ...(historyImages ? { historyImages } : {}),
     tokenDetails: priorTokenDetails,
     tokenDetailsFresh: false,
-    occupancyHasMedia: images.length > 0,
+    ...(images.length > 0 ? { occupancyMediaAfterFrame: lastFrameArrival() } : {}),
     cacheDiagnostics: {
       sessionKey,
       conversationId,
@@ -3383,12 +3383,14 @@ export async function drainSessionUntilTurnEnded(
         if (bytes && bytes.length > 0) {
           cancellationCheckpoint = true
           if (session.cacheDiagnostics) session.cacheDiagnostics.checkpointUpdates++
-          setCheckpoint(session.conversationId, bytes, checkpointObservation(session))
+          const observation = checkpointObservation(session, frame)
+          setCheckpoint(session.conversationId, bytes, observation)
           noteCheckpoint(session.openCodeSessionId, bytes)
           acceptResumeCheckpoint(session, bytes, frame)
           markEarlySteersCheckpointed(session.openCodeSessionId, session.sessionId)
           noteRunImageCheckpoint(session, bytes, frame)
           const rawTokenDetails = decodeConversationTokenDetails(bytes)
+          if (observation.bypass && rawTokenDetails) session.occupancyMediaAfterFrame = undefined
           const tokenDetails = rawTokenDetails?.usedTokens === 0 ? rawTokenDetails : checkpointTokenDetails(session.conversationId, bytes)
           if (tokenDetails && !(cancelling && tokenDetails.usedTokens === 0
             && (session.tokenDetails?.usedTokens ?? 0) > 0)) {
@@ -3786,6 +3788,7 @@ async function deliverContinuationResultsNow(
     let endTurnAfterDelivery = false
     let deliveredCreatePlan: { approved: boolean; emulated: boolean; endTurn: boolean } | undefined
     let deliveredImageHashes: string[] = []
+    let resultHasImages = false
     let completedPlanOperation: string | undefined
     if (pending.resultField === ASK_QUESTION_RESULT_FIELD) {
       // A bridged Cursor AskQuestion. The host tool result carries the user's
@@ -4053,7 +4056,7 @@ async function deliverContinuationResultsNow(
             images,
           })
           if (images.length > 0) {
-            session.occupancyHasMedia = true
+            resultHasImages = true
             deliveredImageHashes = r.imageHashes?.slice(0, images.length) ?? []
             trace(`continuation: ${images.length} tool-result image(s) on ${pending.resultField} execId=${r.execId}`)
           }
@@ -4087,6 +4090,7 @@ async function deliverContinuationResultsNow(
       return undefined
     }
     deliveredResults++
+    if (resultHasImages) session.occupancyMediaAfterFrame = beforeResultWrite
     if (completedPlanOperation) {
       clearPlanOperation(session.openCodeSessionId, completedPlanOperation)
       await persistPlanOperations(session)
@@ -5880,12 +5884,15 @@ export async function pump(
       const bytes = normalizeCheckpointBytes(checkpointRaw)
       if (bytes && bytes.length > 0) {
         cacheDiagnostics.checkpointUpdates++
-        setCheckpoint(session.conversationId, bytes, checkpointObservation(session))
+        const observation = checkpointObservation(session, frame)
+        setCheckpoint(session.conversationId, bytes, observation)
         noteCheckpoint(session.openCodeSessionId, bytes)
         if (!isPlanTurnEnding()) acceptResumeCheckpoint(session, bytes, frame)
         markEarlySteersCheckpointed(session.openCodeSessionId, session.sessionId)
         noteRunImageCheckpoint(session, bytes, frame)
         const rawTokenDetails = decodeConversationTokenDetails(bytes)
+        // A zero reading leaves the reset on the guard until the next positive one.
+        if (observation.bypass && rawTokenDetails) session.occupancyMediaAfterFrame = undefined
         const tokenDetails = rawTokenDetails?.usedTokens === 0 ? rawTokenDetails : checkpointTokenDetails(session.conversationId, bytes)
         if (tokenDetails && !(isPlanTurnEnding() && tokenDetails.usedTokens === 0
           && (session.tokenDetails?.usedTokens ?? 0) > 0)) {
@@ -7844,13 +7851,17 @@ function streamedOutputChars(part: V3Part): number {
   return 0
 }
 
-function checkpointObservation(session: CursorSession) {
+function checkpointObservation(session: CursorSession, frame: Frame) {
+  const arrived = frameArrival(frame)
+  const mediaAfter = session.occupancyMediaAfterFrame
   return {
     // A pump can resume on a queued duplicate received before host results.
     // Only an inbound step-start or a different Run advances the observation.
     boundary: `${session.runId ?? session.sessionId}:${session.cacheDiagnostics?.stepStarts ?? 0}`,
     model: session.cacheDiagnostics?.modelId,
-    bypass: session.occupancyHasMedia,
+    // Like a resume checkpoint, only a later, acknowledged checkpoint holds the media.
+    bypass: mediaAfter !== undefined && (arrived === undefined || arrived > mediaAfter)
+      && !session.unacknowledgedHostResults?.length,
   }
 }
 

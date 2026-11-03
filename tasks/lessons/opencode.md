@@ -467,8 +467,11 @@ These are failure lessons shared by both hosts, not a replacement for
   a second pair member does not confirm an occupancy jump. Confirmation needs
   an independent observation, and a pending reading must survive a zero-token
   terminal state and restart. Keep the accepted count separate from resume
-  bytes, and match recovery readings by their full token evidence
-  (`test/checkpoint-occupancy.test.ts`, `test/checkpoint-occupancy-run.test.ts`).
+  bytes, and match recovery readings by their full token evidence. A media
+  reset is one-shot: a sticky Run flag let every later spike in an image Run
+  through. Consume it only on a checkpoint that arrived after the media and its
+  acknowledged result (`test/checkpoint-occupancy.test.ts`,
+  `test/checkpoint-occupancy-run.test.ts`, `test/host-notes-run.test.ts`).
 - **Book charges only after accepted delivery.** Cancelled estimates must not
   credit another Run. Aggregate counters cannot prove per-call tiers; compare
   both hosts' pricing formulas (`test/billing.test.ts`).

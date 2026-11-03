@@ -657,6 +657,90 @@ describe("history images through a full provider Run", () => {
     expect(sentCheckpoint(2)).toBeUndefined()
     expect(sentImages(2)).toEqual([IMAGE_A])
   }), 30_000)
+
+  /** Complete synthetic categories, so only the conversation's token density changes. */
+  const measured = (usedTokens: number, conversationChars: number) => encodeMessage("ConversationStateStructure", {
+    token_details: {
+      used_tokens: usedTokens,
+      max_tokens: 1_000_000,
+      breakdown: {
+        total_used_tokens: usedTokens,
+        max_tokens: 1_000_000,
+        categories: [
+          { id: "system_prompt", label: "System prompt", estimated_tokens: 20_000, character_count: 80_000 },
+          { id: "conversation", label: "Conversation", estimated_tokens: usedTokens - 20_000, character_count: conversationChars },
+        ],
+      },
+    },
+  })
+  const contextOf = (parts: LanguageModelV3StreamPart[]) => {
+    const finish = parts.find((part) => part.type === "finish")
+    if (finish?.type !== "finish") throw new Error("Expected finish")
+    return finish.providerMetadata?.cursor?.context as Record<string, unknown>
+  }
+  /** The media reading is a new baseline; a later unexplained jump in the same Run still waits. */
+  function admitMediaThenJump(run: FakeRun): void {
+    run.send({ conversation_checkpoint_update: measured(240_000, 404_000) })
+    run.send({ interaction_update: { step_started: {} } })
+    run.send({ conversation_checkpoint_update: measured(480_000, 410_000) })
+    run.send({ interaction_update: { text_delta: { text: "Done." } } })
+    run.send({ interaction_update: { turn_ended: { input_tokens: 10, output_tokens: 2 } } })
+  }
+  const heldAfterMedia = { source: "checkpoint-held-spike", stale: true, usedTokens: 240_000, rawUsedTokens: 480_000 }
+
+  it("admits one reading after a prompt image as the occupancy baseline, then holds a later jump", () => withRoot(async (root) => {
+    const sessionKey = "ses_images_occupancy_prompt"
+    onRun = (run, message) => {
+      if (!message.run_request) return
+      if (runs.indexOf(run) === 0) {
+        run.send({ conversation_checkpoint_update: measured(120_000, 400_000) })
+        endTurnOn(run, undefined)
+      } else admitMediaThenJump(run)
+    }
+    const turn1: Prompt = [user("First question.")]
+    await collect(model(root), turn1, sessionKey)
+    const second = await collect(model(root), [...turn1, assistant("Done."), user("Here is the screenshot.", IMAGE_A)], sessionKey)
+
+    expect(sentImages(1)).toEqual([IMAGE_A])
+    expect(contextOf(second)).toMatchObject(heldAfterMedia)
+  }), 30_000)
+
+  it("admits a tool-result image's reading only from a checkpoint after the result, then holds a later jump", () => withRoot(async (root) => {
+    const sessionKey = "ses_images_occupancy_tool"
+    const file = path.join(root, "shot.png")
+    fs.writeFileSync(file, Buffer.from(IMAGE_B, "base64"))
+    onRun = (run, message) => {
+      const index = runs.indexOf(run)
+      if (message.run_request && index === 0) {
+        run.send({ conversation_checkpoint_update: measured(120_000, 400_000) })
+        endTurnOn(run, undefined)
+      } else if (message.run_request) {
+        run.send({ exec_server_message: { id: 1, read_args: { path: file, tool_call_id: "read-image" } } })
+        // Queued while the tool runs; it cannot hold the image.
+        run.send({ conversation_checkpoint_update: measured(121_000, 401_000) })
+      } else if (message.exec_client_message?.read_result) {
+        run.send({ interaction_update: { tool_call_completed: { call_id: "read-image" } } })
+        admitMediaThenJump(run)
+      }
+    }
+    const turn1: Prompt = [user("First question.")]
+    await collect(model(root), turn1, sessionKey)
+    const turn2: Prompt = [...turn1, assistant("Done."), user("Read shot.png.")]
+    const call = (await collect(model(root), turn2, sessionKey)).find((part) => part.type === "tool-call")
+    if (call?.type !== "tool-call") throw new Error("Expected read")
+    await Bun.sleep(100)
+    const third = await collect(model(root), [
+      ...turn2,
+      { role: "assistant", content: [{ type: "tool-call", toolCallId: call.toolCallId, toolName: "read", input: JSON.parse(call.input) }] },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: call.toolCallId, toolName: "read",
+        output: { type: "content", value: [{ type: "text", text: "Image read successfully" },
+          { type: "image-data", mediaType: "image/png", data: IMAGE_B }] } }] },
+    ] as Prompt, sessionKey)
+
+    const result = runs[1]!.received.find((message) => message.exec_client_message?.read_result)!
+    expect(Buffer.from(result.exec_client_message.read_result.success.data).toString("base64")).toBe(IMAGE_B)
+    expect(contextOf(third)).toMatchObject(heldAfterMedia)
+  }), 30_000)
 })
 
 describe("host notes through a full provider Run", () => {
