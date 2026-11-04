@@ -1230,6 +1230,45 @@ describe("foreign compaction follow-ups", () => {
     }
   })
 
+  it("keeps restored request notes when its checkpoint cannot be loaded and recovery rebuilds history", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-foreign-notes-missing-blob-"))
+    const key = "ses_restored_notes_missing_blob"
+    const requests: Request[] = []
+    const answer = heldThenAnswer(requests)
+    scripted = (stream, message) => {
+      if (message.run_request && requests.length === 1) {
+        requests.push(message.run_request as Request)
+        stream.write(frame(encodeMessage("AgentServerMessage", {
+          kv_server_message: { id: 1, get_blob_args: { blob_id: new Uint8Array(32).fill(0xc8) } },
+        })))
+      } else if (message.kv_client_message && requests.length === 2) {
+        stream.end(frame(Buffer.from(JSON.stringify({ error: { code: "internal" } })), 2))
+      } else answer(stream, message)
+    }
+    cacheHttp2SessionForTests(ORIGIN, client)
+    try {
+      const model = createCursor({ name: "cursor", accessToken: "example-token", agentBaseURL: ORIGIN,
+        cacheDir: root, workspaceRoot: root, retry: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1 } }).languageModel("composer-2.5")
+      const prompt: LanguageModelV3CallOptions["prompt"] = [text("Original history")]
+      const options: LanguageModelV3CallOptions = { prompt, headers: { "x-opencode-session-id": key }, tools: [tool("bash")] }
+      restorePersistedHostNotes(key, encodePersistedHostNotes(["<system-update>Use bazel for builds.</system-update>"]))
+      await readParts(model, options)
+      await notifyHostInterrupt(key, "shutdown")
+      await restart()
+      prompt.push(text("Continue."))
+      await readParts(model, options)
+      expect(requests).toHaveLength(3)
+      expect(requests[1]!.conversation_state!.length).toBeGreaterThan(0)
+      expect(requests[1]!.action.user_message_action!.user_message.text).not.toContain("Use bazel for builds.")
+      expect(requests[2]!.conversation_state?.length ?? 0).toBe(0)
+      expect(requests[2]!.action.user_message_action!.user_message.text.split("Use bazel for builds.")).toHaveLength(2)
+    } finally {
+      sessionManager.dispose()
+      await settleRunSavesForTests()
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it("leaves the rebase to the main turn when a smaller-catalog helper arrives first", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-foreign-helper-"))
     const key = "ses_foreign_helper"

@@ -129,7 +129,11 @@ Operator setup: [OpenCode 2.x](../../docs/opencode-2.md).
   Closing the held Run for that rebase dropped the host notes only it carried,
   and a restart lost them too, even without a rewrite: a late tool result
   rebuilds from host history. Save a held Run's own notes in its in-progress
-  snapshot and deliver them only to a Run without that checkpoint. An
+  snapshot and deliver them only to a Run without that checkpoint. A warm
+  request must still own the restored notes: a missing-blob recovery can rebase
+  that same request without its checkpoint. Transfer ownership only after the
+  opening upload succeeds (`keeps restored request notes` in
+  `test/run-error-host.test.ts`). An
   unacknowledged injection may be missing from the checkpoint, so it is
   deferred; a compaction Run defers the restored notes too, or its snapshot
   drops them. Decide

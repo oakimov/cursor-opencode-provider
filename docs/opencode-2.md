@@ -53,7 +53,9 @@ the next normal request.
 
 The rebase requirement is saved with the conversation snapshot and survives a
 server restart, including a shutdown save from a held tool Run, which also
-keeps that Run's host notes. If saving that
+keeps that Run's host notes. A warm request retains those notes for recovery:
+if Cursor cannot load its saved checkpoint, the rebuilt request carries them.
+If saving that
 requirement fails, the next Cursor request reports the error and retries saving
 on a later request. No extra configuration is needed. See the
 [compaction acceptance checks](host-compat-acceptance.md#opencode-2-foreign-compaction).

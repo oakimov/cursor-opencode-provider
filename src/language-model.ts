@@ -4490,12 +4490,15 @@ export function prepareUserTurnHostNotes(input: {
   // longer be delivered there; a still-open Run keeps its own.
   if (sessionKey && !isCompaction && !ephemeralRun) releaseHostNoteInjections(sessionKey, "run-closed")
   const interrupted = sessionKey && !ephemeralRun ? interruptedRunHostNotesBySession.get(sessionKey) : undefined
+  const checkpointedNotes = interrupted && !isCompaction && (startedWithCheckpoint || resuming) ? [interrupted] : []
   if (interrupted) {
-    interruptedRunHostNotesBySession.delete(sessionKey!)
     // A Run on the interrupted Run's checkpoint already holds them. A
     // compaction does not deliver them, but the main Run after it rebases from
     // the summary, so they wait with the deferred notes every snapshot saves.
-    if (isCompaction || (!startedWithCheckpoint && !resuming)) appendUndeliveredHostNotes(sessionKey!, [interrupted])
+    if (checkpointedNotes.length === 0) {
+      interruptedRunHostNotesBySession.delete(sessionKey!)
+      appendUndeliveredHostNotes(sessionKey!, [interrupted])
+    }
   }
   // An interrupted-turn resume carries no user message; notes wait for the next one.
   const undelivered = isCompaction || ephemeralRun || resuming || !sessionKey
@@ -4522,6 +4525,9 @@ export function prepareUserTurnHostNotes(input: {
   }
   return {
     carriedNotes: [
+      // Its checkpoint holds these notes, but a later recovery may have to
+      // rebuild without that checkpoint. Transfer their ownership to the Run.
+      ...checkpointedNotes,
       ...(undelivered ?? []),
       ...(turnBoundary.length ? [{ notes: turnBoundary, order: nextHostNoteOrder++ }] : []),
     ],
@@ -4530,6 +4536,9 @@ export function prepareUserTurnHostNotes(input: {
       ...wrapHostNotesForCursor(turnBoundary),
     ],
     sent: () => {
+      if (sessionKey && interruptedRunHostNotesBySession.get(sessionKey) === interrupted) {
+        interruptedRunHostNotesBySession.delete(sessionKey)
+      }
       if (sessionKey && undelivered?.length) {
         forgetUndeliveredHostNotes(sessionKey, undelivered, startedWithCheckpoint ? "user-turn" : "seed-history")
       }

@@ -603,8 +603,11 @@ describe("host notes on a new Run's user turn", () => {
 
   it("re-delivers an interrupted Run's own notes only to a later main Run without its checkpoint, or after a compaction", () => {
     restoreInterruptedRunHostNotes("ses_interrupted_checkpoint", encodePersistedHostNotes([NOTE]), undefined)
-    // A Run on the interrupted Run's checkpoint already holds them, and consumes the record.
-    expect(prepareUserTurnHostNotes({ sessionKey: "ses_interrupted_checkpoint", prompt, ...flags }).reminders).toEqual([])
+    // The checkpoint holds them; ownership transfers to the Run only after upload.
+    const checkpointed = prepareUserTurnHostNotes({ sessionKey: "ses_interrupted_checkpoint", prompt, ...flags })
+    expect(checkpointed.reminders).toEqual([])
+    expect(checkpointed.carriedNotes.flatMap(batch => batch.notes)).toEqual([NOTE])
+    checkpointed.sent()
     expect(prepareUserTurnHostNotes({
       sessionKey: "ses_interrupted_checkpoint", prompt, ...flags, startedWithCheckpoint: false,
     }).reminders).toEqual([])
@@ -619,6 +622,16 @@ describe("host notes on a new Run's user turn", () => {
     expect(rebuilt.reminders).toEqual([wrapHostNoteForCursor(NOTE)])
     rebuilt.sent()
     expect(stored("ses_interrupted_seed")).toEqual([])
+  })
+
+  it("keeps restored checkpoint notes available when a prepared Run never uploads", () => {
+    const sessionKey = "ses_interrupted_upload_failed"
+    restoreInterruptedRunHostNotes(sessionKey, encodePersistedHostNotes([NOTE]), undefined)
+    const unsent = prepareUserTurnHostNotes({ sessionKey, prompt, ...flags })
+    expect(unsent.reminders).toEqual([])
+    expect(unsent.carriedNotes.flatMap(batch => batch.notes)).toEqual([NOTE])
+    expect(prepareUserTurnHostNotes({ sessionKey, prompt, ...flags, startedWithCheckpoint: false }).reminders)
+      .toEqual([wrapHostNoteForCursor(NOTE)])
   })
 
   it("keeps interrupted-Run notes for a bounded number of sessions", () => {
