@@ -335,7 +335,12 @@ These are failure lessons shared by both hosts, not a replacement for
   ordering. Apply queued aborts before redispatch, and retain the generation's
   listed count across an idle host-step split: the first denied edit can
   finish before a later listed call even arrives. Otherwise the call stays
-  blocked forever, runs after its withdrawal, or escapes the denial.
+  blocked forever, runs after its withdrawal, or escapes the denial. An unknown
+  count is not zero: before count-capability discovery, the first host call
+  can finish before its same-generation follower or count arrives (#154).
+  Retain its refusal until the count proves completion or `step_started`
+  explicitly begins a new generation (`retains refusal when the count arrives
+  late`, `cancels an uncounted follower` in those tests).
   A new exec or emitted host phase counts in its current step even when the
   call id already ran the edit's prerequisite read. Treating that write as a
   late display completion left the listed count unmet and added the idle

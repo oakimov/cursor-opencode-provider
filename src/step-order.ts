@@ -92,8 +92,9 @@ export function isFileChangeExec(resultField: string, toolName: string): boolean
 const terminal = (state: OrderedCallState) => state === "done" || state === "refused"
 
 function stepFinished(order: StepOrderState): boolean {
-  return order.held.length === 0
-    && order.calls.size >= (order.listedCount ?? 0)
+  return order.listedCount !== undefined
+    && order.held.length === 0
+    && order.calls.size >= order.listedCount
     && [...order.calls.values()].every((call) => terminal(call.state))
 }
 
@@ -132,7 +133,8 @@ function ensureCall(order: StepOrderState, callId: string, fileChange: boolean):
 /**
  * `tool_call_started`. A call after a finished generation starts a new one.
  * Keep a refusal until all listed calls have arrived, even when the idle
- * guard split the host step before Cursor sent the remaining calls.
+ * guard split the host step before Cursor sent the remaining calls. Without
+ * a count, only an explicit new generation establishes that no calls remain.
  */
 export function announceCall(order: StepOrderState, callId: string, fileChange: boolean): void {
   if (stepFinished(order)) clearStep(order)
