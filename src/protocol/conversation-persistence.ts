@@ -25,6 +25,8 @@ export type PersistedConversation = {
   checkpoint?: Uint8Array
   /** Last measured occupancy, as a token-details-only checkpoint; separate from resumable state. */
   occupancyCheckpoint?: Uint8Array
+  /** Versioned checkpoint measurement confirmation state, independent of Cursor's wire state. */
+  occupancyGuard?: string
   blobs: ConversationBlobSnapshot[]
   requestContext: Record<string, unknown>
   toolCatalog: OpencodeToolDef[]
@@ -209,7 +211,7 @@ function cloneConversation(value: PersistedConversation): PersistedConversation 
  * turn_provenance_json=12, host_note=13, early_steers_json=14,
  * lost_request_json=15, sent_image_hashes=16 (repeated), sent_images_checkpoint_sha256=17,
  * occupancy_checkpoint=18 (token-details-only checkpoint, never Run state),
- * session_edits_deny_sent=19, plan_operations_json=20.
+ * session_edits_deny_sent=19, plan_operations_json=20, occupancy_guard_json=21.
  * Blob: id=1, data=2. Tool: name=1, description=2,
  * input_schema_json=3, source_name=4.
  *
@@ -342,6 +344,7 @@ function encodeCacheFile(value: PersistedConversation): {
   if (value.occupancyCheckpoint?.length) writer.uint32(fieldTag(18, 2)).bytes(value.occupancyCheckpoint)
   if (value.sessionEditsDenySent) writer.uint32(fieldTag(19, 0)).bool(true)
   if (value.planOperations) writer.uint32(fieldTag(20, 2)).string(value.planOperations)
+  if (value.occupancyGuard) writer.uint32(fieldTag(21, 2)).string(value.occupancyGuard)
   return { protobufBytes: writer.finish(), requestContextBytes: requestContext.length }
 }
 
@@ -367,6 +370,7 @@ function decodeProtobuf(data: Uint8Array): PersistedConversation {
   let sentImagesCheckpoint: string | undefined
   let sessionEditsDenySent = false
   let planOperations: string | undefined
+  let occupancyGuard: string | undefined
   while (reader.pos < reader.len) {
     const tag = reader.uint32()
     const wireType = tag & 7
@@ -451,6 +455,10 @@ function decodeProtobuf(data: Uint8Array): PersistedConversation {
         if (wireType !== 2) throw new Error("invalid plan operations")
         planOperations = reader.string()
         break
+      case 21:
+        if (wireType !== 2) throw new Error("invalid occupancy guard")
+        occupancyGuard = reader.string()
+        break
       default:
         reader.skipType(wireType)
     }
@@ -483,6 +491,7 @@ function decodeProtobuf(data: Uint8Array): PersistedConversation {
     ...(sentImagesCheckpoint && sentImageHashes.length > 0 ? { sentImageHashes, sentImagesCheckpoint } : {}),
     ...(sessionEditsDenySent ? { sessionEditsDenySent } : {}),
     ...(planOperations ? { planOperations } : {}),
+    ...(occupancyGuard ? { occupancyGuard } : {}),
   }
 }
 

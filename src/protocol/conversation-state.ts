@@ -22,7 +22,8 @@ import {
   compactConversationBlobs,
   restoreConversationBlobs,
 } from "./blob-store.js"
-import { clearCheckpoint, getCheckpoint, getCheckpointOccupancy, restoreCheckpointOccupancy, setCheckpoint } from "./checkpoint.js"
+import { clearCheckpoint, getCheckpoint, getCheckpointOccupancy, restoreCheckpointOccupancy, setCheckpoint,
+  restoreCheckpointOccupancyGuard, serializeCheckpointOccupancyGuard } from "./checkpoint.js"
 import type { OpencodeToolDef } from "./tools.js"
 import {
   forgetTurnProvenance,
@@ -259,6 +260,7 @@ export async function hydrateConversationState(
   restoreSessionEditsDenySent(persisted.conversationId, persisted.sessionEditsDenySent === true, bound !== undefined)
   if (bound !== undefined) clearCheckpoint(persisted.conversationId)
   if (persisted.occupancyCheckpoint) restoreCheckpointOccupancy(persisted.conversationId, persisted.occupancyCheckpoint)
+  restoreCheckpointOccupancyGuard(persisted.conversationId, persisted.occupancyGuard)
   if (persisted.checkpoint) setCheckpoint(persisted.conversationId, persisted.checkpoint)
   restoreConversationBlobs(persisted.conversationId, persisted.blobs)
   if (bound !== undefined) clearFrozenRequestContext(persisted.conversationId)
@@ -337,6 +339,7 @@ export async function persistConversationState(
       conversationId: input.conversationId,
       checkpoint,
       occupancyCheckpoint: getCheckpointOccupancy(input.conversationId),
+      occupancyGuard: serializeCheckpointOccupancyGuard(input.conversationId),
       blobs,
       requestContext,
       toolCatalog: structuredClone(input.toolCatalog ?? []),

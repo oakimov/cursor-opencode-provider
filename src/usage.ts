@@ -159,6 +159,16 @@ export function formatCursorTokenCategories(
   return Object.keys(categories).length > 0 ? JSON.stringify(categories) : "unavailable"
 }
 
+/** Cursor's per-category character counts, which tell a real context jump from repeated token accounting. */
+export function formatCursorCategoryCharacters(
+  details: CursorConversationTokenDetails | undefined,
+): string {
+  const characters = Object.fromEntries((currentCursorTokenBreakdown(details)?.categories ?? [])
+    .filter((category) => category.characterCount !== undefined)
+    .map((category) => [category.id || category.label || "(unnamed)", category.characterCount]))
+  return Object.keys(characters).length > 0 ? JSON.stringify(characters) : "unavailable"
+}
+
 /**
  * Explain Cursor's aggregate cache counters using the state visible to this
  * client. `stepStarts` is deliberately not called a model-call count: Cursor

@@ -187,7 +187,7 @@ lifecycle calls instead advertise empty tools on their own conversation. See
 Every completed Run emits `turn usage validation:`. Begin with `status`:
 
 - `status=ok` means the AI SDK input/output partitions sum correctly, the total
-  sent to OpenCode matches Cursor's checkpoint total when available, and the
+  sent to OpenCode matches the accepted checkpoint total when available, and the
   category breakdown is internally consistent when present. A self-consistent
   older breakdown is marked `breakdownMatch=stale`; it is not current category
   evidence and is omitted from display metadata and cache comparisons.
@@ -206,14 +206,15 @@ Important fields:
 |---|---|
 | `source=checkpoint-current-run` | Current Run supplied fresh `tokenDetails`; preferred. |
 | `source=checkpoint-previous-turn` | No fresh details arrived, so the last snapshot is retained and marked stale in provider metadata. |
+| `source=checkpoint-held-spike` | A conversation-only count jump needs confirmation. Host usage retains the accepted snapshot, marked stale; context metadata exposes the pending `rawUsedTokens`. See the [selection policy](checkpoint-occupancy.md). |
 | `source=occupancy-checkpoint-current-run` | Tool-call finish published the current Run's occupancy snapshot, billed as a one-call estimate (see `billing:` below). |
 | `source=occupancy-checkpoint-previous-turn` | Tool-call finish published the prior checkpoint occupancy because this Run has not yet received token details. |
 | `source=intermediate-zero` | Tool-call finish with no known checkpoint occupancy. Standard usage remains zero. |
 | `source=unavailable` | No checkpoint has ever supplied token details. Standard usage remains zero rather than pretending aggregate TurnEnded usage is context occupancy. |
-| `cursor=used/max(percent)` | Cursor's authoritative context occupancy. |
+| `cursor=used/max(percent)` | The accepted checkpoint measurement used for host context accounting; a held spike uses the earlier stale measurement. |
 | `occupancyTotal` | Occupancy-shaped validation counters: exactly `usedTokens`, split into reported output and the remaining input (both zero for an empty snapshot). Every finish with token details validates against these; disagreement with `sentTotal` is a mismatch. |
 | `rawTotal` | Only on a finish without token details: aggregate `TurnEnded` input + output, request work rather than context occupancy. |
-| `sentTotal` | AI SDK input + output sent to OpenCode. With token details, this must equal Cursor `usedTokens`. |
+| `sentTotal` | AI SDK input + output sent to OpenCode. With token details, this must equal the accepted `usedTokens`, which can differ from the pending raw reading. |
 | `occupancyCachedRatio` | Shaped cached input divided by `usedTokens - reported output`, bounded to the available input. TurnEnded request cache ratios are on `finish:` / cache diagnosis, never here. (`rawCachedRatio` appears instead only beside `rawTotal`.) |
 | `sentCachedRatio` | Occupancy (`cacheRead` + `cacheWrite`) / sent input. Should match `occupancyCachedRatio`. |
 | `breakdownMatch` | `true`: category sum and breakdown total match current occupancy/limit. `stale`: self-consistent breakdown with a different occupancy or limit. `false`: category sum disagrees with breakdown total. `unavailable`: no breakdown. |
@@ -234,6 +235,12 @@ the counters behind it, labelled by where they come from:
 The final `TurnEnded` attempts to settle the catalog-priced balance once. Two
 tool-call finishes with the same `v3In` are two steps with no checkpoint between
 them: occupancy is replaced, while each delivered step can add an estimated cost.
+
+For a held spike, `checkpoint: stored` still prints the raw count/categories,
+followed by `acceptedContext` and `source=checkpoint-held-spike`. Finish usage,
+validation, billing tiers and the next cached-prefix estimate use the accepted
+count. This confirmation policy can delay genuine unexplained growth by one
+independent reading; it is not an exact reconstruction of hidden model calls.
 
 Every attempted finish is followed by a `billing:` line. `delivered=false`
 means the consumer rejected the finish and neither its charge nor its cached
@@ -305,9 +312,12 @@ internal model calls can process uncached text more than once.
 | `execRequests` | Cursor exec/control requests, including provider-handled probes and host-tool requests. |
 | `perModelCallCache=unavailable` | Cursor did not expose a per-call cache split. This must remain unavailable unless the wire protocol supplies it. |
 
-Each `checkpoint: stored` line includes `context=used/max` and a compact
-`categories={...}` object. Read these in timestamp order to locate the step where
-context composition changed. Category names come from Cursor and can evolve.
+Each `checkpoint: stored` line includes `context=used/max`, a compact
+`categories={...}` object of token counts and `characters={...}` with Cursor's
+character count per category. Read these in timestamp order to locate the step
+where context composition changed. A token jump without matching character
+growth is the unexplained shape the [confirmation policy](checkpoint-occupancy.md)
+holds. Category names come from Cursor and can evolve.
 
 ## Recognize common patterns
 

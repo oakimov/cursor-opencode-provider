@@ -194,6 +194,12 @@ export type DeliveryOutcome =
 
 export type CursorSession = {
   /**
+   * Media can change token occupancy without proportional character growth.
+   * The first measured checkpoint that arrives after this frame, with every
+   * delivered result acknowledged, admits its reading as a new baseline.
+   */
+  occupancyMediaAfterFrame?: number
+  /**
    * Stable per-Run-stream id (distinct from Cursor's own conversation_id).
    * Tags toolCallIds so two concurrent Run streams with overlapping exec ids
    * (Cursor resets them per stream) can't cross-deliver results.

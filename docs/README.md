@@ -8,6 +8,7 @@ variables and limitations. Host setup belongs in the matching guide.
 | [OpenCode 1.x](opencode-1.md) | Classic plugin and the separate 1.18 v2 API |
 | [OpenCode 2.x](opencode-2.md) | Installation, daemon/local builds, tools and migration |
 | [Cache and token logs](cache-log-runbook.md) | Continuity, usage, billing and cache evidence |
+| [Checkpoint occupancy](checkpoint-occupancy.md) | Confirmation policy for isolated unexplained context spikes |
 | [Host acceptance](host-compat-acceptance.md) | Planning, patch tools, steering and caching checks |
 | [Execution self-verification](execution-self-verify.md) | Native shell, permissions, failures and cleanup |
 | [CLI parity](cli-parity.md) | Provider support inventory and historical CLI comparison |

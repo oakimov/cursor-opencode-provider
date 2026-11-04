@@ -16,6 +16,7 @@ import { decodeConversationTokenDetails } from "../src/protocol/token-details.js
 import { sessionManager } from "../src/session.js"
 import { MODEL_CACHE_SCHEMA_VERSION } from "../src/shared.js"
 import { cacheHttp2SessionForTests, closeCachedHttp2SessionsForTests } from "../src/transport/connect.js"
+import { withTempHostCache } from "./host-cache.js"
 
 // The checkpoint that ends a Run cancelled for a plan handoff carries
 // `used_tokens=0`. The next Run sends it; its prior occupancy (the cached
@@ -178,4 +179,163 @@ it.each([false, true])("keeps measured occupancy on a zero-token checkpoint (res
     setHostCacheDirOverride(undefined)
     await fs.rm(directory, { recursive: true, force: true })
   }
+})
+
+/** Complete synthetic prompt categories let the confirmation policy inspect density. */
+function categorizedState(usedTokens: number, conversationChars: number, marker: string): Uint8Array {
+  return encodeMessage("ConversationStateStructure", {
+    root_prompt_messages_json: [marker],
+    token_details: {
+      used_tokens: usedTokens,
+      max_tokens: 256_000,
+      breakdown: {
+        total_used_tokens: usedTokens,
+        max_tokens: 256_000,
+        categories: [
+          { id: "system_prompt", label: "System prompt", estimated_tokens: 20_000, character_count: 80_000 },
+          { id: "conversation", label: "Conversation", estimated_tokens: usedTokens - 20_000, character_count: conversationChars },
+        ],
+      },
+    },
+  })
+}
+
+const checkpointUpdate = (state: Uint8Array): Uint8Array => encodeMessage("AgentServerMessage", {
+  conversation_checkpoint_update: state,
+})
+
+async function resetForRestart(): Promise<void> {
+  await settleRunSavesForTests()
+  sessionManager.dispose()
+  resetTurnStateForTests()
+  resetConversationBindingsForTests()
+  resetConversationPersistenceForTests()
+  resetCheckpointsForTests()
+}
+
+type FixtureModel = ReturnType<ReturnType<typeof createCursor>["languageModel"]>
+
+async function withOccupancyModel(run: (model: FixtureModel) => Promise<void>): Promise<void> {
+  await withTempHostCache(async directory => {
+    const models = mapAvailableModelsResponse({ models: [{ name: "occupancy-fixture" }] })
+    await writeCache(directory, { models, fetchedAt: Date.now(), schemaVersion: MODEL_CACHE_SCHEMA_VERSION })
+    cacheHttp2SessionForTests(origin, client)
+    const model = createCursor({ name: "cursor", accessToken: "example-token", cacheDir: directory, agentBaseURL: origin })
+      .languageModel("occupancy-fixture")
+    try {
+      await run(model)
+    } finally {
+      await settleRunSavesForTests()
+      sessionManager.dispose()
+    }
+  })
+}
+
+it.each([false, true])("holds an unexplained terminal spike without changing the resumed checkpoint (restart=%s)", async restart => {
+  await withOccupancyModel(async model => {
+    const baseline = categorizedState(120_000, 400_000, "before-spike")
+    const spike = categorizedState(240_000, 404_000, "unconfirmed-spike")
+    const normal = categorizedState(121_000, 408_000, "normal-after-spike")
+    scripts.push(
+      [reply, checkpointUpdate(baseline), checkpointUpdate(spike), checkpointUpdate(spike), turnEnded],
+      [reply, turnEnded],
+      [reply, checkpointUpdate(normal), turnEnded],
+    )
+    const first = [{ role: "user", content: [{ type: "text", text: "first" }] }]
+    const firstFinish = await finishOf(model, first)
+    expect(firstFinish.usage.inputTokens.total + firstFinish.usage.outputTokens.total).toBe(120_000)
+    expect(firstFinish.providerMetadata.cursor.context).toMatchObject({
+      source: "checkpoint-held-spike", stale: true, usedTokens: 120_000, rawUsedTokens: 240_000,
+    })
+    if (restart) await resetForRestart()
+    const secondPrompt = [
+      ...first,
+      { role: "assistant", content: [{ type: "text", text: "ok" }] },
+      { role: "user", content: [{ type: "text", text: "second" }] },
+    ]
+    const second = await finishOf(model, secondPrompt)
+    expect(second.usage.inputTokens.total + second.usage.outputTokens.total).toBe(120_000)
+    expect(second.providerMetadata.cursor.context).toMatchObject({
+      source: "checkpoint-held-spike", stale: true, usedTokens: 120_000, rawUsedTokens: 240_000,
+    })
+    const third = await finishOf(model, [
+      ...secondPrompt,
+      { role: "assistant", content: [{ type: "text", text: "ok" }] },
+      { role: "user", content: [{ type: "text", text: "third" }] },
+    ])
+    expect(third.usage.inputTokens.total + third.usage.outputTokens.total).toBe(121_000)
+    expect(third.providerMetadata.cursor.context).toMatchObject({
+      source: "checkpoint-current-run", stale: false, usedTokens: 121_000,
+    })
+    expect(third.providerMetadata.cursor.context.rawUsedTokens).toBeUndefined()
+    expect(sentStates).toHaveLength(3)
+    expect(sentStates[0]).toBeUndefined()
+    expect(sentStates[1]).toEqual(spike)
+    expect(sentStates[2]).toEqual(spike)
+    expect(decodeConversationTokenDetails(sentStates[1])?.usedTokens).toBe(240_000)
+  })
+})
+
+it("retains a pending spike through a zero checkpoint and restart, then confirms an independent high reading", async () => {
+  await withOccupancyModel(async model => {
+    const baseline = categorizedState(120_000, 400_000, "before-zero")
+    const spike = categorizedState(240_000, 404_000, "held-before-zero")
+    const zero = checkpoint(0, "terminal-zero")
+    const zeroState = decodeMessage<{ conversation_checkpoint_update: Uint8Array }>("AgentServerMessage", zero)
+      .conversation_checkpoint_update
+    scripts.push(
+      [reply, checkpointUpdate(baseline), checkpointUpdate(spike), zero, turnEnded],
+      [reply, turnEnded],
+      [reply, checkpointUpdate(spike), checkpointUpdate(spike), turnEnded],
+    )
+    const first = [{ role: "user", content: [{ type: "text", text: "first" }] }]
+    const firstFinish = await finishOf(model, first)
+    // A terminal zero still reports empty usage; its separately saved guard survives.
+    expect(firstFinish.usage.inputTokens.total + firstFinish.usage.outputTokens.total).toBe(0)
+    expect(firstFinish.providerMetadata.cursor.context).toMatchObject({
+      source: "checkpoint-current-run", stale: false, usedTokens: 0,
+    })
+    await resetForRestart()
+    const secondPrompt = [
+      ...first,
+      { role: "assistant", content: [{ type: "text", text: "ok" }] },
+      { role: "user", content: [{ type: "text", text: "second" }] },
+    ]
+    const second = await finishOf(model, secondPrompt)
+    expect(second.usage.inputTokens.total + second.usage.outputTokens.total).toBe(120_000)
+    expect(second.providerMetadata.cursor.context).toMatchObject({
+      source: "checkpoint-held-spike", stale: true, usedTokens: 120_000, rawUsedTokens: 240_000,
+    })
+    const third = await finishOf(model, [
+      ...secondPrompt,
+      { role: "assistant", content: [{ type: "text", text: "ok" }] },
+      { role: "user", content: [{ type: "text", text: "third" }] },
+    ])
+    expect(third.usage.inputTokens.total + third.usage.outputTokens.total).toBe(240_000)
+    expect(third.providerMetadata.cursor.context).toMatchObject({
+      source: "checkpoint-current-run", stale: false, usedTokens: 240_000,
+    })
+    expect(third.providerMetadata.cursor.context.rawUsedTokens).toBeUndefined()
+    expect(sentStates).toHaveLength(3)
+    expect(sentStates[1]).toEqual(zeroState)
+    expect(sentStates[2]).toEqual(zeroState)
+    expect(decodeConversationTokenDetails(sentStates[1])?.usedTokens).toBe(0)
+  })
+})
+
+it("admits a large reading immediately when conversation characters grow with it", async () => {
+  await withOccupancyModel(async model => {
+    scripts.push([
+      reply,
+      checkpointUpdate(categorizedState(120_000, 400_000, "before-growth")),
+      checkpointUpdate(categorizedState(240_000, 880_000, "large-real-growth")),
+      turnEnded,
+    ])
+    const finish = await finishOf(model, [{ role: "user", content: [{ type: "text", text: "first" }] }])
+    expect(finish.usage.inputTokens.total + finish.usage.outputTokens.total).toBe(240_000)
+    expect(finish.providerMetadata.cursor.context).toMatchObject({
+      source: "checkpoint-current-run", stale: false, usedTokens: 240_000,
+    })
+    expect(finish.providerMetadata.cursor.context.rawUsedTokens).toBeUndefined()
+  })
 })

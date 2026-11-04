@@ -154,6 +154,26 @@ describe("conversation restart persistence", () => {
     expect((await loadPersistedConversation(root, sessionKey)).status).toBe("invalid")
   })
 
+  it("stores confirmation metadata under the independently specified private field 21", async () => {
+    const root = await cacheRoot()
+    const sessionKey = "ses_guard_cache"
+    const occupancyGuard = '{"version":1}'
+    await persistConversation(root, {
+      sessionKey, conversationId: "conv-guard-cache",
+      blobs: [], requestContext: { rules_info_complete: true }, toolCatalog: [], postCompactionRebase: false, occupancyGuard,
+    })
+    const file = conversationCacheFilePath(root, sessionKey)
+    const raw = gunzipSync(await readFile(file))
+    // Independent protobuf tag: field21/wire2 = 0xaa 0x01; payload is 13 UTF-8 bytes.
+    expect(raw.includes(Buffer.from([0xaa, 1, 13, ...Buffer.from(occupancyGuard)]))).toBe(true)
+    clearMemory()
+    expect((await loadPersistedConversation(root, sessionKey)).value?.occupancyGuard).toBe(occupancyGuard)
+    // A wrong wire type must invalidate the snapshot rather than trusting the record.
+    await writeFile(file, gzipSync(Buffer.concat([raw, Buffer.from([0xa8, 1, 1])])))
+    clearMemory()
+    expect((await loadPersistedConversation(root, sessionKey)).status).toBe("invalid")
+  })
+
   it("persists whether a session edit deny was ever sent, so a restart adds no needless correction", async () => {
     const root = await cacheRoot()
     const requestContext = { rules_info_complete: true }
