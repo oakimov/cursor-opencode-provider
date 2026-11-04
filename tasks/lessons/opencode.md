@@ -544,7 +544,9 @@ These are failure lessons shared by both hosts, not a replacement for
   soft handoff then carried output from after its window (#130). A fixed
   delay before `done` did not guarantee the launcher sampled a footer:
   coordinate readiness and sampling explicitly, and assert the sampled size
-  differs from the bound in the direction under test
+  differs from the bound in the direction under test. Opening `output-bytes`
+  exposes an empty file before its number is written; wait for the later
+  `done` marker before reading that bound in the soft-handoff regression
   (`test/terminal-runner.test.ts`, finalized record footer; soft handoff).
 - **Read native execution before emulating it.** Both hosts own shell choice,
   permission and process-group cancellation. Preserve native background support;

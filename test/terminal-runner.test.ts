@@ -415,7 +415,9 @@ fs.createReadStream(job + "/pipe").on("data", chunk => fs.writeSync(fd, chunk))
       `  while [ $(( $(wc -c <"$cursor_terminal") - cursor_header )) -lt ${"before".length} ]; do sleep 0.01; done`,
       sample,
       `  printf '%s\\n' "$cursor_output" >'${sampled}'`,
-      '  while [ ! -f "$cursor_job/output-bytes" ]; do sleep 0.01; done',
+      // Opening output-bytes creates it before printf writes the bound. done
+      // is published afterward, so it proves the bound is ready to read.
+      '  while [ ! -f "$cursor_job/done" ]; do sleep 0.01; done',
     ].join("\n"))
     const launched = await launch(terminal)
     expect(launched.code).toBe(0)
