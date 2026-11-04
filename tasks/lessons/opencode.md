@@ -323,10 +323,14 @@ These are failure lessons shared by both hosts, not a replacement for
   Hold the calls after a file change behind its result, by model order, never
   on a timer: a permission prompt would reopen the race. A held exec frame is
   dispatched again, so it must skip the replay accounting it already passed
-  and keep its pending entry owed while it waits. A new-step reset on "every
-  call finished" forgot a provider refusal mid-step; only a host refusal,
-  which comes after the step was sent, cancels followers
-  (`test/step-order-pump.test.ts`, `test/step-order.test.ts`).
+  and keep its pending entry owed while it waits. Provider mapping refusals
+  finish their own calls; host refusals cancel the calls that follow them
+  (`test/step-order-pump.test.ts`, `test/step-order.test.ts`). Locally answered
+  execs without a display id must settle the same fallback id used for
+  ordering. Apply queued aborts before redispatch, and retain the generation's
+  listed count across an idle host-step split: the first denied edit can
+  finish before a later listed call even arrives. Otherwise the call stays
+  blocked forever, runs after its withdrawal, or escapes the denial.
 
 - **Gate the unavoidable transition and stop on refusal.** The model wrote a
   plan and stopped without volunteering SwitchMode. Attach approval to

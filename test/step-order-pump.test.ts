@@ -17,6 +17,7 @@ import { toolsToDescriptors } from "../src/protocol/tools.js"
 import { HELD_CALL_CANCELLED_REASON } from "../src/step-order.js"
 import { sessionManager, type CursorSession, type Frame } from "../src/session.js"
 import { sessionFixture } from "./session-fixture.js"
+import { withTempHostCache } from "./host-cache.js"
 
 const frame = (message: Record<string, unknown>): Frame => ({ flags: 0, payload: encodeMessage("AgentServerMessage", message) })
 const listed = (call_count: number) => frame({ interaction_update: { tool_requests_listed: { call_count } } })
@@ -201,6 +202,27 @@ describe("model order in a step that changes a file", () => {
     expect(toolCalls(f.parts).map((call) => call.toolName)).toEqual(["write", "bash"])
   })
 
+  it("settles a locally rejected read without a display id before a later edit", async () => {
+    const root = workspace()
+    const target = path.join(root, "new.txt")
+    const f = fixture([
+      listed(3),
+      frame({ exec_server_message: { id: 1, read_args: { path: path.join(root, "missing.txt") } } }),
+      editStarted("edit", target),
+      writeExec(2, target, "created\n", "edit"),
+      shellStarted("shell"),
+      shellExec(3, "shell"),
+      ended(),
+    ], root)
+
+    await f.run()
+    expect(replyOrder(f.writes)).toEqual([1])
+    expect(toolCalls(f.parts).map((call) => call.toolName)).toEqual(["write"])
+    await answer(f.session, toolCalls(f.parts)[0]!, 2)
+    await f.run()
+    expect(toolCalls(f.parts).map((call) => call.toolName)).toEqual(["write", "bash"])
+  })
+
   it("runs the command when Cursor finishes the edit without a write", async () => {
     const root = workspace()
     const { frames } = editThenShell(root)
@@ -258,6 +280,20 @@ describe("model order in a step that changes a file", () => {
     expect(replyText(f.writes, 2)).toContain(HELD_CALL_CANCELLED_REASON)
   })
 
+  it("keeps a denied change's cancellation when a listed follower arrives after the idle boundary", async () => {
+    const root = workspace()
+    const target = path.join(root, "new.txt")
+    const f = fixture([listed(2), editStarted("edit", target), writeExec(1, target, "created\n", "edit")], root)
+    await f.run()
+    await answer(f.session, toolCalls(f.parts)[0]!, 1, { error: "Permission rejected", refusal: "rejected" })
+    f.push(shellStarted("shell"), shellExec(2, "shell"), ended())
+    await f.run()
+
+    expect(toolCalls(f.parts).map((call) => call.toolName)).toEqual(["write"])
+    expect(replyText(f.writes, 2)).toContain(HELD_CALL_CANCELLED_REASON)
+    expect(finishes(f.parts).at(-1)!.finishReason.unified).toBe("stop")
+  })
+
   it("never runs a held call Cursor withdraws", async () => {
     const root = workspace()
     const { frames } = editThenShell(root)
@@ -269,6 +305,77 @@ describe("model order in a step that changes a file", () => {
     expect(toolCalls(f.parts).map((call) => call.toolName)).toEqual(["read"])
     expect(replyOrder(f.writes)).toEqual([1])
     expect(finishes(f.parts).at(-1)!.finishReason.unified).toBe("stop")
+  })
+
+  it("applies an already queued abort before releasing its held call", async () => {
+    const root = workspace()
+    const { frames } = editThenShell(root)
+    const f = fixture(frames, root)
+    await f.run()
+    await answer(f.session, toolCalls(f.parts)[0]!, 1)
+    f.session.heldFrames = [completed("edit"), execAbort(2), ended()]
+
+    await f.run()
+    expect(toolCalls(f.parts).map((call) => call.toolName)).toEqual(["read"])
+    expect(replyOrder(f.writes)).toEqual([1])
+    expect(finishes(f.parts).at(-1)!.finishReason.unified).toBe("stop")
+  })
+
+  it("never redispatches a held call whose pending owner was removed", async () => {
+    const root = workspace()
+    const { frames } = editThenShell(root)
+    const f = fixture(frames, root)
+    await f.run()
+    await answer(f.session, toolCalls(f.parts)[0]!, 1)
+    sessionManager.resolve(f.session.sessionId, 2)
+    f.push(completed("edit"), ended())
+    await f.run()
+    expect(toolCalls(f.parts).map((call) => call.toolName)).toEqual(["read"])
+    expect(replyOrder(f.writes)).toEqual([1])
+  })
+
+  it("does not reply to a cancelled follower whose pending owner was removed", async () => {
+    const root = workspace()
+    const { frames } = editThenShell(root)
+    const f = fixture(frames, root)
+    await f.run()
+    await answer(f.session, toolCalls(f.parts)[0]!, 1, { error: "Permission rejected", refusal: "rejected" })
+    sessionManager.resolve(f.session.sessionId, 2)
+    f.push(ended())
+    await f.run()
+    expect(toolCalls(f.parts).map((call) => call.toolName)).toEqual(["read"])
+    expect(replyOrder(f.writes)).toEqual([1])
+  })
+
+  it("rechecks a held tool against the permitted catalog on release", async () => {
+    const root = workspace()
+    const target = path.join(root, "new.txt")
+    const f = fixture([
+      listed(2), editStarted("edit", target), writeExec(1, target, "created\n", "edit"),
+      shellStarted("shell"), shellExec(2, "shell"),
+    ], root)
+    await f.run()
+    await answer(f.session, toolCalls(f.parts)[0]!, 1)
+    f.session.permittedToolNames = new Set(["read", "write"])
+    f.push(ended())
+    await f.run()
+    expect(toolCalls(f.parts).map((call) => call.toolName)).toEqual(["write"])
+    expect(replyText(f.writes, 2)).toContain("not permitted")
+    expect(f.session.pending.size).toBe(0)
+  })
+
+  it("releases a follower when the provider refuses the change's mapping", async () => {
+    const root = workspace()
+    const target = path.join(root, "new.txt")
+    const f = fixture([
+      listed(2), editStarted("edit", target), shellStarted("shell"), shellExec(2, "shell"),
+      writeExec(1, target, "created\n", "edit"),
+    ], root)
+    f.session.permittedToolNames = new Set(["read", "bash"])
+    await f.run()
+    expect(toolCalls(f.parts).map((call) => call.toolName)).toEqual(["bash"])
+    expect(replyText(f.writes, 1)).toContain("not permitted")
+    expect(replyText(f.writes, 2)).toBe("[]")
   })
 
   it("never runs a held call after the host stops the turn", async () => {
@@ -308,6 +415,20 @@ describe("model order in a step that changes a file", () => {
     expect(f.session.stepOrder?.held ?? []).toEqual([])
   })
 
+  it("does not count an unordered image-copy refusal as a listed model call", async () => {
+    const root = workspace()
+    const f = fixture([
+      listed(2),
+      frame({ exec_server_message: { id: 99, write_args: { path: path.join(root, "copy.png"), file_bytes: new Uint8Array([0, 255, 0]) } } }),
+      shellStarted("status", "git status"), shellExec(1, "status", "git status"),
+      shellStarted("log", "git log -1"), shellExec(2, "log", "git log -1"),
+    ], root)
+    await f.run()
+    expect(replyOrder(f.writes)).toEqual([99])
+    expect(toolCalls(f.parts).map((call) => call.toolName)).toEqual(["bash", "bash"])
+    expect(finishes(f.parts)).toHaveLength(1)
+  })
+
   it("runs a call before the edit with it and holds only the call after it", async () => {
     const root = workspace()
     const target = path.join(root, "target.txt")
@@ -331,7 +452,7 @@ describe("model order in a step that changes a file", () => {
     expect(f.session.stepOrder?.held.map((held) => held.execId)).toEqual([3])
   })
 
-  it("books one Cursor step once when its calls run in two host steps", async () => {
+  it("books one Cursor step once when its calls run in two host steps", async () => withTempHostCache(async cacheDir => {
     const root = workspace()
     const target = path.join(root, "new.txt")
     const f = fixture([
@@ -342,6 +463,8 @@ describe("model order in a step that changes a file", () => {
       shellExec(2, "shell"),
       writeExec(3, target, "created\n", "edit"),
     ], root)
+    f.session.cacheDir = cacheDir
+    f.session.openCodeSessionId = "ses_step_order_billing"
     f.session.tokenDetails = { usedTokens: 40_000, maxTokens: 256_000 }
     f.session.tokenDetailsFresh = true
     f.session.billing = { key: "ses_step_order", cost: { input: 2, output: 6, cache_read: 0.5 }, prefixTokens: 30_000 }
@@ -360,7 +483,7 @@ describe("model order in a step that changes a file", () => {
     expect(released.usage.outputTokens.total ?? 0).toBe(0)
     expect(released.providerMetadata).toMatchObject({ copilot: { totalNanoAiu: 0 }, cursor: { releasedStep: true } })
     expect(billingLedger.totals(f.session.billing.key).billedUsd).toBe(booked)
-  })
+  }))
 
   it("keeps a held call owed to Cursor with the usual exec heartbeats", async () => {
     const root = workspace()

@@ -8,8 +8,10 @@ import {
   isFileChangeDisplay,
   isFileChangeExec,
   noteExecResult,
+  noteOrderedCallCount,
   orderExec,
   runExec,
+  startOrderedStep,
   takeCancelledExecs,
   takeReleasableExecs,
 } from "../src/step-order.js"
@@ -138,5 +140,42 @@ describe("step order", () => {
     announceCall(order, "shell", false)
     expect(order.calls.has("edit")).toBe(true)
     expect(orderExec(order, "shell", false)).toBe("hold")
+  })
+
+  it("retains refusal until every listed call arrived, then admits the next generation's count", () => {
+    const order = createStepOrder<number, undefined>()
+    noteOrderedCallCount(order, 2)
+    announceCall(order, "edit", true)
+    runExec(order, "edit", 1, false)
+    noteExecResult(order, 1, "refused")
+    announceCall(order, "late", false)
+    expect(orderExec(order, "late", false)).toBe("cancel")
+    finishCall(order, "late")
+
+    noteOrderedCallCount(order, 3)
+    announceCall(order, "next-edit", true)
+    expect(order.calls.has("edit")).toBe(false)
+    expect(order.listedCount).toBe(3)
+    runExec(order, "next-edit", 2, false)
+    noteExecResult(order, 2, "refused")
+    announceCall(order, "next-late", false)
+    expect(orderExec(order, "next-late", false)).toBe("cancel")
+  })
+
+  it("uses an explicit new generation even if the prior count was incomplete", () => {
+    const order = createStepOrder<number, undefined>()
+    noteOrderedCallCount(order, 2)
+    announceCall(order, "edit", true)
+    runExec(order, "edit", 1, false)
+    startOrderedStep(order)
+    expect(order.calls.has("edit")).toBe(true)
+    noteExecResult(order, 1, "refused")
+    startOrderedStep(order)
+    announceCall(order, "next", false)
+    expect(orderExec(order, "next", false)).toBe("run")
+    expect(order.listedCount).toBeUndefined()
+    noteOrderedCallCount(order, -1)
+    noteOrderedCallCount(order, Number.NaN)
+    expect(order.listedCount).toBeUndefined()
   })
 })

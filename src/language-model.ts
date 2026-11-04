@@ -33,8 +33,10 @@ import {
   isFileChangeDisplay,
   isFileChangeExec,
   noteExecResult,
+  noteOrderedCallCount,
   orderExec,
   runExec,
+  startOrderedStep,
   takeCancelledExecs,
   takeReleasableExecs,
 } from "./step-order.js"
@@ -5881,6 +5883,8 @@ export async function pump(
     // form a host step of their own, so wait for one in progress to end.
     const order = session.stepOrder
     if (order && order.held.length > 0) {
+      // Control frames already received take effect before a held call can run.
+      applyQueuedAborts(session)
       for (const held of takeCancelledExecs(order)) {
         const current = session.pending.get(held.execId)
         if (!current || current !== held.pending || current.state !== "pending" || current.aborted) continue
@@ -6439,11 +6443,13 @@ export async function pump(
           : undefined
       noteToolRequestsListedSeen()
       if (callCount !== undefined && Number.isFinite(callCount)) {
+        noteOrderedCallCount(session.stepOrder ??= createStepOrder(), callCount)
         noteListedCallCount(ensureParallelStep(), callCount)
         trace(`tool_requests_listed call_count=${callCount}`)
         if (closeIfParallelStepComplete()) return
       }
     } else if (iu?.step_started) {
+      startOrderedStep(session.stepOrder)
       cacheDiagnostics.stepStarts++
     } else if (iu?.step_completed) {
       cacheDiagnostics.stepCompletes++
@@ -6549,6 +6555,9 @@ export async function pump(
       } else {
         replaySafety.markBarrier("non-control-exec")
         const displayCallId = extractExecDisplayCallId(esm)
+        const orderedCallId = displayCallId ?? `cursor_${session.sessionId}_${esmId}`
+        const disposeExecCall = () => disposeParallelCall(displayCallId
+          ?? (session.stepOrder?.calls.has(orderedCallId) ? orderedCallId : undefined))
         // A refused exec is final for its announced row, on every refusal path.
         const rejectExec = async (parsed: ParsedExecRequest, reason: string, label: string) => {
           const row = earlyRows.claim(displayCallId)
@@ -6563,7 +6572,7 @@ export async function pump(
               ? CREATE_PLAN_NOT_APPROVED_REASON
               : "The host agent is switching. End this turn; the next agent continues the work.",
               session.planReviewDeclined ? "plan execution declined" : "agent handoff")) return
-            disposeParallelCall(displayCallId)
+            disposeExecCall()
             if (closeIfParallelStepComplete()) return
             continue
           }
@@ -6584,7 +6593,7 @@ export async function pump(
             await writeWithBackpressure(session.stream, message, `runtime metadata reply id=${esmId}`)
           }
           if (displayCallId) session.displayToolCalls.delete(displayCallId)
-          disposeParallelCall(displayCallId)
+          disposeExecCall()
           if (closeIfParallelStepComplete()) return
           continue
         }
@@ -6595,13 +6604,13 @@ export async function pump(
           const request = parseExecServerMessage(esm, session.hostToolDialect)
           if (request && !binaryWritePayload(request)) {
             const order = session.stepOrder ??= createStepOrder()
-            const callId = displayCallId ?? `cursor_${session.sessionId}_${request.id}`
+            const callId = orderedCallId
             const decision = redispatched
               ? "run"
               : orderExec(order, callId, isFileChangeExec(request.resultField, request.toolName))
             if (decision === "cancel") {
               if (!await rejectExec(request, HELD_CALL_CANCELLED_REASON, "after a refused file change")) return
-              disposeParallelCall(displayCallId)
+              disposeExecCall()
               if (closeIfParallelStepComplete()) return
               continue
             }
@@ -6648,7 +6657,7 @@ export async function pump(
               })
               for (const message of frames) await writeWithBackpressure(session.stream, message, `runtime MCP read reply id=${esmId}`)
               if (displayCallId) session.displayToolCalls.delete(displayCallId)
-              disposeParallelCall(displayCallId)
+              disposeExecCall()
               if (closeIfParallelStepComplete()) return
               continue
             }
@@ -6688,7 +6697,7 @@ export async function pump(
             pending.resultMetadata?.correlatedEditCallId === displayCallId)) {
             if (!await rejectExec(parsed, "Wait for the host-authorized edit read before sending its replacement.",
               "edit read authorization pending")) return
-            disposeParallelCall(displayCallId)
+            disposeExecCall()
             if (closeIfParallelStepComplete()) return
             continue
           }
@@ -6723,7 +6732,7 @@ export async function pump(
         if (parsed) {
           if (parsed.localError) {
             if (!await rejectExec(parsed, parsed.localError, "invalid mapping")) return
-            disposeParallelCall(displayCallId)
+            disposeExecCall()
             if (closeIfParallelStepComplete()) return
             continue
           }
@@ -6741,7 +6750,7 @@ export async function pump(
               trace(`exec: dropped ${toollessText.length} chars of tool-less narration before refused id=${parsed.id}`)
               toollessText = ""
             }
-            disposeParallelCall(displayCallId)
+            disposeExecCall()
             if (closeIfParallelStepComplete()) return
             continue
           }
@@ -6757,7 +6766,7 @@ export async function pump(
                 "This OpenCode agent cannot write binary file content. "
                 + "Do not retry this write with the same bytes."
               if (!await rejectExec(parsed, reason, "binary write unsupported")) return
-              disposeParallelCall(displayCallId)
+              disposeExecCall()
               if (closeIfParallelStepComplete()) return
               continue
             }
@@ -6771,7 +6780,7 @@ export async function pump(
                 "This OpenCode agent cannot write binary file content on this turn. "
                 + "Do not retry this write with the same bytes."
               if (!await rejectExec(parsed, reason, "binary write not permitted")) return
-              disposeParallelCall(displayCallId)
+              disposeExecCall()
               if (closeIfParallelStepComplete()) return
               continue
             }
@@ -6802,7 +6811,7 @@ export async function pump(
               })
             } catch (error) {
               if (!await rejectExec(parsed, (error as Error).message, "binary write not staged")) return
-              disposeParallelCall(displayCallId)
+              disposeExecCall()
               if (closeIfParallelStepComplete()) return
               continue
             }
@@ -6888,7 +6897,7 @@ export async function pump(
                 `advertised=[${advertisedToolNames.join(",")}]`,
             )
             if (!await rejectExec(parsed, reason, "unavailable tool")) return
-            disposeParallelCall(displayCallId)
+            disposeExecCall()
             if (closeIfParallelStepComplete()) return
             continue
           }
@@ -6906,7 +6915,7 @@ export async function pump(
                 `permitted=[${[...permittedToolNames].sort().join(",")}]`,
             )
             if (!await rejectExec(parsed, reason, "not permitted this turn")) return
-            disposeParallelCall(displayCallId)
+            disposeExecCall()
             if (closeIfParallelStepComplete()) return
             continue
           }
@@ -6920,14 +6929,14 @@ export async function pump(
             if (!await rejectExec(parsed, reason, "plan exit blocked")) return
             session.planReviewDeclined = true
             if (displayCallId) session.displayToolCalls.delete(displayCallId)
-            disposeParallelCall(displayCallId)
+            disposeExecCall()
             if (closeIfParallelStepComplete()) return
             continue
           }
           if (await recoverCorrelatedEditRead(parsed, displayCallId)) continue
           if (await rejectMissingReadTarget(parsed)) {
             if (displayCallId) session.displayToolCalls.delete(displayCallId)
-            disposeParallelCall(displayCallId)
+            disposeExecCall()
             if (closeIfParallelStepComplete()) return
             continue
           }
@@ -6938,7 +6947,7 @@ export async function pump(
               + "or use this tool's own input schema; do not retry the misplaced command."
             if (!await rejectExec(parsed, reason, "misplaced shell command")) return
             if (displayCallId) session.displayToolCalls.delete(displayCallId)
-            disposeParallelCall(displayCallId)
+            disposeExecCall()
             if (closeIfParallelStepComplete()) return
             continue
           }
@@ -6949,7 +6958,7 @@ export async function pump(
               + "arguments before retrying. Do not retry the same incomplete arguments or invent required values."
             if (!await rejectExec(parsed, reason, "missing required arguments")) return
             if (displayCallId) session.displayToolCalls.delete(displayCallId)
-            disposeParallelCall(displayCallId)
+            disposeExecCall()
             if (closeIfParallelStepComplete()) return
             continue
           }
@@ -7052,7 +7061,7 @@ export async function pump(
             failRunProtocol("Cursor unsupported exec deny reply failed", RUN_REPLY_FAILED)
           }
           trace(`exec: SOFT-DENIED ${variant.requestName} id=${esmId}`)
-          disposeParallelCall(displayCallId)
+          disposeExecCall()
           if (closeIfParallelStepComplete()) return
           continue
         }

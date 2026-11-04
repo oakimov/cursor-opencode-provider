@@ -60,6 +60,8 @@ export type HeldExec<F, P> = {
 
 export type StepOrderState<F = unknown, P = unknown> = {
   nextIndex: number
+  /** Cursor's count for this generation, retained across host step splits. */
+  listedCount?: number
   calls: Map<string, OrderedCall>
   /** Dispatched execs: which call each belongs to, and whether it is a file change's private read. */
   execs: Map<number, { callId: string; fileChangeRead: boolean }>
@@ -83,7 +85,34 @@ export function isFileChangeExec(resultField: string, toolName: string): boolean
 
 const terminal = (state: OrderedCallState) => state === "done" || state === "refused"
 
-function ensureCall(order: StepOrderState<any, any>, callId: string, fileChange: boolean): OrderedCall {
+function stepFinished(order: StepOrderState): boolean {
+  return order.held.length === 0
+    && order.calls.size >= (order.listedCount ?? 0)
+    && [...order.calls.values()].every((call) => terminal(call.state))
+}
+
+function clearStep(order: StepOrderState): void {
+  order.calls.clear()
+  order.execs.clear()
+  order.nextIndex = 0
+  order.listedCount = undefined
+}
+
+/** A new generation's count may precede its first tool announcement. */
+export function noteOrderedCallCount(order: StepOrderState, count: number): void {
+  if (!Number.isFinite(count) || count < 0) return
+  if (order.listedCount !== undefined && stepFinished(order)) clearStep(order)
+  order.listedCount = count
+}
+
+/** Cursor explicitly started a new generation; outstanding holds retain their owner. */
+export function startOrderedStep(order: StepOrderState | undefined): void {
+  if (order && order.held.length === 0 && [...order.calls.values()].every((call) => terminal(call.state))) {
+    clearStep(order)
+  }
+}
+
+function ensureCall(order: StepOrderState, callId: string, fileChange: boolean): OrderedCall {
   let call = order.calls.get(callId)
   if (!call) {
     call = { index: order.nextIndex++, fileChange, state: "announced" }
@@ -95,21 +124,16 @@ function ensureCall(order: StepOrderState<any, any>, callId: string, fileChange:
 }
 
 /**
- * `tool_call_started`. A call after a finished step starts a new step: Cursor
- * generates again only once every exec of the step before it was answered.
- * A host refusal arrives only after its step was sent, so it is never
- * forgotten while that step still has calls to come.
+ * `tool_call_started`. A call after a finished generation starts a new one.
+ * Keep a refusal until all listed calls have arrived, even when the idle
+ * guard split the host step before Cursor sent the remaining calls.
  */
-export function announceCall(order: StepOrderState<any, any>, callId: string, fileChange: boolean): void {
-  if (order.held.length === 0 && [...order.calls.values()].every((call) => terminal(call.state))) {
-    order.calls.clear()
-    order.execs.clear()
-    order.nextIndex = 0
-  }
+export function announceCall(order: StepOrderState, callId: string, fileChange: boolean): void {
+  if (stepFinished(order)) clearStep(order)
   ensureCall(order, callId, fileChange)
 }
 
-function blocked(order: StepOrderState<any, any>, callId: string, call: OrderedCall): boolean {
+function blocked(order: StepOrderState, callId: string, call: OrderedCall): boolean {
   for (const [otherId, other] of order.calls) {
     if (otherId === callId || other.index >= call.index) continue
     // A started but unsent file change already blocks the calls after it.
@@ -120,7 +144,7 @@ function blocked(order: StepOrderState<any, any>, callId: string, call: OrderedC
   return false
 }
 
-function followsRefusal(order: StepOrderState<any, any>, call: OrderedCall): boolean {
+function followsRefusal(order: StepOrderState, call: OrderedCall): boolean {
   for (const other of order.calls.values()) {
     if (other.index < call.index && other.fileChange && other.state === "refused") return true
   }
@@ -129,7 +153,7 @@ function followsRefusal(order: StepOrderState<any, any>, call: OrderedCall): boo
 
 /** Decide an exec as it arrives: run it now, hold it, or cancel it behind a refused file change. */
 export function orderExec(
-  order: StepOrderState<any, any>,
+  order: StepOrderState,
   callId: string,
   fileChange: boolean,
 ): "run" | "hold" | "cancel" {
@@ -138,7 +162,7 @@ export function orderExec(
   return blocked(order, callId, call) ? "hold" : "run"
 }
 
-export function isFileChangeCall(order: StepOrderState<any, any> | undefined, callId: string): boolean {
+export function isFileChangeCall(order: StepOrderState | undefined, callId: string): boolean {
   return !!order?.calls.get(callId)?.fileChange
 }
 
@@ -152,7 +176,7 @@ export function holdExec<F, P>(order: StepOrderState<F, P>, held: HeldExec<F, P>
 
 /** An exec of `callId` was dispatched: answered here, refused, or sent to the host. */
 export function runExec(
-  order: StepOrderState<any, any>,
+  order: StepOrderState,
   callId: string,
   execId: number,
   fileChangeRead: boolean,
@@ -163,13 +187,13 @@ export function runExec(
 }
 
 /** The call finished: Cursor completed it, or it was answered without the host. */
-export function finishCall(order: StepOrderState<any, any> | undefined, callId: string): void {
+export function finishCall(order: StepOrderState | undefined, callId: string): void {
   const call = order?.calls.get(callId)
   if (call && call.state !== "held" && call.state !== "refused") call.state = "done"
 }
 
 /** The host refused the call or the user stopped it. A refused file change cancels the calls after it. */
-function refuseCall(order: StepOrderState<any, any> | undefined, callId: string): void {
+function refuseCall(order: StepOrderState | undefined, callId: string): void {
   const call = order?.calls.get(callId)
   if (!call || call.state === "held") return
   call.state = call.fileChange ? "refused" : "done"
@@ -181,7 +205,7 @@ function refuseCall(order: StepOrderState<any, any> | undefined, callId: string)
  * cancelled it). Returns true when the order state changed.
  */
 export function noteExecResult(
-  order: StepOrderState<any, any> | undefined,
+  order: StepOrderState | undefined,
   execId: number,
   outcome: "done" | "refused",
 ): boolean {
