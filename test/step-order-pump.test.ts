@@ -13,6 +13,7 @@ import {
 import { billingLedger } from "../src/billing.js"
 import { resetToolRequestsListedSeenForTests } from "../src/parallel-step.js"
 import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
+import { encodeJsonAsValue, readAllFields } from "../src/protocol/struct.js"
 import { toolsToDescriptors } from "../src/protocol/tools.js"
 import { HELD_CALL_CANCELLED_REASON } from "../src/step-order.js"
 import { sessionManager, type CursorSession, type Frame } from "../src/session.js"
@@ -177,6 +178,38 @@ describe("model order in a step that changes a file", () => {
     f.push(completed("edit"), completed("shell"), ended())
     await f.run()
     expect(finishes(f.parts).at(-1)!.finishReason.unified).toBe("stop")
+  })
+
+  it("holds a command whose exec arrives before an announced host edit called through MCP", async () => {
+    const root = workspace()
+    const target = path.join(root, "target.txt")
+    fs.writeFileSync(target, "before\n")
+    const mcpArgs = (args: Record<string, unknown>) => ({
+      name: "opencode-edit",
+      args: readAllFields(readAllFields(encodeJsonAsValue(args)).find((field) => field.fn === 5)!.bytes!)
+        .map((field) => field.bytes!),
+      tool_call_id: "edit",
+    })
+    const edit = mcpArgs({ filePath: target, oldString: "before", newString: "after" })
+    const f = fixture([
+      listed(2),
+      started("edit", { mcp_tool_call: { args: edit } }),
+      shellStarted("shell"),
+      shellExec(2, "shell"),
+      frame({ exec_server_message: { id: 1, mcp_args: edit } }),
+    ], root)
+
+    await f.run()
+    // The command came first on the wire but follows the edit in the model's order.
+    expect(toolCalls(f.parts).map((call) => call.toolName)).toEqual(["edit"])
+    expect(f.session.stepOrder?.held.map((held) => held.execId)).toEqual([2])
+
+    await answer(f.session, toolCalls(f.parts)[0]!, 1)
+    await f.run()
+    expect(toolCalls(f.parts).map((call) => call.toolName)).toEqual(["edit", "bash"])
+    expect(f.session.stepOrder?.held).toEqual([])
+    await answer(f.session, toolCalls(f.parts)[1]!, 2)
+    expect(replyOrder(f.writes)).toEqual([1, 2])
   })
 
   it("holds the command behind an edit whose read Cursor answers locally", async () => {

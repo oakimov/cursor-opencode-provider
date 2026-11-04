@@ -23,6 +23,11 @@ describe("step order", () => {
     expect(isFileChangeDisplay({ edit_tool_call: { args: { path: "a" } } })).toBe(true)
     expect(isFileChangeDisplay({ delete_tool_call: {} })).toBe(true)
     expect(isFileChangeDisplay({ shell_tool_call: { args: { command: "ls" } } })).toBe(false)
+    // A host file tool called through MCP, by the host tool it resolves to.
+    for (const tool of ["edit", "write", "apply_patch", "patch"]) {
+      expect(isFileChangeDisplay({ mcp_tool_call: { args: {} } }, tool)).toBe(true)
+    }
+    expect(isFileChangeDisplay({ mcp_tool_call: { args: {} } }, "bash")).toBe(false)
     expect(isFileChangeExec("write_result", "write")).toBe(true)
     expect(isFileChangeExec("delete_result", "bash")).toBe(true)
     expect(isFileChangeExec("mcp_result", "apply_patch")).toBe(true)

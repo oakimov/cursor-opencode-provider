@@ -73,8 +73,14 @@ export function createStepOrder<F, P>(): StepOrderState<F, P> {
   return { nextIndex: 0, calls: new Map(), execs: new Map(), held: [] }
 }
 
-export function isFileChangeDisplay(toolCall: unknown): boolean {
+/**
+ * `mcpHostTool`: the host tool an `mcp_tool_call` announcement resolves to, as
+ * its exec will. An advertised host `edit`/`write`/patch tool is announced as
+ * an MCP call, and a later call's exec may arrive before its own.
+ */
+export function isFileChangeDisplay(toolCall: unknown, mcpHostTool?: string): boolean {
   if (!toolCall || typeof toolCall !== "object") return false
+  if (mcpHostTool !== undefined && FILE_CHANGE_HOST_TOOLS.has(mcpHostTool)) return true
   return Object.keys(toolCall).some((key) =>
     FILE_CHANGE_DISPLAY_VARIANTS.has(key) && (toolCall as Record<string, unknown>)[key] != null)
 }

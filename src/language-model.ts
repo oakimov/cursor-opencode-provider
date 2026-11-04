@@ -124,6 +124,7 @@ import {
   CUSTOM_LIST_MCP_RESOURCES_TOOL,
   CUSTOM_READ_MCP_RESOURCE_TOOL,
   hostToolDialectFromTools,
+  mapCursorArgsToOpencode,
   opencodePathArg,
   type OpencodeToolDef,
   type ParsedExecRequest,
@@ -6292,7 +6293,11 @@ export async function pump(
           const editToolCalls = session.editToolCalls ?? (session.editToolCalls = new Map())
           editToolCalls.set(callId, { path: editPath })
         }
-        announceCall(session.stepOrder ??= createStepOrder(), callId, isFileChangeDisplay(toolCall))
+        // Resolve an MCP call's host tool as `parseExecServerMessage` resolves its exec.
+        const mcpHostTool = display?.variant === "mcp_tool_call"
+          ? mapCursorArgsToOpencode(display.preferredToolName, display.args, "mcp_args", session.hostToolDialect).toolName
+          : undefined
+        announceCall(session.stepOrder ??= createStepOrder(), callId, isFileChangeDisplay(toolCall, mcpHostTool))
         const callIdLog = callId.replace(/\r?\n/g, "\\n")
         let wireFields = ""
         if (variant === "?") {
