@@ -174,6 +174,31 @@ describe("conversation restart persistence", () => {
     expect((await loadPersistedConversation(root, sessionKey)).status).toBe("invalid")
   })
 
+  it("restores pending occupancy and interrupted request notes from the same snapshot", async () => {
+    const root = await cacheRoot()
+    const sessionKey = "ses_guard_and_notes"
+    const conversationId = "conv-guard-and-notes"
+    const checkpoint = (used: number) => encodeMessage("ConversationStateStructure", {
+      token_details: { used_tokens: used, max_tokens: 256_000,
+        breakdown: { total_used_tokens: used, max_tokens: 256_000,
+          categories: [{ id: "conversation", label: "Conversation", estimated_tokens: used, character_count: 200_000 }] } },
+    })
+    const low = checkpoint(50_000)
+    const high = checkpoint(100_000)
+    const runHostNote = "Keep this interrupted request's note."
+    restoreConversationBinding(sessionKey, conversationId)
+    setCheckpoint(conversationId, low, { boundary: "first:0" })
+    setCheckpoint(conversationId, high, { boundary: "first:0" })
+    await persistConversationState(root, { sessionKey, conversationId, requestContext: { rules_info_complete: true },
+      runHostNote, runInProgress: true })
+    clearMemory()
+    expect((await hydrateConversationState(root, sessionKey))?.runHostNote).toBe(runHostNote)
+    expect(getCheckpoint(conversationId)).toEqual(Uint8Array.from(high))
+    expect(checkpointTokenDetails(conversationId, high)).toMatchObject({ usedTokens: 50_000, rawUsedTokens: 100_000 })
+    setCheckpoint(conversationId, high, { boundary: "second:0" })
+    expect(checkpointTokenDetails(conversationId, high)?.usedTokens).toBe(100_000)
+  })
+
   it("persists whether a session edit deny was ever sent, so a restart adds no needless correction", async () => {
     const root = await cacheRoot()
     const requestContext = { rules_info_complete: true }
@@ -203,6 +228,31 @@ describe("conversation restart persistence", () => {
     await writeFile(file, gzipSync(Buffer.concat([raw, Buffer.from([0x9a, 1, 0])])))
     clearMemory()
     expect((await loadPersistedConversation(root, "ses_was_denied")).status).toBe("invalid")
+  })
+
+  it("saves an interrupted Run's own host notes on field 22, only with an in-progress save", async () => {
+    const root = await cacheRoot()
+    const requestContext = { rules_info_complete: true }
+    const runHostNote = "Use bazel for builds."
+    const save = async (sessionKey: string, conversationId: string, runInProgress: boolean) => {
+      restoreConversationBinding(sessionKey, conversationId)
+      setCheckpoint(conversationId, Uint8Array.of(0x2a, 5, 8, 42, 16, 0x80, 2))
+      await persistConversationState(root, { sessionKey, conversationId, requestContext, runHostNote, runInProgress })
+      return gunzipSync(await readFile(conversationCacheFilePath(root, sessionKey)))
+    }
+    // Private cache field #22 (length-delimited): tag 0xb2 0x01.
+    const field = Buffer.from([0xb2, 1, runHostNote.length, ...Buffer.from(runHostNote)])
+    expect((await save("ses_turn_ended", "conv-turn-ended", false)).includes(field)).toBe(false)
+    expect((await save("ses_in_progress", "conv-in-progress", true)).includes(field)).toBe(true)
+    clearMemory()
+    expect((await hydrateConversationState(root, "ses_in_progress"))?.runHostNote).toBe(runHostNote)
+    expect((await hydrateConversationState(root, "ses_turn_ended"))?.runHostNote).toBeUndefined()
+
+    // Wrong wire type for #22 invalidates the snapshot rather than trusting it.
+    const file = conversationCacheFilePath(root, "ses_in_progress")
+    await writeFile(file, gzipSync(Buffer.concat([gunzipSync(await readFile(file)), Buffer.from([0xb0, 1, 1])])))
+    clearMemory()
+    expect((await loadPersistedConversation(root, "ses_in_progress")).status).toBe("invalid")
   })
 
   it("restores the complete resumable state after process memory is cleared", async () => {

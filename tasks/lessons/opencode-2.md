@@ -126,6 +126,20 @@ Operator setup: [OpenCode 2.x](../../docs/opencode-2.md).
   saves across module graphs, and consume it only when replacing the binding
   (`test/plugin-opencode2.test.ts`, committed foreign compaction outcomes;
   `test/host-history-rewrite.test.ts`, `test/run-error-host.test.ts`).
+  Closing the held Run for that rebase dropped the host notes only it carried,
+  and a restart lost them too, even without a rewrite: a late tool result
+  rebuilds from host history. Save a held Run's own notes in its in-progress
+  snapshot and deliver them only to a Run without that checkpoint. A warm
+  request must still own the restored notes: a missing-blob recovery can rebase
+  that same request without its checkpoint. Transfer ownership only after the
+  opening upload succeeds (`keeps restored request notes` in
+  `test/run-error-host.test.ts`). An
+  unacknowledged injection may be missing from the checkpoint, so it is
+  deferred; a compaction Run defers the restored notes too, or its snapshot
+  drops them. Decide
+  helper isolation before closing held Runs, or a helper takes the rebase.
+  Keep consumed receipts as bounded tombstones: another copy can deliver the
+  same event late (#131, `foreign compaction follow-ups`).
 - **Inbox admission precedes the model boundary.** A Cursor-side AwaitShell
   could postpone a host steer until the background job finished. Inject eligible
   plain text into the actively pumping Run, with backpressure and admission

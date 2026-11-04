@@ -45,9 +45,17 @@ OpenCode commits that summary, the next normal Cursor request starts from the
 compacted host history, keeping the recent messages and completed tool results.
 The conversation group stays stable; subsequent turns reuse the new checkpoint.
 Preparing a background summary or failing a summary does not reset Cursor.
+Host notes the interrupted Run carried, such as system reminders or
+background-job notices, are sent again with that request unless the compacted
+history still holds them. A helper call on the same session, such as a memory
+or task child with a smaller tool list, stays isolated and leaves the rebase to
+the next normal request.
 
 The rebase requirement is saved with the conversation snapshot and survives a
-server restart, including a shutdown save from a held tool Run. If saving that
+server restart, including a shutdown save from a held tool Run, which also
+keeps that Run's host notes. A warm request retains those notes for recovery:
+if Cursor cannot load its saved checkpoint, the rebuilt request carries them.
+If saving that
 requirement fails, the next Cursor request reports the error and retries saving
 on a later request. No extra configuration is needed. See the
 [compaction acceptance checks](host-compat-acceptance.md#opencode-2-foreign-compaction).

@@ -40,6 +40,12 @@ export type PersistedConversation = {
    * via encodePersistedHostNotes). The Cursor checkpoint does not hold them.
    */
   hostNote?: string
+  /**
+   * Host notes the in-progress Run delivered with its own request (encoded like
+   * `hostNote`). Its checkpoint holds them; a rebase after a host history
+   * rewrite does not, so only that rebase delivers them again.
+   */
+  runHostNote?: string
   /** Bounded early-steer delivery receipts for the saved checkpoint. */
   earlySteers?: string
   /** JSON lost-request record: user text sent on a checkpoint Cursor never advanced. */
@@ -211,7 +217,8 @@ function cloneConversation(value: PersistedConversation): PersistedConversation 
  * turn_provenance_json=12, host_note=13, early_steers_json=14,
  * lost_request_json=15, sent_image_hashes=16 (repeated), sent_images_checkpoint_sha256=17,
  * occupancy_checkpoint=18 (token-details-only checkpoint, never Run state),
- * session_edits_deny_sent=19, plan_operations_json=20, occupancy_guard_json=21.
+ * session_edits_deny_sent=19, plan_operations_json=20, occupancy_guard_json=21,
+ * run_host_note=22.
  * Blob: id=1, data=2. Tool: name=1, description=2,
  * input_schema_json=3, source_name=4.
  *
@@ -345,6 +352,7 @@ function encodeCacheFile(value: PersistedConversation): {
   if (value.sessionEditsDenySent) writer.uint32(fieldTag(19, 0)).bool(true)
   if (value.planOperations) writer.uint32(fieldTag(20, 2)).string(value.planOperations)
   if (value.occupancyGuard) writer.uint32(fieldTag(21, 2)).string(value.occupancyGuard)
+  if (value.runHostNote) writer.uint32(fieldTag(22, 2)).string(value.runHostNote)
   return { protobufBytes: writer.finish(), requestContextBytes: requestContext.length }
 }
 
@@ -371,6 +379,7 @@ function decodeProtobuf(data: Uint8Array): PersistedConversation {
   let sessionEditsDenySent = false
   let planOperations: string | undefined
   let occupancyGuard: string | undefined
+  let runHostNote: string | undefined
   while (reader.pos < reader.len) {
     const tag = reader.uint32()
     const wireType = tag & 7
@@ -459,6 +468,10 @@ function decodeProtobuf(data: Uint8Array): PersistedConversation {
         if (wireType !== 2) throw new Error("invalid occupancy guard")
         occupancyGuard = reader.string()
         break
+      case 22:
+        if (wireType !== 2) throw new Error("invalid run host note")
+        runHostNote = reader.string()
+        break
       default:
         reader.skipType(wireType)
     }
@@ -492,6 +505,7 @@ function decodeProtobuf(data: Uint8Array): PersistedConversation {
     ...(sessionEditsDenySent ? { sessionEditsDenySent } : {}),
     ...(planOperations ? { planOperations } : {}),
     ...(occupancyGuard ? { occupancyGuard } : {}),
+    ...(runHostNote ? { runHostNote } : {}),
   }
 }
 

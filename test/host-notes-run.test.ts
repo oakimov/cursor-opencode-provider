@@ -20,12 +20,12 @@ import { cacheHttp2SessionForTests, closeCachedHttp2SessionsForTests } from "../
 import { setHostCacheDirOverride } from "../src/context/paths.js"
 import { sessionManager } from "../src/session.js"
 import { notifyHostInterrupt } from "../src/host-interrupt.js"
-import { resetTurnStateForTests, restorePersistedHostNotes } from "../src/language-model.js"
-import { encodePersistedHostNotes } from "../src/protocol/host-notes.js"
+import { resetTurnStateForTests, restorePersistedHostNotes, settleRunSavesForTests } from "../src/language-model.js"
+import { decodePersistedHostNotes, encodePersistedHostNotes } from "../src/protocol/host-notes.js"
 import { getActiveCursorMode, resetActiveCursorModesForTests, setActiveCursorMode, takeActiveCursorModeReminder } from "../src/protocol/switch-mode.js"
 import { peekConversationId, resetConversationBindingsForTests, sessionIdToUuid } from "../src/protocol/conversation-bind.js"
 import { getCheckpoint, resetCheckpointsForTests } from "../src/protocol/checkpoint.js"
-import { resetConversationPersistenceForTests } from "../src/protocol/conversation-persistence.js"
+import { getPersistedConversation, resetConversationPersistenceForTests } from "../src/protocol/conversation-persistence.js"
 import { resetConversationBlobsForTests } from "../src/protocol/blob-store.js"
 import { resetFrozenRequestContextsForTests } from "../src/context/frozen.js"
 import { resetTurnProvenanceForTests } from "../src/protocol/turn-provenance.js"
@@ -1074,6 +1074,49 @@ describe("host notes through a full provider Run", () => {
           .toContain("<system_reminder>\nUse bazel for builds.\n</system_reminder>")
       }
     } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  it("saves an unacknowledged injection with the deferred notes, not with the held Run's own", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-host-notes-run-"))
+    cacheHttp2SessionForTests(ORIGIN, client)
+    try {
+      const file = path.join(root, "probe.txt")
+      fs.writeFileSync(file, "The build uses make.\n")
+      const carried = "<system-update>Use bazel for builds.</system-update>"
+      const instructions = `Instructions from: ${path.join(root, "AGENTS.md")}\nThis project builds with bazel.`
+      const sessionKey = `ses_unacked_${Date.now()}`
+      const model = createCursor({ name: "cursor", accessToken: "example-token", agentBaseURL: ORIGIN, cacheDir: root }).languageModel("composer-2.5")
+      onRun = (run, message) => {
+        if (message.run_request) {
+          run.send({ exec_server_message: { id: 0, exec_id: "exec-0", read_args: { path: file, tool_call_id: "tc-0" } } })
+        } else if (message.conversation_action?.inject_context_action) {
+          // No acknowledgement: the injection may never reach the checkpoint.
+          run.send({ exec_server_message: { id: 1, exec_id: "exec-1", read_args: { path: file, tool_call_id: "tc-1" } } })
+        }
+      }
+      restorePersistedHostNotes(sessionKey, encodePersistedHostNotes([carried]))
+      const system = { role: "system", content: "Host system prompt." } as Prompt[number]
+      const ask = { role: "user", content: [{ type: "text", text: "Read probe.txt twice." }] } as Prompt[number]
+      const call = (await collect(model, [system, ask], sessionKey)).find((part) => part.type === "tool-call") as { toolCallId: string; input: string }
+      const second = await collect(model, [
+        system, ask,
+        { role: "assistant", content: [{ type: "tool-call", toolCallId: call.toolCallId, toolName: "read", input: JSON.parse(call.input) }] },
+        { role: "tool", content: [{ type: "tool-result", toolCallId: call.toolCallId, toolName: "read", output: { type: "text", value: "The build uses make." } }] },
+        { role: "user", content: [{ type: "text", text: instructions }] },
+      ] as Prompt, sessionKey)
+      expect(second.some((part) => part.type === "tool-call")).toBe(true)
+      expect(runs[0]!.received.some((message) => message.conversation_action?.inject_context_action)).toBe(true)
+
+      await notifyHostInterrupt(sessionKey, "shutdown")
+      await settleRunSavesForTests()
+      const saved = await getPersistedConversation(root, sessionKey)
+      expect(decodePersistedHostNotes(saved?.runHostNote)).toEqual([carried])
+      expect(decodePersistedHostNotes(saved?.hostNote)).toEqual([instructions])
+    } finally {
+      sessionManager.dispose()
+      await settleRunSavesForTests()
       fs.rmSync(root, { recursive: true, force: true })
     }
   }, 30_000)
