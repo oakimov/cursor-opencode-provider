@@ -52,7 +52,8 @@ the raw reading directly. A zero-token cancellation does not confirm a
 candidate. Its saved accepted measurement and pending decision survive restart;
 incoming zero-token finishes retain their existing behavior. Known model or
 media changes bypass confirmation for the next positive reading only; a
-zero-token checkpoint carries that reset forward. Media counts from the first
+zero-token checkpoint, or one without token details, carries that reset forward
+on the conversation, so a Run resumed after a dropped connection still applies it. Media counts from the first
 measured checkpoint that arrives after the prompt or tool result carrying it,
 once Cursor has completed every delivered result. A checkpoint queued while the
 tool ran cannot hold the image and does not consume the reset.

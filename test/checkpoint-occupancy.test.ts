@@ -104,6 +104,16 @@ describe("checkpoint occupancy confirmation", () => {
     expect(update(details(240_000)).usedTokens).toBe(240_000)
   })
 
+  it("keeps a media reset that lands on an unmeasured checkpoint for a later Run", () => {
+    update(details(120_000))
+    setCheckpoint("conv", encodeMessage("ConversationStateStructure", { root_prompt_messages_json: ["unmeasured"] }),
+      { boundary: "media-run:0", model: "example-model", bypass: true })
+    expect(parseOccupancyGuard(serializeCheckpointOccupancyGuard("conv"))?.needsFreshBaseline).toBe(true)
+    // A resumed Run has no media of its own; its first measured reading is still the new baseline.
+    expect(update(details(240_000), "resumed-run:0")).toMatchObject({ usedTokens: 240_000 })
+    expect(update(details(480_000, 125_000), "resumed-run:0")).toMatchObject({ usedTokens: 240_000, rawUsedTokens: 480_000 })
+  })
+
   it("admits a distinct compatible high measurement within the same observation", () => {
     update(details(120_000))
     update(details(240_000, 121_000))

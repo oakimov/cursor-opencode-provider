@@ -26,7 +26,11 @@ export function setCheckpoint(conversationId: string, bytes: Uint8Array, observa
   // Copy so later mutations of the decode buffer can't corrupt the store.
   byConversationId.set(conversationId, Uint8Array.from(bytes))
   const current = decodeConversationTokenDetails(bytes)
-  if (!current) return
+  if (!current) {
+    // A reset this checkpoint consumes must outlive the Run: a resumed Run has no media of its own.
+    if (observation.bypass) occupancyGuards.set(conversationId, { ...(occupancyGuards.get(conversationId) ?? { version: 1 }), needsFreshBaseline: true })
+    return
+  }
   const previous = decodeConversationTokenDetails(occupancyByConversationId.get(conversationId))
   const selected = selectCheckpointOccupancy(previous, current, occupancyGuards.get(conversationId) ?? { version: 1 }, observation)
   occupancyGuards.set(conversationId, selected.guard)
