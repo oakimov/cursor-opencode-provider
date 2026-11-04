@@ -1017,6 +1017,55 @@ test("an unbound copy behind takes a snapshot without provenance over its own ol
   }
 })
 
+test("an unbound copy behind takes the edit-deny record of the snapshot it restores", async () => {
+  const cache = root()
+  const other = await otherGraph()
+  const sessionKey = "unbound-deny-elsewhere"
+  const conversationId = peekConversationId(sessionKey)
+  setCheckpoint(conversationId, checkpointBytes)
+  try {
+    recordSessionEditsGuidance(conversationId, false)
+    await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    await other.state.hydrateConversationState(cache, sessionKey)
+    other.sessionEdits.recordSessionEditsGuidance(conversationId, true)
+    await other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    evictBindings()
+    expect((await hydrateConversationState(cache, sessionKey))?.replacesCopyState).toBe(true)
+    // The restored checkpoint holds the other copy's deny, so lifting it needs the no-deny note.
+    expect(sessionEditsGuidance(conversationId, false, { carriesEarlierState: true })).toBe(false)
+  } finally {
+    other.persistence.resetConversationPersistenceForTests()
+    resetSessionEditsGuidanceForTests()
+    resetCheckpointsForTests()
+  }
+})
+
+test("an unbound copy behind another copy's delete drops its own older turn state", async () => {
+  const cache = root()
+  const other = await otherGraph()
+  const sessionKey = "unbound-behind-delete"
+  const conversationId = peekConversationId(sessionKey)
+  const stale = { conversationId, toolCallIds: [], text: "Older answer", textWithReasoning: "Older answer" }
+  const replaced: string[] = []
+  onCopyStateReplaced(key => replaced.push(key))
+  setCheckpoint(conversationId, checkpointBytes)
+  try {
+    restoreTurnProvenance(sessionKey, stale)
+    await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    await other.state.hydrateConversationState(cache, sessionKey)
+    await other.state.clearPersistedConversationState(cache, sessionKey)
+    evictBindings()
+    expect(await hydrateConversationState(cache, sessionKey)).toBeUndefined()
+    expect(getTurnProvenance(sessionKey)).toBeUndefined()
+    expect(getCheckpoint(conversationId)).toBeUndefined()
+    expect(replaced).toEqual([sessionKey])
+  } finally {
+    other.persistence.resetConversationPersistenceForTests()
+    resetTurnProvenanceForTests()
+    resetCheckpointsForTests()
+  }
+})
+
 test("at most the cap's worth of unbound failed-save records stay past the cap, also after concurrent saves", async () => {
   const cache = root()
   setConversationPersistenceHookForTests(phase => {

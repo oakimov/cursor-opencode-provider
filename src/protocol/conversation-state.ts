@@ -230,17 +230,17 @@ export async function hydrateConversationState(
   if (bindingMoved()) return undefined
   // A concurrent request in this copy already restored this generation.
   if (bound !== undefined && heldGeneration(key) === generation) return undefined
-  if (heldGeneration(key) !== generation) {
-    // This copy was behind: what is on disk (a snapshot, or none after a delete) replaces its per-session state.
+  // This copy was behind: what is on disk (a snapshot, or none after a delete) replaces its per-session state, also
+  // once the binding, and maybe the record, were evicted but this copy's per-session state was not.
+  const replacing = heldGeneration(key) !== generation
+  if (replacing) {
     if (bound !== undefined) replaceCopyState(key, generation, sessionKey, bound)
-    // The binding, and maybe the record, were evicted but this copy's per-session state was not.
-    else if (loaded.value) replaceCopyState(key, generation, sessionKey, loaded.value.conversationId, true)
-    else {
-      // State kept for a session this copy never ran (host notes before its first Run) stays, but a checkpoint of
-      // the default conversation may lack turns another copy ran.
+    // No copy held a generation: state kept for a session this copy never ran (host notes before its first Run)
+    // stays, but a checkpoint of the default conversation may lack turns another copy ran.
+    else if (!loaded.value && snapshotRecord(key, sessionKey).held.size === 0) {
       clearCheckpoint(conversationId)
       snapshotRecord(key, sessionKey).held.set(copyId, generation)
-    }
+    } else replaceCopyState(key, generation, sessionKey, loaded.value?.conversationId ?? conversationId, true)
   }
   const persisted = loaded.value
   if (!persisted) {
@@ -267,13 +267,13 @@ export async function hydrateConversationState(
     restorePlanOperations(sessionKey, persisted.planOperations)
   }
   // Snapshots written before this marker existed came from releases that never sent a deny.
-  restoreSessionEditsDenySent(persisted.conversationId, persisted.sessionEditsDenySent === true, bound !== undefined)
-  if (bound !== undefined) clearCheckpoint(persisted.conversationId)
+  restoreSessionEditsDenySent(persisted.conversationId, persisted.sessionEditsDenySent === true, replacing)
+  if (replacing) clearCheckpoint(persisted.conversationId)
   if (persisted.occupancyCheckpoint) restoreCheckpointOccupancy(persisted.conversationId, persisted.occupancyCheckpoint)
   restoreCheckpointOccupancyGuard(persisted.conversationId, persisted.occupancyGuard)
   if (persisted.checkpoint) setCheckpoint(persisted.conversationId, persisted.checkpoint)
   restoreConversationBlobs(persisted.conversationId, persisted.blobs)
-  if (bound !== undefined) clearFrozenRequestContext(persisted.conversationId)
+  if (replacing) clearFrozenRequestContext(persisted.conversationId)
   setFrozenRequestContext(persisted.conversationId, persisted.requestContext)
   const provenance = persisted.turnProvenance ? parseTurnProvenance(persisted.turnProvenance) : undefined
   if (provenance?.conversationId === persisted.conversationId) restoreTurnProvenance(sessionKey, provenance)
@@ -295,7 +295,7 @@ export async function hydrateConversationState(
     ...(persisted.systemPromptHash ? { systemPromptHash: persisted.systemPromptHash } : {}),
     ...(persisted.hostNote ? { hostNote: persisted.hostNote } : {}),
     ...(persisted.runHostNote ? { runHostNote: persisted.runHostNote } : {}),
-    ...(bound !== undefined ? { replacesCopyState: true as const } : {}),
+    ...(replacing ? { replacesCopyState: true as const } : {}),
   }
 }
 
