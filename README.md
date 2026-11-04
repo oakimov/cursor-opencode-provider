@@ -269,7 +269,8 @@ and its final exit, signal or timeout notice starts on its own line; other text
 blocks concatenate without changing their bytes.
 
 Terminal-record headers and footers stay out of command stdout, including
-when completion races a timeout or background handoff.
+when completion races a timeout or background handoff. A handoff result holds
+only the foreground window's output; later output stays in the terminal file.
 
 A failed host shell call reaches Cursor once as stderr in streamed and unary
 results. Distinct partial command output remains on stdout. See the
