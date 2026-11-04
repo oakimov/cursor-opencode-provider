@@ -175,6 +175,14 @@ A binary write staged for the image save tool hands its row to that tool.
 Failure labels use the permitted catalog without reading target files.
 See [shared early-row behavior](../README.md#known-limitations).
 
+OpenCode 1.x leaves a step's tool calls to the AI SDK, which runs them
+concurrently. In a step that changes a file, calls the model wrote after the
+change reach OpenCode in a later step, once the change finished. Denying the
+change's permission stops the turn, so the held calls never run, and the next
+message tells Cursor so. With `experimental.continue_loop_on_deny`, OpenCode 1.x
+reports the denial as an ordinary failed result, and the held calls then run.
+See [tool call order](../README.md#tool-call-order-around-file-changes).
+
 ## Shell failures and interruption
 
 Wrapped commands expose their real exit status to the host. A hard timeout

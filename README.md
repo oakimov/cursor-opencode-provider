@@ -503,6 +503,18 @@ The provider retains the correlation and exposes the resulting existing-file mut
 
 Ordinary complete native reads also preserve an existing final LF/CRLF. OpenCode's numbered read envelope cannot represent that terminator, and dropping it made exact edit matching fail. This restoration applies only to confirmed-complete, unbounded reads; paged and capped reads keep their existing truncation behavior.
 
+### Tool call order around file changes
+
+Cursor sends a step's tool calls at once, and both OpenCode majors run them concurrently. A command the model wrote after an edit (`git commit`, a test run, a `gh` post) could therefore run before the edit landed. In a step that changes a file (an edit, write or delete, whichever host tool it becomes, including an edit's permission-checked `read`), the provider keeps the model's order from Cursor's `tool_call_started`:
+
+- Every later call waits until the file change finishes: its result comes back from the host, or Cursor completes or withdraws it. A file change waiting on a permission prompt keeps its followers waiting; nothing releases them on a timer.
+- The file change waits for the earlier calls of the step that are already running or waiting. Several file changes in one step run one after another.
+- A waiting call reaches OpenCode in a later host step, after the result it waits for. Cursor still sees one step: it gets its usual exec heartbeats while the call waits, and nothing is sent to Cursor twice.
+- When the user denies the file change or stops it, the calls after it are not run; Cursor is told why. A file change this provider refuses, or one that fails, does not cancel them. OpenCode 1.x reports a denial as an ordinary failure, and stops the turn on it unless `experimental.continue_loop_on_deny` is set; the held calls run only in that case.
+- A step without a file change runs every call at once, as before. Provider-owned runtime files and image saves are not ordered.
+
+The host step of released calls reports no tokens and no cost: its Cursor step was already booked with the step that held them. Debug logs show `step-order: HELD` and `step-order: released`.
+
 ### `apply_patch` / `patch` on GPT models
 
 OpenCode selects the file-editing tools before calling this provider:

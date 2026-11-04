@@ -738,6 +738,7 @@ describe("early edit rows", () => {
 
   // A held parallel step keeps pumping after the host read, and a later
   // announcement may open a row while the step waits for its other calls.
+  // The second edit follows a file change, so it waits for the first.
   for (const order of ["outside first", "inside first"] as const) {
     for (const catalog of catalogs) {
       it(`opens no edit rows before either authorized read in a parallel step, ${order} (${catalog.label})`, async () => {
@@ -762,7 +763,16 @@ describe("early edit rows", () => {
         expectNoFailedRow(parts)
         expect(parts.filter(part => part.type === "tool-input-start")).toEqual([])
         const calls = parts.filter(part => part.type === "tool-call")
-        expect(calls.map(call => call.toolName)).toEqual(["read", "read"])
+        if (order === "outside first") {
+          // The inside edit follows a file change: its read is held, still owed to Cursor.
+          expect(calls.map(call => call.toolName)).toEqual(["read"])
+          expect(calls[0]!.toolCallId).toBe(`cursor_${session.sessionId}_3`)
+          expect(session.stepOrder?.held.map(held => held.execId)).toEqual([5])
+        } else {
+          // The inside edit's early write is refused, which ends that edit; the outside edit runs.
+          expect(calls.map(call => call.toolName)).toEqual(["read", "read"])
+          expect(session.stepOrder?.held).toEqual([])
+        }
         expect(session.pending.has(3)).toBe(true)
         expect(session.pending.has(5)).toBe(true)
         expect(parts.filter(part => part.type === "finish").map(part => part.finishReason.unified))
@@ -960,6 +970,10 @@ describe("early edit rows", () => {
     const file = path.join(workspace, "never-written.txt")
     const { session, parts } = pumpSession([
       encodeMessage("AgentServerMessage", { interaction_update: { tool_requests_listed: { call_count: 2 } } }),
+      // The shell comes first in the model's order, so it does not wait for the edit.
+      encodeMessage("AgentServerMessage", { interaction_update: { tool_call_started: {
+        call_id: "shell-other", tool_call: { shell_tool_call: { args: { command: "echo ok" } } },
+      } } }),
       partial("edit-terminal", file),
       started("edit-terminal", file),
       encodeMessage("AgentServerMessage", { exec_server_message: {

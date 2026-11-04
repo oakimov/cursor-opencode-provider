@@ -298,6 +298,11 @@ converts Cursor-native file execs from the current permitted catalog. It refuses
 patch operations that would lose CRLF bytes before changing a file. Native
 `edit` / `write` remain unchanged when permitted; see [shared patch behavior](../README.md#apply_patch--patch-on-gpt-models).
 
+OpenCode 2.x starts every tool call of a step as soon as it arrives. In a step
+that changes a file, calls the model wrote after the change reach OpenCode in a
+later step, once the change finished. A denied or stopped change cancels them,
+and Cursor is told they did not run. See [tool call order](../README.md#tool-call-order-around-file-changes).
+
 ## Interrupted model requests
 
 OpenCode retries a transient failure after only text or reasoning when the

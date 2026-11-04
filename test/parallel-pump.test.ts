@@ -149,7 +149,7 @@ describe("parallel tool-call pump", () => {
     expect(session.pending.size).toBe(1)
   })
 
-  it.each([false, true])("counts a streamed edit only after its write (patch catalog: %s)", async patch => {
+  it.each([false, true])("runs a streamed edit after the call before it (patch catalog: %s)", async patch => {
     const root = fs.mkdtempSync("/tmp/cursor-parallel-edit-")
     const target = path.join(root, "target.ts")
     fs.writeFileSync(target, "export const value = 1\n")
@@ -175,15 +175,25 @@ describe("parallel tool-call pump", () => {
       const { parts, controller } = collect()
       await pump(session, controller, ids)
       expect(reads()).toBe(4)
-      expect(toolCalls(parts).map(p => p.toolName)).toEqual(["bash", "read"])
+      // The edit's private read waits for the shell the model called before it.
+      expect(toolCalls(parts).map(p => p.toolName)).toEqual(["bash"])
       expect(finishes(parts)).toHaveLength(1)
       expect(session.pending.size).toBe(2)
+      const bash = toolCalls(parts)[0]!
+      expect(await deliverContinuationResults(session, [{
+        sessionId: session.sessionId, execId: 1, toolCallId: bash.toolCallId, toolName: "bash", output: "done",
+      }])).toBe(session)
+      await pump(session, controller, ids)
+      expect(toolCalls(parts).map(p => p.toolName)).toEqual(["bash", "read"])
+      expect(finishes(parts)).toHaveLength(2)
+      expect(reads()).toBe(4)
       await authorizeRead(session, parts, 2)
       await pump(session, controller, ids)
       expect(toolCalls(parts).map(p => p.toolName)).toEqual(["bash", "read", patch ? "apply_patch" : "edit"])
       expect(session.pending.has(2)).toBe(false)
-      expect(decodeMessage<any>("AgentClientMessage", writes[0]!).exec_client_message.read_result.success.content)
-        .toBe("export const value = 1\n")
+      const read = writes.map(bytes => decodeMessage<any>("AgentClientMessage", bytes).exec_client_message)
+        .find(message => message?.read_result)
+      expect(read.read_result.success.content).toBe("export const value = 1\n")
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
     }
