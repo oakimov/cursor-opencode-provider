@@ -266,7 +266,12 @@ These are failure lessons shared by both hosts, not a replacement for
   (`test/host-notes-run.test.ts`, `test/image-input.test.ts`).
 - **Injection needs acknowledgement and ordered fallback.** A written note is
   not necessarily consumed. Retry/defer it with its owning turn; an action may
-  remove only the batches it captured (`test/host-notes.test.ts`).
+  remove only the batches it captured (`test/host-notes.test.ts`). `delivered`
+  is not persisted either: Cursor stores the checkpoint holding the note after
+  the ack, and while the Run waits on a host tool that checkpoint sits unread
+  in `heldFrames`, so dropping the note on the ack lost it across a restart
+  (#153). Keep it deferred until the Run stores a later checkpoint
+  (`forgetCheckpointedHostNotes`, `test/host-notes-run.test.ts`).
 - **Every provider-minted tool-call id must stay recognizable.** Early-row ids
   routed only through a live-Run table were dropped once the Run closed, so the
   completed edit never reached Cursor. Keep routes like tombstones and parse the
