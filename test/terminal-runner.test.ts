@@ -407,10 +407,12 @@ fs.createReadStream(job + "/pipe").on("data", chunk => fs.writeSync(fd, chunk))
     const terminal = job(`printf before; while [ ! -f '${sampled}' ]; do sleep 0.01; done; printf late`, { timeoutMs: 300 })
     const sample = '  cursor_output=$(( $(wc -c <"$cursor_terminal") - cursor_header ))'
     expect(terminal.command.split(sample)).toHaveLength(3)
-    // The command writes "late" only after the launcher's sample, and the
-    // launcher reads the final output bound only after the supervisor has
-    // published it. Polls impose no race timing.
+    // The launcher samples only once the collector has stored "before", the
+    // command writes "late" only after that sample, and the launcher reads the
+    // final output bound only after the supervisor has published it. Polls
+    // impose no race timing.
     terminal.command = terminal.command.replaceAll(sample, [
+      `  while [ $(( $(wc -c <"$cursor_terminal") - cursor_header )) -lt ${"before".length} ]; do sleep 0.01; done`,
       sample,
       `  printf '%s\\n' "$cursor_output" >'${sampled}'`,
       '  while [ ! -f "$cursor_job/output-bytes" ]; do sleep 0.01; done',
