@@ -111,6 +111,13 @@ exceed measured output, and output at its catalog rate can raise the minimum
 settlement cost. See [accounting limits](../README.md#known-limitations) and
 the [billing diagnostics](cache-log-runbook.md#3-validate-the-totals-sent-to-opencode).
 
+## Conversation recovery
+
+If a full conversation save fails, the provider invalidates the older snapshot
+and its quarantine copies without allocating a directory or inode. After a
+restart, the next turn builds from host history until a successful save lands.
+See [conversation persistence](../README.md#known-limitations).
+
 ## Planning and session edit rules
 
 Cursor tools use the route advertised for the current turn. Call a supplied
