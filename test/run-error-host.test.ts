@@ -21,6 +21,7 @@ import { resetConversationBindingsForTests } from "../src/protocol/conversation-
 import { resetCheckpointsForTests } from "../src/protocol/checkpoint.js"
 import { resetConversationPersistenceForTests } from "../src/protocol/conversation-persistence.js"
 import { notifyHostInterrupt } from "../src/host-interrupt.js"
+import { CURSOR_COMPACTION_OPTION } from "../src/shared.js"
 
 const ORIGIN = "https://agentn.run-error-test.cursor.sh"
 const PROXY_KEYS = ["HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"] as const
@@ -1195,6 +1196,39 @@ describe("foreign compaction follow-ups", () => {
       }
     })
   }
+
+  it("keeps a held Run's notes through restart, a compaction Run and another restart", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-foreign-notes-compaction-"))
+    const key = "ses_foreign_notes_compaction"
+    const requests: Request[] = []
+    scripted = heldThenAnswer(requests)
+    cacheHttp2SessionForTests(ORIGIN, client)
+    try {
+      const model = createCursor({ name: "cursor", accessToken: "example-token", agentBaseURL: ORIGIN,
+        cacheDir: root, workspaceRoot: root }).languageModel("composer-2.5")
+      const prompt: LanguageModelV3CallOptions["prompt"] = [text("Original large history")]
+      const options: LanguageModelV3CallOptions = { prompt, headers: { "x-opencode-session-id": key }, tools: [tool("bash")] }
+      restorePersistedHostNotes(key, encodePersistedHostNotes(["<system-update>Use bazel for builds.</system-update>"]))
+      appendResult(prompt, await readParts(model, options), "COMPLETED_HOST_RESULT")
+      await notifyHostInterrupt(key, "shutdown")
+      await restart()
+      // The host summarizes on Cursor; its compaction Run does not deliver the note.
+      await readParts(model, { prompt: [...prompt, text("Summarize the conversation.")], tools: [],
+        headers: { "x-opencode-session-id": key }, providerOptions: { cursor: { [CURSOR_COMPACTION_OPTION]: true } } })
+      expect(requests.at(-1)!.action.user_message_action!.user_message.text).not.toContain("Use bazel for builds.")
+      await restart()
+      prompt.splice(0, prompt.length, text("COMPACTED_HOST_SUMMARY"), text("Continue."))
+      await readParts(model, options)
+      const seed = requests.at(-1)!.action.user_message_action!.user_message.text
+      expect(requests.at(-1)!.conversation_state?.length ?? 0).toBe(0)
+      expect(seed).toContain("COMPACTED_HOST_SUMMARY")
+      expect(seed.split("Use bazel for builds.")).toHaveLength(2)
+    } finally {
+      sessionManager.dispose()
+      await settleRunSavesForTests()
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
 
   it("leaves the rebase to the main turn when a smaller-catalog helper arrives first", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-foreign-helper-"))

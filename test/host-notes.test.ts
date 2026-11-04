@@ -601,7 +601,7 @@ describe("host notes on a new Run's user turn", () => {
     expect(stored("ses_seeded")).toEqual([])
   })
 
-  it("re-delivers an interrupted Run's own notes only to a later main Run without its checkpoint", () => {
+  it("re-delivers an interrupted Run's own notes only to a later main Run without its checkpoint, or after a compaction", () => {
     restoreInterruptedRunHostNotes("ses_interrupted_checkpoint", encodePersistedHostNotes([NOTE]), undefined)
     // A Run on the interrupted Run's checkpoint already holds them, and consumes the record.
     expect(prepareUserTurnHostNotes({ sessionKey: "ses_interrupted_checkpoint", prompt, ...flags }).reminders).toEqual([])
@@ -613,6 +613,8 @@ describe("host notes on a new Run's user turn", () => {
     expect(prepareUserTurnHostNotes({
       sessionKey: "ses_interrupted_seed", prompt, ...flags, startedWithCheckpoint: false, isCompaction: true,
     }).reminders).toEqual([])
+    // The compaction's own snapshot saves them for the rebased main Run.
+    expect(stored("ses_interrupted_seed")).toEqual([NOTE])
     const rebuilt = prepareUserTurnHostNotes({ sessionKey: "ses_interrupted_seed", prompt, ...flags, startedWithCheckpoint: false })
     expect(rebuilt.reminders).toEqual([wrapHostNoteForCursor(NOTE)])
     rebuilt.sent()

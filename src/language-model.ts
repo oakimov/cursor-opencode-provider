@@ -3175,8 +3175,7 @@ function persistRunInProgress(session: CursorSession, where: string): Promise<vo
     postCompactionRebase: session.postCompactionRebase,
     hostAgent: session.hostAgent,
     systemPromptHash: session.stableSystemPromptHash,
-    hostNote: encodePersistedHostNotes(undeliveredHostNotes(sessionKey)),
-    runHostNote: encodePersistedHostNotes(runCarriedHostNotes(session, sessionKey)),
+    ...heldRunHostNotes(session, sessionKey),
     runInProgress: true,
   }).catch((error) => {
     trace(`conversation persistence: ${where} save failed sessionKey=${sessionKey}: ${String(error)}`)
@@ -3203,8 +3202,7 @@ async function persistPlanOperations(session: CursorSession): Promise<void> {
     postCompactionRebase: session.postCompactionRebase,
     hostAgent: session.hostAgent,
     systemPromptHash: session.stableSystemPromptHash,
-    hostNote: encodePersistedHostNotes(undeliveredHostNotes(session.openCodeSessionId)),
-    runHostNote: encodePersistedHostNotes(runCarriedHostNotes(session, session.openCodeSessionId)),
+    ...heldRunHostNotes(session, session.openCodeSessionId),
     runInProgress: true,
   })
   assertOwner()
@@ -4491,11 +4489,13 @@ export function prepareUserTurnHostNotes(input: {
   // Notes injected into a Run that closed without acknowledging them can no
   // longer be delivered there; a still-open Run keeps its own.
   if (sessionKey && !isCompaction && !ephemeralRun) releaseHostNoteInjections(sessionKey, "run-closed")
-  const interrupted = sessionKey && !isCompaction && !ephemeralRun ? interruptedRunHostNotesBySession.get(sessionKey) : undefined
+  const interrupted = sessionKey && !ephemeralRun ? interruptedRunHostNotesBySession.get(sessionKey) : undefined
   if (interrupted) {
     interruptedRunHostNotesBySession.delete(sessionKey!)
-    // A Run on the interrupted Run's checkpoint already holds them.
-    if (!startedWithCheckpoint && !resuming) appendUndeliveredHostNotes(sessionKey!, [interrupted])
+    // A Run on the interrupted Run's checkpoint already holds them. A
+    // compaction does not deliver them, but the main Run after it rebases from
+    // the summary, so they wait with the deferred notes every snapshot saves.
+    if (isCompaction || (!startedWithCheckpoint && !resuming)) appendUndeliveredHostNotes(sessionKey!, [interrupted])
   }
   // An interrupted-turn resume carries no user message; notes wait for the next one.
   const undelivered = isCompaction || ephemeralRun || resuming || !sessionKey
@@ -4537,12 +4537,18 @@ export function prepareUserTurnHostNotes(input: {
   }
 }
 
-/** Notes a Run delivered with its request or injected without an acknowledgement yet. */
-function runCarriedHostNotes(session: CursorSession, sessionKey: string): string[] {
+/**
+ * An in-progress save's notes. Only those the Run's own request delivered are
+ * known to be in its checkpoint; an unacknowledged injection may not be, so it
+ * is deferred like one released from a closed Run.
+ */
+function heldRunHostNotes(session: CursorSession, sessionKey: string): { hostNote?: string; runHostNote?: string } {
   const injected = [...(hostNoteInjectionsBySession.get(sessionKey)?.values() ?? [])].filter((entry) => entry.session === session)
-  return [...(session.userTurnHostNotes ?? []), ...injected]
-    .sort((a, b) => a.order - b.order)
-    .flatMap((batch) => batch.notes)
+  const deferred = [...(undeliveredHostNotesBySession.get(sessionKey) ?? []), ...injected].sort((a, b) => a.order - b.order)
+  return {
+    hostNote: encodePersistedHostNotes(deferred.flatMap((batch) => batch.notes)),
+    runHostNote: encodePersistedHostNotes((session.userTurnHostNotes ?? []).flatMap((batch) => batch.notes)),
+  }
 }
 
 function undeliveredHostNotes(sessionKey: string): string[] {

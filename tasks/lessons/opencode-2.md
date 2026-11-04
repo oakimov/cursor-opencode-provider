@@ -129,7 +129,10 @@ Operator setup: [OpenCode 2.x](../../docs/opencode-2.md).
   Closing the held Run for that rebase dropped the host notes only it carried,
   and a restart lost them too, even without a rewrite: a late tool result
   rebuilds from host history. Save a held Run's own notes in its in-progress
-  snapshot and deliver them only to a Run without that checkpoint. Decide
+  snapshot and deliver them only to a Run without that checkpoint. An
+  unacknowledged injection may be missing from the checkpoint, so it is
+  deferred; a compaction Run defers the restored notes too, or its snapshot
+  drops them. Decide
   helper isolation before closing held Runs, or a helper takes the rebase.
   Keep consumed receipts as bounded tombstones: another copy can deliver the
   same event late (#131, `foreign compaction follow-ups`).
