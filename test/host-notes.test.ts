@@ -16,6 +16,7 @@ import {
   pumpWithRecovery,
   releaseHostNoteInjectionsForTests,
   resetTurnStateForTests,
+  restoreInterruptedRunHostNotes,
   restorePersistedHostNotes,
 } from "../src/language-model.js"
 import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
@@ -598,6 +599,44 @@ describe("host notes on a new Run's user turn", () => {
     expect(notes.reminders).toEqual([])
     notes.sent()
     expect(stored("ses_seeded")).toEqual([])
+  })
+
+  it("re-delivers an interrupted Run's own notes only to a later main Run without its checkpoint", () => {
+    restoreInterruptedRunHostNotes("ses_interrupted_checkpoint", encodePersistedHostNotes([NOTE]), undefined)
+    // A Run on the interrupted Run's checkpoint already holds them, and consumes the record.
+    expect(prepareUserTurnHostNotes({ sessionKey: "ses_interrupted_checkpoint", prompt, ...flags }).reminders).toEqual([])
+    expect(prepareUserTurnHostNotes({
+      sessionKey: "ses_interrupted_checkpoint", prompt, ...flags, startedWithCheckpoint: false,
+    }).reminders).toEqual([])
+
+    restoreInterruptedRunHostNotes("ses_interrupted_seed", encodePersistedHostNotes([NOTE]), undefined)
+    expect(prepareUserTurnHostNotes({
+      sessionKey: "ses_interrupted_seed", prompt, ...flags, startedWithCheckpoint: false, isCompaction: true,
+    }).reminders).toEqual([])
+    const rebuilt = prepareUserTurnHostNotes({ sessionKey: "ses_interrupted_seed", prompt, ...flags, startedWithCheckpoint: false })
+    expect(rebuilt.reminders).toEqual([wrapHostNoteForCursor(NOTE)])
+    rebuilt.sent()
+    expect(stored("ses_interrupted_seed")).toEqual([])
+  })
+
+  it("keeps interrupted-Run notes for a bounded number of sessions", () => {
+    for (let i = 0; i <= MAX_TURN_STATE_SESSIONS; i++) {
+      restoreInterruptedRunHostNotes(`ses_interrupted_${i}`, encodePersistedHostNotes([NOTE]), undefined)
+    }
+    const rebuild = (sessionKey: string) =>
+      prepareUserTurnHostNotes({ sessionKey, prompt, ...flags, startedWithCheckpoint: false }).reminders
+    expect(rebuild("ses_interrupted_0")).toEqual([])
+    expect(rebuild(`ses_interrupted_${MAX_TURN_STATE_SESSIONS}`)).toEqual([wrapHostNoteForCursor(NOTE)])
+  })
+
+  it("orders an interrupted Run's notes before notes deferred later, without duplicates", () => {
+    const later = "<system-update>Background job finished.</system-update>"
+    const deferred = encodePersistedHostNotes([later])
+    restoreInterruptedRunHostNotes("ses_interrupted_order", encodePersistedHostNotes([NOTE, later]), deferred)
+    restorePersistedHostNotes("ses_interrupted_order", deferred)
+    expect(prepareUserTurnHostNotes({
+      sessionKey: "ses_interrupted_order", prompt, ...flags, startedWithCheckpoint: false,
+    }).reminders).toEqual([wrapHostNoteForCursor(NOTE), wrapHostNoteForCursor(later)])
   })
 
   it("carries deferred notes missing from compacted or rewritten seed history", () => {

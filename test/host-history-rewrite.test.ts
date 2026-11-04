@@ -5,7 +5,7 @@ import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import {
   acknowledgeHostHistoryRewrite, awaitHostHistoryRewrite, hasHostHistoryRewrite,
-  noteHostHistoryRewrite, resetHostHistoryRewritesForTests,
+  MAX_CONSUMED_HOST_HISTORY_REWRITES, noteHostHistoryRewrite, resetHostHistoryRewritesForTests,
 } from "../src/host-history-rewrite.js"
 import {
   bindConversationId, MAX_ACTIVE_CONVERSATION_BINDINGS, peekConversationId, resetConversationBindingsForTests,
@@ -732,4 +732,21 @@ test("snapshot generation records of bound sessions are kept past the cap", asyn
   expect(snapshotGenerationRecordsForTests()).toBe(MAX_ACTIVE_CONVERSATION_BINDINGS)
   expect(await hydrateConversationState(cache, "unbound-late")).toBeUndefined()
   expect(snapshotGenerationRecordsForTests()).toBe(MAX_ACTIVE_CONVERSATION_BINDINGS + 1)
+})
+
+test("keeps a bounded set of consumed receipts and every pending one", async () => {
+  const cache = root()
+  const rewrites = () => (globalThis as Record<symbol, { rewrites: Map<string, { pending: boolean }> }>)[
+    Symbol.for("cursor-opencode-provider.host-history-rewrite.v1")]!.rewrites
+  await noteHostHistoryRewrite(cache, "waiting", "evt_waiting")
+  const total = MAX_CONSUMED_HOST_HISTORY_REWRITES + 20
+  for (let i = 0; i < total; i++) {
+    await noteHostHistoryRewrite(cache, `consumed-${i}`, `evt_${i}`)
+    acknowledgeHostHistoryRewrite(cache, `consumed-${i}`)
+  }
+  expect([...rewrites().values()].filter((rewrite) => !rewrite.pending)).toHaveLength(MAX_CONSUMED_HOST_HISTORY_REWRITES)
+  expect(hasHostHistoryRewrite(cache, "waiting")).toBe(true)
+  // The newest tombstone still absorbs a late copy of its event.
+  await noteHostHistoryRewrite(cache, `consumed-${total - 1}`, `evt_${total - 1}`)
+  expect(hasHostHistoryRewrite(cache, `consumed-${total - 1}`)).toBe(false)
 })

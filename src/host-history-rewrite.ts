@@ -63,10 +63,26 @@ export async function awaitHostHistoryRewrite(cacheDir: string, sessionKey: stri
   return true
 }
 
+/** Consumed receipts kept so a late copy of their event cannot ask for a second rebase. */
+export const MAX_CONSUMED_HOST_HISTORY_REWRITES = 256
+
 /** Consume only after the provider has replaced the old conversation binding. */
 export function acknowledgeHostHistoryRewrite(cacheDir: string, sessionKey: string): void {
-  const rewrite = state.rewrites.get(keyFor(cacheDir, sessionKey))
-  if (rewrite) rewrite.pending = false
+  const key = keyFor(cacheDir, sessionKey)
+  const rewrite = state.rewrites.get(key)
+  if (!rewrite) return
+  rewrite.pending = false
+  // Keep the newest consumed receipts as tombstones; never drop a pending one.
+  state.rewrites.delete(key)
+  state.rewrites.set(key, rewrite)
+  let consumed = 0
+  for (const entry of state.rewrites.values()) if (!entry.pending) consumed++
+  for (const [other, entry] of state.rewrites) {
+    if (consumed <= MAX_CONSUMED_HOST_HISTORY_REWRITES) break
+    if (entry.pending || entry.saving) continue
+    state.rewrites.delete(other)
+    consumed--
+  }
 }
 
 export function resetHostHistoryRewritesForTests(): void {

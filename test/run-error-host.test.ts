@@ -15,7 +15,8 @@ import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
 import { cacheHttp2SessionForTests, closeCachedHttp2SessionsForTests, frameArrival, lastFrameArrival } from "../src/transport/connect.js"
 import { setHostCacheDirOverride } from "../src/context/paths.js"
 import { sessionManager } from "../src/session.js"
-import { resetTurnStateForTests, settleRunSavesForTests } from "../src/language-model.js"
+import { resetTurnStateForTests, restorePersistedHostNotes, settleRunSavesForTests } from "../src/language-model.js"
+import { encodePersistedHostNotes } from "../src/protocol/host-notes.js"
 import { resetConversationBindingsForTests } from "../src/protocol/conversation-bind.js"
 import { resetCheckpointsForTests } from "../src/protocol/checkpoint.js"
 import { resetConversationPersistenceForTests } from "../src/protocol/conversation-persistence.js"
@@ -1112,4 +1113,139 @@ describe("a session that returns to a Location", () => {
       fs.rmSync(graph, { recursive: true, force: true })
     }
   }, 30_000)
+})
+
+
+describe("foreign compaction follow-ups", () => {
+  type Request = { conversation_id: string; conversation_state?: Uint8Array
+    action: { resume_action?: unknown; user_message_action?: { user_message: { text: string } } } }
+  const tool = (name: string) => ({ type: "function" as const, name, inputSchema: { type: "object", properties: { command: { type: "string" } } } })
+  const text = (value: string) => ({ role: "user" as const, content: [{ type: "text" as const, text: value }] })
+  const readParts = async (model: LanguageModelV3, options: LanguageModelV3CallOptions) => {
+    const parts: LanguageModelV3StreamPart[] = []
+    const reader = (await model.doStream(options)).stream.getReader()
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) return parts
+      parts.push(value)
+    }
+  }
+  const appendResult = (prompt: LanguageModelV3CallOptions["prompt"], parts: LanguageModelV3StreamPart[], output: string) => {
+    const call = parts.find(part => part.type === "tool-call")
+    if (!call || call.type !== "tool-call") throw new Error("Expected a host tool call")
+    prompt.push({ role: "assistant", content: [{ type: "tool-call", toolCallId: call.toolCallId, toolName: call.toolName, input: JSON.parse(call.input) }] })
+    prompt.push({ role: "tool", content: [{ type: "tool-result", toolCallId: call.toolCallId, toolName: call.toolName, output: { type: "text", value: output } }] })
+  }
+  // The first Run waits on a shell call; every later Run answers and ends its turn.
+  const heldThenAnswer = (requests: Request[]) => (stream: http2.ServerHttp2Stream, message: Record<string, unknown>) => {
+    if (!message.run_request) return
+    requests.push(message.run_request as Request)
+    const send = (value: Record<string, unknown>) => stream.write(frame(encodeMessage("AgentServerMessage", value)))
+    send({ conversation_checkpoint_update: Uint8Array.of(0x2a, 5, 8, 42, 16, 0x80, requests.length) })
+    if (requests.length === 1) {
+      send({ exec_server_message: { id: 1, shell_args: { command: "echo done", tool_call_id: "command" } } })
+      return
+    }
+    send({ interaction_update: { text_delta: { text: "Cursor answer" } } })
+    send({ interaction_update: { turn_ended: {} } })
+    stream.end()
+  }
+  const restart = async () => {
+    sessionManager.dispose()
+    await settleRunSavesForTests()
+    resetTurnStateForTests()
+    resetHostHistoryRewritesForTests()
+    resetConversationPersistenceForTests()
+    resetConversationBindingsForTests()
+    resetCheckpointsForTests()
+  }
+
+  // Without a rewrite, a restart still rebuilds the late tool result from host history.
+  for (const scenario of ["live", "restart", "restart-without-rewrite"] as const) {
+    it(`keeps the host notes a held Run carried when its next Run starts without its checkpoint (${scenario})`, async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-foreign-notes-"))
+      const key = `ses_foreign_notes_${scenario}`
+      const requests: Request[] = []
+      scripted = heldThenAnswer(requests)
+      cacheHttp2SessionForTests(ORIGIN, client)
+      try {
+        const model = createCursor({ name: "cursor", accessToken: "example-token", agentBaseURL: ORIGIN,
+          cacheDir: root, workspaceRoot: root }).languageModel("composer-2.5")
+        const prompt: LanguageModelV3CallOptions["prompt"] = [text("Original large history")]
+        const options: LanguageModelV3CallOptions = { prompt, headers: { "x-opencode-session-id": key }, tools: [tool("bash")] }
+        restorePersistedHostNotes(key, encodePersistedHostNotes(["<system-update>Use bazel for builds.</system-update>"]))
+        const parts = await readParts(model, options)
+        expect(requests[0]!.action.user_message_action!.user_message.text).toContain("Use bazel for builds.")
+        appendResult(prompt, parts, "COMPLETED_HOST_RESULT")
+        const restarts = scenario !== "live"
+        const rewrites = scenario !== "restart-without-rewrite"
+        if (restarts) await notifyHostInterrupt(key, "shutdown")
+        if (rewrites) await noteHostHistoryRewrite(root, key, "evt_compacted")
+        if (restarts) await restart()
+        if (rewrites) prompt[0] = text("COMPACTED_HOST_SUMMARY")
+        await readParts(model, options)
+        const seed = requests.at(-1)!.action.user_message_action!.user_message.text
+        expect(requests.at(-1)!.conversation_state?.length ?? 0).toBe(0)
+        if (rewrites) expect(seed).toContain("COMPACTED_HOST_SUMMARY")
+        expect(seed.split("Use bazel for builds.")).toHaveLength(2)
+      } finally {
+        sessionManager.dispose()
+        await settleRunSavesForTests()
+        fs.rmSync(root, { recursive: true, force: true })
+      }
+    })
+  }
+
+  it("leaves the rebase to the main turn when a smaller-catalog helper arrives first", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-foreign-helper-"))
+    const key = "ses_foreign_helper"
+    const requests: Request[] = []
+    scripted = heldThenAnswer(requests)
+    cacheHttp2SessionForTests(ORIGIN, client)
+    try {
+      const model = createCursor({ name: "cursor", accessToken: "example-token", agentBaseURL: ORIGIN,
+        cacheDir: root, workspaceRoot: root }).languageModel("composer-2.5")
+      const prompt: LanguageModelV3CallOptions["prompt"] = [text("Original large history")]
+      const options: LanguageModelV3CallOptions = { prompt, headers: { "x-opencode-session-id": key }, tools: [tool("bash"), tool("task")] }
+      appendResult(prompt, await readParts(model, options), "COMPLETED_HOST_RESULT")
+      await noteHostHistoryRewrite(root, key, "evt_compacted")
+      prompt[0] = text("COMPACTED_HOST_SUMMARY")
+      await readParts(model, { prompt: [text("Helper task")], headers: { "x-opencode-session-id": key }, tools: [tool("bash")] })
+      expect(hasHostHistoryRewrite(root, key)).toBe(true)
+      await readParts(model, options)
+      const main = requests.at(-1)!
+      expect(main.conversation_state?.length ?? 0).toBe(0)
+      expect(main.action.user_message_action!.user_message.text).toContain("COMPACTED_HOST_SUMMARY")
+    } finally {
+      sessionManager.dispose()
+      await settleRunSavesForTests()
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps a consumed rewrite only as a tombstone against a late copy of its event", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-foreign-forget-"))
+    const key = "ses_foreign_forget"
+    const requests: Request[] = []
+    scripted = heldThenAnswer(requests)
+    cacheHttp2SessionForTests(ORIGIN, client)
+    try {
+      const model = createCursor({ name: "cursor", accessToken: "example-token", agentBaseURL: ORIGIN,
+        cacheDir: root, workspaceRoot: root }).languageModel("composer-2.5")
+      const prompt: LanguageModelV3CallOptions["prompt"] = [text("Original large history")]
+      const options: LanguageModelV3CallOptions = { prompt, headers: { "x-opencode-session-id": key }, tools: [tool("bash")] }
+      appendResult(prompt, await readParts(model, options), "COMPLETED_HOST_RESULT")
+      await noteHostHistoryRewrite(root, key, "evt_compacted")
+      prompt[0] = text("COMPACTED_HOST_SUMMARY")
+      await readParts(model, options)
+      expect(hasHostHistoryRewrite(root, key)).toBe(false)
+      // Another module copy can deliver the same compaction event after the main turn consumed it.
+      await noteHostHistoryRewrite(root, key, "evt_compacted")
+      expect(hasHostHistoryRewrite(root, key)).toBe(false)
+    } finally {
+      sessionManager.dispose()
+      await settleRunSavesForTests()
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
 })

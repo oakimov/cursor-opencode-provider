@@ -185,6 +185,31 @@ describe("conversation restart persistence", () => {
     expect((await loadPersistedConversation(root, "ses_was_denied")).status).toBe("invalid")
   })
 
+  it("saves an interrupted Run's own host notes on field 22, only with an in-progress save", async () => {
+    const root = await cacheRoot()
+    const requestContext = { rules_info_complete: true }
+    const runHostNote = "Use bazel for builds."
+    const save = async (sessionKey: string, conversationId: string, runInProgress: boolean) => {
+      restoreConversationBinding(sessionKey, conversationId)
+      setCheckpoint(conversationId, Uint8Array.of(0x2a, 5, 8, 42, 16, 0x80, 2))
+      await persistConversationState(root, { sessionKey, conversationId, requestContext, runHostNote, runInProgress })
+      return gunzipSync(await readFile(conversationCacheFilePath(root, sessionKey)))
+    }
+    // Private cache field #22 (length-delimited): tag 0xb2 0x01.
+    const field = Buffer.from([0xb2, 1, runHostNote.length, ...Buffer.from(runHostNote)])
+    expect((await save("ses_turn_ended", "conv-turn-ended", false)).includes(field)).toBe(false)
+    expect((await save("ses_in_progress", "conv-in-progress", true)).includes(field)).toBe(true)
+    clearMemory()
+    expect((await hydrateConversationState(root, "ses_in_progress"))?.runHostNote).toBe(runHostNote)
+    expect((await hydrateConversationState(root, "ses_turn_ended"))?.runHostNote).toBeUndefined()
+
+    // Wrong wire type for #22 invalidates the snapshot rather than trusting it.
+    const file = conversationCacheFilePath(root, "ses_in_progress")
+    await writeFile(file, gzipSync(Buffer.concat([gunzipSync(await readFile(file)), Buffer.from([0xb0, 1, 1])])))
+    clearMemory()
+    expect((await loadPersistedConversation(root, "ses_in_progress")).status).toBe("invalid")
+  })
+
   it("restores the complete resumable state after process memory is cleared", async () => {
     const root = await cacheRoot()
     const sessionKey = "ses_restart"

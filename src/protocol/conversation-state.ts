@@ -181,6 +181,7 @@ export async function hydrateConversationState(
   hostAgent?: string
   systemPromptHash?: string
   hostNote?: string
+  runHostNote?: string
   /** Another copy advanced this binding: the snapshot replaces this copy's per-session turn state. */
   replacesCopyState?: true
 } | undefined> {
@@ -282,6 +283,7 @@ export async function hydrateConversationState(
     ...(persisted.hostAgent ? { hostAgent: persisted.hostAgent } : {}),
     ...(persisted.systemPromptHash ? { systemPromptHash: persisted.systemPromptHash } : {}),
     ...(persisted.hostNote ? { hostNote: persisted.hostNote } : {}),
+    ...(persisted.runHostNote ? { runHostNote: persisted.runHostNote } : {}),
     ...(bound !== undefined ? { replacesCopyState: true as const } : {}),
   }
 }
@@ -311,6 +313,8 @@ export async function persistConversationState(
     hostAgent?: string
     systemPromptHash?: string
     hostNote?: string
+    /** Only with `runInProgress`: notes that Run's own request delivered. */
+    runHostNote?: string
     runInProgress?: boolean
   },
 ): Promise<void> {
@@ -344,6 +348,7 @@ export async function persistConversationState(
       hostAgent: input.hostAgent,
       systemPromptHash: input.systemPromptHash,
       hostNote: input.hostNote,
+      ...(input.runInProgress && input.runHostNote ? { runHostNote: input.runHostNote } : {}),
       earlySteers: serializeEarlySteers(input.sessionKey),
       lostRequest: serializeLostRequest(input.sessionKey),
       planOperations: serializePlanOperations(input.sessionKey),
