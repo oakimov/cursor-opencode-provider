@@ -174,6 +174,31 @@ describe("conversation restart persistence", () => {
     expect((await loadPersistedConversation(root, sessionKey)).status).toBe("invalid")
   })
 
+  it("restores pending occupancy and interrupted request notes from the same snapshot", async () => {
+    const root = await cacheRoot()
+    const sessionKey = "ses_guard_and_notes"
+    const conversationId = "conv-guard-and-notes"
+    const checkpoint = (used: number) => encodeMessage("ConversationStateStructure", {
+      token_details: { used_tokens: used, max_tokens: 256_000,
+        breakdown: { total_used_tokens: used, max_tokens: 256_000,
+          categories: [{ id: "conversation", label: "Conversation", estimated_tokens: used, character_count: 200_000 }] } },
+    })
+    const low = checkpoint(50_000)
+    const high = checkpoint(100_000)
+    const runHostNote = "Keep this interrupted request's note."
+    restoreConversationBinding(sessionKey, conversationId)
+    setCheckpoint(conversationId, low, { boundary: "first:0" })
+    setCheckpoint(conversationId, high, { boundary: "first:0" })
+    await persistConversationState(root, { sessionKey, conversationId, requestContext: { rules_info_complete: true },
+      runHostNote, runInProgress: true })
+    clearMemory()
+    expect((await hydrateConversationState(root, sessionKey))?.runHostNote).toBe(runHostNote)
+    expect(getCheckpoint(conversationId)).toEqual(Uint8Array.from(high))
+    expect(checkpointTokenDetails(conversationId, high)).toMatchObject({ usedTokens: 50_000, rawUsedTokens: 100_000 })
+    setCheckpoint(conversationId, high, { boundary: "second:0" })
+    expect(checkpointTokenDetails(conversationId, high)?.usedTokens).toBe(100_000)
+  })
+
   it("persists whether a session edit deny was ever sent, so a restart adds no needless correction", async () => {
     const root = await cacheRoot()
     const requestContext = { rules_info_complete: true }
