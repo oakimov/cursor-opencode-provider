@@ -36,6 +36,7 @@ import { heldHistoryImagesSnapshot, restoreHeldHistoryImages } from "./sent-hist
 import { restoreSessionEditsDenySent, sessionEditsDenySent } from "./session-edits.js"
 import {
   deletePersistedConversation,
+  discardPersistedConversation,
   forgetCachedConversation,
   getPersistedTurnProvenance,
   loadPersistedConversation,
@@ -310,27 +311,26 @@ export async function hydrateTurnProvenance(cacheDir: string, sessionKey: string
   if (provenance?.conversationId === persisted.conversationId) restoreTurnProvenance(sessionKey, provenance)
 }
 
+type ConversationStateSave = {
+  sessionKey: string
+  conversationId: string
+  requestContext: Record<string, unknown>
+  toolCatalog?: OpencodeToolDef[]
+  postCompactionRebase?: boolean
+  hostAgent?: string
+  systemPromptHash?: string
+  hostNote?: string
+  /** Only with `runInProgress`: notes that Run's own request delivered. */
+  runHostNote?: string
+  runInProgress?: boolean
+}
+
 /**
  * Persist the resumable state at Cursor's TurnEnded, or before it
  * (`runInProgress`) so a Run the host interrupts, or a restart, resumes from
  * the latest checkpoint and still recognizes the step in progress.
  */
-export async function persistConversationState(
-  cacheDir: string,
-  input: {
-    sessionKey: string
-    conversationId: string
-    requestContext: Record<string, unknown>
-    toolCatalog?: OpencodeToolDef[]
-    postCompactionRebase?: boolean
-    hostAgent?: string
-    systemPromptHash?: string
-    hostNote?: string
-    /** Only with `runInProgress`: notes that Run's own request delivered. */
-    runHostNote?: string
-    runInProgress?: boolean
-  },
-): Promise<void> {
+export async function persistConversationState(cacheDir: string, input: ConversationStateSave): Promise<void> {
   await trackedSnapshotWrite(cacheDir, input.sessionKey, () => queueConversationStateWrite(cacheDir, input.sessionKey, async () => {
     // A newer Run may have reset/superseded this conversation while its final
     // frame was still in flight. Never let that late TurnEnded resurrect it.
@@ -341,46 +341,63 @@ export async function persistConversationState(
       )
       return false
     }
-    const checkpoint = getCheckpoint(input.conversationId)
-    const blobCompaction = compactConversationBlobs(input.conversationId, checkpoint, {
-      keepInMemory: input.runInProgress,
-    })
-    const blobs = blobCompaction.blobs
-    const requestContext = getFrozenRequestContext(input.conversationId) ?? input.requestContext
-    const provenance = getTurnProvenance(input.sessionKey)
-    const heldImages = heldHistoryImagesSnapshot(input.sessionKey, input.conversationId, checkpoint)
-    await persistConversation(cacheDir, {
-      sessionKey: input.sessionKey,
-      conversationId: input.conversationId,
-      checkpoint,
-      occupancyCheckpoint: getCheckpointOccupancy(input.conversationId),
-      occupancyGuard: serializeCheckpointOccupancyGuard(input.conversationId),
-      blobs,
-      requestContext,
-      toolCatalog: structuredClone(input.toolCatalog ?? []),
-      postCompactionRebase: input.postCompactionRebase || hasHostHistoryRewrite(cacheDir, input.sessionKey),
-      hostAgent: input.hostAgent,
-      systemPromptHash: input.systemPromptHash,
-      hostNote: input.hostNote,
-      ...(input.runInProgress && input.runHostNote ? { runHostNote: input.runHostNote } : {}),
-      earlySteers: serializeEarlySteers(input.sessionKey),
-      lostRequest: serializeLostRequest(input.sessionKey),
-      planOperations: serializePlanOperations(input.sessionKey),
-      ...(heldImages ? { sentImageHashes: heldImages.hashes, sentImagesCheckpoint: heldImages.checkpoint } : {}),
-      ...(sessionEditsDenySent(input.conversationId) ? { sessionEditsDenySent: true } : {}),
-      ...(provenance?.conversationId === input.conversationId
-        ? { turnProvenance: serializeTurnProvenance(provenance) }
-        : {}),
-    })
-    trace(
-      `conversation persistence: saved${input.runInProgress ? " in-progress" : ""} sessionKey=${input.sessionKey} ` +
-        `conversationId=${input.conversationId} checkpoint=${checkpoint?.length ?? 0}B ` +
-        `blobs=${blobCompaction.beforeCount}->${blobCompaction.afterCount} ` +
-        `blobBytes=${blobCompaction.beforeBytes}->${blobCompaction.afterBytes}` +
-        (blobCompaction.fallbackReason ? ` compactionFallback=${blobCompaction.fallbackReason}` : ""),
-    )
+    try {
+      await saveConversationState(cacheDir, input)
+    } catch (error) {
+      // The snapshot left on disk lacks what this save carried: a restart, or a copy that lost track of this failure,
+      // must start from host history instead of resuming it. Still in the write lane, so no newer save is removed.
+      await discardPersistedConversation(cacheDir, input.sessionKey).then(
+        () => trace(`conversation persistence: discarded older snapshot after failed save sessionKey=${input.sessionKey}`),
+        (discardError) => trace(
+          `conversation persistence: older snapshot kept after failed save sessionKey=${input.sessionKey}: ` +
+            String(discardError),
+        ),
+      )
+      throw error
+    }
     return true
   }))
+}
+
+async function saveConversationState(cacheDir: string, input: ConversationStateSave): Promise<void> {
+  const checkpoint = getCheckpoint(input.conversationId)
+  const blobCompaction = compactConversationBlobs(input.conversationId, checkpoint, {
+    keepInMemory: input.runInProgress,
+  })
+  const blobs = blobCompaction.blobs
+  const requestContext = getFrozenRequestContext(input.conversationId) ?? input.requestContext
+  const provenance = getTurnProvenance(input.sessionKey)
+  const heldImages = heldHistoryImagesSnapshot(input.sessionKey, input.conversationId, checkpoint)
+  await persistConversation(cacheDir, {
+    sessionKey: input.sessionKey,
+    conversationId: input.conversationId,
+    checkpoint,
+    occupancyCheckpoint: getCheckpointOccupancy(input.conversationId),
+    occupancyGuard: serializeCheckpointOccupancyGuard(input.conversationId),
+    blobs,
+    requestContext,
+    toolCatalog: structuredClone(input.toolCatalog ?? []),
+    postCompactionRebase: input.postCompactionRebase || hasHostHistoryRewrite(cacheDir, input.sessionKey),
+    hostAgent: input.hostAgent,
+    systemPromptHash: input.systemPromptHash,
+    hostNote: input.hostNote,
+    ...(input.runInProgress && input.runHostNote ? { runHostNote: input.runHostNote } : {}),
+    earlySteers: serializeEarlySteers(input.sessionKey),
+    lostRequest: serializeLostRequest(input.sessionKey),
+    planOperations: serializePlanOperations(input.sessionKey),
+    ...(heldImages ? { sentImageHashes: heldImages.hashes, sentImagesCheckpoint: heldImages.checkpoint } : {}),
+    ...(sessionEditsDenySent(input.conversationId) ? { sessionEditsDenySent: true } : {}),
+    ...(provenance?.conversationId === input.conversationId
+      ? { turnProvenance: serializeTurnProvenance(provenance) }
+      : {}),
+  })
+  trace(
+    `conversation persistence: saved${input.runInProgress ? " in-progress" : ""} sessionKey=${input.sessionKey} ` +
+      `conversationId=${input.conversationId} checkpoint=${checkpoint?.length ?? 0}B ` +
+      `blobs=${blobCompaction.beforeCount}->${blobCompaction.afterCount} ` +
+      `blobBytes=${blobCompaction.beforeBytes}->${blobCompaction.afterBytes}` +
+      (blobCompaction.fallbackReason ? ` compactionFallback=${blobCompaction.fallbackReason}` : ""),
+  )
 }
 
 export async function clearPersistedConversationState(

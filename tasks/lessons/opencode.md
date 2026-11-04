@@ -524,6 +524,13 @@ These are failure lessons shared by both hosts, not a replacement for
   session; gzip protobuf bytes rather than base64 JSON. Revalidate cleanup
   candidates, expire loaded sessions too, and avoid decoded snapshot duplicates
   (`test/conversation-maintenance.test.ts`).
+- **A failed save leaves a stale snapshot, not an old-but-valid one.** The
+  atomic rename keeps the previous file, whose checkpoint lacks the turns since;
+  an in-memory "unsaved" mark is lost on restart or record eviction (#135).
+  Remove that snapshot in the same write lane, whatever conversation it holds,
+  so only a later save can replace it; a receipt rewrite of the old snapshot is
+  not a full save (`persistConversationState`,
+  `test/host-history-rewrite.test.ts`).
 - **Bound indexes without discarding warm state.** Soft binding eviction must
   retain checkpoint/blobs/context and allow disk hydration; a process cap must
   not close pumping or pending Runs (`test/session.test.ts`).

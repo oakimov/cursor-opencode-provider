@@ -724,7 +724,8 @@ function queueWrite(store: ConversationStore, value: PersistedConversation): Pro
   return write
 }
 
-function queueDelete(store: ConversationStore, expectedConversationId: string): Promise<void> {
+/** Without `expectedConversationId`, any snapshot of the session goes. */
+function queueDelete(store: ConversationStore, expectedConversationId?: string): Promise<void> {
   const write = store.writeChain.catch(() => {}).then(async () => {
     const filePath = conversationCacheFilePath(store.cacheDir, store.sessionKey)
     await withFileOperation(filePath, async () => {
@@ -734,7 +735,7 @@ function queueDelete(store: ConversationStore, expectedConversationId: string): 
         const stat = await opened.handle.stat({ bigint: true })
         const header = await readConversationCacheHeader(opened.handle)
         if (header.status !== "metadata" || header.value.sessionKey !== store.sessionKey ||
-            header.value.conversationId !== expectedConversationId) return
+            (expectedConversationId !== undefined && header.value.conversationId !== expectedConversationId)) return
         if (opened.sourcePath === filePath) await discardCacheCandidate(filePath, stat)
         else await unlink(opened.sourcePath).catch((error) => {
           if (errorCode(error) !== "ENOENT") throw error
@@ -1111,6 +1112,18 @@ export async function deletePersistedConversation(
   store.value = undefined
   store.loadStatus = "missing"
   await queueDelete(store, current.conversationId)
+}
+
+/**
+ * A failed save left the snapshot on disk behind the state it was saving, whichever conversation that snapshot
+ * holds: remove it so a restart starts from host history instead of resuming it.
+ */
+export async function discardPersistedConversation(cacheDir: string, sessionKey: string): Promise<void> {
+  const store = await getStore(cacheDir, sessionKey)
+  store.head = undefined
+  store.value = undefined
+  store.loadStatus = "missing"
+  await queueDelete(store)
 }
 
 /** Full snapshots still held in memory; the store should keep heads only. */

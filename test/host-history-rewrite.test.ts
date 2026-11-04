@@ -1066,6 +1066,73 @@ test("an unbound copy behind another copy's delete drops its own older turn stat
   }
 })
 
+/** A new process: nothing of this one's per-session state survives, only the cache directory. */
+const restartProcess = () => {
+  resetSnapshotGenerationsForTests()
+  resetConversationPersistenceForTests()
+  resetConversationBindingsForTests()
+  resetTurnProvenanceForTests()
+  resetCheckpointsForTests()
+}
+
+test("a restart after a failed save starts from host history instead of the older snapshot", async () => {
+  const cache = root()
+  const sessionKey = "restart-after-failed-save"
+  const older = bindConversationId(sessionKey).conversationId
+  const stale = { conversationId: older, toolCallIds: [], text: "Older answer", textWithReasoning: "Older answer" }
+  setCheckpoint(older, checkpointBytes)
+  try {
+    restoreTurnProvenance(sessionKey, stale)
+    await persistConversationState(cache, { sessionKey, conversationId: older, requestContext: { rules_info_complete: true } })
+    // The failed save carries another conversation: whatever conversation the older snapshot holds goes.
+    const current = bindConversationId(sessionKey, { reset: true }).conversationId
+    setConversationPersistenceHookForTests(phase => {
+      if (phase === "before-write") throw new Error("disk full")
+    })
+    expect(await rejectionMessage(persistConversationState(cache, { sessionKey, conversationId: current,
+      requestContext: { rules_info_complete: true } }))).toContain("disk full")
+    restartProcess()
+    expect(await hydrateConversationState(cache, sessionKey)).toBeUndefined()
+    await hydrateTurnProvenance(cache, sessionKey)
+    expect(getTurnProvenance(sessionKey)).toBeUndefined()
+    expect(getCheckpoint(older)).toBeUndefined()
+    expect(await getPersistedConversation(cache, sessionKey)).toBeUndefined()
+  } finally {
+    setConversationPersistenceHookForTests()
+    resetTurnProvenanceForTests()
+    resetCheckpointsForTests()
+  }
+})
+
+test("a save queued behind a failed one is kept, also across a restart", async () => {
+  const cache = root()
+  const sessionKey = "save-after-failed-save"
+  const conversationId = peekConversationId(sessionKey)
+  const newer = encodeMessage("ConversationStateStructure", { token_details: { used_tokens: 7, max_tokens: 9 } })
+  setCheckpoint(conversationId, checkpointBytes)
+  try {
+    await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    let failed = false
+    setConversationPersistenceHookForTests(phase => {
+      if (phase !== "before-write" || failed) return
+      failed = true
+      throw new Error("disk full")
+    })
+    const failing = rejectionMessage(persistConversationState(cache, { sessionKey, conversationId,
+      requestContext: { rules_info_complete: true } }))
+    setCheckpoint(conversationId, newer)
+    const landing = persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+    expect(await failing).toContain("disk full")
+    await landing
+    restartProcess()
+    expect((await hydrateConversationState(cache, sessionKey))?.conversationId).toBe(conversationId)
+    expect(getCheckpoint(conversationId)).toEqual(newer)
+  } finally {
+    setConversationPersistenceHookForTests()
+    resetCheckpointsForTests()
+  }
+})
+
 test("at most the cap's worth of unbound failed-save records stay past the cap, also after concurrent saves", async () => {
   const cache = root()
   setConversationPersistenceHookForTests(phase => {
