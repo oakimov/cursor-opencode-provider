@@ -111,6 +111,7 @@ const fileOperations = new Map<string, Promise<void>>()
 const WRITER_TEMP_FILE = /^\..+\.pb\.gz\.\d+\.[^.]+\.tmp$/
 type PersistenceTestPhase =
   | "maintenance-start" | "before-quarantine" | "after-quarantine" | "full-decode" | "directory-opened" | "before-write"
+  | "before-invalidate" | "after-invalidate-open"
 let testHook: ((phase: PersistenceTestPhase, filePath: string) => Promise<void> | void) | undefined
 
 function errorCode(error: unknown): unknown {
@@ -724,18 +725,77 @@ function queueWrite(store: ConversationStore, value: PersistedConversation): Pro
   return write
 }
 
-/** Without `expectedConversationId`, any snapshot of the session goes. */
+/**
+ * Invalidate through a checked descriptor: truncation needs no new directory or
+ * inode, and an atomic replacement at the same name cannot redirect the write.
+ * Leave the empty file for ordinary maintenance rather than unlinking a name
+ * that another process may have replaced since the identity check.
+ */
+async function invalidateCacheCandidate(filePath: string, identity: FileIdentity): Promise<void> {
+  await testHook?.("before-invalidate", filePath)
+  let handle
+  try {
+    handle = await open(filePath, fsConstants.O_WRONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0))
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return
+    throw error
+  }
+  try {
+    const stat = await handle.stat({ bigint: true })
+    if (stat.isFile() && sameFile(identity, stat)) {
+      await testHook?.("after-invalidate-open", filePath)
+      await handle.truncate(0)
+    }
+  } finally {
+    await handle.close()
+  }
+}
+
+/** A reader can recover a quarantined copy after the live snapshot disappears. Invalidate those copies too. */
+async function invalidateSessionSnapshots(store: ConversationStore, filePath: string): Promise<void> {
+  const invalidate = async (candidate: string) => {
+    let handle
+    try {
+      handle = await openSnapshot(candidate)
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") return
+      throw error
+    }
+    try {
+      const stat = await handle.stat({ bigint: true })
+      const header = await readConversationCacheHeader(handle)
+      if (header.status === "metadata" && header.value.sessionKey === store.sessionKey) {
+        await invalidateCacheCandidate(candidate, stat)
+      }
+    } finally {
+      await handle.close()
+    }
+  }
+  try {
+    const directory = quarantineDirectory(filePath)
+    for await (const entry of removableDirectoryEntries(directory)) {
+      if (entry.isFile() && entry.name.endsWith(".snapshot")) await invalidate(path.join(directory, entry.name))
+    }
+  } finally {
+    // A collector can restore and unlink a quarantine entry during iteration;
+    // inspect the live name last, even if inspection of quarantine failed.
+    await invalidate(filePath)
+  }
+}
+
+/** Without `expectedConversationId`, invalidate any snapshot of the session. */
 function queueDelete(store: ConversationStore, expectedConversationId?: string): Promise<void> {
   const write = store.writeChain.catch(() => {}).then(async () => {
     const filePath = conversationCacheFilePath(store.cacheDir, store.sessionKey)
     await withFileOperation(filePath, async () => {
+      if (expectedConversationId === undefined) return invalidateSessionSnapshots(store, filePath)
       const opened = await openConversationFile(filePath)
       if (!opened) return
       try {
         const stat = await opened.handle.stat({ bigint: true })
         const header = await readConversationCacheHeader(opened.handle)
         if (header.status !== "metadata" || header.value.sessionKey !== store.sessionKey ||
-            (expectedConversationId !== undefined && header.value.conversationId !== expectedConversationId)) return
+            header.value.conversationId !== expectedConversationId) return
         if (opened.sourcePath === filePath) await discardCacheCandidate(filePath, stat)
         else await unlink(opened.sourcePath).catch((error) => {
           if (errorCode(error) !== "ENOENT") throw error
@@ -1116,7 +1176,7 @@ export async function deletePersistedConversation(
 
 /**
  * A failed save left the snapshot on disk behind the state it was saving, whichever conversation that snapshot
- * holds: remove it so a restart starts from host history instead of resuming it.
+ * holds: invalidate it so a restart starts from host history instead of resuming it.
  */
 export async function discardPersistedConversation(cacheDir: string, sessionKey: string): Promise<void> {
   const store = await getStore(cacheDir, sessionKey)

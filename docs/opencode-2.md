@@ -60,6 +60,12 @@ requirement fails, the next Cursor request reports the error and retries saving
 on a later request. No extra configuration is needed. See the
 [compaction acceptance checks](host-compat-acceptance.md#opencode-2-foreign-compaction).
 
+If a full conversation save fails, the provider invalidates the older snapshot
+and its quarantine copies without allocating a directory or inode. After a
+restart, the next turn builds from host history until a successful save lands.
+A returning Location that cannot read the latest snapshot also drops its own
+older checkpoint. See [conversation persistence](../README.md#known-limitations).
+
 ## Network interruptions
 
 Name-resolution and routing outages wait inside the provider under the

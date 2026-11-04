@@ -53,7 +53,10 @@ Operator setup: [OpenCode 2.x](../../docs/opencode-2.md).
   checkpoint unless it holds the latest generation. The unbound path once
   skipped the bound path's write wait, failed-save check and full state reset
   (#135); key those on "this copy is behind", not on "bound", and keep a failed
-  save's record past the cap so the eviction cannot erase it. Tests need a copy
+  save's record past the cap so the eviction cannot erase it. An I/O exception
+  during restore must drop an unchanged older checkpoint before the caller
+  continues from host history, while retaining checkpoints received during the
+  read or still owned by this copy. Tests need a copy
   that served the session before, and one whose record or binding was evicted
   since, not only one that never did (`hydrateConversationState`,
   `test/host-history-rewrite.test.ts`).

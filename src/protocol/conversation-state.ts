@@ -208,18 +208,28 @@ export async function hydrateConversationState(
       }
       return undefined
     }
-    await forgetCachedConversation(cacheDir, sessionKey)
-    const record = snapshotRecord(key, sessionKey)
-    generation = record.generation
-    record.reading++
-    let read: PersistedConversationLoad
     try {
-      read = await loadPersistedConversation(cacheDir, sessionKey)
-    } finally {
-      record.reading--
+      await forgetCachedConversation(cacheDir, sessionKey)
+      const record = snapshotRecord(key, sessionKey)
+      generation = record.generation
+      record.reading++
+      let read: PersistedConversationLoad
+      try {
+        read = await loadPersistedConversation(cacheDir, sessionKey)
+      } finally {
+        record.reading--
+      }
+      // A write that landed or was queued during the read, also this copy's own, may be newer than what was read.
+      if (record.generation === generation && !queuedWrite(key, false)) loaded = read
+    } catch (error) {
+      // The caller logs I/O failures and continues from host history. Its older
+      // checkpoint must not remain eligible, nor may this discard a checkpoint
+      // a concurrent request received while the read was pending.
+      if (!bindingMoved() && !holdsLatestSnapshot(key) && getCheckpoint(conversationId) === entryCheckpoint) {
+        replaceCopyState(key, snapshotRecord(key, sessionKey).generation, sessionKey, conversationId, true)
+      }
+      throw error
     }
-    // A write that landed or was queued during the read, also this copy's own, may be newer than what was read.
-    if (record.generation === generation && !queuedWrite(key, false)) loaded = read
   }
   if (!loaded) {
     trace(`conversation persistence: hydration skipped sessionKey=${sessionKey} status=still-writing`)
@@ -345,9 +355,9 @@ export async function persistConversationState(cacheDir: string, input: Conversa
       await saveConversationState(cacheDir, input)
     } catch (error) {
       // The snapshot left on disk lacks what this save carried: a restart, or a copy that lost track of this failure,
-      // must start from host history instead of resuming it. Still in the write lane, so no newer save is removed.
+      // must start from host history instead of resuming it. Still in the write lane, so no newer save is invalidated.
       await discardPersistedConversation(cacheDir, input.sessionKey).then(
-        () => trace(`conversation persistence: discarded older snapshot after failed save sessionKey=${input.sessionKey}`),
+        () => trace(`conversation persistence: invalidated older snapshot after failed save sessionKey=${input.sessionKey}`),
         (discardError) => trace(
           `conversation persistence: older snapshot kept after failed save sessionKey=${input.sessionKey}: ` +
             String(discardError),

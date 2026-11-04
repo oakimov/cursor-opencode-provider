@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test"
-import { mkdir, mkdtemp, open, rm, stat, truncate, utimes, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, open, readFile, rename, rm, stat, symlink, truncate, utimes, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { gzipSync } from "node:zlib"
@@ -13,6 +13,7 @@ import {
   conversationCacheDirectoryPath,
   conversationCacheFilePath,
   deletePersistedConversation,
+  discardPersistedConversation,
   getPersistedConversation,
   getPersistedTurnProvenance,
   initializeConversationPersistence,
@@ -269,6 +270,101 @@ describe("bounded conversation maintenance", () => {
     await deletePersistedConversation(cacheDir, sessionKey, "owned")
     resetConversationPersistenceForTests()
     expect((await getPersistedConversation(cacheDir, sessionKey, now))?.conversationId).toBe("new-binding")
+  })
+
+  it("failed-save invalidation preserves atomic replacements before and after opening its writable descriptor", async () => {
+    for (const barrier of ["before-invalidate", "after-invalidate-open"]) {
+      const cacheDir = await root()
+      await persistConversation(cacheDir, {
+        sessionKey, conversationId: "owned", blobs: [], requestContext: { rules_info_complete: true },
+      }, now)
+      const filePath = conversationCacheFilePath(cacheDir, sessionKey)
+      setConversationPersistenceHookForTests(async phase => {
+        if (phase === barrier) await publishFromChild(filePath, gzipSync(protobufSnapshot(now, "replacement")))
+      })
+      await discardPersistedConversation(cacheDir, sessionKey)
+      resetConversationPersistenceForTests()
+      expect((await getPersistedConversation(cacheDir, sessionKey, now))?.conversationId).toBe("replacement")
+    }
+  })
+
+  it("failed-save invalidation tolerates a candidate disappearing before its writable open", async () => {
+    const cacheDir = await root()
+    await persistConversation(cacheDir, {
+      sessionKey, conversationId: "owned", blobs: [], requestContext: { rules_info_complete: true },
+    }, now)
+    setConversationPersistenceHookForTests(async (phase, filePath) => {
+      if (phase === "before-invalidate") await rm(filePath)
+    })
+    await discardPersistedConversation(cacheDir, sessionKey)
+    resetConversationPersistenceForTests()
+    expect(await getPersistedConversation(cacheDir, sessionKey, now)).toBeUndefined()
+  })
+
+  it("failed-save invalidation refuses symlinks both before inspection and before its writable open", async () => {
+    for (const beforeInspection of [true, false]) {
+      const cacheDir = await root()
+      await persistConversation(cacheDir, {
+        sessionKey, conversationId: "owned", blobs: [], requestContext: { rules_info_complete: true },
+      }, now)
+      const filePath = conversationCacheFilePath(cacheDir, sessionKey)
+      const unrelated = path.join(cacheDir, "unrelated")
+      await writeFile(unrelated, "preserve these bytes")
+      const replace = async () => {
+        await rm(filePath)
+        await symlink(unrelated, filePath)
+      }
+      if (beforeInspection) await replace()
+      else setConversationPersistenceHookForTests(async phase => {
+        if (phase === "before-invalidate") await replace()
+      })
+      await expect(discardPersistedConversation(cacheDir, sessionKey)).rejects.toMatchObject({ code: "ELOOP" })
+      expect(await readFile(unrelated, "utf8")).toBe("preserve these bytes")
+      resetConversationPersistenceForTests()
+    }
+  })
+
+  it("failed-save invalidation still covers the live name when inspecting quarantine fails", async () => {
+    const cacheDir = await root()
+    const filePath = await snapshot(cacheDir)
+    expect(await getPersistedConversation(cacheDir, sessionKey, now)).toBeDefined()
+    await writeFile(path.join(conversationCacheDirectoryPath(cacheDir), ".gc"), "not a directory")
+    await expect(discardPersistedConversation(cacheDir, sessionKey)).rejects.toMatchObject({ code: "ENOTDIR" })
+    expect((await stat(filePath)).size).toBe(0)
+  })
+
+  it("failed-save invalidation covers quarantine when the live name is missing and ignores unrelated entries", async () => {
+    const cacheDir = await root()
+    const filePath = await snapshot(cacheDir)
+    expect(await getPersistedConversation(cacheDir, sessionKey, now)).toBeDefined()
+    const directory = path.join(conversationCacheDirectoryPath(cacheDir), ".gc", path.basename(filePath))
+    await mkdir(directory, { recursive: true })
+    const moved = path.join(directory, "moved.snapshot")
+    await writeFile(moved, gzipSync(protobufSnapshot()))
+    await writeFile(path.join(directory, "unrelated.txt"), "keep")
+    await mkdir(path.join(directory, "directory.snapshot"))
+    await rm(filePath)
+    await discardPersistedConversation(cacheDir, sessionKey)
+    expect((await stat(moved)).size).toBe(0)
+    expect((await stat(path.join(directory, "unrelated.txt"))).size).toBe(4)
+    resetConversationPersistenceForTests()
+    expect(await getPersistedConversation(cacheDir, sessionKey, now)).toBeUndefined()
+  })
+
+  it("failed-save invalidation covers a quarantine candidate restored during inspection", async () => {
+    const cacheDir = await root()
+    const filePath = await snapshot(cacheDir)
+    expect(await getPersistedConversation(cacheDir, sessionKey, now)).toBeDefined()
+    const directory = path.join(conversationCacheDirectoryPath(cacheDir), ".gc", path.basename(filePath))
+    await mkdir(directory, { recursive: true })
+    const moved = path.join(directory, "moved.snapshot")
+    await rename(filePath, moved)
+    setConversationPersistenceHookForTests(async (phase, candidate) => {
+      if (phase === "before-invalidate" && candidate === moved) await rename(moved, filePath)
+    })
+    await discardPersistedConversation(cacheDir, sessionKey)
+    resetConversationPersistenceForTests()
+    expect(await getPersistedConversation(cacheDir, sessionKey, now)).toBeUndefined()
   })
 
   it("tolerates a second collector finishing an already moved candidate", async () => {

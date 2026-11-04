@@ -1,7 +1,8 @@
-import { afterEach, expect, test } from "bun:test"
+import { afterEach, expect, spyOn, test } from "bun:test"
+import * as fsPromises from "node:fs/promises"
 import { cpSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import {
   acknowledgeHostHistoryRewrite, awaitHostHistoryRewrite, hasHostHistoryRewrite,
@@ -1074,6 +1075,112 @@ const restartProcess = () => {
   resetTurnProvenanceForTests()
   resetCheckpointsForTests()
 }
+
+test("a failed save invalidates the older snapshot even when directory allocation fails", async () => {
+  const cache = root()
+  const sessionKey = "full-disk-cleanup"
+  const conversationId = peekConversationId(sessionKey)
+  setCheckpoint(conversationId, checkpointBytes)
+  await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+  const noSpace = Object.assign(new Error("disk full"), { code: "ENOSPC" })
+  const mkdir = spyOn(fsPromises, "mkdir").mockRejectedValue(noSpace)
+  try {
+    setConversationPersistenceHookForTests(phase => {
+      if (phase === "before-write") throw noSpace
+    })
+    expect(await rejectionMessage(persistConversationState(cache, { sessionKey, conversationId,
+      requestContext: { rules_info_complete: true } }))).toContain("disk full")
+  } finally {
+    mkdir.mockRestore()
+    setConversationPersistenceHookForTests()
+  }
+  restartProcess()
+  expect(await hydrateConversationState(cache, sessionKey)).toBeUndefined()
+  expect(await getPersistedConversation(cache, sessionKey)).toBeUndefined()
+})
+
+test("a failed save also invalidates snapshot copies left in quarantine", async () => {
+  const cache = root()
+  const sessionKey = "failed-save-quarantine"
+  const conversationId = peekConversationId(sessionKey)
+  setCheckpoint(conversationId, checkpointBytes)
+  await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+  const filePath = conversationCacheFilePath(cache, sessionKey)
+  const directory = join(dirname(filePath), ".gc", basename(filePath))
+  await fsPromises.mkdir(directory, { recursive: true })
+  await fsPromises.copyFile(filePath, join(directory, "older.snapshot"))
+  setConversationPersistenceHookForTests(phase => {
+    if (phase === "before-write") throw new Error("disk full")
+  })
+  expect(await rejectionMessage(persistConversationState(cache, { sessionKey, conversationId,
+    requestContext: { rules_info_complete: true } }))).toContain("disk full")
+  restartProcess()
+  expect(await hydrateConversationState(cache, sessionKey)).toBeUndefined()
+  expect(await getPersistedConversation(cache, sessionKey)).toBeUndefined()
+})
+
+test("a copy behind drops stale state when snapshot reading throws, bound or unbound", async () => {
+  const cache = root()
+  const other = await otherGraph()
+  try {
+    for (const unbound of [false, true]) {
+      const sessionKey = unbound ? "unbound-read-io-error" : "bound-read-io-error"
+      const conversationId = peekConversationId(sessionKey)
+      setCheckpoint(conversationId, checkpointBytes)
+      await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+      await other.state.hydrateConversationState(cache, sessionKey)
+      await other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+      restoreTurnProvenance(sessionKey, { conversationId, toolCallIds: [], text: "Older", textWithReasoning: "Older" })
+      if (unbound) evictBindings()
+      setConversationPersistenceHookForTests(phase => {
+        if (phase === "full-decode") throw Object.assign(new Error("snapshot read failed"), { code: "EIO" })
+      })
+      expect(await rejectionMessage(hydrateConversationState(cache, sessionKey))).toContain("snapshot read failed")
+      expect(getCheckpoint(conversationId)).toBeUndefined()
+      expect(getTurnProvenance(sessionKey)).toBeUndefined()
+      setConversationPersistenceHookForTests()
+    }
+  } finally {
+    setConversationPersistenceHookForTests()
+    other.persistence.resetConversationPersistenceForTests()
+    other.checkpoint.resetCheckpointsForTests()
+    resetTurnProvenanceForTests()
+    resetCheckpointsForTests()
+  }
+})
+
+test("snapshot read failures preserve checkpoints a concurrent request received or this copy still owns", async () => {
+  const cache = root()
+  const other = await otherGraph()
+  const newer = encodeMessage("ConversationStateStructure", { token_details: { used_tokens: 7, max_tokens: 9 } })
+  try {
+    for (const mode of ["latest", "received", "rebound"]) {
+      const sessionKey = `read-failure-${mode}`
+      const conversationId = peekConversationId(sessionKey)
+      setCheckpoint(conversationId, checkpointBytes)
+      await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+      await other.state.hydrateConversationState(cache, sessionKey)
+      if (mode !== "latest") {
+        await other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
+      } else evictBindings()
+      let current = conversationId
+      setConversationPersistenceHookForTests(phase => {
+        if (phase !== "full-decode") return
+        if (mode === "rebound") current = bindConversationId(sessionKey, { reset: true }).conversationId
+        if (mode !== "latest") setCheckpoint(current, newer)
+        throw new Error("snapshot read failed")
+      })
+      expect(await rejectionMessage(hydrateConversationState(cache, sessionKey))).toContain("snapshot read failed")
+      expect(getCheckpoint(current)).toEqual(mode === "latest" ? checkpointBytes : newer)
+      setConversationPersistenceHookForTests()
+    }
+  } finally {
+    setConversationPersistenceHookForTests()
+    other.persistence.resetConversationPersistenceForTests()
+    other.checkpoint.resetCheckpointsForTests()
+    resetCheckpointsForTests()
+  }
+})
 
 test("a restart after a failed save starts from host history instead of the older snapshot", async () => {
   const cache = root()
