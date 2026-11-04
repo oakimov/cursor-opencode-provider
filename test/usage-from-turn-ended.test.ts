@@ -6,6 +6,7 @@ import {
   emptyLanguageModelV3Usage,
   formatCursorCacheDiagnostics,
   formatFinishTrace,
+  formatCursorCategoryCharacters,
   formatCursorTokenCategories,
   formatTurnUsageValidation,
   flatUsageFromV3,
@@ -393,6 +394,20 @@ describe("Cursor cache diagnostics", () => {
       '{"system_prompt":1000,"tools":9000,"conversation":35000}',
     )
     expect(formatCursorTokenCategories(undefined)).toBe("unavailable")
+  })
+
+  it("prints the character counts Cursor reports beside the categories", () => {
+    const withCharacters: Parameters<typeof formatCursorCategoryCharacters>[0] = {
+      ...current,
+      breakdown: { ...current.breakdown!, categories: [
+        { id: "system_prompt", label: "System prompt", estimatedTokens: 1_000, characterCount: 4_000 },
+        { id: "tools", label: "Tools", estimatedTokens: 9_000 },
+        { id: "conversation", label: "Conversation", estimatedTokens: 35_000, characterCount: 140_000 },
+      ] },
+    }
+    expect(formatCursorCategoryCharacters(withCharacters)).toBe('{"system_prompt":4000,"conversation":140000}')
+    expect(formatCursorCategoryCharacters(current)).toBe("unavailable")
+    expect(formatCursorCategoryCharacters(undefined)).toBe("unavailable")
   })
 
   it("does not compare categories retained from an older occupancy snapshot", () => {
