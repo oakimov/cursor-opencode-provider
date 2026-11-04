@@ -312,9 +312,12 @@ internal model calls can process uncached text more than once.
 | `execRequests` | Cursor exec/control requests, including provider-handled probes and host-tool requests. |
 | `perModelCallCache=unavailable` | Cursor did not expose a per-call cache split. This must remain unavailable unless the wire protocol supplies it. |
 
-Each `checkpoint: stored` line includes `context=used/max` and a compact
-`categories={...}` object. Read these in timestamp order to locate the step where
-context composition changed. Category names come from Cursor and can evolve.
+Each `checkpoint: stored` line includes `context=used/max`, a compact
+`categories={...}` object of token counts and `characters={...}` with Cursor's
+character count per category. Read these in timestamp order to locate the step
+where context composition changed. A token jump without matching character
+growth is the unexplained shape the [confirmation policy](checkpoint-occupancy.md)
+holds. Category names come from Cursor and can evolve.
 
 ## Recognize common patterns
 

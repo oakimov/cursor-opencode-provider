@@ -363,6 +363,7 @@ import {
   cursorUsageCountersFromTurnEnded,
   emptyLanguageModelV3Usage,
   formatCursorCacheDiagnostics,
+  formatCursorCategoryCharacters,
   formatCursorTokenCategories,
   formatFinishTrace,
   formatTurnUsageValidation,
@@ -5996,7 +5997,8 @@ export async function pump(
         }
         const context = rawTokenDetails
           ? ` context=${rawTokenDetails.usedTokens}/${rawTokenDetails.maxTokens} ` +
-            `categories=${formatCursorTokenCategories(rawTokenDetails)}` +
+            `categories=${formatCursorTokenCategories(rawTokenDetails)} ` +
+            `characters=${formatCursorCategoryCharacters(rawTokenDetails)}` +
             (tokenDetails?.rawUsedTokens !== undefined ? ` acceptedContext=${tokenDetails.usedTokens} source=checkpoint-held-spike` : "")
           : " context=unavailable"
         trace(
