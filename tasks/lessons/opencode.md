@@ -315,6 +315,19 @@ These are failure lessons shared by both hosts, not a replacement for
 
 ## Planning and file mutations
 
+- **Concurrent host execution reorders a step.** An edit and a `git commit`
+  in one step committed before the edit landed: both hosts run a step's calls
+  at once, and Cursor sends an edit's write only after its read, so the command
+  even reached the host first ([discussion #145](https://github.com/oakimov/cursor-opencode-provider/discussions/145),
+  [#151](https://github.com/oakimov/cursor-opencode-provider/issues/151)).
+  Hold the calls after a file change behind its result, by model order, never
+  on a timer: a permission prompt would reopen the race. A held exec frame is
+  dispatched again, so it must skip the replay accounting it already passed
+  and keep its pending entry owed while it waits. A new-step reset on "every
+  call finished" forgot a provider refusal mid-step; only a host refusal,
+  which comes after the step was sent, cancels followers
+  (`test/step-order-pump.test.ts`, `test/step-order.test.ts`).
+
 - **Gate the unavoidable transition and stop on refusal.** The model wrote a
   plan and stopped without volunteering SwitchMode. Attach approval to
   CreatePlan. A No answer is ordinary question data in native OpenCode, so a

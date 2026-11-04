@@ -1,0 +1,237 @@
+/**
+ * Model-order holds for a Cursor step that changes a file.
+ *
+ * Cursor sends every exec of a step at once, and both OpenCode majors run a
+ * step's tool calls concurrently, so a command the model wrote after an edit
+ * can run before the edit lands. In a step with a file change (an edit, write
+ * or delete, whichever host tool it becomes, including an edit's private
+ * read), every later call in `tool_call_started` order waits until the file
+ * change finishes, and the file change waits for the earlier calls that are
+ * already running or held. A step without a file change runs as before.
+ *
+ * A held call reaches the host in a later host step. Nothing releases it on a
+ * timer: only the file change's result (a failure included), Cursor's
+ * completion or withdrawal of it, or this provider refusing it, as a failed
+ * tool would under Cursor CLI. When the host refuses the file change (the user
+ * denied it) or the user stops it, the calls that follow it are cancelled.
+ */
+
+/** Display calls that change a file. Cursor's `write` arrives as an `edit_tool_call`. */
+const FILE_CHANGE_DISPLAY_VARIANTS: ReadonlySet<string> = new Set([
+  "edit_tool_call",
+  "delete_tool_call",
+  "pi_edit_tool_call",
+  "pi_write_tool_call",
+])
+/** Exec results of a file change (Cursor's side of the call). */
+const FILE_CHANGE_RESULT_FIELDS: ReadonlySet<string> = new Set([
+  "write_result",
+  "delete_result",
+  "pi_edit_result",
+  "pi_write_result",
+])
+/** Canonical host file tools a Cursor call can be remapped to. */
+const FILE_CHANGE_HOST_TOOLS: ReadonlySet<string> = new Set(["edit", "write", "apply_patch", "patch"])
+
+export const HELD_CALL_CANCELLED_REASON =
+  "Not run: it follows a file change in this step that was refused or interrupted. "
+  + "Run it again only if it still applies."
+
+/** `held`: its exec waits here; `refused`: a file change the host refused, which cancels later calls. */
+export type OrderedCallState = "announced" | "held" | "running" | "done" | "refused"
+
+export type OrderedCall = {
+  /** Position in the model's order: `tool_call_started`, or exec arrival for an unannounced call. */
+  index: number
+  fileChange: boolean
+  state: OrderedCallState
+}
+
+export type HeldExec<F, P> = {
+  callId: string
+  execId: number
+  /** The exec frame, dispatched again on release. */
+  frame: F
+  /** What the frame asks for, to answer a cancelled call. */
+  request: P
+  /** The pending entry that keeps the exec owed (heartbeats, fresh-turn cancel). */
+  pending: unknown
+}
+
+export type StepOrderState<F = unknown, P = unknown> = {
+  nextIndex: number
+  calls: Map<string, OrderedCall>
+  /** Dispatched execs: which call each belongs to, and whether it is a file change's private read. */
+  execs: Map<number, { callId: string; fileChangeRead: boolean }>
+  /** Held execs in model order. */
+  held: Array<HeldExec<F, P>>
+}
+
+export function createStepOrder<F, P>(): StepOrderState<F, P> {
+  return { nextIndex: 0, calls: new Map(), execs: new Map(), held: [] }
+}
+
+export function isFileChangeDisplay(toolCall: unknown): boolean {
+  if (!toolCall || typeof toolCall !== "object") return false
+  return Object.keys(toolCall).some((key) =>
+    FILE_CHANGE_DISPLAY_VARIANTS.has(key) && (toolCall as Record<string, unknown>)[key] != null)
+}
+
+export function isFileChangeExec(resultField: string, toolName: string): boolean {
+  return FILE_CHANGE_RESULT_FIELDS.has(resultField) || FILE_CHANGE_HOST_TOOLS.has(toolName)
+}
+
+const terminal = (state: OrderedCallState) => state === "done" || state === "refused"
+
+function ensureCall(order: StepOrderState<any, any>, callId: string, fileChange: boolean): OrderedCall {
+  let call = order.calls.get(callId)
+  if (!call) {
+    call = { index: order.nextIndex++, fileChange, state: "announced" }
+    order.calls.set(callId, call)
+  } else if (fileChange) {
+    call.fileChange = true
+  }
+  return call
+}
+
+/**
+ * `tool_call_started`. A call after a finished step starts a new step: Cursor
+ * generates again only once every exec of the step before it was answered.
+ * A host refusal arrives only after its step was sent, so it is never
+ * forgotten while that step still has calls to come.
+ */
+export function announceCall(order: StepOrderState<any, any>, callId: string, fileChange: boolean): void {
+  if (order.held.length === 0 && [...order.calls.values()].every((call) => terminal(call.state))) {
+    order.calls.clear()
+    order.execs.clear()
+    order.nextIndex = 0
+  }
+  ensureCall(order, callId, fileChange)
+}
+
+function blocked(order: StepOrderState<any, any>, callId: string, call: OrderedCall): boolean {
+  for (const [otherId, other] of order.calls) {
+    if (otherId === callId || other.index >= call.index) continue
+    // A started but unsent file change already blocks the calls after it.
+    if (other.fileChange && (other.state === "announced" || other.state === "held" || other.state === "running")) return true
+    // A file change also waits for the earlier calls that are on their way.
+    if (call.fileChange && (other.state === "held" || other.state === "running")) return true
+  }
+  return false
+}
+
+function followsRefusal(order: StepOrderState<any, any>, call: OrderedCall): boolean {
+  for (const other of order.calls.values()) {
+    if (other.index < call.index && other.fileChange && other.state === "refused") return true
+  }
+  return false
+}
+
+/** Decide an exec as it arrives: run it now, hold it, or cancel it behind a refused file change. */
+export function orderExec(
+  order: StepOrderState<any, any>,
+  callId: string,
+  fileChange: boolean,
+): "run" | "hold" | "cancel" {
+  const call = ensureCall(order, callId, fileChange)
+  if (followsRefusal(order, call)) return "cancel"
+  return blocked(order, callId, call) ? "hold" : "run"
+}
+
+export function isFileChangeCall(order: StepOrderState<any, any> | undefined, callId: string): boolean {
+  return !!order?.calls.get(callId)?.fileChange
+}
+
+export function holdExec<F, P>(order: StepOrderState<F, P>, held: HeldExec<F, P>): void {
+  const call = ensureCall(order, held.callId, false)
+  call.state = "held"
+  const at = order.held.findIndex((other) => (order.calls.get(other.callId)?.index ?? 0) > call.index)
+  if (at < 0) order.held.push(held)
+  else order.held.splice(at, 0, held)
+}
+
+/** An exec of `callId` was dispatched: answered here, refused, or sent to the host. */
+export function runExec(
+  order: StepOrderState<any, any>,
+  callId: string,
+  execId: number,
+  fileChangeRead: boolean,
+): void {
+  const call = ensureCall(order, callId, false)
+  if (!terminal(call.state)) call.state = "running"
+  order.execs.set(execId, { callId, fileChangeRead })
+}
+
+/** The call finished: Cursor completed it, or it was answered without the host. */
+export function finishCall(order: StepOrderState<any, any> | undefined, callId: string): void {
+  const call = order?.calls.get(callId)
+  if (call && call.state !== "held" && call.state !== "refused") call.state = "done"
+}
+
+/** The host refused the call or the user stopped it. A refused file change cancels the calls after it. */
+function refuseCall(order: StepOrderState<any, any> | undefined, callId: string): void {
+  const call = order?.calls.get(callId)
+  if (!call || call.state === "held") return
+  call.state = call.fileChange ? "refused" : "done"
+}
+
+/**
+ * A host result was delivered for `execId`. An edit's private read does not
+ * finish its call: the write follows. A held exec is dropped (a fresh turn
+ * cancelled it). Returns true when the order state changed.
+ */
+export function noteExecResult(
+  order: StepOrderState<any, any> | undefined,
+  execId: number,
+  outcome: "done" | "refused",
+): boolean {
+  if (!order) return false
+  if (dropHeldExec(order, execId)) return true
+  const exec = order.execs.get(execId)
+  if (!exec) return false
+  order.execs.delete(execId)
+  if (outcome === "refused") refuseCall(order, exec.callId)
+  else if (!exec.fileChangeRead) finishCall(order, exec.callId)
+  return true
+}
+
+/** Remove a held exec that will never run (Cursor withdrew it, or a result settled it). */
+export function dropHeldExec<F, P>(order: StepOrderState<F, P> | undefined, execId: number): HeldExec<F, P> | undefined {
+  if (!order) return undefined
+  const at = order.held.findIndex((held) => held.execId === execId)
+  if (at < 0) return undefined
+  const [held] = order.held.splice(at, 1)
+  const call = order.calls.get(held!.callId)
+  if (call) call.state = "done"
+  return held
+}
+
+/** Held execs that follow a refused file change, in model order. */
+export function takeCancelledExecs<F, P>(order: StepOrderState<F, P>): Array<HeldExec<F, P>> {
+  const cancelled = order.held.filter((held) => {
+    const call = order.calls.get(held.callId)
+    return !!call && followsRefusal(order, call)
+  })
+  for (const held of cancelled) {
+    order.held.splice(order.held.indexOf(held), 1)
+    const call = order.calls.get(held.callId)
+    if (call) call.state = "done"
+  }
+  return cancelled
+}
+
+/**
+ * Held execs nothing blocks any more, in model order. A released file change
+ * counts as running, so the calls after it stay held.
+ */
+export function takeReleasableExecs<F, P>(order: StepOrderState<F, P>): Array<HeldExec<F, P>> {
+  const released: Array<HeldExec<F, P>> = []
+  for (const held of [...order.held]) {
+    const call = order.calls.get(held.callId)
+    if (!call || followsRefusal(order, call) || blocked(order, held.callId, call)) continue
+    call.state = "running"
+    order.held.splice(order.held.indexOf(held), 1)
+    released.push(held)
+  }
+  return released
+}

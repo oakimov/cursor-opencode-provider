@@ -218,6 +218,12 @@ The **1.18 v2** API and **OpenCode 2.x** are source-incompatible:
   closure/restart so a late result can rebuild
   from history. An edit Cursor fails after its host read, with no row open,
   gets a failed row with Cursor's error.
+- In a step with a file change, keep `tool_call_started` order
+  (`src/step-order.ts`): later calls wait for it, and it waits for earlier
+  calls already running or held. Hold the exec frame, owed (heartbeats,
+  fresh-turn cancel), and dispatch it again in a later host step; release only
+  on its result, Cursor's completion or abort, never a timer. A host refusal or
+  interruption of the change cancels its followers. A released step books nothing.
 - Drain a held Run before a fresh user turn. Rebuild late tool results from
   host history; checkpoint resume would request the tool again. Never replay
   side effects after the replay barrier or treat EOF as successful `stop`.

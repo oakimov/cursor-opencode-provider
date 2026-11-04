@@ -23,6 +23,22 @@ import {
   shouldHoldParallelStep,
 } from "./parallel-step.js"
 import {
+  HELD_CALL_CANCELLED_REASON,
+  announceCall,
+  createStepOrder,
+  dropHeldExec,
+  finishCall as finishOrderedCall,
+  holdExec,
+  isFileChangeCall,
+  isFileChangeDisplay,
+  isFileChangeExec,
+  noteExecResult,
+  orderExec,
+  runExec,
+  takeCancelledExecs,
+  takeReleasableExecs,
+} from "./step-order.js"
+import {
   bidiRunStream,
   compressRunRequestAhead,
   CursorRunInterruptedError,
@@ -3006,6 +3022,12 @@ function applyExecControl(session: CursorSession, control: Record<string, unknow
     trace(`exec control: unknown message ${JSON.stringify(Object.keys(control))} (${where}) sessionId=${session.sessionId}`)
     return
   }
+  // A held exec never reached the host, so no late result will settle it.
+  if (dropHeldExec(session.stepOrder, id)) {
+    sessionManager.resolve(session.sessionId, id)
+    trace(`exec control: Cursor aborted held execId=${id} (${where}) sessionId=${session.sessionId} — it will not run`)
+    return
+  }
   const pending = session.pending.get(id)
   // Interaction answers share the pending map under their own ids, never an exec's.
   const marked = pending !== undefined && isOwedCursorExec(pending) && sessionManager.markExecAborted(session, id)
@@ -4203,6 +4225,9 @@ async function deliverContinuationResultsNow(
       return undefined
     }
     deliveredResults++
+    if (noteExecResult(session.stepOrder, r.execId, r.refusal || r.interrupted ? "refused" : "done")) {
+      trace(`step-order: result execId=${r.execId} refused=${!!(r.refusal || r.interrupted)} held=${session.stepOrder?.held.length ?? 0}`)
+    }
     if (resultHasImages) session.occupancyMediaAfterFrame = beforeResultWrite
     if (completedPlanOperation) {
       clearPlanOperation(session.openCodeSessionId, completedPlanOperation)
@@ -5156,9 +5181,17 @@ export async function pump(
     }
   }
 
+  /** End the host step on tool calls; a step of released calls books nothing. */
+  const finishToolStep = () => {
+    const unbilled = session.parallelStep?.unbilled === true
+    clearParallelStep()
+    emitFinish(undefined, { unified: "tool-calls", raw: undefined }, undefined, undefined, { unbilled })
+  }
+
   /** Record a final disposition for a Cursor call id (emit, refuse, or internal). */
   const disposeParallelCall = (callId: string | undefined) => {
     if (!callId) return
+    finishOrderedCall(session.stepOrder, callId)
     if (session.priorParallelStepCallIds?.has(callId)) return
     resolveParallelStepCall(
       ensureParallelStep(),
@@ -5178,8 +5211,7 @@ export async function pump(
       clearParallelStep()
       return false
     }
-    clearParallelStep()
-    emitFinish(undefined, { unified: "tool-calls", raw: undefined })
+    finishToolStep()
     return true
   }
 
@@ -5204,8 +5236,7 @@ export async function pump(
       )
       return false
     }
-    clearParallelStep()
-    emitFinish(undefined, { unified: "tool-calls", raw: undefined })
+    finishToolStep()
     return true
   }
 
@@ -5220,8 +5251,7 @@ export async function pump(
       `parallel-step: guard-close listed=${step.listedCount ?? "?"} ` +
         `resolved=${step.resolved.size} emitted=${step.emitted}`,
     )
-    clearParallelStep()
-    emitFinish(undefined, { unified: "tool-calls", raw: undefined })
+    finishToolStep()
     return true
   }
 
@@ -5233,8 +5263,7 @@ export async function pump(
     if (emittedHostTools === 0) return false
     if (error) session.closeError = error
     session.deferredTerminalReason = reason
-    clearParallelStep()
-    emitFinish(undefined, { unified: "tool-calls", raw: undefined })
+    finishToolStep()
     return true
   }
 
@@ -5539,10 +5568,32 @@ export async function pump(
     reason: LanguageModelV3FinishReason,
     settledUsage?: LanguageModelV3Usage,
     settledSource?: string,
+    options?: { unbilled?: boolean },
   ) => {
     settleOpenEarlyRows(reason.unified === "tool-calls" && emittedHostTools > 0)
     flushToollessText()
     closeOpenSpans()
+    if (options?.unbilled && !te) {
+      // Calls released from a hold belong to a Cursor step already booked with
+      // the host step that held them. OpenCode 2 prices any reported token, so
+      // this step reports none and costs nothing; its output stays for TurnEnded.
+      trace(`billing: step=released pricing=${session.billing.cost ? "priced" : "unpriced"} stepUsd=0.000000 ` +
+        `key=${session.billing.key}`)
+      const delivered = safeEnqueue({
+        type: "finish",
+        usage: emptyLanguageModelV3Usage(),
+        finishReason: reason,
+        providerMetadata: {
+          copilot: { totalNanoAiu: 0 },
+          cursor: { usageVersion: 3, occupancyOnly: true, releasedStep: true },
+        },
+      } as V3Part)
+      if (delivered && session.openCodeSessionId) {
+        finishEmittedStep(session.openCodeSessionId, session.conversationId)
+        if (reason.unified === "tool-calls") scheduleHeldRunSave(session)
+      }
+      return
+    }
     const est = session.usageEstimate
     // OpenCode TUI/GUI replace each assistant message's tokens (they do not
     // sum occupancy) and the TUI footer requires tokens.output > 0. Cost and
@@ -5825,6 +5876,43 @@ export async function pump(
       continue
     }
 
+    // Calls held behind a file change: cancel those after a refused one, and
+    // dispatch the rest again, in model order, once nothing blocks them. They
+    // form a host step of their own, so wait for one in progress to end.
+    const order = session.stepOrder
+    if (order && order.held.length > 0) {
+      for (const held of takeCancelledExecs(order)) {
+        const current = session.pending.get(held.execId)
+        if (!current || current !== held.pending || current.state !== "pending" || current.aborted) continue
+        const row = earlyRows.claim(held.callId)
+        if (row) closeEarlyRow(row, { kind: "outcome", ...cursorEditFailure(row.path, HELD_CALL_CANCELLED_REASON) })
+        if (!await replyExecRefusal(held.request, HELD_CALL_CANCELLED_REASON, "held call cancelled")) return
+        sessionManager.resolve(session.sessionId, held.execId)
+      }
+      const released = session.parallelStep ? [] : takeReleasableExecs(order).filter((held) => {
+        if (sessionManager.forgetHeldExec(session, held.execId, held.pending)) return true
+        // Its pending entry is gone (the Run is stopping): it never runs and blocks nothing.
+        finishOrderedCall(order, held.callId)
+        return false
+      })
+      if (released.length > 0) {
+        for (const held of released) {
+          session.priorParallelStepCallIds?.delete(held.callId)
+          redispatchedFrames.add(held.frame)
+        }
+        const step = createParallelStep()
+        step.listedCount = released.length
+        step.unbilled = true
+        session.parallelStep = step
+        const queued = session.heldFrames ?? []
+        if (session.pushbackFrame) queued.unshift(session.pushbackFrame)
+        session.pushbackFrame = undefined
+        session.heldFrames = [...released.map((held) => held.frame), ...queued]
+        trace(`step-order: released ${released.length} held call(s) ` +
+          `execIds=[${released.map((held) => held.execId).join(",")}] stillHeld=${order.held.length}`)
+      }
+    }
+
     let next: IteratorResult<Frame>
     try {
       if (!planTurnCancellationRequested && session.pending.size === 0
@@ -5977,25 +6065,27 @@ export async function pump(
     ) {
       failRunProtocol("Cursor response-requiring request could not be decoded", RUN_REQUEST_DECODE_FAILED)
     }
-    const replayFrame = analyzeReplayFrame(payload, {
+    // A held exec dispatched again was already accounted for when it arrived.
+    const redispatched = redispatchedFrames.delete(frame)
+    const replayFrame = redispatched ? undefined : analyzeReplayFrame(payload, {
       interactionUpdate: iu,
       exec: esm,
       kv,
       execControl,
       interactionQuery,
     })
-    if (replayFrame.barrier === "unknown-or-malformed-frame" && isDebugEnabled()) {
+    if (replayFrame?.barrier === "unknown-or-malformed-frame" && isDebugEnabled()) {
       const layout = describeFrameLayout(payload)
       if (!unknownFrameLayouts.has(layout)) {
         unknownFrameLayouts.add(layout)
         trace(`replay frame unknown: layout=${layout} bytes=${payload.length}`)
       }
     }
-    if (replayFrame.barrier === "display-tool-lifecycle") {
+    if (replayFrame?.barrier === "display-tool-lifecycle") {
       replaySafety.recordToolLifecycle(replayFrame.toolLifecycle)
       acknowledgeHostResults(session, replayFrame.toolLifecycle, frame)
-    } else if (replayFrame.barrier) replaySafety.markBarrier(replayFrame.barrier)
-    if (replayFrame.barrier === "non-control-exec") {
+    } else if (replayFrame?.barrier) replaySafety.markBarrier(replayFrame.barrier)
+    if (replayFrame?.barrier === "non-control-exec") {
       replaySafety.recordExec(esm?.id, esm ? extractExecDisplayCallId(esm) : undefined)
     }
     // Reseeding is allowed only while every frame so far was positively a
@@ -6091,8 +6181,7 @@ export async function pump(
         // The Run is terminal even though the host still owes other results.
         settleOpenEarlyRows()
         session.pushbackFrame = frame
-        clearParallelStep()
-        emitFinish(undefined, { unified: "tool-calls", raw: undefined })
+        finishToolStep()
         return
       }
       trace(`turn_ended raw wire fields: ${debugWalkTurnEnded(payload)}`)
@@ -6199,6 +6288,7 @@ export async function pump(
           const editToolCalls = session.editToolCalls ?? (session.editToolCalls = new Map())
           editToolCalls.set(callId, { path: editPath })
         }
+        announceCall(session.stepOrder ??= createStepOrder(), callId, isFileChangeDisplay(toolCall))
         const callIdLog = callId.replace(/\r?\n/g, "\\n")
         let wireFields = ""
         if (variant === "?") {
@@ -6212,6 +6302,7 @@ export async function pump(
     } else if (iu?.tool_call_completed) {
       const completed = iu.tool_call_completed as Record<string, unknown>
       const callId = typeof completed.call_id === "string" ? completed.call_id : ""
+      if (callId) finishOrderedCall(session.stepOrder, callId)
       const earlyRow = earlyRows.claim(callId)
       // Still listed: no host mutation ran for this edit, so a failure is Cursor's own.
       const unwrittenEdit = callId ? session.editToolCalls?.get(callId) : undefined
@@ -6359,7 +6450,7 @@ export async function pump(
     } else if (iu?.context_injection_state) {
       if (applyContextInjectionState(session, iu.context_injection_state)) textBreakPending = true
     } else if (esm) {
-      cacheDiagnostics.execRequests++
+      if (!redispatched) cacheDiagnostics.execRequests++
       const esmId = (esm.id as number) ?? 0
       if (esm.request_context_args) {
         // Server turn-setup probe (#10). Reply with the same RequestContext the Run sent.
@@ -6496,6 +6587,46 @@ export async function pump(
           disposeParallelCall(displayCallId)
           if (closeIfParallelStepComplete()) return
           continue
+        }
+        // Keep the model's order in a step that changes a file (`src/step-order.ts`).
+        // Provider-owned runtime files are answered above. Image bytes stay
+        // unordered: Cursor does not wait for an input image's copy.
+        if (session.allowTools) {
+          const request = parseExecServerMessage(esm, session.hostToolDialect)
+          if (request && !binaryWritePayload(request)) {
+            const order = session.stepOrder ??= createStepOrder()
+            const callId = displayCallId ?? `cursor_${session.sessionId}_${request.id}`
+            const decision = redispatched
+              ? "run"
+              : orderExec(order, callId, isFileChangeExec(request.resultField, request.toolName))
+            if (decision === "cancel") {
+              if (!await rejectExec(request, HELD_CALL_CANCELLED_REASON, "after a refused file change")) return
+              disposeParallelCall(displayCallId)
+              if (closeIfParallelStepComplete()) return
+              continue
+            }
+            if (decision === "hold") {
+              // Owed like any exec the host runs: heartbeats, and a fresh turn's cancel.
+              sessionManager.registerPending(
+                request.id,
+                session,
+                request.resultField,
+                request.toolName,
+                false,
+                request.resultMetadata,
+              )
+              holdExec(order, { callId, execId: request.id, frame, request, pending: session.pending.get(request.id) })
+              trace(
+                `step-order: HELD execId=${request.id} toolName=${request.toolName} ` +
+                  `callId=${callId.replace(/\r?\n/g, "\\n")} held=${order.held.length}`,
+              )
+              // It counts toward this step's listed calls and runs in a later host step.
+              disposeParallelCall(callId)
+              if (closeIfParallelStepComplete()) return
+              continue
+            }
+            runExec(order, callId, request.id, isFileChangeCall(order, callId) && request.resultField === "read_result")
+          }
         }
         const parsed = parseExecServerMessage(esm, session.hostToolDialect)
         if (parsed) {
@@ -7394,6 +7525,9 @@ export async function pump(
     // handled above.
   }
 }
+
+/** Held exec frames dispatched again on release (`src/step-order.ts`). */
+const redispatchedFrames = new WeakSet<Frame>()
 
 /** Normalize protobufjs bytes / Buffer / number[] into a Uint8Array. */
 function normalizeCheckpointBytes(raw: unknown): Uint8Array | undefined {

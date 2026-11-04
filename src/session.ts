@@ -8,12 +8,14 @@ import type {
   HostSubagentCatalog,
   HostToolDialect,
   OpencodeToolDef,
+  ParsedExecRequest,
   ToolAliasRegistry,
 } from "./protocol/tools.js"
 import type { CursorConversationTokenDetails } from "./protocol/token-details.js"
 import type { HostNoteBatch } from "./protocol/host-notes.js"
 import type { RunHistoryImages } from "./protocol/sent-history-images.js"
 import type { ParallelStepState } from "./parallel-step.js"
+import type { StepOrderState } from "./step-order.js"
 import type { OpenCodeModelCost } from "./pricing.js"
 import type { RunCostEstimate } from "./billing.js"
 import type { ReplaySafetyState } from "./replay-safety.js"
@@ -346,6 +348,8 @@ export type CursorSession = {
   parallelStep?: ParallelStepState
   /** Resolved call ids from prior steps of this Run — ignore late completions. */
   priorParallelStepCallIds?: Set<string>
+  /** Model-order holds for a step that changes a file (`src/step-order.ts`). */
+  stepOrder?: StepOrderState<Frame, ParsedExecRequest>
   pending: Map<number, PendingExec>
   /**
    * Cursor display tool calls (tool_call_started) awaiting either an exec or a
@@ -604,6 +608,25 @@ export class SessionManager {
     session.pending.clear()
     this.scheduleHardDeadline(session)
     return dropped
+  }
+
+  /**
+   * A held exec is about to be dispatched again (`src/step-order.ts`): drop
+   * the entry that kept it owed while it waited, without a tombstone, so its
+   * dispatch can register it afresh. False when that entry is gone (Stop, a
+   * fresh turn's cancel, Cursor's abort) and the exec must not run.
+   */
+  forgetHeldExec(session: CursorSession, execId: number, pending: unknown): boolean {
+    const current = session.pending.get(execId)
+    if (session.closed || current === undefined || current !== pending || current.state !== "pending" || current.aborted) {
+      return false
+    }
+    session.pending.delete(execId)
+    this.byExecId.delete(this.key(session.sessionId, execId))
+    // Its dispatch is the next frame read; an idle deadline from the wait must not precede it.
+    if (session.pending.size === 0) this.recordSemanticProgress(session)
+    this.scheduleHardDeadline(session)
+    return true
   }
 
   /** Cursor withdrew this exec; returns false when it is not one the host still owes. */
@@ -947,6 +970,7 @@ export class SessionManager {
     session.heldFrames = undefined
     session.parallelStep = undefined
     session.priorParallelStepCallIds = undefined
+    session.stepOrder = undefined
     this.subscribeTerminal(session)
     try { old.destroy() } catch { /* already closed */ }
   }
@@ -1000,6 +1024,7 @@ export class SessionManager {
     session.heldFrames = undefined
     session.parallelStep = undefined
     session.priorParallelStepCallIds = undefined
+    session.stepOrder = undefined
     session.pumpOwner = null
     session.pumpActive = false
     session.displayToolCalls?.clear()
