@@ -183,7 +183,8 @@ command status from `metadata.exit` for history rebuilds and removes that
 notice from live stdout while preserving command bytes.
 
 Terminal-record headers and footers stay out of command stdout, including
-when completion races a timeout or background handoff.
+when completion races a timeout or background handoff. A handoff result holds
+only the foreground window's output; later output stays in the terminal file.
 
 Shell output keeps path-like text, whitespace and successful timeout-shaped
 text unchanged. Internal wrapper markers are removed without trimming command

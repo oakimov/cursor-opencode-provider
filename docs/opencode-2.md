@@ -252,7 +252,8 @@ the notice is the whole result. Native signal and timeout notices also start on
 their own line. Other text blocks retain their exact bytes.
 
 Terminal-record headers and footers stay out of command stdout, including
-when completion races a timeout or background handoff.
+when completion races a timeout or background handoff. A handoff result holds
+only the foreground window's output; later output stays in the terminal file.
 
 Shell output keeps path-like text, whitespace and successful timeout-shaped
 text unchanged. Internal wrapper markers are removed without trimming command
