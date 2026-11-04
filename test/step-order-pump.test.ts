@@ -40,9 +40,11 @@ const ended = () => frame({ interaction_update: { turn_ended: {} } })
 /** Frames in order; a read past the end waits until the test pushes more. */
 function scriptedFrames(initial: Frame[]) {
   const queue = [...initial]
+  let reads = 0
   let waiting: ((result: IteratorResult<Frame>) => void) | undefined
   const iterator: AsyncIterator<Frame> = {
     next: () => {
+      reads++
       const next = queue.shift()
       if (next) return Promise.resolve({ done: false, value: next })
       return new Promise((resolve) => { waiting = resolve })
@@ -50,6 +52,7 @@ function scriptedFrames(initial: Frame[]) {
   }
   return {
     iterator,
+    reads: () => reads,
     push(...frames: Frame[]) {
       queue.push(...frames)
       const resolve = waiting
@@ -99,7 +102,7 @@ function fixture(initial: Frame[], root: string) {
     error(error: unknown) { throw error },
   } as ReadableStreamDefaultController<LanguageModelV3StreamPart>
   const run = () => pump(session, controller, { textId: "text", reasoningId: "reasoning" })
-  return { session, writes, parts, run, push: script.push }
+  return { session, writes, parts, run, push: script.push, reads: script.reads }
 }
 
 type Part = LanguageModelV3StreamPart
@@ -178,6 +181,69 @@ describe("model order in a step that changes a file", () => {
     f.push(completed("edit"), completed("shell"), ended())
     await f.run()
     expect(finishes(f.parts).at(-1)!.finishReason.unified).toBe("stop")
+  })
+
+  it("closes the listed write step without another read after the edit's earlier permission read", async () => {
+    const root = workspace()
+    const target = path.join(root, "target.txt")
+    fs.writeFileSync(target, "before\n")
+    const f = fixture([editStarted("edit", target), readExec(1, target, "edit")], root)
+    await f.run()
+    await answer(f.session, toolCalls(f.parts)[0]!, 1)
+
+    f.push(listed(2), writeExec(3, target, "after\n", "edit"), shellStarted("shell"), shellExec(2, "shell"), ended())
+    await f.run()
+    expect(f.reads()).toBe(6)
+    expect(toolCalls(f.parts).map(call => call.toolName)).toEqual(["read", "edit"])
+    expect(f.session.stepOrder?.held.map(held => held.execId)).toEqual([2])
+    await answer(f.session, toolCalls(f.parts)[1]!, 3)
+    await f.run()
+    expect(toolCalls(f.parts).map(call => call.toolName)).toEqual(["read", "edit", "bash"])
+    expect(f.reads()).toBe(6)
+  })
+
+  it("counts a held write after the edit's earlier permission read", async () => {
+    const root = workspace()
+    const target = path.join(root, "target.txt")
+    fs.writeFileSync(target, "before\n")
+    const f = fixture([shellStarted("status"), editStarted("edit", target), readExec(1, target, "edit")], root)
+    await f.run()
+    await answer(f.session, toolCalls(f.parts)[0]!, 1)
+
+    f.push(listed(2), shellExec(4, "status"), writeExec(3, target, "after\n", "edit"), ended())
+    await f.run()
+    expect(f.reads()).toBe(6)
+    expect(toolCalls(f.parts).map(call => call.toolName)).toEqual(["read", "bash"])
+    expect(f.session.stepOrder?.held.map(held => held.execId)).toEqual([3])
+  })
+
+  it("counts a locally refused write after the edit's earlier permission read", async () => {
+    const root = workspace()
+    const target = path.join(root, "target.txt")
+    fs.writeFileSync(target, "before\n")
+    const f = fixture([editStarted("edit", target), readExec(1, target, "edit")], root)
+    await f.run()
+    await answer(f.session, toolCalls(f.parts)[0]!, 1)
+    f.session.permittedToolNames = new Set(["read", "bash"])
+
+    f.push(listed(2), shellStarted("shell"), shellExec(2, "shell"), writeExec(3, target, "after\n", "edit"), ended())
+    await f.run()
+    expect(f.reads()).toBe(6)
+    expect(toolCalls(f.parts).map(call => call.toolName)).toEqual(["read", "bash"])
+    expect(replyText(f.writes, 3)).toContain("not permitted")
+  })
+
+  it("still ignores a prior call's late completion when counting a new host step", async () => {
+    const root = workspace()
+    const target = path.join(root, "target.txt")
+    fs.writeFileSync(target, "before\n")
+    const f = fixture([editStarted("edit", target), readExec(1, target, "edit")], root)
+    await f.run()
+    await answer(f.session, toolCalls(f.parts)[0]!, 1)
+    f.push(listed(2), completed("edit"), shellStarted("first"), shellExec(4, "first"), shellStarted("second"), shellExec(5, "second"), ended())
+    await f.run()
+    expect(f.reads()).toBe(8)
+    expect(toolCalls(f.parts).map(call => call.toolName)).toEqual(["read", "bash", "bash"])
   })
 
   it("holds a command whose exec arrives before an announced host edit called through MCP", async () => {

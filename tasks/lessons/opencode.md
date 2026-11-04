@@ -331,6 +331,12 @@ These are failure lessons shared by both hosts, not a replacement for
   listed count across an idle host-step split: the first denied edit can
   finish before a later listed call even arrives. Otherwise the call stays
   blocked forever, runs after its withdrawal, or escapes the denial.
+  A new exec or emitted host phase counts in its current step even when the
+  call id already ran the edit's prerequisite read. Treating that write as a
+  late display completion left the listed count unmet and added the idle
+  guard's delay before releasing followers. Held and locally refused phases
+  need the same accounting; genuinely late display completions still do not
+  count (`test/step-order-pump.test.ts`, earlier permission-read cases).
 
 - **Gate the unavoidable transition and stop on refusal.** The model wrote a
   plan and stopped without volunteering SwitchMode. Attach approval to

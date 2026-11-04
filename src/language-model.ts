@@ -5192,14 +5192,14 @@ export async function pump(
   }
 
   /** Record a final disposition for a Cursor call id (emit, refuse, or internal). */
-  const disposeParallelCall = (callId: string | undefined) => {
+  const disposeParallelCall = (callId: string | undefined, currentExec = false) => {
     if (!callId) return
     finishOrderedCall(session.stepOrder, callId)
-    if (session.priorParallelStepCallIds?.has(callId)) return
+    if (!currentExec && session.priorParallelStepCallIds?.has(callId)) return
     resolveParallelStepCall(
       ensureParallelStep(),
       callId,
-      session.priorParallelStepCallIds,
+      currentExec ? undefined : session.priorParallelStepCallIds,
     )
   }
 
@@ -5229,7 +5229,9 @@ export async function pump(
   }): boolean => {
     const step = ensureParallelStep()
     if (options?.callId) {
-      resolveParallelStepCall(step, options.callId, session.priorParallelStepCallIds)
+      // A new host emission owns this step even if its call id already ran a
+      // prerequisite read or another phase. Only late display completions are old.
+      resolveParallelStepCall(step, options.callId)
     }
     recordParallelStepEmission(step)
     if (shouldHoldParallelStep(step, { humanGatedWithoutCount: options?.humanGated })) {
@@ -6562,7 +6564,7 @@ export async function pump(
         const displayCallId = extractExecDisplayCallId(esm)
         const orderedCallId = displayCallId ?? `cursor_${session.sessionId}_${esmId}`
         const disposeExecCall = () => disposeParallelCall(displayCallId
-          ?? (session.stepOrder?.calls.has(orderedCallId) ? orderedCallId : undefined))
+          ?? (session.stepOrder?.calls.has(orderedCallId) ? orderedCallId : undefined), true)
         // A refused exec is final for its announced row, on every refusal path.
         const rejectExec = async (parsed: ParsedExecRequest, reason: string, label: string) => {
           const row = earlyRows.claim(displayCallId)
@@ -6635,7 +6637,7 @@ export async function pump(
                   `callId=${callId.replace(/\r?\n/g, "\\n")} held=${order.held.length}`,
               )
               // It counts toward this step's listed calls and runs in a later host step.
-              disposeParallelCall(callId)
+              disposeParallelCall(callId, true)
               if (closeIfParallelStepComplete()) return
               continue
             }
