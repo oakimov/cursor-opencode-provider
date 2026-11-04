@@ -486,7 +486,10 @@ These are failure lessons shared by both hosts, not a replacement for
   terminal state and restart. Keep the accepted count separate from resume
   bytes, and match recovery readings by their full token evidence. A media
   reset is one-shot: a sticky Run flag let every later spike in an image Run
-  through. Consume it only on a checkpoint that arrived after the media and its
+  through. Capture a prompt image's arrival cutoff before opening its upload:
+  a response can arrive before drain completes, and an after-drain cutoff both
+  misses the baseline and resends checkpointed images. Consume it only on a
+  checkpoint that arrived after the media and its
   acknowledged result (`test/checkpoint-occupancy.test.ts`,
   `test/checkpoint-occupancy-run.test.ts`, `test/host-notes-run.test.ts`).
 - **Book charges only after accepted delivery.** Cancelled estimates must not

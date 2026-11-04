@@ -2531,6 +2531,9 @@ async function startSession(
   trace(`hash requestContext sha256=${requestContextHash}`)
   if (conversationState) trace(`hash checkpoint sha256=${sha(conversationState)}`)
 
+  // Cursor may send checkpoints while the opening upload waits for drain.
+  // Capture the receipt boundary before opening, rather than after the wait.
+  const requestAfterFrame = lastFrameArrival()
   const stream = await openRunWithRequest(token, {
     baseURL: agentBaseUrl, headers: options.headers,
   }, reqBytes, "initial Run request", {
@@ -2541,7 +2544,7 @@ async function startSession(
   userTurnHostNotes.sent()
   if (!isCompaction && !lifecycle && !resuming) recordSessionEditsGuidance(conversationId, sessionEditsDenied)
   const historyImages = sessionKey && !ephemeralRun ? runHistoryImages(heldImages) : undefined
-  if (historyImages) noteHistoryImagesSent(historyImages, imageExtraction.hashes, lastFrameArrival())
+  if (historyImages) noteHistoryImagesSent(historyImages, imageExtraction.hashes, requestAfterFrame)
 
   const hostToolDialect = hostToolDialectFromTools(tools, options.defaultDialect)
   trace(
@@ -2565,7 +2568,7 @@ async function startSession(
     ...(historyImages ? { historyImages } : {}),
     tokenDetails: priorTokenDetails,
     tokenDetailsFresh: false,
-    ...(images.length > 0 ? { occupancyMediaAfterFrame: lastFrameArrival() } : {}),
+    ...(images.length > 0 ? { occupancyMediaAfterFrame: requestAfterFrame } : {}),
     cacheDiagnostics: {
       sessionKey,
       conversationId,

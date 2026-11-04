@@ -57,6 +57,8 @@ on the conversation, so a Run resumed after a dropped connection still applies i
 measured checkpoint that arrives after the prompt or tool result carrying it,
 once Cursor has completed every delivered result. A checkpoint queued while the
 tool ran cannot hold the image and does not consume the reset.
+For prompt images, the receipt boundary is captured before opening the Run;
+checkpoints received while its request waits for upload drain remain eligible.
 
 ## State and integration
 

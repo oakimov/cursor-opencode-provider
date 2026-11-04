@@ -705,6 +705,50 @@ describe("history images through a full provider Run", () => {
     expect(contextOf(second)).toMatchObject(heldAfterMedia)
   }), 30_000)
 
+  it("admits a prompt image's checkpoint received before the opening upload drains", () => withRoot(async (root) => {
+    const sessionKey = "ses_images_occupancy_upload"
+    onRun = (run, message) => {
+      if (!message.run_request) return
+      if (runs.indexOf(run) === 0) {
+        run.send({ conversation_checkpoint_update: measured(120_000, 400_000) })
+        endTurnOn(run, undefined)
+      } else admitMediaThenJump(run)
+    }
+    const turn1: Prompt = [user("First question.")]
+    await collect(model(root), turn1, sessionKey)
+    // Force opening backpressure without delaying the inbound response. The
+    // server's measured checkpoints arrive before the upload promise settles.
+    const request = client.request
+    let checkpointBeforeDrain = false
+    client.request = function (...args: Parameters<typeof request>) {
+      const stream = Reflect.apply(request, client, args)
+      const write = stream.write
+      stream.write = (...writeArgs: unknown[]) => {
+        stream.write = write
+        Reflect.apply(write, stream, writeArgs)
+        stream.once("data", () => setImmediate(() => {
+          checkpointBeforeDrain = true
+          stream.emit("drain")
+        }))
+        return false
+      }
+      return stream
+    }
+    try {
+      const turn2: Prompt = [...turn1, assistant("Done."), user("Here is the screenshot.", IMAGE_A)]
+      const second = await collect(model(root), turn2, sessionKey)
+      expect(checkpointBeforeDrain).toBe(true)
+      expect(sentImages(1)).toEqual([IMAGE_A])
+      expect(contextOf(second)).toMatchObject(heldAfterMedia)
+      client.request = request
+      await collect(model(root), [...turn2, assistant("Done."), user("Next question.")], sessionKey)
+      expect(sentCheckpoint(2)).toEqual(Uint8Array.from(measured(480_000, 410_000)))
+      expect(sentImages(2)).toEqual([])
+    } finally {
+      client.request = request
+    }
+  }), 30_000)
+
   it("admits a tool-result image's reading only from a checkpoint after the result, then holds a later jump", () => withRoot(async (root) => {
     const sessionKey = "ses_images_occupancy_tool"
     const file = path.join(root, "shot.png")
