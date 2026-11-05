@@ -1181,6 +1181,76 @@ describe("host notes through a full provider Run", () => {
     }
   }, 30_000)
 
+  it("keeps a delivered note across a restart while its Run waits on a host tool", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-host-notes-restart-"))
+    cacheHttp2SessionForTests(ORIGIN, client)
+    try {
+      const file = path.join(root, "data.txt")
+      fs.writeFileSync(file, "payload line\n")
+      const instructions = `Instructions from: ${path.join(root, "sub", "AGENTS.md")}\nThe build tool here is BAZEL-77.`
+      const sessionKey = "ses_note_delivered_after_checkpoint"
+      const resultCheckpoint = Uint8Array.from([0x98, 0x06, 2])
+      const noteCheckpoint = Uint8Array.from([0x98, 0x06, 3])
+      const model = createCursor({ name: "cursor", accessToken: "example-token", agentBaseURL: ORIGIN, cacheDir: root }).languageModel("composer-2.5")
+      onRun = (run, message) => {
+        if (message.run_request && runs.indexOf(run) === 0) {
+          run.send({ conversation_checkpoint_update: Uint8Array.from([0x98, 0x06, 1]) })
+          run.send({ exec_server_message: { id: 0, exec_id: "exec-0", read_args: { path: file, tool_call_id: "tc-0" } } })
+        } else if (message.conversation_action?.inject_context_action) {
+          const injectionId = message.conversation_action.inject_context_action.injection_id
+          // Live order: the result step's checkpoint, then the delivery ack, then the next host call.
+          run.send({ interaction_update: { context_injection_state: { injection_id: injectionId, state: { queued: {} } } } })
+          run.send({ conversation_checkpoint_update: resultCheckpoint })
+          run.send({ interaction_update: { context_injection_state: { injection_id: injectionId, state: { delivered: { step: 1 } } } } })
+          run.send({ exec_server_message: { id: 1, exec_id: "exec-1", read_args: { path: file, tool_call_id: "tc-1" } } })
+        } else if (message.run_request) endTurn(run, "BAZEL-77")
+      }
+      const system = { role: "system", content: "Host system prompt." } as Prompt[number]
+      const ask = { role: "user", content: [{ type: "text", text: "Read data.txt, then read it again." }] } as Prompt[number]
+      const first = (await collect(model, [system, ask], sessionKey)).find((part) => part.type === "tool-call") as { toolCallId: string; input: string }
+      const step: Prompt = [
+        system, ask,
+        { role: "assistant", content: [{ type: "tool-call", toolCallId: first.toolCallId, toolName: "read", input: JSON.parse(first.input) }] },
+        { role: "tool", content: [{ type: "tool-result", toolCallId: first.toolCallId, toolName: "read", output: { type: "text", value: "payload line" } }] },
+        { role: "user", content: [{ type: "text", text: instructions }] },
+      ] as Prompt
+      const second = (await collect(model, step, sessionKey)).find((part) => part.type === "tool-call") as { toolCallId: string; input: string }
+      expect(second).toBeDefined()
+      expect(runs[0]!.received.filter((message) => message.conversation_action?.inject_context_action)).toHaveLength(1)
+      // While the Run waits on the host, Cursor sends the checkpoint of the step that saw the note.
+      const held = sessionManager.findOpenByOpenCodeSessionId(sessionKey)!
+      runs[0]!.send({ conversation_checkpoint_update: noteCheckpoint })
+      const seen = () => !!held.heldFrames?.length || Buffer.from(getCheckpoint(held.conversationId) ?? []).equals(noteCheckpoint)
+      for (let i = 0; i < 200 && !seen(); i++) await new Promise((resolve) => setTimeout(resolve, 5))
+
+      await notifyHostInterrupt(sessionKey, "shutdown")
+      await settleRunSavesForTests()
+      sessionManager.dispose()
+      resetTurnStateForTests()
+      resetConversationPersistenceForTests()
+      resetConversationBindingsForTests()
+      resetCheckpointsForTests()
+
+      await collect(model, [
+        ...step,
+        { role: "assistant", content: [{ type: "tool-call", toolCallId: second.toolCallId, toolName: "read", input: JSON.parse(second.input) }] },
+        { role: "tool", content: [{ type: "tool-result", toolCallId: second.toolCallId, toolName: "read",
+          output: { type: "error-text", value: "Tool execution was interrupted" } }] },
+        { role: "user", content: [{ type: "text", text: "Which build tool do the sub/ instructions name?" }] },
+      ] as Prompt, sessionKey)
+      expect(runs).toHaveLength(2)
+      const request = runs[1]!.received[0]!.run_request
+      const notes = (request.action.user_message_action.user_message.text as string).split("BAZEL-77").length - 1
+      // The checkpoint from before the delivery ack lacks the note: start after the note, or carry it once.
+      const afterNote = Buffer.from(request.conversation_state ?? []).equals(noteCheckpoint)
+      expect({ afterNote, notes }).toEqual(afterNote ? { afterNote, notes: 0 } : { afterNote, notes: 1 })
+    } finally {
+      sessionManager.dispose()
+      await settleRunSavesForTests()
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  }, 30_000)
+
   it("injects a mid-step OpenCode 2 instruction once and carries a between-turns update with the next message", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-host-notes-run-"))
     cacheHttp2SessionForTests(ORIGIN, client)

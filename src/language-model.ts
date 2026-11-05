@@ -415,13 +415,15 @@ const toolCatalogBySession = new Map<string, OpencodeToolDef[]>()
 let nextHostNoteOrder = 0
 const undeliveredHostNotesBySession = new Map<string, HostNoteBatch[]>()
 /**
- * Host notes injected into a Run and not yet acknowledged, per OpenCode session
- * and injection id. Cleared on `delivered`; anything else returns the notes to
+ * Host notes injected into a Run and not yet in a checkpoint it stored, per
+ * OpenCode session and injection id. `delivered` marks an entry; the Run's next
+ * stored checkpoint clears it, since Cursor stores the checkpoint holding the
+ * note after the ack. Anything else returns the notes to
  * `undeliveredHostNotesBySession`, as Cursor SDK `Run.steer` reverts to a
  * follow-up. The owning Run is kept so notes are released only once it can no
  * longer deliver them.
  */
-const hostNoteInjectionsBySession = new Map<string, Map<string, HostNoteBatch & { session: CursorSession }>>()
+const hostNoteInjectionsBySession = new Map<string, Map<string, HostNoteBatch & { session: CursorSession; delivered?: boolean }>>()
 /**
  * Notes an interrupted Run delivered with its own request, restored from its
  * in-progress save. Its checkpoint holds them; a next Run that starts without
@@ -3509,6 +3511,7 @@ export async function drainSessionUntilTurnEnded(
           noteCheckpoint(session.openCodeSessionId, bytes)
           acceptResumeCheckpoint(session, bytes, frame)
           markEarlySteersCheckpointed(session.openCodeSessionId, session.sessionId)
+          forgetCheckpointedHostNotes(session)
           noteRunImageCheckpoint(session, bytes, frame)
           const rawTokenDetails = decodeConversationTokenDetails(bytes)
           if (observation.bypass && rawTokenDetails) session.occupancyMediaAfterFrame = undefined
@@ -4417,6 +4420,10 @@ function trackHostNoteInjection(
  * provider sent. Same outcomes as Cursor SDK `Run.steer`: `delivered` hands
  * the notes to the turn; `queued` waits; `queued_for_next_turn`, `cancelled`
  * and `rejected` keep them for the session's next user turn.
+ * A delivered note stays tracked until the Run stores a checkpoint after the
+ * ack (`forgetCheckpointedHostNotes`): the checkpoint stored before it lacks
+ * the note, and while the Run waits on a host tool the next one sits unread in
+ * `heldFrames`, so a restart saves the note with the deferred ones (#153).
  * Returns true when Cursor delivered an early steer: the model answers it next.
  */
 function applyContextInjectionState(session: CursorSession, value: unknown): boolean {
@@ -4432,12 +4439,28 @@ function applyContextInjectionState(session: CursorSession, value: unknown): boo
   const entries = sessionKey ? hostNoteInjectionsBySession.get(sessionKey) : undefined
   const entry = update.injection_id ? entries?.get(update.injection_id) : undefined
   if (!sessionKey || !entries || !entry || kind === "queued" || kind === "unknown") return false
+  if (kind === "delivered") {
+    entry.delivered = true
+    return false
+  }
   entries.delete(update.injection_id!)
   if (entries.size === 0) hostNoteInjectionsBySession.delete(sessionKey)
-  if (kind === "delivered") return false
   appendUndeliveredHostNotes(sessionKey, [{ notes: entry.notes, order: entry.order }])
   trace(`continuation: host note injection ${kind}; kept for the next user turn sessionKey=${sessionKey}`)
   return false
+}
+
+/** A checkpoint `session` stored after a delivery ack holds that note. */
+function forgetCheckpointedHostNotes(session: CursorSession): void {
+  const sessionKey = session.openCodeSessionId
+  const entries = sessionKey ? hostNoteInjectionsBySession.get(sessionKey) : undefined
+  if (!sessionKey || !entries) return
+  for (const [injectionId, entry] of entries) {
+    if (entry.session !== session || !entry.delivered) continue
+    entries.delete(injectionId)
+    trace(`continuation: delivered host note injection checkpointed id=${injectionId}`)
+  }
+  if (entries.size === 0) hostNoteInjectionsBySession.delete(sessionKey)
 }
 
 /**
@@ -4572,8 +4595,9 @@ export function prepareUserTurnHostNotes(input: {
 
 /**
  * An in-progress save's notes. Only those the Run's own request delivered are
- * known to be in its checkpoint; an unacknowledged injection may not be, so it
- * is deferred like one released from a closed Run.
+ * known to be in its checkpoint; an injection not yet in a stored checkpoint,
+ * acknowledged or not, may not be, so it is deferred like one released from a
+ * closed Run.
  */
 function heldRunHostNotes(session: CursorSession, sessionKey: string): { hostNote?: string; runHostNote?: string } {
   const injected = [...(hostNoteInjectionsBySession.get(sessionKey)?.values() ?? [])].filter((entry) => entry.session === session)
@@ -6127,6 +6151,7 @@ export async function pump(
         noteCheckpoint(session.openCodeSessionId, bytes)
         if (!isPlanTurnEnding()) acceptResumeCheckpoint(session, bytes, frame)
         markEarlySteersCheckpointed(session.openCodeSessionId, session.sessionId)
+        forgetCheckpointedHostNotes(session)
         noteRunImageCheckpoint(session, bytes, frame)
         const rawTokenDetails = decodeConversationTokenDetails(bytes)
         // A zero reading leaves the reset on the guard until the next positive one.
