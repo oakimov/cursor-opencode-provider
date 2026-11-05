@@ -26,11 +26,39 @@ BASELINE = EVAL / "baseline"
 MARKER = "REVIEW_EVAL_ANSWER"
 LIVE_CLAIM = re.compile(r"production incident|\blive model\b|\bin production\b", re.IGNORECASE)
 
-PROMPT = """Review the change in this checkout. The diff against its base is diff.patch.
+PROMPT = """Review the change in checkout/. The diff against its base is diff.patch.
 Follow instructions/SKILL.md and instructions/pr-review.md.
 Read the diff, the files it changes, their callers, and instructions/review-rules.md.
 Use instructions/SKILL.md as the review procedure.
-Write the private ledger and one structured result for this checkout.
+
+Evaluation adapter (applies equally to both instruction snapshots):
+- Work only inside this mount, starting at its root. Do not inspect its parent.
+  checkout/ is the reviewed tree. All finding and contract paths are relative
+  to that tree; the provided policy files outside it are review guidance.
+- Production policy references are supplied at their usual paths in this mount.
+  The three selected review guides are under instructions/ instead of their
+  production paths. Apply rules only where their scope matches the change.
+  Read incident lessons only if checkout/ supplies them. Current harness
+  incident lessons are withheld to avoid importing later adjudication.
+- This is an offline local review, not a GitHub publication run. PR binding,
+  bot/CI lookups, isolated-check.sh, live credentials, render/stamp/approval/post,
+  and production build commands for a different project are not applicable.
+  Record that limitation. Run applicable checkout tests with available tools;
+  missing required analysis still makes the review incomplete. Do not fetch
+  secrets, contact GitHub, or treat a skipped production gate as a pass.
+- Write ledger.json and review.json here. Use revision "local" in the ledger
+  and head "local" in the result, including for the archived calibration tree.
+  The local result has outcome (clean, findings, or incomplete), findings, and
+  limits. Each finding has id, title, explanation, trigger, consequence,
+  evidence, path, and line. Ledger candidates and findings share ids.
+  Use the ledger schema and enums in scripts/review-ledger.py. Record both the
+  candidate-validation and omission passes even with the baseline snapshot.
+  A valid ledger is a completion check, not a detection score.
+- Before finishing, run from this mount root:
+  python3 scripts/review-ledger.py check ledger.json
+  python3 scripts/review-ledger.py compare ledger.json review.json
+  These tools are supplied here; do not use tools outside the mount. An
+  incomplete ledger/result remains incomplete; report its diagnostic.
 Stop. Do not post, approve, or merge.
 """
 
@@ -129,6 +157,25 @@ def write_instructions(kind: str, dest: Path) -> str:
     return digest.hexdigest()
 
 
+def write_support(mount: Path) -> str:
+    """Copy shared policy and offline validation tools, never grading material."""
+    files = [
+        "AGENTS.md", "CONTRIBUTING.md", ".greptile/config.json", ".greptile/files.json",
+        "docs/cache-log-runbook.md", "docs/host-compat-acceptance.md",
+        "scripts/review-ledger.py",
+    ]
+    files.extend(path.relative_to(ROOT).as_posix() for path in (ROOT / ".cursor/rules").rglob("*") if path.is_file())
+    digest = hashlib.sha256(PROMPT.encode())
+    for name in sorted(files):
+        data = (ROOT / name).read_bytes()
+        target = mount / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        digest.update(name.encode())
+        digest.update(data)
+    return digest.hexdigest()
+
+
 def git_text(*args: str) -> str:
     return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
 
@@ -145,6 +192,7 @@ def prepare_case(case: str, variant: str, skill: str, out: Path) -> None:
     build_checkout(case, variant, checkout)
     write_diff(CASES / case / "base", checkout, mount / "diff.patch")
     skill_sha = write_instructions(skill, mount / "instructions")
+    support_sha = write_support(mount)
     (mount / "PROMPT.txt").write_text(PROMPT, encoding="utf-8")
     out.mkdir(parents=True, exist_ok=True)
     write_meta(out, {
@@ -154,26 +202,41 @@ def prepare_case(case: str, variant: str, skill: str, out: Path) -> None:
         "harnessHead": git_text("rev-parse", "HEAD"),
         "harnessDirty": bool(git_text("status", "--porcelain")),
         "skillSha256": skill_sha,
+        "supportSha256": support_sha,
         "checkoutSha256": tree_hash(checkout),
         "mount": "mount",
     })
 
 
 def prepare_calibration(skill: str, out: Path) -> None:
+    private = json.loads((PRIVATE / "calibration.json").read_text(encoding="utf-8"))
+    prepare_revision(skill, out, ROOT, private["revision"], private["base"])
+
+
+def prepare_revision(skill: str, out: Path, repository: Path, revision: str, base: str) -> None:
     if out.exists():
         raise SystemExit(f"output already exists: {out}")
-    private = json.loads((PRIVATE / "calibration.json").read_text(encoding="utf-8"))
-    revision = private["revision"]
-    base = private["base"]
+    for commit in (revision, base):
+        available = subprocess.run(
+            ["git", "cat-file", "-e", f"{commit}^{{commit}}"], cwd=repository,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+        if available.returncode:
+            raise SystemExit(
+                f"calibration commit unavailable: {commit}; fetch the pinned head and base "
+                "as described in eval/review/README.md, then retry"
+            )
+    # Read both objects before creating output; a shallow checkout may lack either.
+    archive = subprocess.check_output(["git", "archive", revision], cwd=repository)
+    diff = subprocess.check_output(["git", "diff", "--binary", base, revision], cwd=repository)
     mount = out / "mount"
     checkout = mount / "checkout"
     checkout.mkdir(parents=True)
-    archive = subprocess.check_output(["git", "archive", revision], cwd=ROOT)
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
         tar.extractall(checkout, filter="data")
-    diff = subprocess.check_output(["git", "diff", "--binary", base, revision], cwd=ROOT)
     (mount / "diff.patch").write_bytes(diff)
     skill_sha = write_instructions(skill, mount / "instructions")
+    support_sha = write_support(mount)
     (mount / "PROMPT.txt").write_text(PROMPT, encoding="utf-8")
     out.mkdir(parents=True, exist_ok=True)
     write_meta(out, {
@@ -185,6 +248,7 @@ def prepare_calibration(skill: str, out: Path) -> None:
         "harnessHead": git_text("rev-parse", "HEAD"),
         "harnessDirty": bool(git_text("status", "--porcelain")),
         "skillSha256": skill_sha,
+        "supportSha256": support_sha,
         "checkoutSha256": tree_hash(checkout),
         "mount": "mount",
     })

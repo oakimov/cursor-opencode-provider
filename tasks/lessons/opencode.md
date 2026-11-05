@@ -729,6 +729,14 @@ These are failure lessons shared by both hosts, not a replacement for
   reviewer ran. Repair the review harness when that is the requested target,
   using the reviewed defect as evaluation evidence rather than turning the
   repair into a patch to the subject (`docs/pr-review.md`).
+- **Exercise review tooling from the reviewer's actual inputs.** A calibration
+  test passed with unrelated PR objects in the developer's Git database but
+  failed in shallow CI. Test archive preparation with local commits and missing
+  history; keep fetching real calibration revisions an explicit integration
+  step. An offline reviewer mount needs its validator, policy context, and an
+  explicit adapter for production-only gates. Bind the ledger revision to the
+  result head so analysis from an older revision cannot validate a newer result
+  (`test/review-eval.test.ts`).
 - **Review text is not a publication receipt.** Publish through the approved
   review publisher, including clean verdicts. A discussion comment can carry
   the exact review marker without being a submitted review or creating inline

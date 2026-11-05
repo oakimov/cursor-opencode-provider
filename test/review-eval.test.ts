@@ -5,7 +5,7 @@ import os from "node:os"
 import path from "node:path"
 
 const ROOT = path.resolve(import.meta.dir, "..")
-const env = { ...process.env, PYTHONDONTWRITEBYTECODE: "1" }
+const env = { ...process.env, PYTHONDONTWRITEBYTECODE: "1", PYTHONWARNINGS: "error" }
 const roots: string[] = []
 
 function outDir(): string {
@@ -26,6 +26,25 @@ function prepare(args: string[]) {
 
 function writeJson(file: string, value: unknown) {
   fs.writeFileSync(file, JSON.stringify(value))
+}
+
+function fixtureGit(cwd: string, ...args: string[]): string {
+  const result = spawnSync("git", [
+    "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+    "-c", "user.name=Fixture", "-c", "user.email=1+fixture@users.noreply.github.com", ...args,
+  ], { cwd, env: { ...env, GIT_CONFIG_GLOBAL: os.devNull, GIT_CONFIG_NOSYSTEM: "1" }, encoding: "utf8" })
+  if (result.status !== 0) throw new Error(result.stderr)
+  return result.stdout.trim()
+}
+
+function prepareRevision(repository: string, revision: string, base: string, out: string) {
+  return python(["-c", `
+import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location("review_eval", "scripts/review-eval.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.prepare_revision("revised", pathlib.Path(sys.argv[4]), pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3])
+`, repository, revision, base, out])
 }
 
 function removeOuts() {
@@ -245,8 +264,9 @@ describe("review mount", () => {
     try {
       expect(prepared.result.status).toBe(0)
       expect(python(["scripts/review-eval.py", "verify-mount", prepared.mount]).status).toBe(0)
-      const leaked = python(["-c", "import pathlib,sys; root=pathlib.Path(sys.argv[1]);\nprint('\\n'.join(str(p) for p in root.rglob('*') if 'REVIEW_EVAL_ANSWER' in p.read_bytes().decode('utf-8','ignore') or 'failed-refresh-skips-retry' in p.read_bytes().decode('utf-8','ignore')))", prepared.mount])
-      expect(leaked.stdout).toBe("")
+      const leaked = python(["-c", "import pathlib,sys; root=pathlib.Path(sys.argv[1]);\nprint('\\n'.join(str(p) for p in root.rglob('*') if p.is_file() and ('REVIEW_EVAL_ANSWER' in p.read_text() or 'failed-refresh-skips-retry' in p.read_text())))", prepared.mount])
+      expect(leaked.status).toBe(0)
+      expect(leaked.stdout.trim()).toBe("")
       expect(fs.existsSync(path.join(prepared.mount, "checkout", "sync_index.py"))).toBe(true)
       expect(fs.readFileSync(path.join(prepared.mount, "PROMPT.txt"), "utf8")).not.toContain("index-sync")
       expect(fs.readFileSync(path.join(prepared.mount, "instructions", "SKILL.md"), "utf8")).toContain("scripts/review-ledger.py")
@@ -270,25 +290,64 @@ describe("review mount", () => {
       expect(revisedSkill).not.toContain("REVIEW_EVAL_ANSWER")
       expect(revisedSkill).not.toContain("fcf331e")
       expect(revisedSkill).not.toContain("imageProbeVerdict")
+      expect(fs.readFileSync(path.join(baseline.mount, "PROMPT.txt"), "utf8"))
+        .toBe(fs.readFileSync(path.join(revised.mount, "PROMPT.txt"), "utf8"))
+      expect(JSON.parse(fs.readFileSync(path.join(baseline.out, "meta.json"), "utf8")).supportSha256)
+        .toBe(JSON.parse(fs.readFileSync(path.join(revised.out, "meta.json"), "utf8")).supportSha256)
     } finally {
       removeOuts()
     }
   })
 
-  test("the calibration mount is the reviewed revision without the answer key", () => {
-    const prepared = prepare(["prepare-calibration", "--skill", "revised"])
+  test("calibration archives the pinned revision and diff without unrelated repository history", () => {
+    const repository = outDir()
+    const out = outDir()
+    fs.mkdirSync(repository)
     try {
-      expect(prepared.result.status).toBe(0)
-      expect(fs.existsSync(path.join(prepared.checkout, "scripts/probe-cursor-image-input.ts"))).toBe(true)
-      expect(fs.statSync(path.join(prepared.mount, "diff.patch")).size).toBeGreaterThan(0)
-      expect(python(["scripts/review-eval.py", "verify-mount", prepared.mount]).status).toBe(0)
-      const prompt = fs.readFileSync(path.join(prepared.mount, "PROMPT.txt"), "utf8")
+      fixtureGit(repository, "init", "-q")
+      fs.writeFileSync(path.join(repository, "subject.py"), "value = 1\n")
+      fixtureGit(repository, "add", ".")
+      fixtureGit(repository, "commit", "-qm", "base")
+      const base = fixtureGit(repository, "rev-parse", "HEAD")
+      fs.writeFileSync(path.join(repository, "subject.py"), "value = 2\n")
+      fixtureGit(repository, "commit", "-qam", "head")
+      const head = fixtureGit(repository, "rev-parse", "HEAD")
+      fs.writeFileSync(path.join(repository, "subject.py"), "uncommitted\n")
+      fs.writeFileSync(path.join(repository, "grading-key.json"), "REVIEW_EVAL_ANSWER")
+      const result = prepareRevision(repository, head, base, out)
+      expect(result.stderr).toBe("")
+      expect(result.status).toBe(0)
+      const mount = path.join(out, "mount")
+      expect(fs.readFileSync(path.join(mount, "checkout/subject.py"), "utf8")).toBe("value = 2\n")
+      expect(fs.existsSync(path.join(mount, "checkout/grading-key.json"))).toBe(false)
+      expect(fs.existsSync(path.join(mount, "checkout/.git"))).toBe(false)
+      expect(fs.readFileSync(path.join(mount, "diff.patch"), "utf8")).toContain("-value = 1\n+value = 2\n")
+      expect(python(["scripts/review-eval.py", "verify-mount", mount]).status).toBe(0)
+      const prompt = fs.readFileSync(path.join(mount, "PROMPT.txt"), "utf8")
       expect(prompt).not.toContain("REVIEW_EVAL_ANSWER")
       expect(prompt).not.toContain("failed-refresh-skips-next-default")
-      const meta = JSON.parse(fs.readFileSync(path.join(prepared.out, "meta.json"), "utf8"))
-      expect(meta.revision).toBe("fcf331e8ceb3a169f6f72205e5df262991bf9e1f")
-      expect(meta.base).toBe("f122fe36afe85500ee0164ec2a24ebdfd23b13dc")
-      expect(fs.existsSync(path.join(prepared.mount, "meta.json"))).toBe(false)
+      const meta = JSON.parse(fs.readFileSync(path.join(out, "meta.json"), "utf8"))
+      expect(meta.revision).toBe(head)
+      expect(meta.base).toBe(base)
+      expect(fs.existsSync(path.join(mount, "meta.json"))).toBe(false)
+
+      const shallow = outDir()
+      fixtureGit(ROOT, "clone", "-q", "--depth=1", `file://${repository}`, shallow)
+      const missingBase = outDir()
+      const failedBase = prepareRevision(shallow, head, base, missingBase)
+      expect(failedBase.status).toBe(1)
+      expect(failedBase.stderr).toContain(`calibration commit unavailable: ${base}`)
+      expect(failedBase.stderr).toContain("fetch the pinned head and base")
+      expect(fs.existsSync(missingBase)).toBe(false)
+
+      const missingHead = outDir()
+      const failedHead = prepareRevision(shallow, "0".repeat(40), head, missingHead)
+      expect(failedHead.status).toBe(1)
+      expect(failedHead.stderr).toContain("calibration commit unavailable:")
+      expect(fs.existsSync(missingHead)).toBe(false)
+
+      fixtureGit(shallow, "fetch", "-q", "--unshallow")
+      expect(prepareRevision(shallow, head, base, missingBase).status).toBe(0)
     } finally {
       removeOuts()
     }
@@ -335,6 +394,7 @@ describe("review ledger and score", () => {
     passes: { candidatesValidated: true, omissionsAnalyzed: true },
   }
   const review = {
+    head: "local",
     outcome: "findings",
     findings: [{
       id: "failed-refresh-skips-retry",
@@ -347,6 +407,65 @@ describe("review ledger and score", () => {
       line: 24,
     }],
   }
+
+  test("the mounted tools complete an offline review without files outside the mount", () => {
+    const prepared = prepare(["prepare", "--case", "index-sync", "--variant", "buggy", "--skill", "revised"])
+    try {
+      expect(prepared.result.status).toBe(0)
+      for (const relative of [
+        "AGENTS.md", "CONTRIBUTING.md", ".greptile/config.json", ".greptile/files.json",
+        ".cursor/rules/greptile-context.mdc", "docs/cache-log-runbook.md",
+        "docs/host-compat-acceptance.md",
+      ]) expect(fs.existsSync(path.join(prepared.mount, relative))).toBe(true)
+      // Later incident lessons describe the calibration subject and must stay out.
+      expect(fs.existsSync(path.join(prepared.mount, "tasks/lessons/opencode.md"))).toBe(false)
+      const prompt = fs.readFileSync(path.join(prepared.mount, "PROMPT.txt"), "utf8")
+      expect(prompt).toContain("offline local review")
+      expect(prompt).toContain('head "local"')
+      writeJson(path.join(prepared.mount, "ledger.json"), ledger)
+      writeJson(path.join(prepared.mount, "review.json"), review)
+      expect(python(["scripts/review-ledger.py", "check", "ledger.json"], prepared.mount).status).toBe(0)
+      expect(python(["scripts/review-ledger.py", "compare", "ledger.json", "review.json"], prepared.mount).status).toBe(0)
+      const unfinished = structuredClone(ledger)
+      unfinished.passes.omissionsAnalyzed = false
+      unfinished.omissionsNone = ""
+      writeJson(path.join(prepared.mount, "ledger.json"), unfinished)
+      expect(python(["scripts/review-ledger.py", "check", "ledger.json"], prepared.mount).status).toBe(2)
+      expect(python(["scripts/review-ledger.py", "compare", "ledger.json", "review.json"], prepared.mount).status).not.toBe(0)
+    } finally {
+      removeOuts()
+    }
+  })
+
+  test("ledger comparison binds the reviewed head, including the local evaluation mode", () => {
+    const dir = outDir()
+    fs.mkdirSync(dir)
+    try {
+      const ledgerPath = path.join(dir, "ledger.json")
+      const reviewPath = path.join(dir, "review.json")
+      for (const [revision, head, valid] of [
+        ["a".repeat(40), "a".repeat(40), true],
+        ["a".repeat(40), "b".repeat(40), false],
+        ["local", "a".repeat(40), false],
+        ["a".repeat(40), "local", false],
+        ["local", "local", true],
+        ["local", undefined, false],
+        ["a".repeat(40), undefined, false],
+        ["local", "bad-head", false],
+      ] as const) {
+        writeJson(ledgerPath, { ...ledger, revision })
+        writeJson(reviewPath, { ...review, head })
+        const compared = python(["scripts/review-ledger.py", "compare", ledgerPath, reviewPath])
+        expect(compared.status === 0).toBe(valid)
+        if (!valid) expect(compared.stderr).toContain("head")
+      }
+      writeJson(ledgerPath, [])
+      expect(python(["scripts/review-ledger.py", "check", ledgerPath]).stderr.trim()).toBe("ledger")
+      expect(python(["scripts/review-ledger.py", "compare", ledgerPath, reviewPath]).stderr.trim()).toBe("ledger")
+    } finally {
+      removeOuts()
+    }
+  })
 
   test("a complete ledger matches its public finding and a misleading one does not", () => {
     const dir = outDir()

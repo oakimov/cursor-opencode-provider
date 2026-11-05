@@ -43,8 +43,11 @@ existing rubric and do not include the ledger.
 
 The private ledger is `scripts/review-ledger.py`. `check` validates it.
 `compare` requires every public finding to be an actionable candidate that
-survived falsification, and it rejects a clean or findings result when either
-pass is unfinished. Run both before `render`. A ledger that validates is not
+survived falsification, requires the ledger's `revision` to equal the result's
+full `head` commit, and rejects a clean or findings result when either pass is
+unfinished. The `local` revision is only for offline evaluation with a `local`
+result head; it cannot validate a result bound to a PR commit. Run both before
+`render`. A ledger that validates is not
 a correct or complete review. Tests can pass, including helper tests, while
 the orchestration that owns a later retry or consumer is still wrong. A live
 `pong` covers plugin loading and the reply path only. Missing optional live

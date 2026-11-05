@@ -268,10 +268,17 @@ def public_text(finding: dict) -> str:
     )
 
 
-def compare_ledger(ledger: dict, result: dict) -> list[str]:
+def compare_ledger(ledger: object, result: object) -> list[str]:
     problems = check_ledger(ledger)
+    if not isinstance(ledger, dict):
+        return problems
     if not isinstance(result, dict):
         return [*problems, "result"]
+    head = result.get("head")
+    if not isinstance(head, str) or not REVISION.fullmatch(head):
+        problems.append("result.head")
+    elif ledger.get("revision") != head:
+        problems.append("revision.head")
     outcome = result.get("outcome")
     findings = result.get("findings")
     if not isinstance(findings, list):
@@ -319,7 +326,6 @@ def main(argv: list[str]) -> int:
     if problems:
         print("\n".join(problems), file=sys.stderr)
         return 1
-    assert isinstance(ledger, dict)
     if argv[0] == "check":
         problems = check_ledger(ledger)
     else:
