@@ -650,7 +650,13 @@ These are failure lessons shared by both hosts, not a replacement for
 - **Model metadata has separate owners.** Keep wire parameters isolated; make
   metadata-changing variants separate catalog entries. Invalidate cache schema
   before config consumes it; live negative capabilities outrank docs
-  (`test/model-metadata.test.ts`). PRs #84/#86/#95 showed that tier selection
+  (`test/model-metadata.test.ts`). Capability claims need our own evidence:
+  `supports_images` marked Grok 4.7, Composer 2.5 and Kimi K2.7 Code text-only
+  though their Runs read images, Cursor CLI ignores it, and Cursor drops images
+  for a text-only model without an error. Advertise images only from the live
+  probe record (`generate:images`), never the flag or a hardcoded id
+  (`test/image-input-probe.test.ts`, `test/model-selection-review.test.ts`).
+  PRs #84/#86/#95 showed that tier selection
   must precede speed preference, defaults must survive catalog partitioning,
   and unmatched hints must not rewrite an advertised tuple. Exercise marked
   non-1M tiers and duplicate ids (`test/model-selection-review.test.ts`,

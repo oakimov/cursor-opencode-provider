@@ -1,12 +1,9 @@
-import { CURSOR_MODEL_CAPABILITIES, CURSOR_MODEL_CONTEXTS } from "./pricing-data.js"
+import { CURSOR_IMAGE_INPUT } from "./image-input-data.js"
+import { CURSOR_MODEL_CONTEXTS } from "./pricing-data.js"
 
 export type CursorModelContext = {
   maxContext?: number
   maxContextForMaxMode?: number
-}
-
-export type CursorModelCapabilities = {
-  supportsImages: boolean
 }
 
 export function getDocumentedCursorModelContext(
@@ -16,18 +13,10 @@ export function getDocumentedCursorModelContext(
   return context ? { ...context } : undefined
 }
 
-export function getDocumentedCursorModelCapabilities(
-  modelId: string,
-): CursorModelCapabilities | undefined {
-  const capabilities = (
-    CURSOR_MODEL_CAPABILITIES as Record<string, CursorModelCapabilities>
-  )[modelId]
-  return capabilities ? { ...capabilities } : undefined
-}
-
-export function resolveCursorModelSupportsImages(
-  modelId: string,
-  availableModelsValue?: boolean,
-): boolean {
-  return availableModelsValue ?? getDocumentedCursorModelCapabilities(modelId)?.supportsImages ?? false
+/**
+ * Image input only where our live probe saw the model's Run read an image
+ * (`bun run generate:images`). Cursor's AvailableModels flag is not used.
+ */
+export function cursorModelReadsImages(modelId: string): boolean {
+  return (CURSOR_IMAGE_INPUT as Record<string, boolean>)[modelId] === true
 }

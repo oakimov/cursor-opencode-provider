@@ -7,10 +7,7 @@ import {
   type ModelVariant,
 } from "./models.js"
 import { applyCursorModelCost, hasCursorFastPricing } from "./pricing.js"
-import {
-  getDocumentedCursorModelContext,
-  resolveCursorModelSupportsImages,
-} from "./model-metadata.js"
+import { cursorModelReadsImages, getDocumentedCursorModelContext } from "./model-metadata.js"
 
 /**
  * Cursor `ModelInfo` → OpenCode model-config mapping.
@@ -233,15 +230,15 @@ export function modelInfoToConfig(
   // 64k–128k output — a tiny cap makes long-context sessions feel broken
   // even when the 1M input window is correct.
   const output = contextTier === "long" ? 128_000 : 32_000
-  const supportsImages = resolveCursorModelSupportsImages(mi.id, mi.supportsImages)
+  const readsImages = cursorModelReadsImages(mi.id)
   const config: Record<string, any> = {
     name,
-    attachment: supportsImages,
+    attachment: readsImages,
     reasoning: mi.supportsThinking ?? false,
     tool_call: mi.supportsAgent ?? true,
     temperature: false,
     modalities: {
-      input: supportsImages ? ["text", "image"] : ["text"],
+      input: readsImages ? ["text", "image"] : ["text"],
       output: ["text"],
     },
     limit: {

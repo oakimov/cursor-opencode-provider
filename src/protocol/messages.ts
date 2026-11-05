@@ -2230,7 +2230,6 @@ export function createMessageTypes(): protobuf.Root {
     { id: 2, name: "default_on", type: "bool" },
     { id: 5, name: "supports_agent", type: "bool" },
     { id: 9, name: "supports_thinking", type: "bool" },
-    { id: 10, name: "supports_images", type: "bool" },
     { id: 14, name: "supports_max_mode", type: "bool" },
     { id: 15, name: "context_token_limit", type: "int32" },
     { id: 16, name: "context_token_limit_for_max_mode", type: "int32" },
