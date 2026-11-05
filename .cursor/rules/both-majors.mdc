@@ -1,0 +1,11 @@
+---
+description: Medium. Runtime fixes must account for OpenCode 1.x and 2.0.
+globs: src/**
+alwaysApply: false
+---
+
+Greptile id: both-majors
+Severity: medium
+Scope: src/**
+
+A runtime fix must account for OpenCode 1.x and OpenCode 2.0 unless the bug is specific to one entrypoint.

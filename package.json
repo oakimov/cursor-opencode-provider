@@ -83,6 +83,7 @@
     "generate:pricing": "bun run scripts/generate-cursor-pricing.ts",
     "generate:pricing:check": "bun run scripts/generate-cursor-pricing.ts -- --check",
     "check:pricing": "bun run scripts/check-cursor-pricing-coverage.ts",
+    "live-test": "bash scripts/live-test.sh",
     "prepublishOnly": "bun run generate:pricing && bun run build"
   },
   "dependencies": {

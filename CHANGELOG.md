@@ -4,6 +4,7 @@
 
 ### Added
 
+- Cloud agents can install the OpenCode CLI and load this checkout's built OpenCode 2 plugin. `bun run live-test` runs `opencode run` against that plugin. It reads `CURSOR_API_KEY` and skips with a clear message when that variable is unset. `scripts/review-pr.sh` checks out a pull request, builds, runs the unit tests, and runs that live test. `.cursor/rules/` mirrors the Greptile rules in `.greptile/config.json` for those reviews.
 - Recovery-only diagnostics (`CURSOR_PROVIDER_RECOVERY_DEBUG=1`) record interruption, recovery decisions, and host-call/result IDs without logging prompt or tool payloads.
 
 ### Changed

@@ -355,6 +355,10 @@ A request only to bump/tag/publish still requires steps 1–4 first; report thei
 results before touching the version. The failed-release rationale belongs in
 [general lessons](tasks/lessons/opencode.md#auth-models-and-delivery-process).
 
+## Cursor Cloud
+
+`scripts/cloud-agent-install.sh` (wired from `.cursor/environment.json`) installs Bun, zsh, and the OpenCode CLI, then builds this package and writes a local OpenCode 2 config under `.opencode-local/`. Review a pull request with `scripts/review-pr.sh` and `.cursor/skills/review`. Those reviews apply `.cursor/rules/`, which mirror `.greptile/config.json` without changing the Greptile files. `bun run live-test` needs `CURSOR_API_KEY` and skips when it is unset. See [docs/pr-review.md](docs/pr-review.md).
+
 ## Changelog
 
 Use `CHANGELOG.md` → `## [Unreleased]`, with applicable `### Breaking Changes`

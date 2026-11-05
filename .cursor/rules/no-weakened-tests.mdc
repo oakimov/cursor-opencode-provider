@@ -1,0 +1,11 @@
+---
+description: High. Do not delete, skip, or weaken a test to make a change pass.
+globs: test/**
+alwaysApply: false
+---
+
+Greptile id: no-weakened-tests
+Severity: high
+Scope: test/**
+
+Do not delete, skip, or weaken a test to make the change pass.

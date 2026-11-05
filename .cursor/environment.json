@@ -1,0 +1,4 @@
+{
+  "name": "cursor-opencode-provider",
+  "install": "bash scripts/cloud-agent-install.sh"
+}

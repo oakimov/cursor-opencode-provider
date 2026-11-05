@@ -1,0 +1,11 @@
+---
+description: High. Keep CursorPluginV2 off the package root and load each host through its own entry.
+globs: src/index.ts,src/plugin.ts,src/plugin-v2.ts,src/plugin-opencode2.ts,package.json
+alwaysApply: false
+---
+
+Greptile id: entrypoints
+Severity: high
+Scope: src/index.ts, src/plugin.ts, src/plugin-v2.ts, src/plugin-opencode2.ts, package.json
+
+CursorPluginV2 must not be exported from the package root. The 1.18 plugin loads only through ./plugin/v2. OpenCode 2.0 loads only through ./plugin/opencode2.

@@ -1,0 +1,11 @@
+---
+description: High. Do not leak HTTP/2 streams, sessions, or listeners.
+globs: src/session.ts,src/transport/**,src/language-model.ts
+alwaysApply: false
+---
+
+Greptile id: resource-lifecycle
+Severity: high
+Scope: src/session.ts, src/transport/**, src/language-model.ts
+
+Do not leak HTTP/2 streams, sessions, or listeners. Abort and disposal must be explicit. A failed reuse ping must not destroy sibling runs.

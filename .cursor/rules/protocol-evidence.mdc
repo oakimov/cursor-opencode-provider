@@ -1,0 +1,11 @@
+---
+description: High. Protocol encode or decode changes need independent wire evidence.
+globs: src/protocol/**,test/**
+alwaysApply: false
+---
+
+Greptile id: protocol-evidence
+Severity: high
+Scope: src/protocol/**, test/**
+
+Protocol encode or decode changes need an independent fixture or captured wire bytes. A test that only round-trips through the same schema is not evidence.

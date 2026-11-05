@@ -1,0 +1,11 @@
+---
+description: Medium. Do not remint a sticky conversation or rewrite frozen RequestContext bytes.
+globs: src/context/**,src/session.ts,src/language-model.ts,src/protocol/**
+alwaysApply: false
+---
+
+Greptile id: cache-continuity
+Severity: medium
+Scope: src/context/**, src/session.ts, src/language-model.ts, src/protocol/**
+
+A bug fix must not remint a sticky conversation or rewrite frozen RequestContext bytes without a stated reason. Read docs/cache-log-runbook.md before judging a cache result.
