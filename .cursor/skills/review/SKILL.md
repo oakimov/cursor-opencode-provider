@@ -18,7 +18,19 @@ scripts/review-pr.sh <pr-number-or-url> --live
 
 Use `scripts/review-pr.sh --local` only when the change is the checkout you already have, including uncommitted files. The script checks out a contributor pull request in a temporary worktree. Install, build, and `bun test` for that pull request run without reviewer credentials. `--live` is a separate trust decision to run that revision's `scripts/live-test.sh` with `CURSOR_API_KEY`.
 
-Read the script summary. `LIVE_TEST=skipped` means the key is unset, or `--live` was not passed for a contributor pull request. That is not a failure. `LIVE_TEST=failed` or `UNIT_TESTS=failed` is a failure.
+Read the script summary. `LIVE_TEST=skipped` means the key is unset, or `--live` was not passed for a contributor pull request. That is not a failure. `LIVE_TEST=failed` or `UNIT_TESTS=failed` is a failure. The script prints `REVIEW_MODEL=`.
+
+## Model
+
+The review's OpenCode model is `cursor/default` (Cursor Auto). Override it with `CURSOR_REVIEW_MODEL`, a `provider/model` id accepted by `opencode run --model`.
+
+```bash
+opencode run --standalone --model "${CURSOR_REVIEW_MODEL:-cursor/default}"
+```
+
+`opencode run --model` has no reasoning-effort flag. Auto's only variant is `Auto`, and that variant has no parameters, so a review cannot select a reasoning effort.
+
+The live test is a separate command. It still defaults to `cursor/composer-2.5` unless `OPENCODE_LIVE_MODEL` is set.
 
 ## Apply these rules on every review
 

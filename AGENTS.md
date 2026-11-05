@@ -357,7 +357,7 @@ results before touching the version. The failed-release rationale belongs in
 
 ## Cursor Cloud
 
-`scripts/cloud-agent-install.sh` (wired from `.cursor/environment.json`) installs Bun, zsh, and the OpenCode CLI, then builds this package and writes a local OpenCode 2 config under `.opencode-local/`. Review a pull request with `scripts/review-pr.sh` and `.cursor/skills/review`. Those reviews apply `.cursor/rules/`, which mirror `.greptile/config.json` without changing the Greptile files. `bun run live-test` needs `CURSOR_API_KEY` and skips when it is unset. See [docs/pr-review.md](docs/pr-review.md).
+`scripts/cloud-agent-install.sh` (wired from `.cursor/environment.json`) installs Bun, zsh, and the OpenCode CLI, then builds this package and writes a local OpenCode 2 config under `.opencode-local/`. Review a pull request with `scripts/review-pr.sh` and `.cursor/skills/review`. That review's OpenCode model is `cursor/default` (`CURSOR_REVIEW_MODEL` overrides it); Auto has no reasoning-effort parameter. Those reviews apply `.cursor/rules/`, which mirror `.greptile/config.json` without changing the Greptile files. `bun run live-test` needs `CURSOR_API_KEY` and skips when it is unset. See [docs/pr-review.md](docs/pr-review.md).
 
 ## Changelog
 

@@ -73,6 +73,80 @@ function scan(diff: string, names: string[], indexSource?: string): { status: nu
   }
 }
 
+describe("local review paths", () => {
+  it("includes an untracked path that Git quotes", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-local-"))
+    const fileName = "caf\u00e9.ts"
+    const gitEnv = { ...process.env }
+    delete gitEnv.GIT_CONFIG_COUNT
+    delete gitEnv.GIT_CONFIG_KEY_0
+    delete gitEnv.GIT_CONFIG_VALUE_0
+    try {
+      const git = (args: string[]) => {
+        const result = spawnSync("git", args, { cwd: directory, encoding: "utf8", env: gitEnv })
+        expect(result.status).toBe(0)
+      }
+      git(["init"])
+      git(["config", "user.email", "test@example.com"])
+      git(["config", "user.name", "test"])
+      git(["config", "core.quotePath", "true"])
+      fs.writeFileSync(path.join(directory, fileName), "export const marker = \"quoted-untracked\"\n")
+      const quoted = spawnSync("git", ["ls-files", "--others", "--exclude-standard"], {
+        cwd: directory,
+        encoding: "utf8",
+        env: gitEnv,
+      })
+      expect(quoted.stdout.startsWith("\"")).toBe(true)
+      const result = spawnSync("bash", ["-c", `
+        set -euo pipefail
+        source "${root}/scripts/review-pr.sh"
+        cd "${directory}"
+        diff_names=""
+        diff_text=""
+        review_add_untracked
+        printf '%s' "$diff_names" > names-out
+        printf '%s' "$diff_text" > text-out
+      `], { encoding: "utf8", env: gitEnv })
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(0)
+      expect(fs.readFileSync(path.join(directory, "names-out"), "utf8")).toBe(fileName)
+      expect(fs.readFileSync(path.join(directory, "text-out"), "utf8")).toContain("quoted-untracked")
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("decodes NUL-delimited names without quoting", () => {
+    const result = spawnSync("bash", ["-c", `
+      set -euo pipefail
+      source "${root}/scripts/review-pr.sh"
+      python3 -c 'import os,sys; sys.stdout.buffer.write(os.environ["NAME"].encode() + b"\\0src/index.ts\\0")' | review_paths_from_nul
+    `], { encoding: "utf8", env: { ...process.env, NAME: "caf\u00e9.ts" } })
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toBe("caf\u00e9.ts\nsrc/index.ts\n")
+  })
+
+  it("removes the names file when the review exits early", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-names-"))
+    const record = path.join(directory, "path")
+    try {
+      const result = spawnSync("bash", ["-c", `
+        set -euo pipefail
+        source "${root}/scripts/review-pr.sh"
+        names_file=$(mktemp)
+        echo pending > "$names_file"
+        printf '%s' "$names_file" > "${record}"
+        trap review_cleanup EXIT
+        exit 1
+      `], { encoding: "utf8" })
+      expect(result.status).toBe(1)
+      const namesFile = fs.readFileSync(record, "utf8")
+      expect(fs.existsSync(namesFile)).toBe(false)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+})
+
 describe("review diff checks", () => {
   it("flags a secret added in a long diff and ignores a removed secret", () => {
     const filler = Array.from({ length: 5000 }, () => "+const ok = 1").join("\n")

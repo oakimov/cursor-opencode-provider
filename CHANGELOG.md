@@ -9,12 +9,14 @@
 
 ### Changed
 
+- Pull-request review uses the OpenCode model `cursor/default` (Cursor Auto). `CURSOR_REVIEW_MODEL` overrides that id. Auto has no reasoning-effort parameter, and the live test still defaults to `cursor/composer-2.5`.
 - Run messages of 1 KiB or more go to Cursor gzip-compressed, as Cursor CLI sends them: the Run request and the conversation blobs Cursor fetches again at the start of every new Run (about 4× smaller). On long conversations the first token of a new turn arrives sooner: about 1.2 s at 700k tokens and 0.4 s at 300k in a real-key A/B; small conversations don't change. If Cursor refuses a gzip Run, the same request is sent once more uncompressed and later Runs to that host stay uncompressed until the provider restarts ([discussion #127](https://github.com/oakimov/cursor-opencode-provider/discussions/127)).
 - Run messages are gzipped on zlib's thread pool, as Cursor CLI does, instead of on the event loop. Sending a long conversation's blobs at the start of a Run no longer stalls the host for tens of milliseconds; messages still go out in the order they were written (follow-up to [#133](https://github.com/oakimov/cursor-opencode-provider/pull/133)).
 - CreatePlan saves plans through an advertised host `write` or patch tool before execution review. File permission authorizes saving; only an explicit Yes approves implementation. Review respects current permissions, cancellation and interrupted saves never replay automatically, and catalogs without a supported writer refuse before mutation ([#90](https://github.com/oakimov/cursor-opencode-provider/issues/90)).
 
 ### Fixed
 
+- Local pull-request review includes untracked files whose names Git quotes, and deletes its temporary file list if reading a rule fails.
 - Pull-request review runs a contributor's install and tests without reviewer credentials. `scripts/review-pr.sh --live` is required before that revision's live test receives `CURSOR_API_KEY`. The live check accepts only an assistant reply of exactly `pong`, and local OpenCode setup always writes `.opencode-local/` instead of replacing `OPENCODE_CONFIG_DIR`.
 - Tool steps with a known call count close promptly when an edit's write reuses its permission-read call ID, avoiding an unnecessary idle-guard wait before dependent commands ([#152](https://github.com/oakimov/cursor-opencode-provider/pull/152), [@nkoynov](https://github.com/nkoynov)).
 - Held tool calls no longer get stuck after a locally rejected read, run after a queued withdrawal, or escape an earlier edit denial when they arrive after a host step split ([#152](https://github.com/oakimov/cursor-opencode-provider/pull/152)).
