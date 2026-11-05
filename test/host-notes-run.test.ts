@@ -11,7 +11,8 @@ import os from "node:os"
 import path from "node:path"
 import type { LanguageModelV3CallOptions, LanguageModelV3StreamPart } from "@ai-sdk/provider"
 import { createCursor } from "../src/index.js"
-import { CURSOR_COMPACTION_OPTION, CURSOR_HOST_AGENT_OPTION, CURSOR_SESSION_EDITS_DENIED_OPTION } from "../src/shared.js"
+import { CURSOR_COMPACTION_OPTION, CURSOR_HOST_AGENT_OPTION, CURSOR_SESSION_EDITS_DENIED_OPTION, MODEL_CACHE_SCHEMA_VERSION } from "../src/shared.js"
+import { CURSOR_VARIANT_PARAMETERS_KEY, CURSOR_WIRE_MODEL_ID_KEY, writeCache } from "../src/models.js"
 import { decodeFramePayload } from "../src/protocol/framing.js"
 import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
 import { encodeJsonAsValue, readAllFields } from "../src/protocol/struct.js"
@@ -450,6 +451,65 @@ describe("history images through a full provider Run", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-history-images-"))
     try { await run(root) } finally { fs.rmSync(root, { recursive: true, force: true }) }
   }
+
+  it.each([false, true])("sends images through a catalog alias and keeps the next turn warm (fast=%s)", async (fast) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-alias-images-"))
+    try {
+      const parameters = [
+        { id: "context", value: "500k" },
+        { id: "reasoning_effort", value: "low" },
+        { id: "fast", value: String(fast) },
+      ]
+      await writeCache(root, { schemaVersion: MODEL_CACHE_SCHEMA_VERSION, fetchedAt: Date.now(), models: [{
+        id: "aliased-model",
+        variants: [{ key: "aliased-model", displayName: "500k low", parameterValues: parameters,
+          isDefaultNonMax: false, isDefaultMax: true, isMaxMode: true }],
+      }] })
+      // Classic passes a synthetic catalog id plus its wire-id option; 2.x
+      // passes Model.Info.modelID directly. Exercise both call shapes.
+      const aliased = createCursor({ name: "cursor", accessToken: "example-token", agentBaseURL: ORIGIN, cacheDir: root })
+        .languageModel(fast ? "aliased-model-500k-fast" : "aliased-model")
+      const options = { cursor: { [CURSOR_VARIANT_PARAMETERS_KEY]: parameters,
+        ...(fast ? { [CURSOR_WIRE_MODEL_ID_KEY]: "aliased-model" } : {}) } }
+      const sessionKey = `ses_alias_images_${fast}`
+      onRun = (run, message) => { if (message.run_request) endTurnOn(run, checkpoint(runs.indexOf(run) + 1)) }
+      const initial: Prompt = [user("Describe the attached image.", IMAGE_A)]
+      expect(textOf(await collect(aliased, initial, sessionKey, undefined, options))).toBe("Done.")
+      await collect(aliased, [...initial, assistant("Done."), user("What shape was it?")], sessionKey, undefined, options)
+      expect(sentImages(0)).toEqual([IMAGE_A])
+      expect(request(0).requested_model.model_id).toBe("aliased-model")
+      expect(request(0).requested_model.max_mode).toBe(true)
+      expect(request(1).conversation_id).toBe(request(0).conversation_id)
+      expect(sentCheckpoint(1)).toEqual(checkpoint(1))
+      expect(sentImages(1)).toEqual([])
+      expect(request(1).action.user_message_action.request_context)
+        .toEqual(request(0).action.user_message_action.request_context)
+    } finally {
+      sessionManager.dispose()
+      await settleRunSavesForTests()
+      setHostCacheDirOverride(undefined)
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  it("opens a text turn with a note when an earlier image cannot be attached", () => withRoot(async (root) => {
+    onRun = (run, message) => { if (message.run_request) endTurnOn(run, checkpoint(runs.indexOf(run) + 1)) }
+    const prompt = [
+      user("Read the screenshot."),
+      { role: "assistant", content: [{ type: "tool-call", toolCallId: "call_shot", toolName: "read", input: { filePath: "shot.png" } }] },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: "call_shot", toolName: "read", output: { type: "content", value: [
+        { type: "text", text: "Image read successfully" },
+        { type: "file-data", mediaType: "image/png", data: "!!!" },
+      ] } }] },
+      assistant("Done."),
+      user("What next?"),
+    ] as Prompt
+    expect(textOf(await collect(model(root), prompt, "ses_images_omitted"))).toBe("Done.")
+    expect(sentImages(0)).toEqual([])
+    expect(request(0).action.user_message_action.user_message.text as string).toContain(
+      "[1 earlier image(s) could not be attached: unreadable, or past the 20 MiB image budget. Their pixels are unavailable.]",
+    )
+  }), 30_000)
 
   it("attaches an explicit image once, and not again after a restart", () => withRoot(async (root) => {
     const sessionKey = "ses_images_restart"

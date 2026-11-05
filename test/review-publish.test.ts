@@ -2245,6 +2245,10 @@ describe("review thread resolution", () => {
       expect(resolutionsOf(state)).toHaveLength(3)
       expect(postsOf(state)).toBe(1)
       expect(fs.readFileSync(path.join(state, "saw-app-key"), "utf8")).toBe("0")
+      const digest = createHash("sha256").update(fs.readFileSync(payload)).digest("hex")
+      const retained = path.join(directory, "retained", `preview-${digest}`)
+      const cleanup = run(["cleanup", retained], env)
+      expect(cleanup.status, cleanup.stderr).toBe(0)
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
     }

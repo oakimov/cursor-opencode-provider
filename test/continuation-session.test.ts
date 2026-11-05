@@ -386,7 +386,6 @@ describe("extractTrailingToolResults", () => {
 describe("decodeTrailingToolImages", () => {
   it("shares a byte budget across pending results and reports omitted images", async () => {
     const live = fakeSession("bounded-images")
-    live.supportsImages = true
     sessionManager.registerPending(1, live, "mcp_result", "badge_a")
     sessionManager.registerPending(2, live, "read_result", "read")
     const results = [1, 2].map(execId => ({
@@ -403,7 +402,6 @@ describe("decodeTrailingToolImages", () => {
   it("delivers a kept read image's omission notice as hook context on that read", async () => {
     const writes: Uint8Array[] = []
     const live = fakeSession("read-image-notice")
-    live.supportsImages = true
     live.stream.write = frame => { writes.push(frame) }
     sessionManager.registerPending(1, live, "read_result", "read", false, { path: "/work/badge.png" })
     const image = { type: "file-data", mediaType: "image/png", data: "AQID" }
@@ -428,7 +426,6 @@ describe("decodeTrailingToolImages", () => {
 
   it("does not resolve media for failed, bridged, foreign, or text-only execs", async () => {
     const live = fakeSession("skip-images")
-    live.supportsImages = true
     sessionManager.registerPending(1, live, "mcp_result", "badge")
     sessionManager.registerPending(2, live, "mcp_result", "badge", true)
     sessionManager.registerPending(3, live, "write_result", "write")

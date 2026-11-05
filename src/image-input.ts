@@ -15,14 +15,9 @@ export type CursorImageInput = {
 export type CursorHistoryImageExtraction = {
   images: CursorImageInput[]
   hashes: string[]
-  candidateCount: number
   duplicateCount: number
-  /** Unreadable optional tool media; explicit user attachments still fail loudly. */
+  /** Unreadable tool media or earlier images past the budget; this turn's attachments still fail loudly. */
   omittedCount?: number
-}
-
-export type CursorPromptImageExtraction = CursorHistoryImageExtraction & {
-  userImageCount: number
 }
 
 function isToolMediaCaption(message: Record<string, unknown> | undefined): boolean {
@@ -31,28 +26,9 @@ function isToolMediaCaption(message: Record<string, unknown> | undefined): boole
   return first?.type === "text" && first.text === "Attached media from tool result:"
 }
 
-export function hasCursorUserImages(lastUser: Record<string, unknown> | undefined): boolean {
-  return !isToolMediaCaption(lastUser) && !!lastUser && Array.isArray(lastUser.content) && lastUser.content.some((part) => {
-    if (!part || typeof part !== "object") return false
-    const file = part as Record<string, unknown>
-    return file.type === "file" && typeof file.mediaType === "string" && file.mediaType.startsWith("image/")
-  })
-}
 
 function unsupported(functionality: string, message: string): never {
   throw new UnsupportedFunctionalityError({ functionality, message })
-}
-
-export function assertCursorUserImageSupport(
-  lastUser: Record<string, unknown> | undefined,
-  supportsImages: boolean,
-  modelId: string,
-): void {
-  if (!hasCursorUserImages(lastUser) || supportsImages) return
-  unsupported(
-    "image input",
-    `Cursor model ${JSON.stringify(modelId)} does not support image input`,
-  )
 }
 
 function decodeBase64(value: string, remaining: number): Uint8Array {
@@ -357,18 +333,13 @@ function cursorHistoryImageParts(prompt: readonly unknown[]): HistoryImageCandid
 export async function extractCursorHistoryImages(
   prompt: readonly unknown[],
   options: {
-    supportsImages: boolean
     seenHashes?: ReadonlySet<string>
     signal?: AbortSignal
     maxBytes?: number
     filenameOffset?: number
-  },
+  } = {},
 ): Promise<CursorHistoryImageExtraction> {
   const candidates = cursorHistoryImageParts(prompt)
-  if (!options.supportsImages) {
-    return { images: [], hashes: [], candidateCount: candidates.length, duplicateCount: 0 }
-  }
-
   const maxBytes = cursorImageBudget(options.maxBytes ?? MAX_CURSOR_IMAGE_INPUT_BYTES)
   const images: CursorImageInput[] = []
   const hashes: string[] = []
@@ -396,14 +367,19 @@ export async function extractCursorHistoryImages(
       duplicateCount++
       continue
     }
-    assertImageSize(image.data.length, maxBytes - totalBytes)
+    // Earlier images are context, not this turn's attachments: one that no
+    // longer fits the combined budget is omitted, like an oversized tool image.
+    if (image.data.length > maxBytes - totalBytes) {
+      omittedCount++
+      continue
+    }
     totalBytes += image.data.length
     images.push(image)
     hashes.push(hash)
     hashesThisTurn.add(hash)
   }
 
-  return { images, hashes, candidateCount: candidates.length, duplicateCount, ...(omittedCount > 0 ? { omittedCount } : {}) }
+  return { images, hashes, duplicateCount, ...(omittedCount > 0 ? { omittedCount } : {}) }
 }
 
 /**
@@ -454,15 +430,14 @@ export async function extractCursorPromptImages(
   prompt: readonly unknown[],
   lastUser: Record<string, unknown> | undefined,
   options: {
-    supportsImages: boolean
     seenHistoryHashes?: ReadonlySet<string>
     signal?: AbortSignal
     maxBytes?: number
-  },
-): Promise<CursorPromptImageExtraction> {
+  } = {},
+): Promise<CursorHistoryImageExtraction> {
   const maxBytes = cursorImageBudget(options.maxBytes ?? MAX_CURSOR_IMAGE_INPUT_BYTES)
   const toolCaption = isToolMediaCaption(lastUser)
-  const caption = toolCaption && options.supportsImages
+  const caption = toolCaption
     ? await extractCursorToolResultImages(lastUser!.content as unknown[], { signal: options.signal, maxBytes })
     : undefined
   const captionHashes: string[] = []
@@ -484,7 +459,6 @@ export async function extractCursorPromptImages(
   // earlier user/assistant/tool message are not attached twice in one Run.
   for (const hash of userHashes) seenHashes.add(hash)
   const history = await extractCursorHistoryImages(prompt, {
-    supportsImages: options.supportsImages,
     seenHashes,
     signal: options.signal,
     maxBytes: maxBytes - userBytes,
@@ -495,7 +469,6 @@ export async function extractCursorPromptImages(
     hashes: [...userHashes, ...history.hashes],
     duplicateCount: history.duplicateCount + captionDuplicates,
     images: [...userImages, ...history.images],
-    userImageCount: toolCaption ? 0 : userImages.length,
     ...((history.omittedCount ?? 0) + (caption?.omittedCount ?? 0) > 0
       ? { omittedCount: (history.omittedCount ?? 0) + (caption?.omittedCount ?? 0) } : {}),
   }

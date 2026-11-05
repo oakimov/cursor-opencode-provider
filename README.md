@@ -214,15 +214,11 @@ OpenCode uses family metadata to select a small model for session titles (2.x: `
 
 #### Image input
 
-The provider advertises `text` + `image` input only when the selected Cursor model supports images; model output remains text. This works in the classic plugin, the 1.18 v2 plugin, and OpenCode 2.x.
+The provider advertises `text` + `image` input only for Cursor models that our own live test saw read an image; every other model is text-only, including one Cursor added after the last test. Model output remains text. This works in the classic plugin, the 1.18 v2 plugin, and OpenCode 2.x.
 
-Image support is resolved in this order:
+Cursor's `AvailableModels.supportsImages` is not used: it marks some models text-only whose Run reads images (Grok 4.7, Composer 2.5, Kimi K2.7 Code) and Kimi K3 as reading images though its Run does not, and for a model that cannot read images Cursor's Run drops the image without an error. `bun run generate:images` tests each model once, when it first appears: one short Run with a probe image, recording in `src/image-input-data.ts` whether the reply transcribes the text drawn in it. A recorded result is retested only on request (`-- --model <id>` or `-- --all`), and removed only with `-- --prune`, since each account's model list differs. Like Cursor CLI, the provider sends Cursor every image the host passes.
 
-1. Live `AvailableModels.supportsImages` metadata, including authoritative `false` values
-2. The `Capabilities` column in Cursor's [`docs.md`](https://cursor.com/docs.md), generated alongside context and pricing metadata
-3. Text-only when neither source describes the model
-
-OpenCode image file parts are decoded from bytes, base64/data URLs, local file URLs, or HTTP(S) URLs and sent through Cursor's `UserMessage.selected_context.selected_images` field. Fresh and rebased Runs normalize the same image formats as held-Run continuations, including AI SDK `image-data` / `image-url` and OpenCode attachment URLs. A Run that resumes a checkpoint skips the history images that exact checkpoint is known to hold (by content hash, recorded when a turn ends on a checkpoint of its own and kept in the restart snapshot); a Run without a checkpoint sends them all.
+OpenCode image file parts are decoded from bytes, base64/data URLs, local file URLs, or HTTP(S) URLs and sent through Cursor's `UserMessage.selected_context.selected_images` field. Fresh and rebased Runs normalize the same image formats as held-Run continuations, including AI SDK `image-data` / `image-url` and OpenCode attachment URLs. A Run that resumes a checkpoint skips the history images that exact checkpoint is known to hold (by content hash, recorded when a turn ends on a checkpoint of its own and kept in the restart snapshot); a Run without a checkpoint sends them all. Earlier images that no longer fit the 20 MiB image budget are left out with a note, so a text follow-up still works; this turn's own attachments past the budget fail the request.
 
 On a held-open Run, an image read returns bytes in `ReadSuccess.data` (including GenerateImage reference reads), and MCP tool images return as `McpImageContent` items after the success text (`McpToolResultContentItem` field 2). Detached media is attributed only where OpenCode's result order and markers establish its owner; ambiguous images stay available through history instead of being attached to an unrelated tool. A host instruction update beside a native read uses Cursor's context-injection channel because read text and bytes are mutually exclusive.
 
@@ -434,7 +430,7 @@ Set `CURSOR_AGENT_TRANSCRIPTS_FOLDER` before starting OpenCode (or its daemon). 
 
 Changes listed under [Unreleased](CHANGELOG.md#unreleased) describe the development checkout; use a rebuilt local install to test them before a release. Maintainer guides and incident lessons are linked from the [documentation index](docs/README.md). The manual Cursor review, isolated pull-request checks, and OpenCode live test are in [docs/pr-review.md](docs/pr-review.md).
 
-Manual Cloud Agent reviews publish through the configured GitHub App after exact-preview approval. See the [App publisher setup](docs/pr-review.md#github-app-publisher) for `REVIEW_APP_ID`, the private key and optional installation ID. Tokens are restricted to this repository and review-write permission; `review-publish.py auth-info` reports configuration without printing secrets. Reviews use the App's bot identity, with no automatic review trigger.
+Manual Cloud Agent reviews publish through the configured GitHub App after exact-preview approval. See the [App publisher setup](docs/pr-review.md#github-app-publisher) for `REVIEW_APP_ID`, the private key and optional installation ID. Tokens are restricted to this repository and retain the installation's configured permissions; the returned grant must include review-write access. `review-publish.py auth-info` reports configuration without printing secrets. Reviews use the App's bot identity, with no automatic review trigger.
 
 Re-reviews verify earlier threads and replies, and resolve fixed or refuted
 findings through the App after approval of the listed actions. The publisher
@@ -458,9 +454,10 @@ bun run test:node-http2 # Node HTTP/2 cleanup, drain, cancellation and memory re
 bun run test:watch   # watch mode
 bun run generate:pricing  # refresh src/pricing-data.ts from Cursor docs
 bun run check:pricing     # fixture coverage for known model ids
+bun run generate:images   # live-test image input of untested Cursor models (needs a Cursor credential)
 ```
 
-**HARD STOP before any version bump or `v*` tag:** run `generate:pricing` and `check:pricing` in the same session, fix any unmapped Cursor display names, commit mapping/`pricing-data.ts` updates, and finalize [`CHANGELOG.md`](CHANGELOG.md) (`[Unreleased]` → dated version) **before** touching `"version"` or creating the tag. Publish CI regenerates rates from the live docs and will fail the release on an unmapped name — that is a last line of defense, not the primary check. See `AGENTS.md` and [Changelog](#changelog).
+**HARD STOP before any version bump or `v*` tag:** run `generate:pricing` and `check:pricing` in the same session, fix any unmapped Cursor display names, commit mapping/`pricing-data.ts` updates, run `generate:images` and commit `image-input-data.ts`, and finalize [`CHANGELOG.md`](CHANGELOG.md) (`[Unreleased]` → dated version) **before** touching `"version"` or creating the tag. Publish CI regenerates rates from the live docs and will fail the release on an unmapped name — that is a last line of defense, not the primary check. See `AGENTS.md` and [Changelog](#changelog).
 
 ## Architecture
 

@@ -75,7 +75,6 @@ describe("mapAvailableModelsResponse", () => {
     expect(models[0].displayName).toBe("Default")
     expect(models[0].supportsThinking).toBe(true)
     expect(models[0].supportsAgent).toBe(true)
-    expect(models[0].supportsImages).toBe(true)
     expect(models[0].maxContext).toBe(200000)
     expect(models[0].variants).toHaveLength(1)
     expect(models[0].variants[0].parameterValues[0].id).toBe("effort")
@@ -91,15 +90,16 @@ describe("mapAvailableModelsResponse", () => {
     })).toThrow(/invalid parameter values/)
   })
 
-  it("preserves explicit image support in camel and snake case", () => {
+  it("ignores AvailableModels image support, like Cursor CLI", () => {
     const models = mapAvailableModelsResponse({
       models: [
         { name: "vision", supportsImages: true, variants: [] },
         { name: "text", supports_images: false, variants: [] },
-        { name: "unknown", variants: [] },
+        { name: "malformed", supports_images: "yes", variants: [] },
       ],
     })
-    expect(models.map((model) => model.supportsImages)).toEqual([true, false, undefined])
+    expect(models.map((model) => model.id)).toEqual(["vision", "text", "malformed"])
+    for (const model of models) expect(Object.keys(model)).not.toContain("supportsImages")
   })
 
   it("maps multiple model entries with multiple variants", () => {
@@ -424,18 +424,20 @@ describe("modelInfoToConfig (context window selection)", () => {
     expect(cfg.limit.context).toBe(300000)
   })
 
-  it("advertises image input from AvailableModels, then docs, then false", () => {
-    const liveTrue = modelInfoToConfig({ ...base, id: "grok-4.5", supportsImages: true } as any)
-    const liveFalse = modelInfoToConfig({ ...base, id: "composer-2.5", supportsImages: false } as any)
-    const docs = modelInfoToConfig({ ...base, id: "gpt-5.2" } as any)
-    const unknown = modelInfoToConfig({ ...base, id: "unknown-model" } as any)
-
-    expect(liveTrue.attachment).toBe(true)
-    expect(liveTrue.modalities).toEqual({ input: ["text", "image"], output: ["text"] })
-    expect(liveFalse.attachment).toBe(false)
-    expect(liveFalse.modalities.input).toEqual(["text"])
-    expect(docs.attachment).toBe(true)
-    expect(unknown.attachment).toBe(false)
+  it("advertises image input only where the live probe recorded it, not Cursor's flag", () => {
+    const [readsDespiteFlag, textDespiteFlag, unrecorded] = mapAvailableModelsResponse({ models: [
+      { name: "composer-2.5", supports_images: false },
+      { name: "kimi-k3", supports_images: true },
+      { name: "unrecorded-model", supports_images: true },
+    ] })
+    const reads = modelInfoToConfig(readsDespiteFlag!)
+    expect(reads.attachment).toBe(true)
+    expect(reads.modalities).toEqual({ input: ["text", "image"], output: ["text"] })
+    for (const model of [textDespiteFlag!, unrecorded!]) {
+      const cfg = modelInfoToConfig(model)
+      expect(cfg.attachment).toBe(false)
+      expect(cfg.modalities).toEqual({ input: ["text"], output: ["text"] })
+    }
   })
 
   it("advertises a models.dev-parity output cap for the long-context tier", () => {

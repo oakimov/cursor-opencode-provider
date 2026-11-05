@@ -351,14 +351,13 @@ import { isCompactionSession } from "./compaction-marker.js"
 import { resolveSessionWorkspaceRoot } from "./session-directory.js"
 import type { SeedHistoryMessage } from "./protocol/request.js"
 import {
-  assertCursorUserImageSupport,
   extractCursorPromptImages,
   extractCursorToolResultImages,
   imageContentHash,
   MAX_CURSOR_IMAGE_INPUT_BYTES,
   type CursorImageInput,
 } from "./image-input.js"
-import { getDocumentedCursorModelContext, resolveCursorModelSupportsImages } from "./model-metadata.js"
+import { getDocumentedCursorModelContext } from "./model-metadata.js"
 import {
   CURSOR_TIMEOUT_BACKGROUND,
   consumeCursorShellResult,
@@ -1256,13 +1255,7 @@ async function doStreamImpl(
     // session and returns undefined so we fall through to history rebase
     // instead of pumping a connection that can no longer accept writes.
     const tailMedia = trailingToolResults.reduce((n, r) => n + (r.media?.length ?? 0), 0)
-    trace(
-      `continuation: prompt-tail mediaParts=${tailMedia} supportsImages=${session.supportsImages} ` +
-        `roles=${describePromptTail(prompt)}`,
-    )
-    const results = session.supportsImages
-      ? await decodeTrailingToolImages(session, trailingToolResults, callOptions.abortSignal)
-      : trailingToolResults
+    trace(`continuation: prompt-tail mediaParts=${tailMedia} roles=${describePromptTail(prompt)}`)
     const held = session
     const cancelled = () => new CursorLocalCancellationError("Cursor continuation upload cancelled")
     const cancelUpload = () => {
@@ -1276,6 +1269,10 @@ async function doStreamImpl(
         cancelUpload()
         throw cancelled()
       }
+      // Like Cursor CLI, tool images reach the Run whatever AvailableModels
+      // says. Decoding is part of the upload: a Stop during it closes the Run.
+      const results = await decodeTrailingToolImages(held, trailingToolResults, signal)
+        .catch((error: unknown) => { throw signal?.aborted ? cancelled() : error })
       session = await deliverContinuationResults(held, results, {
         hostAgent: hostAgentFromCallOptions(callOptions),
         sessionEditsDenied: sessionEditsDeniedFromCallOptions(callOptions),
@@ -2398,38 +2395,25 @@ async function startSession(
   const hintMaxMode = !!(providerOptions?.maxMode ?? false)
 
   const modelInfo = _availableModels?.find((m) => m.id === cursorModelId)
-  const supportsImages = resolveCursorModelSupportsImages(cursorModelId, modelInfo?.supportsImages)
-  if (!resuming) {
-    const liveMessages = liveTurn ? prompt.slice(liveTurn.start).filter((message) => message.role === "user") : [lastUser]
-    for (const message of liveMessages) {
-      assertCursorUserImageSupport(message as unknown as Record<string, unknown> | undefined, supportsImages, cursorModelId)
-    }
-  }
   // A Run without a checkpoint (new, reset, rebased or compacted conversation) sends every image.
   const heldImages = sessionKey && !ephemeralRun && conversationState
     ? heldHistoryImageHashes(sessionKey, conversationId, conversationState)
     : undefined
   const imageExtraction = resuming
-    ? { images: [], hashes: [], candidateCount: 0, duplicateCount: 0, userImageCount: 0, omittedCount: 0 }
+    ? { images: [], hashes: [], duplicateCount: 0, omittedCount: 0 }
     : await extractCursorPromptImages(
         prompt as readonly unknown[],
         lastUser as unknown as Record<string, unknown> | undefined,
         {
-          supportsImages,
           seenHistoryHashes: heldImages,
           signal: callOptions.abortSignal,
         },
       )
   if (imageExtraction.omittedCount) {
     userText = appendMidConversationMessage(userText,
-      `[${imageExtraction.omittedCount} historical tool image(s) could not be decoded; their pixels are unavailable.]`)
-    trace(`image input: omitted ${imageExtraction.omittedCount} unreadable tool image(s)`)
-  }
-  if (!supportsImages && imageExtraction.candidateCount > 0) {
-    trace(
-      `image input: dropped ${imageExtraction.candidateCount} tool/assistant history image(s); ` +
-      `model=${cursorModelId} does not support images`,
-    )
+      `[${imageExtraction.omittedCount} earlier image(s) could not be attached: unreadable, or past the ` +
+      `${MAX_CURSOR_IMAGE_INPUT_BYTES / 1024 / 1024} MiB image budget. Their pixels are unavailable.]`)
+    trace(`image input: omitted ${imageExtraction.omittedCount} unreadable or over-budget earlier image(s)`)
   }
   if (imageExtraction.duplicateCount > 0) {
     trace(`image input: skipped ${imageExtraction.duplicateCount} previously sent history image(s)`)
@@ -2643,7 +2627,6 @@ async function startSession(
     postCompactionRebase: isCompaction,
     toolCatalog: sessionKey ? snapshotToolCatalog(sessionKey) : structuredClone(tools),
     knownMcpServers,
-    supportsImages,
     stream,
     frames: stream.frames()[Symbol.asyncIterator](),
     pending: new Map(),
@@ -7833,7 +7816,7 @@ export async function decodeTrailingToolImages(
   for (const result of results) {
     signal?.throwIfAborted()
     const pending = result.sessionId === session.sessionId ? session.pending.get(result.execId) : undefined
-    if (!session.supportsImages || result.error || !result.media?.length || !pending || pending.bridged
+    if (result.error || !result.media?.length || !pending || pending.bridged
       || (pending.resultField !== "read_result" && pending.resultField !== "mcp_result")) {
       decoded.push(result)
       continue

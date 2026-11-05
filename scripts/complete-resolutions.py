@@ -72,6 +72,7 @@ def main() -> None:
             print("No approved resolve actions in this payload.")
             return
         publisher.resolve_threads(payload_path, approval_path, payload, pinned, checkpoint_path)
+        publisher.retain_receipt(payload_path, payload, checkpoint_path)
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)
         lock.close()
