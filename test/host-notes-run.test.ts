@@ -452,8 +452,8 @@ describe("history images through a full provider Run", () => {
     try { await run(root) } finally { fs.rmSync(root, { recursive: true, force: true }) }
   }
 
-  it.each([false, true])("sends Grok 4.7 images despite a false cached flag and keeps the next turn warm (fast=%s)", async (fast) => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-grok-images-"))
+  it.each([false, true])("sends images through a catalog alias and keeps the next turn warm (fast=%s)", async (fast) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-alias-images-"))
     try {
       const parameters = [
         { id: "context", value: "500k" },
@@ -461,23 +461,23 @@ describe("history images through a full provider Run", () => {
         { id: "fast", value: String(fast) },
       ]
       await writeCache(root, { schemaVersion: MODEL_CACHE_SCHEMA_VERSION, fetchedAt: Date.now(), models: [{
-        id: "grok-4.7", supportsImages: false,
-        variants: [{ key: "grok-4.7", displayName: "500k low", parameterValues: parameters,
+        id: "aliased-model",
+        variants: [{ key: "aliased-model", displayName: "500k low", parameterValues: parameters,
           isDefaultNonMax: false, isDefaultMax: true, isMaxMode: true }],
       }] })
       // Classic passes a synthetic catalog id plus its wire-id option; 2.x
       // passes Model.Info.modelID directly. Exercise both call shapes.
-      const grok = createCursor({ name: "cursor", accessToken: "example-token", agentBaseURL: ORIGIN, cacheDir: root })
-        .languageModel(fast ? "grok-4.7-500k-fast" : "grok-4.7")
+      const aliased = createCursor({ name: "cursor", accessToken: "example-token", agentBaseURL: ORIGIN, cacheDir: root })
+        .languageModel(fast ? "aliased-model-500k-fast" : "aliased-model")
       const options = { cursor: { [CURSOR_VARIANT_PARAMETERS_KEY]: parameters,
-        ...(fast ? { [CURSOR_WIRE_MODEL_ID_KEY]: "grok-4.7" } : {}) } }
-      const sessionKey = `ses_grok_images_${fast}`
+        ...(fast ? { [CURSOR_WIRE_MODEL_ID_KEY]: "aliased-model" } : {}) } }
+      const sessionKey = `ses_alias_images_${fast}`
       onRun = (run, message) => { if (message.run_request) endTurnOn(run, checkpoint(runs.indexOf(run) + 1)) }
       const initial: Prompt = [user("Describe the attached image.", IMAGE_A)]
-      expect(textOf(await collect(grok, initial, sessionKey, undefined, options))).toBe("Done.")
-      await collect(grok, [...initial, assistant("Done."), user("What shape was it?")], sessionKey, undefined, options)
+      expect(textOf(await collect(aliased, initial, sessionKey, undefined, options))).toBe("Done.")
+      await collect(aliased, [...initial, assistant("Done."), user("What shape was it?")], sessionKey, undefined, options)
       expect(sentImages(0)).toEqual([IMAGE_A])
-      expect(request(0).requested_model.model_id).toBe("grok-4.7")
+      expect(request(0).requested_model.model_id).toBe("aliased-model")
       expect(request(0).requested_model.max_mode).toBe(true)
       expect(request(1).conversation_id).toBe(request(0).conversation_id)
       expect(sentCheckpoint(1)).toEqual(checkpoint(1))

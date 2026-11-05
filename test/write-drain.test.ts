@@ -318,8 +318,8 @@ describe("provider upload cancellation", () => {
       expect(session.pending.size).toBe(1)
       expect(session.closed).toBe(false)
       expect(session.stream.isClosed()).toBe(false)
-      await expect(session.reopenWithUserMessage!("Do not upload", AbortSignal.abort()))
-        .rejects.toBeInstanceOf(CursorLocalCancellationError)
+      expect(await failureOf(session.reopenWithUserMessage!("Do not upload", AbortSignal.abort())))
+        .toBeInstanceOf(CursorLocalCancellationError)
       expect(fake.received).toHaveLength(1)
       expect(session.closed).toBe(false)
       const nextStep = new AbortController()
@@ -370,6 +370,64 @@ describe("provider upload cancellation", () => {
       if (reopened) await failureOf(reopened)
       // The stop saves the cancelled Run afterwards; that write would recreate the dir.
       await settleRunSavesForTests()
+      setHostCacheDirOverride(previousCache)
+      await fs.rm(cacheDir, { recursive: true, force: true })
+    }
+  }, 15_000)
+
+  it("closes the held Run when a Stop lands while its tool image is still decoding", async () => {
+    fake = await startSlowCursor(200_000)
+    const stream = await bidiRunStream("token", { baseURL: ORIGIN })
+    const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-continuation-decode-cancel-"))
+    const previousCache = getHostCacheDirOverride()
+    const controller = new AbortController()
+    const sessionKey = "ses_decode_continuation"
+    let imageRequested = false
+    const sockets = new Set<net.Socket>()
+    // Accepts the image request and never answers it.
+    const images = net.createServer((socket) => {
+      imageRequested = true
+      sockets.add(socket)
+      socket.on("error", () => {})
+    })
+    await new Promise<void>((resolve) => images.listen(0, "127.0.0.1", resolve))
+    const { port } = images.address() as net.AddressInfo
+    const session = sessionFixture({
+      sessionId: "decode-continuation", conversationId: "decode-continuation-conversation", openCodeSessionId: sessionKey,
+      cacheDir, pending: new Map(), blobs: new Map(), displayToolCalls: new Map(), editToolCalls: new Map(),
+      nextBridgedExecId: 900_000, pumpActive: false, heartbeat: null,
+      usageEstimate: { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0, reasoningTokens: 0 },
+      stream, frames: stream.frames()[Symbol.asyncIterator](), allowTools: true, toolCatalog: [], toolDescriptors: [], requestContext: {},
+    })
+    sessionManager.registerPending(4, session, "read_result", "read")
+    let opening: Promise<unknown> | undefined
+    try {
+      const model = createCursor({ name: "cursor", accessToken: "token", agentBaseURL: ORIGIN,
+        workspaceRoot: cacheDir, cacheDir }).languageModel("composer-2.5")
+      const toolCallId = `cursor_${session.sessionId}_4`
+      opening = Promise.resolve(model.doStream({
+        prompt: [
+          { role: "user", content: [{ type: "text", text: "Read the image" }] },
+          { role: "assistant", content: [{ type: "tool-call", toolCallId, toolName: "read", input: { filePath: "image.png" } }] },
+          { role: "tool", content: [{ type: "tool-result", toolCallId, toolName: "read", output: { type: "content", value: [
+            { type: "text", text: "Image read successfully" },
+            { type: "image-url", url: `http://127.0.0.1:${port}/image.png` },
+          ] } }] },
+        ],
+        headers: { "x-opencode-session-id": sessionKey }, abortSignal: controller.signal,
+      } as LanguageModelV3CallOptions))
+      const outcome = failureOf(opening)
+      await waitUntil(() => imageRequested)
+      controller.abort()
+      const error = await Promise.race([outcome, Bun.sleep(1_000).then(() => "still decoding")])
+      expect(error).toBeInstanceOf(CursorLocalCancellationError)
+      expect(session.closed).toBe(true)
+      expect(fake.received.reduce((total, bytes) => total + bytes, 0)).toBe(0)
+    } finally {
+      closeCachedHttp2SessionsForTests()
+      if (opening) await failureOf(opening)
+      for (const socket of sockets) socket.destroy()
+      await new Promise<void>((resolve) => images.close(() => resolve()))
       setHostCacheDirOverride(previousCache)
       await fs.rm(cacheDir, { recursive: true, force: true })
     }

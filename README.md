@@ -214,14 +214,9 @@ OpenCode uses family metadata to select a small model for session titles (2.x: `
 
 #### Image input
 
-The provider advertises `text` + `image` input only when the selected Cursor model supports images; model output remains text. This works in the classic plugin, the 1.18 v2 plugin, and OpenCode 2.x.
+The provider advertises `text` + `image` input only for Cursor models that our own live test saw read an image; every other model is text-only, including one Cursor added after the last test. Model output remains text. This works in the classic plugin, the 1.18 v2 plugin, and OpenCode 2.x.
 
-Image support is resolved in this order:
-
-1. A verified correction for the `grok-4.7` wire model, whose image input works despite `AvailableModels` reporting `false`; this covers its base, Fast, and 500k entries
-2. Live `AvailableModels.supportsImages` metadata, including authoritative `false` values for other models
-3. The `Capabilities` column in Cursor's [`docs.md`](https://cursor.com/docs.md), generated alongside context and pricing metadata
-4. Text-only when neither source describes the model
+Cursor's `AvailableModels.supportsImages` is not used: it marks some models text-only whose Run reads images (Grok 4.7, Composer 2.5, Kimi K2.7 Code) and Kimi K3 as reading images though its Run does not, and for a model that cannot read images Cursor's Run drops the image without an error. `bun run generate:images` tests each model once, when it first appears: one short Run with a probe image, recording in `src/image-input-data.ts` whether the reply transcribes the text drawn in it. A recorded result is retested only on request (`-- --model <id>` or `-- --all`). Like Cursor CLI, the provider sends Cursor every image the host passes.
 
 OpenCode image file parts are decoded from bytes, base64/data URLs, local file URLs, or HTTP(S) URLs and sent through Cursor's `UserMessage.selected_context.selected_images` field. Fresh and rebased Runs normalize the same image formats as held-Run continuations, including AI SDK `image-data` / `image-url` and OpenCode attachment URLs. A Run that resumes a checkpoint skips the history images that exact checkpoint is known to hold (by content hash, recorded when a turn ends on a checkpoint of its own and kept in the restart snapshot); a Run without a checkpoint sends them all.
 
@@ -444,9 +439,10 @@ bun run test:node-http2 # Node HTTP/2 cleanup, drain, cancellation and memory re
 bun run test:watch   # watch mode
 bun run generate:pricing  # refresh src/pricing-data.ts from Cursor docs
 bun run check:pricing     # fixture coverage for known model ids
+bun run generate:images   # live-test image input of untested Cursor models (needs a Cursor credential)
 ```
 
-**HARD STOP before any version bump or `v*` tag:** run `generate:pricing` and `check:pricing` in the same session, fix any unmapped Cursor display names, commit mapping/`pricing-data.ts` updates, and finalize [`CHANGELOG.md`](CHANGELOG.md) (`[Unreleased]` → dated version) **before** touching `"version"` or creating the tag. Publish CI regenerates rates from the live docs and will fail the release on an unmapped name — that is a last line of defense, not the primary check. See `AGENTS.md` and [Changelog](#changelog).
+**HARD STOP before any version bump or `v*` tag:** run `generate:pricing` and `check:pricing` in the same session, fix any unmapped Cursor display names, commit mapping/`pricing-data.ts` updates, run `generate:images` and commit `image-input-data.ts`, and finalize [`CHANGELOG.md`](CHANGELOG.md) (`[Unreleased]` → dated version) **before** touching `"version"` or creating the tag. Publish CI regenerates rates from the live docs and will fail the release on an unmapped name — that is a last line of defense, not the primary check. See `AGENTS.md` and [Changelog](#changelog).
 
 ## Architecture
 

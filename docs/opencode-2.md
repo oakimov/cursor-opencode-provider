@@ -118,10 +118,6 @@ see [shared model selection](../README.md#select-a-model).
 Saved 500k variants on the original base/Fast entries remain available after
 upgrading. Select the dedicated 500k entry for its full host context budget.
 
-Grok 4.7's base, Fast, and 500k entries accept image attachments even when
-Cursor's model list reports `supportsImages: false`; the shared capability
-resolver corrects this verified mismatch without changing your model cache.
-
 The plugin supplies its own Cursor SDK even when the host's generic package loader already created one. Each new Run resolves the active integration credential and applies on-demand renewal; a token captured by the generic loader or its options cannot bypass that resolver.
 
 ## From a local clone (`CURSOR_OPENCODE2_DEV_ENTRY`)

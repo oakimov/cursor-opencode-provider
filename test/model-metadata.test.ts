@@ -1,10 +1,6 @@
 import { describe, expect, it } from "bun:test"
-import { buildCapabilityTable, buildContextTable } from "../scripts/generate-cursor-pricing.js"
-import {
-  getDocumentedCursorModelCapabilities,
-  getDocumentedCursorModelContext,
-  resolveCursorModelSupportsImages,
-} from "../src/model-metadata.js"
+import { buildContextTable } from "../scripts/generate-cursor-pricing.js"
+import { getDocumentedCursorModelContext } from "../src/model-metadata.js"
 
 describe("Cursor model context metadata", () => {
   it("parses and merges the published default and max context rows", () => {
@@ -29,13 +25,6 @@ describe("Cursor model context metadata", () => {
       "grok-4.6": { maxContext: 256_000 },
       "gpt-5.2": { maxContext: 272_000 },
     })
-    expect(buildCapabilityTable(markdown)).toEqual({
-      "claude-sonnet-4": { supportsImages: false },
-      "default": { supportsImages: false },
-      "gpt-5.2": { supportsImages: true },
-      "grok-4.5": { supportsImages: false },
-      "grok-4.6": { supportsImages: false },
-    })
   })
 
   it("exposes generated context metadata without mutable shared state", () => {
@@ -44,24 +33,5 @@ describe("Cursor model context metadata", () => {
     context!.maxContext = 1
     expect(getDocumentedCursorModelContext("grok-4.5")).toEqual({ maxContext: 256_000 })
     expect(getDocumentedCursorModelContext("grok-4.6")).toEqual({ maxContext: 256_000 })
-  })
-
-  it("uses AvailableModels before docs and defaults unknown models to text", () => {
-    expect(getDocumentedCursorModelCapabilities("gpt-5.2")).toEqual({ supportsImages: true })
-    expect(resolveCursorModelSupportsImages("gpt-5.2")).toBe(true)
-    expect(resolveCursorModelSupportsImages("gpt-5.2", false)).toBe(false)
-    expect(resolveCursorModelSupportsImages("grok-4.5", true)).toBe(true)
-    expect(resolveCursorModelSupportsImages("grok-4.6")).toBe(false)
-    expect(resolveCursorModelSupportsImages("unknown-model")).toBe(false)
-  })
-
-  it("corrects Grok 4.7's false image flag without widening other wire ids", () => {
-    for (const value of [undefined, false, true]) {
-      expect(resolveCursorModelSupportsImages("grok-4.7", value)).toBe(true)
-    }
-    for (const id of ["grok-4.6", "grok-4.8", "grok-4.7-other", "unknown-model", "toString"]) {
-      expect(resolveCursorModelSupportsImages(id, false)).toBe(false)
-    }
-    expect(resolveCursorModelSupportsImages("unknown-model", true)).toBe(true)
   })
 })
