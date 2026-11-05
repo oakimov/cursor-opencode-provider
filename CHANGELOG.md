@@ -4,7 +4,7 @@
 
 ### Added
 
-- Cloud agents can install the OpenCode CLI and load this checkout's built OpenCode 2 plugin. `bun run live-test` runs `opencode run` against that plugin. It reads `CURSOR_API_KEY` and skips when that variable is unset. `scripts/review-pr.sh` reviews a pull request from the diff and `.cursor/rules/` on its own. Greptile comments are optional evidence when they already exist. A contributor tree's install and tests run with a private home and temp directory, no reviewer secrets, and without dependency lifecycle scripts. `--live` passes `CURSOR_API_KEY` to that tree's live test only after unit tests pass and no high finding is present.
+- Cloud agents can install the OpenCode CLI and load this checkout's built OpenCode 2 plugin. `bun run live-test` runs `opencode run` against that plugin. It reads `CURSOR_API_KEY` and skips when that variable is unset. `scripts/review-pr.sh` checks a pull request from the diff and `.cursor/rules/`. A contributor tree's install and tests run with a private home and temp directory, no reviewer secrets, and without dependency lifecycle scripts. `--live` passes `CURSOR_API_KEY` to that tree's live test only after unit tests pass and no high finding is present.
 - Recovery-only diagnostics (`CURSOR_PROVIDER_RECOVERY_DEBUG=1`) record interruption, recovery decisions, and host-call/result IDs without logging prompt or tool payloads.
 
 ### Changed

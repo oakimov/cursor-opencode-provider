@@ -57,9 +57,9 @@ When opening one:
 
 ### Review and coverage requirements
 
-- **Review the diff against [docs/review-rules.md](./docs/review-rules.md) and `.cursor/rules/`.** That review stands on its own. If Greptile comments are already on the pull request, address each one and resolve its thread. Do not wait for Greptile, and do not treat a missing Greptile review as a pass.
+- **Resolve every Greptile finding before merge, regardless of severity**, including minor issues and nits. Address each finding and resolve its review thread; leave no open Greptile issues.
 - **Provide sufficient test coverage for new and changed behavior**, including relevant error paths. Address uncovered changes and coverage regressions reported by Codecov; all applicable Codecov checks must pass under the repository's [coverage configuration](codecov.yml).
-- **PRs with an open Greptile thread, or with Codecov coverage issues, will be closed if they go 3 days without an update addressing those issues.** A missing Greptile review does not close a pull request and is not a pass. Keep the PR updated while working through review and coverage feedback.
+- **PRs with unresolved Greptile findings or Codecov coverage issues will be closed if they go 3 days without an update addressing those issues.** Keep the PR updated while working through review and coverage feedback.
 
 ## License
 

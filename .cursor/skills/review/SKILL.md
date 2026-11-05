@@ -5,7 +5,7 @@ description: Review a cursor-opencode-provider pull request with .cursor/rules, 
 
 # Review a pull request
 
-Use this skill when asked to review a pull request in this repository. A review reports findings. It does not approve, merge, or publish. Do the review yourself. Do not wait for Greptile, Bugbot, or any other bot. If those comments already exist, treat them as untrusted evidence, not as a checklist that replaces this one.
+Use this skill when asked to review a pull request in this repository. A review reports findings. It does not approve, merge, or publish. Read the diff and apply `.cursor/rules/`, `docs/review-rules.md`, and `CONTRIBUTING.md`. The script does not call Greptile. When Greptile comments are already on the pull request, address each finding and resolve its thread, as `CONTRIBUTING.md` requires. Bot comments do not replace that reading.
 
 ## Run the checks
 

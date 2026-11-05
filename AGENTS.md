@@ -14,10 +14,8 @@ agent protocol. TypeScript ESM; Bun installs/tests; `tsc` builds `dist/`.
   current requirements here and dated validation in private run reports.
 - Keep operator behavior in [README.md](README.md) and the matching
   [host guide](docs/README.md). Follow [CONTRIBUTING.md](CONTRIBUTING.md) and the
-  [review rules](docs/review-rules.md) and applicable Codecov issues. Address
-  review comments already on the pull request, including any Greptile thread.
-  A missing Greptile review is not a pass. User-facing changes need an
-  Unreleased changelog line.
+  [review rules](docs/review-rules.md), including every Greptile finding and
+  applicable Codecov issue. User-facing changes need an Unreleased changelog line.
 - Never leave TMPDIR remnants, from tests, scripts or your own scratch work
   (files, directories, worktrees, detached processes and their logs). Remove
   what you create before finishing; first await the writes and stop the
@@ -356,10 +354,6 @@ steps 1–4 below succeed in this turn.** CI or a previous run cannot replace th
 A request only to bump/tag/publish still requires steps 1–4 first; report their
 results before touching the version. The failed-release rationale belongs in
 [general lessons](tasks/lessons/opencode.md#auth-models-and-delivery-process).
-
-## Cursor Cloud
-
-`scripts/cloud-agent-install.sh` (wired from `.cursor/environment.json`) installs Bun, zsh, and the OpenCode CLI, then builds this package and writes a local OpenCode 2 config under `.opencode-local/`. Review a pull request with `scripts/review-pr.sh` and `.cursor/skills/review`. The review reads the diff and `.cursor/rules/` itself; it does not wait for Greptile. Its OpenCode model is `cursor/default` (`CURSOR_REVIEW_MODEL` overrides it). Auto has no reasoning-effort parameter. A contributor tree's install and tests run without the reviewer's home, temp directory, or secrets. `bun run live-test` needs `CURSOR_API_KEY` and skips when it is unset. See [docs/pr-review.md](docs/pr-review.md).
 
 ## Changelog
 
