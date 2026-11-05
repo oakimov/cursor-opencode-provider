@@ -3,7 +3,10 @@
 #
 # Linux: user, mount, and pid namespaces, then pivot_root. The command sees
 # read-only /usr and /etc, the tool binaries named with --tool, read-only
-# --ro-bind mounts, and a read-write copy at /src. Host /tmp, /home,
+# --ro-bind mounts, and a read-write copy at /src. A tool outside /usr/bin
+# and /bin, including /usr/local and a symlink into the reviewer home, is
+# mounted as its real file under the requested name. The directory that
+# contains that file is not mounted. Host /tmp, /home,
 # /workspace, agent sockets, and git metadata are not mounted. The environment
 # starts empty. --map-root-user grants mount capabilities inside the
 # namespace; those are dropped after the mounts exist and before the command
@@ -60,6 +63,22 @@ isolate_unavailable() {
   echo "$1" >&2
   echo "Refusing to run without a filesystem and process boundary. env -i is not a substitute." >&2
   return 2
+}
+
+# Print the regular file that should be placed on the boundary PATH under the
+# requested tool name. /usr/bin and /bin are already on that PATH. /usr/local
+# is not, and a symlink there often points at the reviewer home, which is not
+# mounted. Return 1 when the tool is missing or already visible.
+isolate_tool_file() {
+  local name="$1" host real
+  host="$(command -v "$name" 2>/dev/null || true)"
+  [[ -n "$host" && -e "$host" ]] || return 1
+  real="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$host" 2>/dev/null || true)"
+  [[ -n "$real" && -f "$real" && -x "$real" ]] || return 1
+  case "$real" in
+    /usr/bin/*|/bin/*) return 1 ;;
+  esac
+  printf '%s\n' "$real"
 }
 
 # Print owner/repo for a github remote URL. Never print userinfo.
@@ -270,24 +289,20 @@ EOF
 }
 
 isolate_write_tools() {
-  local root="$1" name host base seen=" " i n
+  local root="$1" name real seen=" " i n
   : >"$root/tool-binds"
   n="$(isolate_count tools)"
   i=0
   while [[ "$i" -lt "$n" ]]; do
     name="$(isolate_at tools "$i")"
     i=$((i + 1))
-    host="$(command -v "$name" 2>/dev/null || true)"
-    [[ -n "$host" && -x "$host" ]] || continue
-    case "$host" in
-      /usr/*|/bin/*) continue ;;
-    esac
-    base="$(basename "$host")"
+    real="$(isolate_tool_file "$name" || true)"
+    [[ -n "$real" ]] || continue
     case "$seen" in
-      *" $base "*) continue ;;
+      *" $name "*) continue ;;
     esac
-    seen+="$base "
-    printf '%s\t%s\n' "$host" "$base" >>"$root/tool-binds"
+    seen+="$name "
+    printf '%s\t%s\n' "$real" "$name" >>"$root/tool-binds"
   done
 }
 
@@ -612,13 +627,9 @@ isolate_darwin_prepare() {
   while [[ "$i" -lt "$n" ]]; do
     name="$(isolate_at tools "$i")"
     i=$((i + 1))
-    host="$(command -v "$name" 2>/dev/null || true)"
-    [[ -n "$host" && -x "$host" ]] || continue
-    case "$host" in
-      /usr/*|/bin/*) continue ;;
-    esac
-    ln -sfn "$host" "$darwin_tools/$name"
-    real="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$host")"
+    real="$(isolate_tool_file "$name" || true)"
+    [[ -n "$real" ]] || continue
+    ln -sfn "$real" "$darwin_tools/$name"
     isolate_darwin_allow_file "$real" || return 2
     isolate_darwin_note_dependencies "$real" || return 2
   done

@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- The isolated live test finds OpenCode when the installer linked it at `/usr/local/bin`. That path is not on the boundary PATH, so the real `opencode` file is placed under `/opt/tools` and its directory is not mounted ([#156](https://github.com/oakimov/cursor-opencode-provider/pull/156)).
 - GitHub App review publication accepts stateless installation tokens, uses Bearer authentication for App JWT requests, and requests only this repository's review-write permission. Diagnostics redact complete tokens ([#156](https://github.com/oakimov/cursor-opencode-provider/pull/156)).
 - Manual Cursor reviews record independent contract, failure/state and consumer analysis before publication and verify review-specific receipts; a discussion comment does not count as a completed COMMENT review ([#156](https://github.com/oakimov/cursor-opencode-provider/pull/156)).
 - The Linux review boundary reaps orphaned processes. The checked command is no longer PID 1, so a killed shell grandchild does not stay visible to `kill -0` and fail shell-supervision tests inside the isolated check.

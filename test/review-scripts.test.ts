@@ -389,6 +389,63 @@ describe("isolated check", () => {
     }
   })
 
+  it("places a tool linked from outside /usr/bin on the boundary PATH", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-tool-link-"))
+    const src = path.join(directory, "src")
+    const bin = path.join(directory, "bin")
+    const hidden = path.join(directory, "hidden")
+    const real = path.join(hidden, "opencode-real")
+    const secret = path.join(hidden, "secret")
+    fs.mkdirSync(src)
+    fs.mkdirSync(bin)
+    fs.mkdirSync(hidden)
+    fs.writeFileSync(real, "#!/bin/sh\necho tool-ok\n")
+    fs.chmodSync(real, 0o755)
+    fs.writeFileSync(secret, "SECRET\n", { mode: 0o600 })
+    fs.symlinkSync(real, path.join(bin, "opencode"))
+    const env = { PATH: `${bin}:/usr/bin:/bin` }
+    try {
+      const decision = bashHere(`
+        set -euo pipefail
+        source scripts/isolate-run.sh
+        if isolate_tool_file true; then echo 'true-mounted'; else echo 'true-visible'; fi
+        isolate_tool_file opencode
+      `, env)
+      expect(decision.status, decision.stderr).toBe(0)
+      expect(decision.stdout).toBe(`true-visible\n${real}\n`)
+      if (hostKernel() !== "Linux") return
+      const ran = run("bash", ["scripts/isolate-run.sh", "--src", src, "--tool", "opencode", "--", "/bin/sh", "-c", 'printf "where=%s\\n" "$(command -v opencode)"; opencode; if ls "$1" >/dev/null 2>&1; then echo LEAK; else echo hidden; fi', "sh", hidden], {
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}` },
+      })
+      expect(ran.status, `${ran.stdout}\n${ran.stderr}`).toBe(0)
+      expect(ran.stdout).toContain("where=/opt/tools/opencode")
+      expect(ran.stdout).toContain("tool-ok")
+      expect(ran.stdout).toContain("hidden")
+      expect(ran.stdout).not.toContain("SECRET")
+      expect(ran.stdout).not.toContain("LEAK")
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("runs the installed opencode binary inside the check boundary", () => {
+    if (hostKernel() !== "Linux") return
+    const linked = "/usr/local/bin/opencode"
+    if (!fs.existsSync(linked)) return
+    const src = fs.mkdtempSync(path.join(os.tmpdir(), "review-installed-opencode-"))
+    try {
+      const homeInstall = path.dirname(fs.realpathSync(linked))
+      const ran = run("bash", ["scripts/isolate-run.sh", "--src", src, "--tool", "opencode", "--", "/bin/sh", "-c", 'printf "where=%s\\n" "$(command -v opencode)"; opencode --version; if ls "$1" >/dev/null 2>&1; then echo LEAK; else echo hidden; fi', "sh", homeInstall])
+      expect(ran.status, `${ran.stdout}\n${ran.stderr}`).toBe(0)
+      expect(ran.stdout).toContain("where=/opt/tools/opencode")
+      expect(ran.stdout).toContain("hidden")
+      expect(ran.stdout).not.toContain("LEAK")
+      expect(ran.stdout.trim().split("\n").some((line) => /\d+\.\d+/.test(line))).toBe(true)
+    } finally {
+      fs.rmSync(src, { recursive: true, force: true })
+    }
+  })
+
   it("does not run the live script when checks fail, and adds only opencode to its PATH", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-live-path-"))
     const bin = path.join(directory, "bin")
