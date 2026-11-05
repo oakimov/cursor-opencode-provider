@@ -39,7 +39,7 @@ else
 fi
 
 python3 - "$PLUGIN" "$CONFIG_DIR" "$ENTRY" "$ROOT" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$REVIEW_TMP" "$ENV_FILE" <<'PY'
-import json, pathlib, shlex, sys
+import json, os, pathlib, shlex, sys
 plugin = pathlib.Path(sys.argv[1]).resolve()
 config_dir = pathlib.Path(sys.argv[2]).resolve()
 entry = pathlib.Path(sys.argv[3]).resolve()
@@ -81,25 +81,37 @@ init_prefix = "CURSOR_REVIEW_PLUGIN_INIT count="
 )
 # The pong prompt runs no shell. Deny every command. Add an allow entry only
 # after a live run shows OpenCode refused a command this test needs.
-# `opencode run --auto` would approve an unlisted external directory, so
-# everything outside this checkout and the private config directories is denied.
-external = {
-    "*": "deny",
-    "/tmp/*": "allow",
-    f"{root}/*": "allow",
-    f"{config_dir}/*": "allow",
-    f"{xdg_cache}/*": "allow",
-    f"{xdg_data}/*": "allow",
-    f"{xdg_state}/*": "allow",
-    f"{review_tmp}/*": "allow",
+# OpenCode keeps the last matching permission rule (evaluate uses findLast).
+# A trailing "*" allow would override the env denies, so the broad allow is
+# first and the ".env.example" exception is last. "*.env.*" also matches
+# ".env.example", which is why that exception follows it.
+# `opencode run --auto` would approve an unlisted external directory. Allow
+# only this checkout and the private config roots. A "/tmp/*" allow would
+# cover other jobs' temporary directories, so it is not granted. Each root
+# is the lexical path and, when it differs, the canonical path.
+path_rules = {
+    "*": "allow",
+    "env": "deny",
+    "*.env": "deny",
+    "*.env.*": "deny",
+    "*.env.example": "allow",
 }
+external = {"*": "deny"}
+seen = []
+for path in (root, config_dir, xdg_cache, xdg_data, xdg_state, review_tmp):
+    for candidate in (pathlib.Path(os.path.abspath(path)), pathlib.Path(os.path.realpath(path))):
+        text = candidate.as_posix().rstrip("/")
+        if text in seen:
+            continue
+        seen.append(text)
+        external[f"{text}/*"] = "allow"
 config = {
     "$schema": "https://opencode.ai/config.json",
     "lsp": False,
     "permission": {
         "bash": {"*": "deny"},
-        "read": {"env": "deny", "*.env": "deny", "*.env.*": "deny", "*.env.example": "allow", "*": "allow"},
-        "edit": {"env": "deny", "*.env": "deny", "*.env.*": "deny", "*.env.example": "allow", "*": "allow"},
+        "read": path_rules,
+        "edit": path_rules,
         "external_directory": external,
     },
     "agents": {

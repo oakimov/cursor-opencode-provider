@@ -1,27 +1,38 @@
 #!/usr/bin/env bash
-# Run a contributor tree's install, build, typecheck, and unit tests without
-# reviewer secrets. This is not the review.
+# Run a contributor tree's install, build, typecheck, and unit tests where
+# the command cannot see reviewer files. This is not the review.
 #
 #   scripts/isolated-check.sh <pr-number|https://github.com/owner/repo/pull/N> [--live]
 #
-# --live is a trust decision. After the checks pass, this checkout's
-# scripts/live-test.sh loads the worktree's built plugin through a private
-# OpenCode config. The revision's shell is not run. A failed check does not
-# receive the key.
+# The pull request is fetched and copied with git archive. There is no linked
+# worktree and no parent git directory. scripts/isolate-run.sh runs the
+# commands. A URL whose owner or repository is not this checkout's origin is
+# refused before fetch.
 #
-# Exit 0 when the checks pass, 1 when a check fails, 2 when the invocation is invalid.
+# --live is a separate trust decision. Passing checks does not pass
+# CURSOR_API_KEY. Set CURSOR_REVIEW_TRUST=1 only after you trust that
+# revision. The key is then given to this checkout's scripts/live-test.sh
+# and the built plugin, still inside the boundary. The revision's shell is
+# not run.
+#
+# Exit 0 when the checks pass, 1 when a check fails, 2 when the invocation
+# or the isolation mechanism is unusable.
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/isolate-run.sh
+source "$ROOT/scripts/isolate-run.sh"
 
 worktree=""
 isolate_home=""
 isolate_tmp=""
+pr=""
+pr_slug=""
+origin_slug=""
 
 check_cleanup() {
   cd "$ROOT" 2>/dev/null || true
   if [[ -n "$worktree" ]]; then
-    git worktree remove --force "$worktree" >/dev/null 2>&1 || true
     rm -rf "$worktree"
     worktree=""
   fi
@@ -40,17 +51,33 @@ usage() {
   exit 2
 }
 
-# Sets pr to the digits of a pull number or a canonical GitHub pull URL.
-# Returns 1 for anything else.
+check_origin_slug() {
+  local url slug
+  url="$(git -C "$ROOT" remote get-url origin)"
+  slug="$(isolate_github_slug "$url")" || return 1
+  origin_slug="$slug"
+}
+
+# Sets pr from a pull number or a canonical GitHub pull URL.
+# A URL must name this checkout's origin. Returns 1 for anything else.
 check_parse_target() {
-  local input="$1"
+  local input="$1" owner repo
   pr=""
+  pr_slug=""
   if [[ "$input" =~ ^[0-9]+$ ]]; then
     pr="$input"
     return 0
   fi
-  if [[ "$input" =~ ^https://github\.com/[^/]+/[^/]+/pull/([0-9]+)([/?#].*)?$ ]]; then
-    pr="${BASH_REMATCH[1]}"
+  if [[ "$input" =~ ^https://github\.com/([^/]+)/([^/]+)/pull/([0-9]+)([/?#].*)?$ ]]; then
+    owner="${BASH_REMATCH[1]}"
+    repo="${BASH_REMATCH[2]}"
+    pr="${BASH_REMATCH[3]}"
+    pr_slug="${owner}/${repo}"
+    check_origin_slug || return 1
+    if [[ "$pr_slug" != "$origin_slug" ]]; then
+      echo "Refusing ${pr_slug}; this checkout's origin is ${origin_slug}." >&2
+      return 1
+    fi
     return 0
   fi
   return 1
@@ -93,7 +120,9 @@ check_live_path() {
   printf '%s' "$path"
 }
 
-# Prints skip, skip-failed, or run. Arguments: 0|1 --live, then the check exit code.
+# Prints skip, skip-failed, skip-untrusted, or run.
+# Arguments: 0|1 --live, then the check exit code.
+# CURSOR_REVIEW_TRUST=1 is required before run. Passing checks is not trust.
 check_live_action() {
   local live="$1" checks="$2"
   if [[ "$checks" -ne 0 ]]; then
@@ -104,22 +133,17 @@ check_live_action() {
     printf 'skip'
     return 0
   fi
+  if [[ "${CURSOR_REVIEW_TRUST:-}" != "1" ]]; then
+    printf 'skip-untrusted'
+    return 0
+  fi
   printf 'run'
 }
 
-# Run a command with no reviewer secrets. Caller must check_begin_sandbox first.
+# Run a command inside the filesystem and process boundary.
 check_run_isolated() {
-  [[ -n "$isolate_home" && -n "$isolate_tmp" ]] || return 1
-  env -i \
-    PATH="$(check_tool_path)" \
-    HOME="$isolate_home" \
-    TMPDIR="$isolate_tmp" \
-    USER="${USER:-reviewer}" \
-    LOGNAME="${LOGNAME:-${USER:-reviewer}}" \
-    LANG="${LANG:-C.UTF-8}" \
-    SHELL="${SHELL:-/bin/bash}" \
-    CI=1 \
-    "$@"
+  "$ROOT/scripts/isolate-run.sh" --src "${ISOLATE_SRC:-$PWD}" \
+    --tool bun --tool node --tool git --tool python3 -- "$@"
 }
 
 check_step() {
@@ -133,6 +157,10 @@ check_step() {
   if [[ "$code" -eq 0 ]]; then
     echo "${label}=passed"
     return 0
+  fi
+  if [[ "$code" -eq 2 ]]; then
+    echo "${label}=unavailable"
+    return 2
   fi
   echo "${label}=failed exit=${code}"
   return 1
@@ -158,18 +186,33 @@ check_main() {
   trap check_cleanup EXIT
   git fetch --no-tags origin "pull/${pr}/head"
   worktree="$(mktemp -d "${TMPDIR:-/tmp}/cursor-pr-check-${pr}.XXXXXX")"
-  git worktree add --detach "$worktree" FETCH_HEAD
+  git -C "$ROOT" archive FETCH_HEAD | tar -x -C "$worktree"
+  if [[ -e "$worktree/.git" ]]; then
+    echo "The fetched tree contains git metadata. Refusing to run it." >&2
+    exit 2
+  fi
   cd "$worktree"
 
   echo "Check root: $worktree"
   echo "Pull request: $pr"
-  check_begin_sandbox
   local checks=0
-  check_step INSTALL bun install --frozen-lockfile --ignore-scripts || checks=1
+  check_step INSTALL bun install --frozen-lockfile --ignore-scripts || checks=$?
+  if [[ "$checks" -eq 2 ]]; then
+    echo "ISOLATION=unavailable"
+    exit 2
+  fi
   if [[ "$checks" -eq 0 ]]; then
-    check_step BUILD bun run build || checks=1
-    check_step TYPECHECK bun run typecheck || checks=1
-    check_step UNIT_TESTS bun test || checks=1
+    check_step BUILD bun run build || checks=$?
+    if [[ "$checks" -eq 0 ]]; then
+      check_step TYPECHECK bun run typecheck || checks=$?
+    fi
+    if [[ "$checks" -eq 0 ]]; then
+      check_step UNIT_TESTS bun test || checks=$?
+    fi
+    if [[ "$checks" -eq 2 ]]; then
+      echo "ISOLATION=unavailable"
+      exit 2
+    fi
   fi
 
   local live_code=0 action
@@ -177,30 +220,28 @@ check_main() {
   case "$action" in
     skip)
       echo "LIVE_TEST=skipped"
-      echo "Pass --live only when this change needs a live OpenCode run and you trust this checkout's harness with CURSOR_API_KEY."
+      echo "Pass --live only when this change needs a live OpenCode run. Passing checks does not grant CURSOR_API_KEY."
       ;;
     skip-failed)
       echo "LIVE_TEST=skipped"
       echo "Checks failed, so the live test did not run and did not receive CURSOR_API_KEY."
       ;;
+    skip-untrusted)
+      echo "LIVE_TEST=skipped"
+      echo "Passing checks is not a decision to trust this revision. Set CURSOR_REVIEW_TRUST=1 only after that decision. CURSOR_API_KEY was not passed."
+      ;;
     run)
-      echo "Worktree: $worktree"
-      echo "Loading $worktree/dist/plugin-opencode2.js through a private OpenCode config."
+      echo "Loading /src/dist/plugin-opencode2.js through a private OpenCode config."
+      echo "CURSOR_REVIEW_TRUST=1 was set separately from the check result."
       set +e
-      env -i \
-        PATH="$(check_live_path)" \
-        HOME="$isolate_home" \
-        TMPDIR="$isolate_tmp" \
-        USER="${USER:-reviewer}" \
-        LOGNAME="${LOGNAME:-${USER:-reviewer}}" \
-        LANG="${LANG:-C.UTF-8}" \
-        SHELL="${SHELL:-/bin/bash}" \
-        CI=1 \
-        CURSOR_API_KEY="${CURSOR_API_KEY:-}" \
-        OPENCODE_LIVE_MODEL="${OPENCODE_LIVE_MODEL:-}" \
-        OPENCODE_CONFIG_ROOT="$worktree" \
-        OPENCODE_REVIEW_HOME="$isolate_tmp/review-opencode" \
-        bash "$ROOT/scripts/live-test.sh"
+      "$ROOT/scripts/isolate-run.sh" --src "$worktree" \
+        --tool bun --tool node --tool git --tool python3 --tool opencode \
+        --ro-bind "$ROOT/scripts:/opt/harness/scripts" \
+        --env CURSOR_API_KEY \
+        --set OPENCODE_CONFIG_ROOT=/src \
+        --set OPENCODE_REVIEW_HOME=/tmp/review-opencode \
+        --set "OPENCODE_LIVE_MODEL=${OPENCODE_LIVE_MODEL:-}" \
+        -- bash /opt/harness/scripts/live-test.sh
       live_code=$?
       set -e
       ;;

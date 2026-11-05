@@ -5,7 +5,7 @@ description: Review a cursor-opencode-provider pull request by reading the diff 
 
 # Review a pull request
 
-You are the reviewer. Read the diff and the code. Apply every in-scope file under `.cursor/rules/`. A review reports findings. It does not approve, merge, or publish.
+You are the reviewer. Read the diff and the code. Apply every in-scope file under `.cursor/rules/`. A review reports findings. It does not approve or merge the pull request. Publishing a COMMENT review is the procedure in `docs/pr-review.md`: show the exact payload, wait for the maintainer, and post only that approved payload. Do not post from this skill on your own.
 
 OpenCode is the runtime for a live test of this plugin. It does not perform the review. Do not send the diff or a review prompt to `opencode run`.
 
@@ -13,22 +13,22 @@ When Greptile comments are already on the pull request, address each finding and
 
 ## Read
 
-- Every review: `docs/review-rules.md`, `CONTRIBUTING.md`, and the in-scope `.cursor/rules/` files
+- Every review: `docs/review-rules.md`, `docs/pr-review.md`, `CONTRIBUTING.md`, and the in-scope `.cursor/rules/` files
 - When the diff touches `src/**`, `test/**`, `package.json`, or `scripts/**`: `AGENTS.md`
 - When the diff touches `src/context/**`, `src/session.ts`, `src/language-model.ts`, `src/protocol/**`, `src/billing.ts`, or `src/usage.ts`: `docs/cache-log-runbook.md`
 - When the diff touches `src/protocol/create-plan.ts`, `src/protocol/switch-mode.ts`, `src/host-agent-mode.ts`, `src/host-plan-file.ts`, or `src/context/**`: `docs/host-compat-acceptance.md`
 
-Report logic and syntax. Style nits, at most five, as `docs/review-rules.md` describes. Cite `file:line`, the rule id, the severity, and the consequence. Say what you could not check.
+Report logic and syntax. Style nits, at most five, as `docs/review-rules.md` describes. Cite a repository-relative `file:line`, the rule id, the severity, and the consequence. Say what you could not check. Absolute worktree and plugin paths stay in the private log.
 
 ## Checks
 
-Never review in the main checkout. For every pull request, check that revision out in its own worktree and remove the worktree on every exit path:
+For every pull request, run the isolated check. It fetches that revision, copies it with `git archive`, and removes the copy on every exit path:
 
 ```bash
 scripts/isolated-check.sh <pr-number-or-url>
 ```
 
-The script runs `git fetch origin pull/<n>/head` and `git worktree add` on `FETCH_HEAD`. Inside that worktree it installs dependencies, builds, typechecks, and runs `bun test`, with a private home and temp directory, a short PATH, and no reviewer secrets. Dependency lifecycle scripts are not run. Exit 0 means those checks passed. Exit 1 is a check failure. Exit 2 is a bad invocation. The log line `Check root:` is the worktree path.
+A pull URL must name this checkout's origin. The copy has no `.git` directory. Install, build, typecheck, and `bun test` run inside `scripts/isolate-run.sh`. Exit 0 means those checks passed. Exit 1 is a check failure. Exit 2 is a bad invocation or an unavailable isolation mechanism. The log line `Check root:` is private.
 
 On your own checkout, run `bun run build`, `bun run typecheck`, and `bun test` directly. That is not a review of someone else's pull request.
 
@@ -38,12 +38,16 @@ Run a live OpenCode test when the diff changes plugin behavior: the provider, pr
 
 Skip it when the diff is docs, rules, or a refactor the unit tests already cover. Say why you skipped it.
 
-When you run it, pass `--live` only after install, build, typecheck, and unit tests passed, and only when you trust this checkout's harness with `CURSOR_API_KEY`. A failed check does not receive the key. The revision's shell is not run. The harness writes a private OpenCode 2 config (its own config, cache, data, state, and temp directories) that loads `dist/plugin-opencode2.js` built in the worktree, through one `plugins/cursor` directory. Before the prompt, `opencode plugin list` must log `CURSOR_REVIEW_PLUGIN=` once for that file and the worktree's package version. The run must log `CURSOR_REVIEW_PLUGIN_INIT count=1` once. Put the worktree path, that plugin path, the version, and the init count in the review. On a cloud agent, `opencode` is the current OpenCode release from the environment install.
+Passing the checks is not permission to pass `CURSOR_API_KEY`. Set `CURSOR_REVIEW_TRUST=1` only after you decide to trust that revision, then pass `--live`. A failed check does not receive the key. The revision's shell is not run. The harness writes a private OpenCode 2 config that loads `dist/plugin-opencode2.js` from the copy, through one `plugins/cursor` directory. Before the prompt, `opencode plugin list` must log `CURSOR_REVIEW_PLUGIN=` once. The run must log `CURSOR_REVIEW_PLUGIN_INIT count=1` once. Keep the copy path, the plugin path, the version, and the init count in the private log. On a cloud agent, `opencode` is the current OpenCode release from the environment install.
 
 ```bash
-scripts/isolated-check.sh <pr-number-or-url> --live
+CURSOR_REVIEW_TRUST=1 scripts/isolated-check.sh <pr-number-or-url> --live
 ```
 
 On your own checkout, `bun run live-test` does the same against the current build. It prints `LIVE_TEST=skipped` and exits 0 when `CURSOR_API_KEY` is unset. The live model is `cursor/composer-2.5` unless `OPENCODE_LIVE_MODEL` is set. The assistant reply must be exactly `pong`.
 
 `CURSOR_API_KEY` is a Cursor user API key from https://cursor.com/settings. It is the only secret the live test reads.
+
+## Publish
+
+Follow `docs/pr-review.md`. Stamp and show the payload. Stop until the maintainer approves that exact text. Then approve and post. A refusal or no answer does not call GitHub.

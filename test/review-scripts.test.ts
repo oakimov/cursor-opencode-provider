@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -33,6 +33,34 @@ function without(names: string[], extra: Record<string, string> = {}): NodeJS.Pr
 
 function textEvent(text: string): string {
   return JSON.stringify({ type: "text", part: { type: "text", text } })
+}
+
+function selectedPython(): string {
+  const result = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" })
+  const found = (result.stdout || "").trim()
+  if (result.status !== 0 || !found.startsWith("/")) throw new Error(result.stderr || "python3 is required")
+  return found
+}
+
+function writeTimeoutAdapter(file: string, python: string): void {
+  fs.writeFileSync(
+    file,
+    `#!${python}
+import os, subprocess, sys
+seconds = float(sys.argv[1])
+log = os.environ.get("TIMEOUT_LOG")
+if log:
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(" ".join(sys.argv[1:]) + "\\n")
+command = sys.argv[2:]
+try:
+    completed = subprocess.run(command, timeout=seconds)
+except subprocess.TimeoutExpired:
+    raise SystemExit(124)
+raise SystemExit(completed.returncode)
+`,
+  )
+  fs.chmodSync(file, 0o755)
 }
 
 function reply(stdout: string, code: string | number = 0): { status: number; output: string } {
@@ -305,10 +333,12 @@ describe("isolated check", () => {
       show 'https://github.com/oakimov/cursor-opencode-provider/pull/156'
       show 'https://github.com/oakimov/cursor-opencode-provider/pull/156/files'
       show 'https://github.com/oakimov/cursor-opencode-provider/pull/156?w=1'
+      show 'https://github.com/unrelated/project/pull/156'
       show 'https://evil.example/pull/1'
       show --local
     `)
     expect(result.status, result.stderr).toBe(0)
+    expect(result.stderr).not.toContain("x-access-token")
     expect(result.stdout).toBe([
       "ok 156",
       "bad",
@@ -317,7 +347,42 @@ describe("isolated check", () => {
       "ok 156",
       "bad",
       "bad",
+      "bad",
     ].join("\n") + "\n")
+  })
+
+  it("does not fetch when the pull URL names a different repository", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-foreign-"))
+    const log = path.join(directory, "git.log")
+    try {
+      const result = bashHere(
+        `
+        set -euo pipefail
+        source scripts/isolated-check.sh
+        git() {
+          printf '%s\\n' "$*" >> "$LOG"
+          if [[ "$*" == *"remote get-url"* ]]; then
+            printf '%s\\n' "https://x-access-token:supersecret@github.com/oakimov/cursor-opencode-provider"
+            return 0
+          fi
+          if [[ "$*" == *fetch* ]]; then
+            printf 'FETCHED\\n' >> "$LOG"
+            return 0
+          fi
+          echo "unexpected git $*" >&2
+          return 1
+        }
+        check_main "https://github.com/unrelated/project/pull/156"
+        `,
+        { LOG: log },
+      )
+      expect(result.status).toBe(2)
+      expect(`${result.stdout}${result.stderr}`).toContain("Refusing unrelated/project")
+      expect(`${result.stdout}${result.stderr}`).not.toContain("supersecret")
+      expect(fs.readFileSync(log, "utf8")).not.toContain("FETCHED")
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
   })
 
   it("does not run the live script when checks fail, and adds only opencode to its PATH", () => {
@@ -337,9 +402,12 @@ describe("isolated check", () => {
         printf '\\n'
         check_live_action 1 1
         printf '\\n'
+        CURSOR_REVIEW_TRUST=1
+        check_live_action 1 0
+        printf '\\n'
       `)
       expect(decision.status, decision.stderr).toBe(0)
-      expect(decision.stdout).toBe("skip\nskip-failed\nrun\nskip-failed\n")
+      expect(decision.stdout).toBe("skip\nskip-failed\nskip-untrusted\nskip-failed\nrun\n")
 
       const result = bashHere(`
         set -euo pipefail
@@ -374,15 +442,24 @@ describe("isolated check", () => {
     fs.writeFileSync(path.join(tree, "package.json"), JSON.stringify({ version: "9.9.9" }) + "\n")
     fs.writeFileSync(path.join(tree, "dist/index.js"), "export {}\n")
     fs.writeFileSync(path.join(tree, "dist/plugin-opencode2.js"), "export default {}\n")
+    const python = selectedPython()
+    const timeoutLog = path.join(tree, "timeout.log")
+    writeTimeoutAdapter(path.join(bin, "review-timeout"), python)
+    fs.writeFileSync(
+      path.join(bin, "read-marker.py"),
+      `#!${python}
+import os, pathlib, re, sys
+text = pathlib.Path(os.environ["OPENCODE_CONFIG_DIR"], "plugins", "cursor", "index.js").read_text()
+match = re.search(r"CURSOR_REVIEW_PLUGIN=\\S+ version=\\S+", text)
+sys.stderr.write((match.group(0) if match else "no-marker") + "\\n")
+`,
+    )
+    fs.chmodSync(path.join(bin, "read-marker.py"), 0o755)
     fs.writeFileSync(
       path.join(bin, "opencode"),
       `#!/bin/sh
 if [ "$1" = plugin ]; then
-  python3 -c 'import os, pathlib, re, sys
-text = pathlib.Path(os.environ["OPENCODE_CONFIG_DIR"], "plugins", "cursor", "index.js").read_text()
-match = re.search(r"CURSOR_REVIEW_PLUGIN=\\S+ version=\\S+", text)
-sys.stderr.write((match.group(0) if match else "no-marker") + "\\n")'
-  exit 0
+  exec ${JSON.stringify(python)} ${JSON.stringify(path.join(bin, "read-marker.py"))}
 fi
 if [ "$1" = run ]; then
   printf '%s\\n' "CURSOR_REVIEW_PLUGIN_INIT count=1 path=$CURSOR_REVIEW_PLUGIN_PATH" >&2
@@ -400,6 +477,9 @@ exit 1
       CURSOR_API_KEY: secret,
       OPENCODE_CONFIG_ROOT: tree,
       OPENCODE_REVIEW_HOME: reviewHome,
+      LIVE_TEST_TIMEOUT: path.join(bin, "review-timeout"),
+      LIVE_TEST_PYTHON: python,
+      TIMEOUT_LOG: timeoutLog,
     }
     try {
       const passed = run("bash", ["scripts/live-test.sh"], { env })
@@ -417,6 +497,9 @@ exit 1
       expect(config.permission.bash["*"]).toBe("deny")
       expect(passed.stdout).toContain("PLUGIN_INIT_COUNT=1")
       expect(fs.existsSync(path.join(tree, ".opencode-local"))).toBe(false)
+      const deadlines = fs.readFileSync(timeoutLog, "utf8")
+      expect(deadlines).toContain("60 ")
+      expect(deadlines).toContain("180 ")
 
       fs.writeFileSync(
         path.join(bin, "opencode"),
@@ -449,22 +532,154 @@ exit 0
   })
 
   it("drops reviewer secrets and removes the sandbox on exit", () => {
+    const src = fs.mkdtempSync(path.join(os.tmpdir(), "review-isolate-src-"))
     const result = bashHere(`
       set -euo pipefail
       source scripts/isolated-check.sh
       trap check_cleanup EXIT
       check_begin_sandbox
       printf 'home %s\\n' "$isolate_home"
-      check_run_isolated python3 -c 'import os; print("KEY="+os.environ.get("CURSOR_API_KEY","")); print("SECRET="+os.environ.get("SECRET_TOKEN","")); print("HOME="+os.environ["HOME"]); print("TMP="+os.environ["TMPDIR"])'
-    `, { ...process.env, CURSOR_API_KEY: secret, SECRET_TOKEN: "super-secret" })
+      ISOLATE_SRC="$SRC" check_run_isolated python3 -c 'import os; print("KEY="+os.environ.get("CURSOR_API_KEY","")); print("SECRET="+os.environ.get("SECRET_TOKEN","")); print("HOME="+os.environ["HOME"]); print("TMP="+os.environ["TMPDIR"])'
+    `, { ...process.env, CURSOR_API_KEY: secret, SECRET_TOKEN: "super-secret", SRC: src })
+    fs.rmSync(src, { recursive: true, force: true })
     expect(result.status, result.stderr).toBe(0)
     const home = result.stdout.match(/^home (\S+)$/m)?.[1]
     expect(home).toBeTruthy()
     expect(result.stdout).toContain("KEY=")
     expect(result.stdout).not.toContain(secret)
     expect(result.stdout).not.toContain("super-secret")
-    expect(result.stdout).toContain(`HOME=${home}`)
+    expect(result.stdout).toContain("HOME=/home/reviewer")
+    expect(result.stdout).toContain("TMP=/tmp")
     expect(fs.existsSync(home!)).toBe(false)
+  })
+
+  it("hides host files and refuses to modify the trusted harness", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-boundary-"))
+    const src = path.join(directory, "src")
+    const secretFile = path.join(directory, "sentinel")
+    const harness = path.join(directory, "harness.txt")
+    fs.mkdirSync(src)
+    fs.writeFileSync(path.join(src, "file.txt"), "hello\n")
+    fs.writeFileSync(secretFile, "TOPSECRET\n", { mode: 0o600 })
+    fs.writeFileSync(harness, "CANARY\n")
+    fs.symlinkSync(secretFile, path.join(src, "escape"))
+    fs.writeFileSync(path.join(directory, "parent-secret"), "PARENTSECRET\n")
+    fs.symlinkSync("../parent-secret", path.join(src, "rel"))
+    const probe = path.join(src, "probe.py")
+    fs.writeFileSync(
+      probe,
+      `import pathlib, sys
+secret, harness, socket = sys.argv[1:]
+print("SRC="+pathlib.Path("/src/file.txt").read_text().strip())
+def attempt(label, fn):
+    try:
+        print(label + "=" + fn())
+    except Exception as error:
+        print(label + "_ERR=" + type(error).__name__)
+attempt("SECRET", lambda: pathlib.Path(secret).read_text())
+attempt("ESCAPE", lambda: pathlib.Path("/src/escape").read_text())
+attempt("REL", lambda: pathlib.Path("/src/rel").read_text())
+attempt("HARNESS", lambda: pathlib.Path(harness).write_text("PWNED\\n") or "ok")
+attempt("RO", lambda: pathlib.Path("/opt/harness/harness.txt").write_text("PWNED\\n") or "ok")
+print("WORKSPACE=" + str(pathlib.Path("/workspace").exists()))
+print("GIT=" + str(pathlib.Path("/src/.git").exists()))
+print("SOCKET=" + str(pathlib.Path(socket).exists()))
+`,
+    )
+    const socket = path.join(directory, "agent.sock")
+    const bound = spawnSync(selectedPython(), ["-c", "import socket,sys\ns=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])", socket])
+    expect(bound.status).toBe(0)
+    const marker = `isolate-host-only-${process.pid}`
+    let sleeper: ReturnType<typeof spawn> | undefined
+    try {
+      const result = run(
+        "bash",
+        [
+          "scripts/isolate-run.sh",
+          "--src",
+          src,
+          "--ro-bind",
+          `${directory}:/opt/harness`,
+          "--",
+          "python3",
+          "/src/probe.py",
+          secretFile,
+          harness,
+          socket,
+        ],
+        { env: { ...process.env, CURSOR_API_KEY: secret } },
+      )
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)
+      expect(result.stdout).toContain("SRC=hello")
+      expect(result.stdout).toContain("SECRET_ERR=FileNotFoundError")
+      expect(result.stdout).toContain("ESCAPE_ERR=FileNotFoundError")
+      expect(result.stdout).toContain("REL_ERR=FileNotFoundError")
+      expect(result.stdout).toContain("HARNESS_ERR=FileNotFoundError")
+      expect(result.stdout).toContain("RO_ERR=")
+      expect(result.stdout).toContain("WORKSPACE=False")
+      expect(result.stdout).toContain("GIT=False")
+      expect(result.stdout).toContain("SOCKET=False")
+      expect(result.stdout).not.toContain(secret)
+      expect(result.stdout).not.toContain("TOPSECRET")
+      expect(fs.readFileSync(harness, "utf8")).toBe("CANARY\n")
+      sleeper = spawn("bash", ["-c", `exec -a ${marker} sleep 30`], { detached: true, stdio: "ignore" })
+      sleeper.unref()
+      const seen = spawnSync("bash", ["-c", `ps -A -o args= | grep -F ${JSON.stringify(marker)} || true`], {
+        encoding: "utf8",
+      })
+      expect(seen.stdout).toContain(marker)
+      fs.writeFileSync(
+        path.join(src, "scan.py"),
+        `import os, pathlib
+marker = os.environ["MARKER"]
+found = False
+for child in pathlib.Path("/proc").iterdir():
+    if not child.name.isdigit():
+        continue
+    try:
+        raw = (child / "cmdline").read_bytes().decode("utf-8", "replace")
+    except Exception:
+        continue
+    if marker in raw:
+        found = True
+print("SAW=" + str(found))
+`,
+      )
+      const inside = run(
+        "bash",
+        ["scripts/isolate-run.sh", "--src", src, "--set", `MARKER=${marker}`, "--", "python3", "/src/scan.py"],
+      )
+      expect(inside.status, inside.stderr).toBe(0)
+      expect(inside.stdout).toContain("SAW=False")
+    } finally {
+      if (sleeper?.pid) spawnSync("kill", ["-KILL", String(sleeper.pid)])
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  }, 20000)
+
+  it("fails closed when the isolation mechanism is unavailable", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-no-unshare-"))
+    const bin = path.join(directory, "bin")
+    const src = path.join(directory, "src")
+    const marker = path.join(directory, "ran")
+    fs.mkdirSync(bin)
+    fs.mkdirSync(src)
+    fs.writeFileSync(path.join(bin, "uname"), "#!/bin/sh\necho Linux\n")
+    fs.writeFileSync(path.join(bin, "unshare"), "#!/bin/sh\nexit 1\n")
+    fs.chmodSync(path.join(bin, "uname"), 0o755)
+    fs.chmodSync(path.join(bin, "unshare"), 0o755)
+    try {
+      const result = run(
+        "bash",
+        ["scripts/isolate-run.sh", "--src", src, "--", "python3", "-c", `open(${JSON.stringify(marker)},"w").write("ran")`],
+        { env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` } },
+      )
+      expect(result.status).toBe(2)
+      expect(result.stderr).toContain("ISOLATION=unavailable")
+      expect(fs.existsSync(marker)).toBe(false)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
   })
 
   it("removes the worktree when the check exits early", () => {
@@ -483,4 +698,181 @@ exit 0
     expect(fs.readdirSync(base)).toEqual([])
     fs.rmSync(base, { recursive: true, force: true })
   })
+})
+
+describe("effective opencode permissions", () => {
+  it("denies env files, sibling temp directories, and symlink targets", () => {
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), "permission-order-"))
+    const directory = path.join(parent, "checkout")
+    const reviewHome = path.join(parent, "review-home")
+    const sibling = path.join(parent, "other-temp")
+    fs.mkdirSync(path.join(directory, "dist"), { recursive: true })
+    fs.mkdirSync(sibling)
+    fs.writeFileSync(path.join(directory, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(directory, "dist/plugin-opencode2.js"), "export default {}\n")
+    fs.writeFileSync(path.join(sibling, "secret.env"), "nope\n")
+    try {
+      const configured = run("bash", ["scripts/configure-opencode.sh"], {
+        env: { ...process.env, OPENCODE_CONFIG_ROOT: directory, OPENCODE_REVIEW_HOME: reviewHome },
+      })
+      expect(configured.status, configured.stderr).toBe(0)
+      const configPath = path.join(reviewHome, "config", "opencode2", "opencode.json")
+      const config = JSON.parse(fs.readFileSync(configPath, "utf8"))
+      expect(config.permission.external_directory["/tmp/*"]).toBeUndefined()
+      expect(Object.keys(config.permission.read)[0]).toBe("*")
+      expect(Object.keys(config.permission.read).at(-1)).toBe("*.env.example")
+      expect(Object.keys(config.permission.edit).at(-1)).toBe("*.env.example")
+      const decide = (action: string, resource: string) => {
+        const decided = run("bun", ["scripts/opencode-permission.mjs", configPath, action, resource])
+        expect(decided.status, `${action} ${resource}\n${decided.stderr}`).toBe(0)
+        return decided.stdout.trim()
+      }
+      for (const action of ["read", "edit"]) {
+        expect(decide(action, ".env")).toBe("deny")
+        expect(decide(action, "src/app/.env")).toBe("deny")
+        expect(decide(action, "credentials.env")).toBe("deny")
+        expect(decide(action, "env")).toBe("deny")
+        expect(decide(action, ".env.local")).toBe("deny")
+        expect(decide(action, "a/b/.env.local")).toBe("deny")
+        expect(decide(action, ".env.example")).toBe("allow")
+        expect(decide(action, "docs/.env.example")).toBe("allow")
+        expect(decide(action, "src/index.ts")).toBe("allow")
+      }
+      const owned = path.join(reviewHome, "tmp")
+      expect(decide("external_directory", `${sibling}/*`)).toBe("deny")
+      expect(decide("external_directory", `${owned}/*`)).toBe("allow")
+      const link = path.join(owned, "escape")
+      fs.symlinkSync(path.join(sibling, "secret.env"), link)
+      expect(decide("external_directory", `${path.dirname(fs.realpathSync(link))}/*`)).toBe("deny")
+      expect(decide("read", path.join(sibling, "secret.env"))).toBe("deny")
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  it("does not treat a shell-looking checkout path as a command", () => {
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), "configure-literal-"))
+    const marker = path.join(parent, "not-created")
+    const directory = path.join(parent, `dir with space ' ; $(touch ${marker})`)
+    fs.mkdirSync(path.join(directory, "dist"), { recursive: true })
+    fs.mkdirSync(path.join(directory, "scripts"))
+    fs.writeFileSync(path.join(directory, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(directory, "dist/plugin-opencode2.js"), "export default {}\n")
+    fs.copyFileSync(path.join(root, "scripts/configure-opencode.sh"), path.join(directory, "scripts/configure-opencode.sh"))
+    try {
+      const result = run("bash", [path.join(directory, "scripts/configure-opencode.sh")])
+      expect(result.status, result.stderr).toBe(0)
+      expect(fs.existsSync(marker)).toBe(false)
+      expect(fs.existsSync(path.join(directory, ".opencode-local/opencode.json"))).toBe(true)
+    } finally {
+      fs.rmSync(parent, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("live test deadlines and cleanup", () => {
+  it("reports a missing deadline command instead of a command-not-found failure", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "live-no-timeout-"))
+    const bin = path.join(directory, "bin")
+    const reviewHome = path.join(directory, "review-home")
+    fs.mkdirSync(bin)
+    fs.mkdirSync(path.join(directory, "dist"), { recursive: true })
+    fs.writeFileSync(path.join(directory, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(directory, "dist/plugin-opencode2.js"), "export default {}\n")
+    for (const dir of ["/usr/bin", "/bin"]) {
+      for (const name of fs.readdirSync(dir)) {
+        if (name === "timeout" || name === "gtimeout") continue
+        const dest = path.join(bin, name)
+        if (!fs.existsSync(dest)) fs.symlinkSync(path.join(dir, name), dest)
+      }
+    }
+    fs.writeFileSync(path.join(bin, "opencode"), "#!/bin/sh\necho should-not-run > \"$HOME/ran\"\nexit 0\n")
+    fs.chmodSync(path.join(bin, "opencode"), 0o755)
+    try {
+      const result = run("bash", ["scripts/live-test.sh"], {
+        env: {
+          ...process.env,
+          HOME: directory,
+          PATH: bin,
+          CURSOR_API_KEY: secret,
+          OPENCODE_CONFIG_ROOT: directory,
+          OPENCODE_REVIEW_HOME: reviewHome,
+          LIVE_TEST_TIMEOUT: "",
+        },
+      })
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1)
+      expect(`${result.stdout}${result.stderr}`).toContain("A deadline command is required")
+      expect(`${result.stdout}${result.stderr}`).not.toContain("command not found")
+      expect(fs.existsSync(path.join(directory, "ran"))).toBe(false)
+      const temps = fs.readdirSync(path.join(reviewHome, "tmp")).filter((name) => name.startsWith("tmp."))
+      expect(temps).toEqual([])
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("stops a short command at the adapter deadline", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "timeout-adapter-"))
+    const python = selectedPython()
+    const adapter = path.join(directory, "review-timeout")
+    writeTimeoutAdapter(adapter, python)
+    try {
+      const started = Date.now()
+      const result = spawnSync(adapter, ["1", "sleep", "30"], { encoding: "utf8" })
+      expect(result.status).toBe(124)
+      expect(Date.now() - started).toBeLessThan(5000)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("removes plugin-list files when the live test is cancelled", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "live-cancel-"))
+    const bin = path.join(directory, "bin")
+    const reviewHome = path.join(directory, "review-home")
+    const pidFile = path.join(directory, "sleep.pid")
+    const python = selectedPython()
+    fs.mkdirSync(bin)
+    fs.mkdirSync(path.join(directory, "dist"), { recursive: true })
+    fs.writeFileSync(path.join(directory, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(directory, "dist/plugin-opencode2.js"), "export default {}\n")
+    writeTimeoutAdapter(path.join(bin, "review-timeout"), python)
+    fs.writeFileSync(path.join(bin, "opencode"), `#!/bin/sh\necho $$ > ${JSON.stringify(pidFile)}\nsleep 60\n`)
+    fs.chmodSync(path.join(bin, "opencode"), 0o755)
+    const child = spawn("bash", ["scripts/live-test.sh"], {
+      cwd: root,
+      env: {
+        ...process.env,
+        HOME: directory,
+        PATH: `${bin}:/usr/bin:/bin`,
+        CURSOR_API_KEY: secret,
+        OPENCODE_CONFIG_ROOT: directory,
+        OPENCODE_REVIEW_HOME: reviewHome,
+        LIVE_TEST_TIMEOUT: path.join(bin, "review-timeout"),
+        LIVE_TEST_PYTHON: python,
+      },
+    })
+    const started = Date.now()
+    const pause = () => new Promise((resolve) => setTimeout(resolve, 50))
+    try {
+      while (!fs.existsSync(pidFile)) {
+        if (Date.now() - started > 8000) throw new Error("plugin list did not start")
+        await pause()
+      }
+      child.kill("SIGTERM")
+      const killed = Date.now()
+      while (child.exitCode === null && child.signalCode === null) {
+        if (Date.now() - killed > 8000) throw new Error("live test did not exit after SIGTERM")
+        await pause()
+      }
+      const temps = fs.readdirSync(path.join(reviewHome, "tmp")).filter((name) => name.startsWith("tmp."))
+      expect(temps).toEqual([])
+      const sleeperAlive = spawnSync("kill", ["-0", fs.readFileSync(pidFile, "utf8").trim()])
+      expect(sleeperAlive.status).not.toBe(0)
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+      if (fs.existsSync(pidFile)) spawnSync("kill", ["-KILL", fs.readFileSync(pidFile, "utf8").trim()])
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  }, 20000)
 })
