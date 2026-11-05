@@ -33,14 +33,14 @@ Cite `file:line`. State the concrete consequence. Confirm the finding is in the 
 ## Nits
 
 Naming, comments, and minor style. Report at most five. Severity does not exempt
-a Greptile finding from the [contribution review requirements](../CONTRIBUTING.md#review-and-coverage-requirements).
+a Greptile or Cursor review finding from the [contribution review requirements](../CONTRIBUTING.md#review-and-coverage-requirements).
 
 ## Evidence
 
 Runtime, authentication, model selection, tools, transport, and session lifecycle changes need evidence from the affected behavior. Unit tests are separate from a live host check. For CreatePlan, SwitchMode, tool-catalog caching, and the host boundary, [docs/host-compat-acceptance.md](host-compat-acceptance.md) is the checklist. Docs-only, test-only, and comment-only changes do not need a live run.
 
 Required CI is `Typecheck, test, build`. A failing or pending required check is not ready.
-Before declaring a PR ready, also apply the [Greptile and Codecov requirements](../CONTRIBUTING.md#review-and-coverage-requirements).
+Before declaring a PR ready, also apply the [review and coverage requirements](../CONTRIBUTING.md#review-and-coverage-requirements). Greptile comments, Cursor review comments, and Codecov deficiencies all count.
 
 Protocol fixture tests must use independent wire bytes or a public vendor definition.
 
