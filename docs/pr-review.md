@@ -22,7 +22,7 @@ Stop. Do not post, approve, or merge. An incomplete result is not a finished rev
 
 The payload is a JSON object: `owner`, `repo`, `pull`, `base`, `head`, `runtime` (`linux`), `event` (`COMMENT` only), `body`, and `comments`. Each comment has a repository-relative `path`, the diff `line`, `side` (`LEFT` or `RIGHT`), and `body`. Say the severity, the rule, and the consequence. Put a clean review's summary in `body` with an empty `comments` array. A comment that is not on the current diff goes in the summary. The public text uses repository-relative paths or public URLs. It does not include secret values, local paths (including `~/...`), session ids, usernames as local identity, hostnames, or account or billing details, including Greptile credit. Naming a public identifier such as `CURSOR_API_KEY` or `copilot.totalNanoAiu` is allowed. A regex cannot see every identity leak; the maintainer still reads the preview.
 
-Write the review as a result, then render it. The result records the same repository, pull request, base, head, and `linux` runtime. `outcome` is `findings`, `clean`, or `incomplete`. Each check has a name, a status (`passed`, `failed`, `skipped`, or `unavailable`), and a detail. A finding has a stable id, a rule id from `.greptile/config.json` or `blocker` / `important` / `nit` from the review rules, that rule's severity, a title, an explanation, a trigger, a consequence, and `evidence` of `reproduced`, `source`, or `unverified`. `diff` lists the path, line, and side verified in the current diff. A comment is emitted only for a finding at one of those locations. Other findings stay in the summary. `prior` classifies an earlier finding as `still_present`, `fixed`, `regressed`, or `unverified`. A clean result cannot leave one unresolved, and a fixed id cannot reappear as a current finding. At most five `low` findings are included. `mutations` are proposed replies or resolutions. They are shown in the preview and are not sent.
+Write the review as a result, then render it. The result records the same repository, pull request, base, head, and `linux` runtime. `outcome` is `findings`, `clean`, or `incomplete`. Each check has a name, a status (`passed`, `failed`, `skipped`, or `unavailable`), and a detail. A finding has a stable id, a rule id from `.greptile/config.json` or `blocker` / `important` / `nit` from the review rules, that rule's severity, a title, an explanation, a trigger, a consequence, and `evidence` of `reproduced`, `source`, or `unverified`. `diff` lists the path, line, and side verified in the current diff. A comment is emitted only for a finding at one of those locations. Other findings stay in the summary. `prior` classifies an earlier finding as `still_present`, `fixed`, `refuted`, `regressed`, or `unverified`. A clean result cannot leave one unresolved, and fixed or refuted ids cannot reappear as current findings. At most five `low` findings are included. `mutations` are included in the approved preview: `resolve` actions are sent after the submitted review is confirmed; `reply` actions remain proposals and are not sent.
 
 `bind` reads the pull request and records its base and head. When the result file already has a different revision, `bind` stops and leaves the file unchanged. `render` checks the result and writes the payload. `REVIEW_OUTCOME=incomplete` means the analysis did not reach a defensible review: the diff was unreadable, a tool was unavailable, or the result is malformed. That file can be read and cannot be stamped or posted. Rendering is not publication. Showing the preview is not approval. Approval is not a merge.
 
@@ -95,6 +95,57 @@ preview. Readback checks do not authorize additional GitHub mutations.
 ```bash
 python3 scripts/review-publish.py deny approval.json
 ```
+
+## Re-review and thread resolution
+
+Read all review threads and their replies, including outdated anchors, before
+classifying earlier findings. The private inventory includes complete paginated
+discussions and a digest of their comment ids, URLs, bodies, and edit timestamps:
+
+```bash
+python3 scripts/review-publish.py threads owner repo 156 > threads.json
+```
+
+Follow the skill's re-review procedure. Verify the current code and relevant
+tests rather than treating a maintainer's response as proof. In `prior`, use
+the original comment URL as `source` and a stable finding id. A verified repair
+is `fixed`; an independently disproved finding is `refuted`. Explain a
+refutation in `note`, correcting the earlier claim. Both may resolve a thread;
+`still_present`, `regressed`, and `unverified` may not.
+
+For each addressed inline finding, `mutations` requires an action like:
+
+```json
+{
+  "action": "resolve",
+  "finding": "earlier-finding-id",
+  "thread": "PRRT_thread-id-from-inventory",
+  "snapshot": "64-character-discussion-digest-from-inventory",
+  "body": "Why the earlier finding is addressed at this head.",
+  "evidence": "Repository-relative source and regression locations."
+}
+```
+
+Render, show, and obtain approval of the exact payload as above. The approval
+covers the listed resolutions and their evidence. `post` refuses a structured
+re-review that omits an open thread, verifies each resolution's original comment
+and PR membership, and checks that the discussion still matches the snapshot.
+Only after a confirmed COMMENT review does it resolve the approved threads with
+the App, using GitHub's [resolveReviewThread mutation](https://docs.github.com/en/graphql/reference/pulls#resolvereviewthread).
+It checks the head, base, and pinned approval before each action, requires the
+correct returned thread id, and reads back `isResolved: true` before printing
+`THREAD_RESOLVED=<id>`. Outdated status alone never causes resolution.
+
+A new reply, an edited comment, a moved revision, or a replaced/denied approval
+stops further thread actions. GitHub provides no atomic discussion/head check
+with resolution, so a change after the final reads can still race the send.
+If the review was submitted but an action failed, report that partial result;
+do not call the re-review finished. Retrying `post` reuses its review receipt.
+It confirms already-resolved threads without sending again, retries a proven
+HTTP rejection after the grant is corrected, and never blindly resends an
+ambiguous mutation or re-resolves a thread reopened after a confirmed action.
+Those cases require renewed analysis and a changed preview. No thread is
+resolved before approval, and replies are not automatically posted.
 
 ## Configure and live test
 

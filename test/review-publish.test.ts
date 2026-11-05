@@ -190,6 +190,49 @@ note_key()
 with (state / "calls").open("a", encoding="utf-8") as handle:
     handle.write(method + " " + endpoint + "\\n")
 token = os.environ.get("GH_TOKEN", "")
+if endpoint == "graphql":
+    request = json.load(sys.stdin)
+    query = request["query"]
+    variables = request["variables"]
+    threads_path = state / "threads.json"
+    threads = json.loads(threads_path.read_text()) if threads_path.exists() else []
+    if "mutation ResolveThread" in query:
+        if token != "ghs_testinstallationtoken":
+            sys.stderr.write("HTTP 403\\n")
+            raise SystemExit(1)
+        with (state / "resolves").open("a") as handle:
+            handle.write(variables["id"] + "\\n")
+        if os.environ.get("GH_RESOLVE_FORBIDDEN") == "1" or os.environ.get("GH_RESOLVE_FORBIDDEN_THREAD") == variables["id"]:
+            sys.stderr.write("HTTP 403\\n")
+            raise SystemExit(1)
+        thread = next(item for item in threads if item["id"] == variables["id"])
+        if os.environ.get("GH_RESOLVE_UNKNOWN") != "1" or os.environ.get("GH_RESOLVE_COMMIT") == "1":
+            thread["isResolved"] = True
+            threads_path.write_text(json.dumps(threads))
+        if os.environ.get("GH_RESOLVE_UNKNOWN") == "1":
+            sys.stderr.write("connection reset\\n")
+            raise SystemExit(1)
+        receipt = {"id": thread["id"], "isResolved": thread["isResolved"]}
+        if os.environ.get("GH_RESOLVE_WRONG_RECEIPT") == "1": receipt["id"] = "PRRT_other"
+        if os.environ.get("GH_RESOLVE_NOT_APPLIED") == "1":
+            thread["isResolved"] = False
+            threads_path.write_text(json.dumps(threads))
+        json.dump({"data": {"resolveReviewThread": {"thread": receipt}}}, sys.stdout)
+        raise SystemExit(0)
+    start = int(variables.get("cursor") or "0")
+    size = int(os.environ.get("GH_THREAD_PAGE_SIZE", "100"))
+    if "query ReviewThreads(" in query:
+        selected = threads[start:start + size]
+        connection = {"nodes": [{"id": item["id"]} for item in selected], "pageInfo": {"hasNextPage": start + size < len(threads), "endCursor": str(start + size)}}
+        json.dump({"data": {"repository": {"pullRequest": {"reviewThreads": connection}}}}, sys.stdout)
+    else:
+        thread = next((item for item in threads if item["id"] == variables["id"]), None)
+        if thread is not None:
+            thread = dict(thread)
+            comments = thread["comments"]
+            thread["comments"] = {"nodes": comments[start:start + size], "pageInfo": {"hasNextPage": start + size < len(comments), "endCursor": str(start + size)}}
+        json.dump({"data": {"node": thread}}, sys.stdout)
+    raise SystemExit(0)
 if endpoint.startswith("app/installations/") and endpoint.endswith("/access_tokens"):
     if os.environ.get("GH_MINT_FAIL") == "1":
         sys.stderr.write("HTTP 401 Bad credentials\\n")
@@ -268,6 +311,19 @@ if method == "POST":
     comments.extend(rows)
     reviews_path.write_text(json.dumps(reviews), encoding="utf-8")
     comments_path.write_text(json.dumps(comments), encoding="utf-8")
+    after = os.environ.get("GH_AFTER_REVIEW")
+    if after == "reply":
+        threads_path = state / "threads.json"
+        threads = json.loads(threads_path.read_text())
+        threads[0]["comments"].append({"id":"new-reply", "url":threads[0]["comments"][0]["url"] + "-reply", "body":"New evidence after approval", "updatedAt":"2026-01-02T00:00:00Z"})
+        threads_path.write_text(json.dumps(threads))
+    if after == "head": (state / "head").write_text("c" * 40)
+    if after == "deny": Path(os.environ["GH_APPROVAL_PATH"]).write_text(json.dumps({"decision":"deny"}))
+    if after == "replacement":
+        approval_path = Path(os.environ["GH_APPROVAL_PATH"])
+        approval_record = json.loads(approval_path.read_text())
+        approval_record["generation"] += 1
+        approval_path.write_text(json.dumps(approval_record))
     json.dump(review, sys.stdout)
     raise SystemExit(0)
 def dump(page):
@@ -1311,7 +1367,7 @@ describe("review publication", () => {
       expect(body.body).toContain("Location: scripts/isolated-check.sh:4 RIGHT")
       expect(body.body).toContain("Earlier findings:")
       expect(body.body).toContain("old-lock (discussion_r10): fixed.")
-      expect(body.body).toContain("Proposed GitHub actions, not performed:")
+      expect(body.body).toContain("GitHub actions after approval (replies remain proposals):")
       expect(callsOf(state)).toEqual([])
       const again = run(["render", source, path.join(directory, "second.json")], env)
       expect(fs.readFileSync(payload, "utf8")).toBe(fs.readFileSync(path.join(directory, "second.json"), "utf8"))
@@ -1457,6 +1513,7 @@ describe("review publication", () => {
       'python3 scripts/review-publish.py approve payload.json approval.json "$PREVIEW_SHA256"',
       "python3 scripts/review-publish.py post payload.json approval.json",
       "python3 scripts/review-publish.py deny approval.json",
+      "python3 scripts/review-publish.py threads owner repo 156 > threads.json",
     ])
     const { directory, bin, state } = freshReview("review-documented-")
     const review = path.join(directory, "review.json")
@@ -1496,6 +1553,7 @@ describe("review publication", () => {
       expect(stored[0]?.request.comments[0]?.path).toBe("scripts/review-publish.py")
       expect(stored[0]?.request.comments[0]?.body).toContain("High: Replacement approval is sent to the locked pull request")
       expect(callsOf(state).filter((line) => line.startsWith("POST "))).toEqual([
+        "POST graphql",
         "POST app/installations/67890/access_tokens",
         "POST repos/oakimov/cursor-opencode-provider/pulls/156/reviews",
       ])
@@ -1712,3 +1770,218 @@ function structuredResult(overrides: Record<string, unknown> = {}) {
     ...overrides,
   }
 }
+
+function resolutionDraft(fixture: ReturnType<typeof freshReview>, statuses = ["fixed"], extra: NodeJS.ProcessEnv = {}) {
+  const { directory, payload, bin, state } = fixture
+  const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, ...extra }
+  const threads = statuses.map((_, index) => ({
+    id: `PRRT_fixture${index}`,
+    isResolved: false,
+    pullRequest: { number: 156, repository: { nameWithOwner: "oakimov/cursor-opencode-provider" } },
+    comments: [
+      { id: `original-${index}`, url: `https://github.com/oakimov/cursor-opencode-provider/pull/156#discussion_r${10 + index}`, body: "Earlier review finding", updatedAt: "2026-01-01T00:00:00Z" },
+      { id: `reply-${index}`, url: `https://github.com/oakimov/cursor-opencode-provider/pull/156#discussion_r${20 + index}`, body: "The author says this is addressed; verify the current code.", updatedAt: "2026-01-02T00:00:00Z" },
+    ],
+  }))
+  fs.writeFileSync(path.join(state, "threads.json"), JSON.stringify(threads))
+  const inventory = run(["threads", "oakimov", "cursor-opencode-provider", "156"], env)
+  expect(inventory.status, inventory.stderr).toBe(0)
+  const snapshots = JSON.parse(inventory.stdout) as { head: string; threads: Array<{ id: string; snapshot: string; comments: unknown[] }> }
+  expect(snapshots.head).toBe(head)
+  expect(snapshots.threads.map((item) => item.comments.length)).toEqual(statuses.map(() => 2))
+  const result = structuredResult({
+    outcome: "clean", findings: [],
+    prior: statuses.map((status, index) => ({ id: `earlier-${index}`, status, source: threads[index]!.comments[0]!.url, note: "Verified the current branch against its contract and regression test." })),
+    mutations: statuses.map((_, index) => ({
+      action: "resolve", thread: threads[index]!.id, finding: `earlier-${index}`,
+      snapshot: snapshots.threads[index]!.snapshot,
+      body: "The earlier finding is addressed at the reviewed head.",
+      evidence: "scripts/review-publish.py:1; test/review-publish.test.ts:1",
+    })),
+  })
+  const source = path.join(directory, "result.json")
+  fs.writeFileSync(source, JSON.stringify(result))
+  const rendered = run(["render", source, payload], env)
+  expect(rendered.status, rendered.stderr).toBe(0)
+  expect(run(["stamp", payload], env).status).toBe(0)
+  return { env, result, source, threads }
+}
+
+function resolutionsOf(state: string): string[] {
+  const file = path.join(state, "resolves")
+  return fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean) : []
+}
+
+describe("review thread resolution", () => {
+  it("reads all replies and pages, then resolves only approved fixed or refuted findings as the App", () => {
+    const fixture = freshReview("review-resolve-")
+    const { directory, payload, approval, state } = fixture
+    try {
+      const { env } = resolutionDraft(fixture, ["fixed", "refuted"], { GH_THREAD_PAGE_SIZE: "1" })
+      const before = callsOf(state)
+      expect(run(["post", payload, approval], env).status).toBe(4)
+      expect(callsOf(state)).toEqual(before)
+      expect(postsOf(state)).toBe(0)
+      expect(resolutionsOf(state)).toEqual([])
+      expect(approve(payload, approval, env).status).toBe(0)
+      const posted = run(["post", payload, approval], env)
+      expect(posted.status, posted.stderr).toBe(0)
+      expect(posted.stdout).toContain("REVIEW_URL=")
+      expect(posted.stdout).toContain("THREAD_RESOLVED=PRRT_fixture0")
+      expect(posted.stdout).toContain("THREAD_RESOLVED=PRRT_fixture1")
+      expect(resolutionsOf(state)).toEqual(["PRRT_fixture0", "PRRT_fixture1"])
+      const visible = JSON.parse(fs.readFileSync(path.join(state, "threads.json"), "utf8")) as Array<{ isResolved: boolean }>
+      expect(visible.every((thread) => thread.isResolved)).toBe(true)
+      expect(checkpointText(directory)).toContain('"resolutions"')
+      expect(run(["post", payload, approval], env).status).toBe(0)
+      expect(postsOf(state)).toBe(1)
+      expect(resolutionsOf(state)).toHaveLength(2)
+      // Reopening by a human is not undone by a retry of the old approval.
+      visible[0]!.isResolved = false
+      fs.writeFileSync(path.join(state, "threads.json"), JSON.stringify(visible))
+      expect(run(["post", payload, approval], env).status).not.toBe(0)
+      expect(resolutionsOf(state)).toHaveLength(2)
+      expect(fs.readFileSync(path.join(state, "saw-app-key"), "utf8")).toBe("0")
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  }, 20000)
+
+  it("requires a resolution for an addressed inline finding and refuses unresolved or mismatched actions", () => {
+    const fixture = freshReview("review-resolution-schema-")
+    const { directory, payload, state } = fixture
+    try {
+      const { env, source, threads } = resolutionDraft(fixture)
+      const original = JSON.parse(fs.readFileSync(source, "utf8")) as Record<string, unknown>
+      const action = { action: "resolve", thread: threads[0]!.id, finding: "earlier-0", snapshot: "a".repeat(64), body: "Addressed", evidence: "test/review-publish.test.ts:1" }
+      const previous = { id: "earlier-0", status: "fixed", source: threads[0]!.comments[0]!.url, note: "Verified in the current head." }
+      for (const change of [
+        { mutations: [] },
+        { prior: [{ ...previous, status: "unverified" }], mutations: [action] },
+        { prior: [{ ...previous, status: "still_present" }], mutations: [action] },
+        { mutations: [{ ...action, finding: "another-finding" }] },
+        { mutations: [{ ...action, snapshot: "not-a-snapshot" }] },
+        { mutations: [action, action] },
+      ]) {
+        fs.writeFileSync(source, JSON.stringify({ ...original, ...change }))
+        expect(run(["render", source, payload], env).status).toBe(2)
+      }
+      expect(postsOf(state)).toBe(0)
+      expect(resolutionsOf(state)).toEqual([])
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("refuses a re-review that omits an open earlier thread", () => {
+    const fixture = freshReview("review-thread-omission-")
+    const { directory, payload, approval, state } = fixture
+    try {
+      const { env, source } = resolutionDraft(fixture)
+      fs.writeFileSync(source, JSON.stringify(structuredResult({ outcome: "clean", findings: [], prior: [], mutations: [] })))
+      expect(run(["render", source, payload], env).status).toBe(0)
+      expect(run(["stamp", payload], env).status).toBe(0)
+      expect(approve(payload, approval, env).status).toBe(0)
+      const posted = run(["post", payload, approval], env)
+      expect(posted.status).not.toBe(0)
+      expect(posted.stderr).toContain("not classified")
+      expect(postsOf(state)).toBe(0)
+      expect(resolutionsOf(state)).toEqual([])
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects changed discussion, a different source comment, or a thread on another PR before posting", () => {
+    for (const change of ["reply", "source", "target"] as const) {
+      const fixture = freshReview("review-stale-thread-")
+      const { directory, payload, approval, state } = fixture
+      try {
+        const { env, threads } = resolutionDraft(fixture)
+        expect(approve(payload, approval, env).status).toBe(0)
+        if (change === "reply") threads[0]!.comments[1]!.body = "New evidence needs re-review."
+        if (change === "source") threads[0]!.comments[0]!.url += "-different"
+        if (change === "target") threads[0]!.pullRequest.number = 157
+        fs.writeFileSync(path.join(state, "threads.json"), JSON.stringify(threads))
+        expect(run(["post", payload, approval], env).status).not.toBe(0)
+        expect(postsOf(state)).toBe(0)
+        expect(resolutionsOf(state)).toEqual([])
+      } finally {
+        fs.rmSync(directory, { recursive: true, force: true })
+      }
+    }
+  }, 20000)
+
+  it("stops thread actions if the head, replies, denial, or approval changes after the review is submitted", () => {
+    for (const after of ["reply", "head", "deny", "replacement"]) {
+      const fixture = freshReview("review-thread-race-")
+      const { directory, payload, approval, state } = fixture
+      try {
+        const { env } = resolutionDraft(fixture)
+        expect(approve(payload, approval, env).status).toBe(0)
+        const posted = run(["post", payload, approval], { ...env, GH_AFTER_REVIEW: after, GH_APPROVAL_PATH: approval })
+        expect(posted.status, after).not.toBe(0)
+        expect(postsOf(state)).toBe(1)
+        expect(resolutionsOf(state)).toEqual([])
+        expect(posted.stdout).not.toContain("THREAD_RESOLVED=")
+      } finally {
+        fs.rmSync(directory, { recursive: true, force: true })
+      }
+    }
+  }, 20000)
+
+  it("keeps the review receipt on a rejected resolution and safely retries the rejected action", () => {
+    const fixture = freshReview("review-resolve-forbidden-")
+    const { directory, payload, approval, state } = fixture
+    try {
+      const { env } = resolutionDraft(fixture, ["fixed", "refuted"])
+      expect(approve(payload, approval, env).status).toBe(0)
+      const rejected = run(["post", payload, approval], { ...env, GH_RESOLVE_FORBIDDEN_THREAD: "PRRT_fixture1" })
+      expect(rejected.status).not.toBe(0)
+      expect(rejected.stdout).toContain("REVIEW_URL=")
+      expect(rejected.stdout).toContain("THREAD_RESOLVED=PRRT_fixture0")
+      expect(rejected.stdout).not.toContain("THREAD_RESOLVED=PRRT_fixture1")
+      expect(checkpointText(directory)).toContain('"state": "posted"')
+      expect(checkpointText(directory)).toContain('"state": "rejected"')
+      expect(run(["post", payload, approval], env).status).toBe(0)
+      expect(postsOf(state)).toBe(1)
+      expect(resolutionsOf(state)).toEqual(["PRRT_fixture0", "PRRT_fixture1", "PRRT_fixture1"])
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("confirms visible ambiguous resolutions on retry and never blindly repeats an unconfirmed mutation", () => {
+    for (const committed of [false, true]) {
+      const fixture = freshReview("review-resolution-unknown-")
+      const { directory, payload, approval, state } = fixture
+      try {
+        const { env } = resolutionDraft(fixture)
+        expect(approve(payload, approval, env).status).toBe(0)
+        expect(run(["post", payload, approval], { ...env, GH_RESOLVE_UNKNOWN: "1", GH_RESOLVE_COMMIT: committed ? "1" : "0" }).status).not.toBe(0)
+        const retried = run(["post", payload, approval], env)
+        expect(retried.status === 0).toBe(committed)
+        expect(resolutionsOf(state)).toHaveLength(1)
+        expect(postsOf(state)).toBe(1)
+      } finally {
+        fs.rmSync(directory, { recursive: true, force: true })
+      }
+    }
+  }, 20000)
+
+  it("requires both a matching mutation receipt and resolved readback", () => {
+    for (const flag of ["GH_RESOLVE_WRONG_RECEIPT", "GH_RESOLVE_NOT_APPLIED"]) {
+      const fixture = freshReview("review-resolution-receipt-")
+      const { directory, payload, approval, state } = fixture
+      try {
+        const { env } = resolutionDraft(fixture)
+        expect(approve(payload, approval, env).status).toBe(0)
+        const sent = run(["post", payload, approval], { ...env, [flag]: "1" })
+        expect(sent.status).not.toBe(0)
+        expect(sent.stdout).not.toContain("THREAD_RESOLVED=")
+      } finally {
+        fs.rmSync(directory, { recursive: true, force: true })
+      }
+    }
+  }, 20000)
+})

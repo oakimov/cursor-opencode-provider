@@ -436,6 +436,12 @@ Changes listed under [Unreleased](CHANGELOG.md#unreleased) describe the developm
 
 Manual Cloud Agent reviews publish through the configured GitHub App after exact-preview approval. See the [App publisher setup](docs/pr-review.md#github-app-publisher) for `REVIEW_APP_ID`, the private key and optional installation ID. Tokens are restricted to this repository and review-write permission; `review-publish.py auth-info` reports configuration without printing secrets. Reviews use the App's bot identity, with no automatic review trigger.
 
+Re-reviews verify earlier threads and replies, and resolve fixed or refuted
+findings through the App after approval of the listed actions. The publisher
+checks the discussion and revision again and confirms resolved readback; a
+summary or an author reply alone does not close a thread. See the
+[re-review procedure](docs/pr-review.md#re-review-and-thread-resolution).
+
 ```bash
 bun install          # install dependencies
 bun run build        # compile TypeScript → dist/

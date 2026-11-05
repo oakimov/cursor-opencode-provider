@@ -742,7 +742,11 @@ These are failure lessons shared by both hosts, not a replacement for
   the exact review marker without being a submitted review or creating inline
   threads. Require a review-specific URL for the returned id and read back its
   comments; do not fall back to a comment tool when publication is unavailable
-  (`test/review-publish.test.ts`).
+  (`test/review-publish.test.ts`). A proposed resolution in a summary does not
+  close its thread. Re-review the complete discussion against the current
+  head, bind each approved resolution to that discussion, and require actual
+  resolved readback. Preserve the review receipt across partial thread-action
+  failures; neither an outdated anchor nor an author's reply proves a repair.
 - **App permissions are not a VM token's effective permissions.** A repository
   read succeeded while the COMMENT review endpoint rejected the sandbox
   credential with HTTP 403. A declared App grant does not prove that token's

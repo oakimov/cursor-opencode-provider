@@ -125,6 +125,30 @@ incomplete outcome. `skipped` is only for a justified docs or comment-only
 diff, with a reason. That status attests that the passes were done. It is not
 machine proof of semantic correctness.
 
+## Re-review earlier threads
+
+Read every earlier review thread and all replies using
+`python3 scripts/review-publish.py threads <owner> <repo> <pull>`. Keep that
+inventory private. Recheck each open thread against the bound head, including
+outdated threads and adjacent unchanged consumers. An author's reply is a
+claim to verify, and an outdated diff anchor does not mean the defect is fixed.
+
+Classify every open thread in `prior`, using its original comment URL as
+`source`. Keep `still_present` and `regressed` findings actionable; leave an
+unverified claim open. Use `fixed` for a verified repair. Use `refuted` when the
+original finding is disproved by the contract and code, explaining the error
+in the review's earlier-findings summary. A disagreement alone is not proof.
+Apply the same standard to Greptile and Cursor findings.
+
+For each fixed or refuted inline finding, add a `resolve` action with the prior
+finding id, thread id and discussion `snapshot` from that inventory, plus the
+reason and source/test evidence. Include those actions in the exact preview.
+After approval, `post` submits the review and resolves those threads through
+the App. Confirm every `THREAD_RESOLVED` receipt. Do not claim resolution from
+a posted summary, a reply, or a proposed action. If any action fails, report
+the submitted review and remaining thread actions separately. Do not send
+direct mutations outside the publisher or resolve threads before approval.
+
 ## Checks
 
 For every pull request, run the isolated check. It fetches that revision, copies it with `git archive`, and removes the copy on every exit path:

@@ -23,6 +23,9 @@ another. render checks a structured result and writes the COMMENT payload.
 approve and post take that payload file, the same file show froze.
 bind records the pull request's base and head. An incomplete result is
 not published. post keeps the returned ids.
+Structured re-reviews classify every open thread. Approved fixed/refuted
+thread actions run only after a confirmed review, with discussion snapshots,
+revision/approval checks, and resolved readback. Replies remain proposals.
 """
 
 from __future__ import annotations
@@ -145,7 +148,9 @@ FINDING_KEYS = {
 }
 OUTCOMES = {"findings", "clean", "incomplete"}
 CHECK_STATUS = {"passed", "failed", "skipped", "unavailable"}
-PRIOR_STATUS = {"still_present", "fixed", "regressed", "unverified"}
+PRIOR_STATUS = {"still_present", "fixed", "refuted", "regressed", "unverified"}
+RESOLVED_STATUS = {"fixed", "refuted"}
+THREAD_ID = re.compile(r"^PRRT_[A-Za-z0-9_-]+$")
 EVIDENCE = {"reproduced", "source", "unverified"}
 SEVERITY_LABEL = {"high": "High", "medium": "Medium", "low": "Low"}
 TOKEN = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -342,23 +347,48 @@ def validate_result(result: dict) -> list[str]:
             present = isinstance(identifier, str) and identifier in finding_ids
             if status in {"still_present", "regressed"} and not present:
                 problems.append(f"prior[{index}].status")
-            if status in {"fixed", "unverified"} and present:
+            if status in {*RESOLVED_STATUS, "unverified"} and present:
                 problems.append(f"prior[{index}].status")
     mutations = result.get("mutations")
     if not isinstance(mutations, list):
         problems.append("mutations")
     else:
+        resolved_prior: set[str] = set()
+        resolved_threads: set[str] = set()
         for index, item in enumerate(mutations):
-            if not isinstance(item, dict) or set(item) != {"action", "thread", "body", "evidence"}:
+            if not isinstance(item, dict):
                 problems.append(f"mutations[{index}]")
                 continue
+            keys = {"action", "thread", "body", "evidence"}
+            if item.get("action") == "resolve":
+                keys |= {"finding", "snapshot"}
+            if set(item) != keys:
+                problems.append(f"mutations[{index}]")
             if item.get("action") not in {"reply", "resolve"}:
                 problems.append(f"mutations[{index}].action")
             if not text_field(item.get("thread")) or not text_field(item.get("body")) or not text_field(item.get("evidence")):
                 problems.append(f"mutations[{index}]")
+            if item.get("action") == "resolve":
+                identifier = item.get("finding")
+                thread = item.get("thread")
+                previous = next((old for old in prior if isinstance(old, dict) and old.get("id") == identifier), None)
+                if not isinstance(identifier, str) or identifier in resolved_prior or not previous or previous.get("status") not in RESOLVED_STATUS:
+                    problems.append(f"mutations[{index}].finding")
+                else:
+                    resolved_prior.add(identifier)
+                if not isinstance(thread, str) or not THREAD_ID.fullmatch(thread) or thread in resolved_threads:
+                    problems.append(f"mutations[{index}].thread")
+                else:
+                    resolved_threads.add(thread)
+                if not isinstance(item.get("snapshot"), str) or not DIGEST.fullmatch(item["snapshot"]):
+                    problems.append(f"mutations[{index}].snapshot")
+        for index, item in enumerate(prior):
+            if isinstance(item, dict) and item.get("status") in RESOLVED_STATUS and isinstance(item.get("source"), str):
+                if "#discussion_r" in item["source"] and item.get("id") not in resolved_prior:
+                    problems.append(f"prior[{index}].resolution")
     if outcome == "clean" and (
         findings
-        or any(item.get("status") != "fixed" for item in prior if isinstance(item, dict))
+        or any(item.get("status") not in RESOLVED_STATUS for item in prior if isinstance(item, dict))
         or any(check.get("status") in {"failed", "unavailable"} for check in checks if isinstance(check, dict))
         or diff_status != "passed"
     ):
@@ -430,9 +460,11 @@ def public_review(result: dict) -> tuple[str, list[dict]]:
         for item in result["prior"]:
             lines.append(f"- {item['id']} ({item['source'].strip()}): {item['status']}. {item['note'].strip()}")
     if result["mutations"]:
-        lines.extend(["", "Proposed GitHub actions, not performed:"])
+        lines.extend(["", "GitHub actions after approval (replies remain proposals):"])
         for item in result["mutations"]:
             lines.append(f"- {item['action']} {item['thread'].strip()}: {item['body'].strip()}")
+            if item["action"] == "resolve":
+                lines.append(f"  Evidence: {item['evidence'].strip()}")
     lines.extend([
         "",
         f"Runtime: {result['runtime']}.",
@@ -810,6 +842,164 @@ def comments_of(owner: str, repo: str, pull: int) -> list[dict]:
     return gh_pages(f"repos/{owner}/{repo}/pulls/{pull}/comments")
 
 
+def graphql(query: str, variables: dict, token: str | None = None) -> dict:
+    code, raw, detail = gh_api("POST", "graphql", {"query": query, "variables": variables}, token=token)
+    response = json_object(raw)
+    if code or response is None or response.get("errors") or not isinstance(response.get("data"), dict):
+        print("GitHub thread request failed; thread completion is unconfirmed.", file=sys.stderr)
+        if detail:
+            print(redact_secret(detail.decode("utf-8", errors="replace")), file=sys.stderr)
+        raise SystemExit(4 if code and PROVEN_REJECTION.search(detail.decode("utf-8", errors="replace")) else 1)
+    return response["data"]
+
+
+def next_cursor(connection: dict, previous: object) -> str | None:
+    page = connection.get("pageInfo")
+    if not isinstance(page, dict) or not isinstance(page.get("hasNextPage"), bool):
+        raise SystemExit("GitHub thread pagination is unreadable.")
+    if not page["hasNextPage"]:
+        return None
+    cursor = page.get("endCursor")
+    if not isinstance(cursor, str) or not cursor or cursor == previous:
+        raise SystemExit("GitHub thread pagination is incomplete.")
+    return cursor
+
+
+def read_thread(owner: str, repo: str, pull: int, identifier: str, token: str | None = None) -> dict:
+    query = """query ReviewThread($id:ID!,$cursor:String) {
+      node(id:$id) { ... on PullRequestReviewThread {
+        id isResolved pullRequest { number repository { nameWithOwner } }
+        comments(first:100,after:$cursor) {
+          pageInfo { hasNextPage endCursor } nodes { id url body updatedAt }
+        }
+      } }
+    }"""
+    cursor = None
+    comments: list[dict] = []
+    resolved = None
+    while True:
+        thread = graphql(query, {"id": identifier, "cursor": cursor}, token).get("node")
+        if not isinstance(thread, dict) or thread.get("id") != identifier:
+            raise SystemExit("The approved review thread is unavailable.")
+        target = thread.get("pullRequest")
+        repository = target.get("repository") if isinstance(target, dict) else None
+        if not isinstance(repository, dict) or repository.get("nameWithOwner") != f"{owner}/{repo}" or target.get("number") != pull:
+            raise SystemExit("The review thread belongs to another pull request.")
+        if not isinstance(thread.get("isResolved"), bool) or (resolved is not None and resolved != thread["isResolved"]):
+            raise SystemExit("The review thread changed while it was read. Refresh the review.")
+        resolved = thread["isResolved"]
+        connection = thread.get("comments")
+        if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):
+            raise SystemExit("The review thread comments are unreadable.")
+        for comment in connection["nodes"]:
+            if not isinstance(comment, dict) or any(not isinstance(comment.get(key), str) for key in ("id", "url", "body", "updatedAt")):
+                raise SystemExit("The review thread comments are incomplete.")
+            comments.append(comment)
+        cursor = next_cursor(connection, cursor)
+        if cursor is None:
+            break
+    if not comments or len({item["id"] for item in comments}) != len(comments):
+        raise SystemExit("The review thread comments are incomplete.")
+    material = {"owner": owner, "repo": repo, "pull": pull, "id": identifier, "comments": comments}
+    snapshot = hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return {"id": identifier, "isResolved": resolved, "comments": comments, "snapshot": snapshot}
+
+
+def thread_inventory(owner: str, repo: str, pull: int) -> dict:
+    if not NAME.fullmatch(owner) or not NAME.fullmatch(repo) or pull < 1:
+        raise SystemExit("Invalid pull request target.")
+    head, base, readable = read_pull(owner, repo, pull)
+    if not readable:
+        raise SystemExit("The pull request revision is unreadable.")
+    query = """query ReviewThreads($owner:String!,$repo:String!,$pull:Int!,$cursor:String) {
+      repository(owner:$owner,name:$repo) { pullRequest(number:$pull) {
+        reviewThreads(first:100,after:$cursor) { pageInfo { hasNextPage endCursor } nodes { id } }
+      } }
+    }"""
+    cursor = None
+    threads: list[dict] = []
+    while True:
+        data = graphql(query, {"owner": owner, "repo": repo, "pull": pull, "cursor": cursor})
+        repository = data.get("repository")
+        pr = repository.get("pullRequest") if isinstance(repository, dict) else None
+        connection = pr.get("reviewThreads") if isinstance(pr, dict) else None
+        if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):
+            raise SystemExit("The pull request review threads are unreadable.")
+        for node in connection["nodes"]:
+            if not isinstance(node, dict) or not isinstance(node.get("id"), str) or not THREAD_ID.fullmatch(node["id"]):
+                raise SystemExit("The pull request review threads are incomplete.")
+            threads.append(read_thread(owner, repo, pull, node["id"]))
+        cursor = next_cursor(connection, cursor)
+        if cursor is None:
+            break
+    current_head, current_base, current_readable = read_pull(owner, repo, pull)
+    reject_moved_revision(current_head, current_base, current_readable, head, base)
+    return {"owner": owner, "repo": repo, "pull": pull, "base": base, "head": head, "threads": threads}
+
+
+def resolution_targets(payload: dict) -> list[dict]:
+    result = payload.get("result")
+    return [item for item in result.get("mutations", []) if item["action"] == "resolve"] if isinstance(result, dict) else []
+
+
+def checked_thread(payload: dict, action: dict, token: str | None = None) -> dict:
+    thread = read_thread(payload["owner"], payload["repo"], payload["pull"], action["thread"], token)
+    prior = next(item for item in payload["result"]["prior"] if item["id"] == action["finding"])
+    if thread["snapshot"] != action["snapshot"] or prior["source"] != thread["comments"][0]["url"]:
+        raise SystemExit("The review thread discussion or source changed. Refresh the review and approve it again.")
+    return thread
+
+
+def resolve_threads(payload_path: Path, approval_path: Path, payload: dict, pinned: tuple, checkpoint_path: Path) -> None:
+    actions = resolution_targets(payload)
+    if not actions:
+        return
+    require_same_operation(payload_path, approval_path, pinned)
+    owner, repo, pull = payload["owner"], payload["repo"], payload["pull"]
+    app_id, pem = load_app_material()
+    token = installation_token(owner, repo, app_id, pem)
+    require_same_operation(payload_path, approval_path, pinned)
+    for action in actions:
+        thread = checked_thread(payload, action, token)
+        head, base, readable = read_pull(owner, repo, pull)
+        reject_moved_revision(head, base, readable, payload["head"], payload["base"])
+        require_same_operation(payload_path, approval_path, pinned)
+        journal = read_json_object(checkpoint_path)
+        if journal is None or journal.get("state") != "posted":
+            raise SystemExit("No confirmed review receipt; threads were not resolved.")
+        states = journal.setdefault("resolutions", {})
+        previous = states.get(action["thread"], {}).get("state")
+        if not thread["isResolved"]:
+            if previous in {"sending", "resolved"}:
+                raise SystemExit("A thread resolution is unconfirmed or was reopened. No automatic resend; refresh the review.")
+            states[action["thread"]] = {"state": "sending", "snapshot": action["snapshot"]}
+            write_checkpoint(checkpoint_path, journal)
+            require_same_operation(payload_path, approval_path, pinned)
+            query = """mutation ResolveThread($id:ID!) {
+              resolveReviewThread(input:{threadId:$id}) { thread { id isResolved } }
+            }"""
+            try:
+                data = graphql(query, {"id": action["thread"]}, token)
+                receipt = data.get("resolveReviewThread")
+                receipt = receipt.get("thread") if isinstance(receipt, dict) else None
+                if not isinstance(receipt, dict) or receipt.get("id") != action["thread"] or receipt.get("isResolved") is not True:
+                    raise SystemExit("GitHub did not confirm the thread resolution.")
+            except SystemExit as error:
+                # Keep the sending state. A retry may confirm a visible resolution,
+                # but must not blindly resend an ambiguous mutation.
+                if error.code == 4:
+                    states[action["thread"]]["state"] = "rejected"
+                    write_checkpoint(checkpoint_path, journal)
+                raise
+        confirmed = checked_thread(payload, action, token)
+        require_same_operation(payload_path, approval_path, pinned)
+        if not confirmed["isResolved"]:
+            raise SystemExit("The thread is still open; resolution is unconfirmed.")
+        states[action["thread"]] = {"state": "resolved", "snapshot": action["snapshot"]}
+        write_checkpoint(checkpoint_path, journal)
+        print(f"THREAD_RESOLVED={action['thread']}")
+
+
 def matching_review(reviews: list[dict], marker: str) -> dict | None:
     for review in reviews:
         body = review.get("body")
@@ -870,6 +1060,7 @@ def record_visible_review(
             "repo": repo,
             "pull": pull,
             "head": head,
+            "resolutions": (read_json_object(checkpoint_path) or {}).get("resolutions", {}),
         },
     )
     if already:
@@ -1146,7 +1337,18 @@ def post(payload_path: Path, approval_path: Path) -> None:
             print("The approval record was replaced. GitHub was not called.", file=sys.stderr)
             raise SystemExit(5)
         pinned = operation_key(payload, approval, digest)
+        if isinstance(payload.get("result"), dict):
+            inventory = thread_inventory(owner, repo, pull)
+            require_same_operation(payload_path, approval_path, pinned)
+            reject_moved_revision(inventory["head"], inventory["base"], True, payload["head"], payload["base"])
+            classified = {item["source"] for item in payload["result"]["prior"]}
+            if any(not thread["isResolved"] and thread["comments"][0]["url"] not in classified for thread in inventory["threads"]):
+                raise SystemExit("An open earlier review thread was not classified. Re-review its discussion before publication.")
+        for action in resolution_targets(payload):
+            checked_thread(payload, action)
+            require_same_operation(payload_path, approval_path, pinned)
         post_locked(payload_path, approval_path, payload, approval, digest, pinned, checkpoint_path)
+        resolve_threads(payload_path, approval_path, payload, pinned, checkpoint_path)
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)
         lock.close()
@@ -1324,7 +1526,7 @@ def render(source: Path, dest: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Show or post an approved COMMENT review.")
-    parser.add_argument("command", choices=("show", "stamp", "approve", "deny", "post", "render", "bind", "auth-info"))
+    parser.add_argument("command", choices=("show", "stamp", "approve", "deny", "post", "render", "bind", "threads", "auth-info"))
     parser.add_argument("payload", nargs="?", type=Path)
     parser.add_argument("approval", nargs="?", type=Path)
     parser.add_argument("preview", nargs="?")
@@ -1352,14 +1554,18 @@ def main() -> None:
         if args.payload is None or args.approval is None:
             parser.error("render requires a result file and an output file")
         render(args.payload, args.approval)
-    elif args.command == "bind":
+    elif args.command in {"bind", "threads"}:
         if args.payload is None or args.approval is None or args.preview is None:
             parser.error("bind requires owner, repo, and pull")
         try:
             pull = int(args.preview)
         except ValueError:
             parser.error("bind pull must be an integer")
-        bind(str(args.payload), str(args.approval), pull, Path(args.extra) if args.extra else None)
+        if args.command == "threads":
+            json.dump(thread_inventory(str(args.payload), str(args.approval), pull), sys.stdout, indent=2)
+            sys.stdout.write("\n")
+        else:
+            bind(str(args.payload), str(args.approval), pull, Path(args.extra) if args.extra else None)
     else:
         if args.payload is None or args.approval is None:
             parser.error("post requires a payload file and an approval file")

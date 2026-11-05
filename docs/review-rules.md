@@ -6,6 +6,12 @@ A review reports findings. It does not approve or merge the pull request. The ma
 
 Cite `file:line`. State the concrete consequence. Confirm the finding is in the diff or in a file you read. Say what you could not check. Do not praise. Do not pad. If nothing is wrong, say so.
 
+On re-review, read earlier threads and replies and verify them against the
+current head. Fixed or refuted inline findings must have approved resolution
+actions and confirmed resolved readback, as [the review procedure](pr-review.md#re-review-and-thread-resolution)
+describes. Apply this to Greptile and Cursor findings equally. An author reply
+or outdated anchor is not evidence that a defect is fixed.
+
 ## Blockers
 
 - A new path logs, persists, fixtures, or sends a token, API key, refresh token, or device identifier.
