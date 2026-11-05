@@ -9,6 +9,9 @@
 # exists. LIVE_TEST_PYTHON, when set, is the interpreter used to read logs.
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
+# Cleanup can run while a command's stderr is redirected at a temp log.
+# Keep the operator's stderr on fd 3 so that failure is not deleted with the log.
+exec 3>&2
 SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TREE="${OPENCODE_CONFIG_ROOT:-$SCRIPT_ROOT}"
 
@@ -25,38 +28,81 @@ fi
 
 owned_files=()
 owned_pids=()
+live_process_table=""
+
+# ${#name[@]} is safe for an empty array under set -u on bash 3.2.
+# shellcheck disable=SC2317
+live_count() {
+  eval "printf '%s' \${#$1[@]}"
+}
+
+# shellcheck disable=SC2317
+live_at() {
+  eval "printf '%s' \"\${$1[$2]}\""
+}
 
 # Invoked by the EXIT trap below.
 # shellcheck disable=SC2317
-kill_tree() {
-  local pid="$1" child
-  local children
-  children="$(ps -o pid= --ppid "$pid" 2>/dev/null || true)"
-  for child in $children; do
-    kill_tree "$child"
-  done
-  kill -TERM "$pid" 2>/dev/null || true
+live_signal_tree() {
+  local signal="$1" pid="$2" child ppid
+  [[ -n "$live_process_table" ]] || return 0
+  while read -r child ppid; do
+    [[ "$ppid" == "$pid" ]] || continue
+    live_signal_tree "$signal" "$child"
+  done <<<"$live_process_table"
+  kill "-$signal" "$pid" 2>/dev/null || true
 }
 
 # Invoked from the EXIT trap through cleanup_owned.
+# A failed process listing is a cleanup failure. The process group is still
+# signalled, including descendants that ignore TERM.
 # shellcheck disable=SC2317
 kill_owned() {
-  local pid
-  [[ "${#owned_pids[@]}" -gt 0 ]] || return 0
-  for pid in "${owned_pids[@]}"; do
+  local pid i n failed=0
+  n="$(live_count owned_pids)"
+  [[ "$n" -gt 0 ]] || return 0
+  if ! live_process_table="$(ps -ax -o pid=,ppid= 2>/dev/null)"; then
+    echo "LIVE_TEST=failed" >&3
+    echo "Process listing failed. Cleanup cannot see descendants." >&3
+    failed=1
+    live_process_table=""
+  fi
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    pid="$(live_at owned_pids "$i")"
+    i=$((i + 1))
     [[ -n "$pid" ]] || continue
-    kill_tree "$pid"
+    kill -TERM -- "-$pid" 2>/dev/null || true
+    live_signal_tree TERM "$pid"
   done
   sleep 0.2
-  for pid in "${owned_pids[@]}"; do
+  if ! live_process_table="$(ps -ax -o pid=,ppid= 2>/dev/null)"; then
+    echo "LIVE_TEST=failed" >&3
+    echo "Process listing failed. Cleanup cannot see descendants." >&3
+    failed=1
+    live_process_table=""
+  fi
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    pid="$(live_at owned_pids "$i")"
+    i=$((i + 1))
     [[ -n "$pid" ]] || continue
-    kill -KILL "$pid" 2>/dev/null || true
+    kill -KILL -- "-$pid" 2>/dev/null || true
+    live_signal_tree KILL "$pid"
   done
-  for pid in "${owned_pids[@]}"; do
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    pid="$(live_at owned_pids "$i")"
+    i=$((i + 1))
     [[ -n "$pid" ]] || continue
     wait "$pid" 2>/dev/null || true
+    if kill -0 "$pid" 2>/dev/null; then
+      failed=1
+    fi
   done
   owned_pids=()
+  live_process_table=""
+  return "$failed"
 }
 
 # Invoked by the EXIT trap below.
@@ -64,8 +110,12 @@ kill_owned() {
 cleanup_owned() {
   local status=$?
   trap - EXIT INT TERM
-  kill_owned
-  if [[ "${#owned_files[@]}" -gt 0 ]]; then
+  if ! kill_owned; then
+    if [[ "$status" -eq 0 ]]; then
+      status=1
+    fi
+  fi
+  if [[ "$(live_count owned_files)" -gt 0 ]]; then
     rm -f "${owned_files[@]}"
   fi
   exit "$status"
@@ -109,13 +159,13 @@ run_deadline() {
   local seconds="$1" bin pid code=0
   shift
   bin="$DEADLINE_BIN"
-  "$bin" "$seconds" "$@" &
+  # Own the session so cancellation can signal the group on Linux and macOS.
+  # Do not enable errexit here: a nonzero wait would skip the caller's diagnostics.
+  "$(live_python)" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$bin" "$seconds" "$@" &
   pid=$!
   owned_pids+=("$pid")
-  set +e
-  wait "$pid"
-  code=$?
-  set -e
+  wait "$pid" || code=$?
   owned_pids=()
   return "$code"
 }
@@ -214,6 +264,16 @@ if [[ "$init_count" -ne 1 || "$init_any" -ne 1 ]]; then
   echo "LIVE_TEST=failed"
   echo "OpenCode initialized the provider ${init_any} times."
   echo "expected=$init_line"
+  "$(live_python)" - "$stderr_file" "$code" <<'PY'
+import os, sys
+path, code = sys.argv[1], sys.argv[2]
+key = os.environ.get("CURSOR_API_KEY", "")
+text = open(path, encoding="utf-8", errors="replace").read()
+if key:
+    text = text.replace(key, "[REDACTED]")
+print(f"opencode_exit={code}")
+print(text[-2000:])
+PY
   exit 1
 fi
 echo "PLUGIN_INIT_COUNT=1"

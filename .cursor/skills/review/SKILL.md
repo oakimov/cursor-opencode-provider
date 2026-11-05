@@ -38,10 +38,10 @@ Run a live OpenCode test when the diff changes plugin behavior: the provider, pr
 
 Skip it when the diff is docs, rules, or a refactor the unit tests already cover. Say why you skipped it.
 
-Passing the checks is not permission to pass `CURSOR_API_KEY`. Set `CURSOR_REVIEW_TRUST=1` only after you decide to trust that revision, then pass `--live`. A failed check does not receive the key. The revision's shell is not run. The harness writes a private OpenCode 2 config that loads `dist/plugin-opencode2.js` from the copy, through one `plugins/cursor` directory. Before the prompt, `opencode plugin list` must log `CURSOR_REVIEW_PLUGIN=` once. The run must log `CURSOR_REVIEW_PLUGIN_INIT count=1` once. Keep the copy path, the plugin path, the version, and the init count in the private log. On a cloud agent, `opencode` is the current OpenCode release from the environment install.
+Passing the checks is not permission to pass `CURSOR_API_KEY`. Set `CURSOR_REVIEW_TRUST=1` and `CURSOR_REVIEW_TRUST_SHA` to the commit you decided to trust, then pass `--live`. The fetched head must be that commit. A failed check does not receive the key. The revision's shell is not run. The harness writes a private OpenCode 2 config that loads `dist/plugin-opencode2.js` from the copy, through one `plugins/cursor` directory. Before the prompt, `opencode plugin list` must log `CURSOR_REVIEW_PLUGIN=` once. The run must log `CURSOR_REVIEW_PLUGIN_INIT count=1` once. Keep the copy path, the plugin path, the version, and the init count in the private log. On a cloud agent, `opencode` is the current OpenCode release from the environment install.
 
 ```bash
-CURSOR_REVIEW_TRUST=1 scripts/isolated-check.sh <pr-number-or-url> --live
+CURSOR_REVIEW_TRUST=1 CURSOR_REVIEW_TRUST_SHA=<commit> scripts/isolated-check.sh <pr-number-or-url> --live
 ```
 
 On your own checkout, `bun run live-test` does the same against the current build. It prints `LIVE_TEST=skipped` and exits 0 when `CURSOR_API_KEY` is unset. The live model is `cursor/composer-2.5` unless `OPENCODE_LIVE_MODEL` is set. The assistant reply must be exactly `pong`.
@@ -50,4 +50,4 @@ On your own checkout, `bun run live-test` does the same against the current buil
 
 ## Publish
 
-Follow `docs/pr-review.md`. Stamp and show the payload. Stop until the maintainer approves that exact text. Then approve and post. A refusal or no answer does not call GitHub.
+Follow `docs/pr-review.md`. Stamp and show the payload. Stop until the maintainer approves the `PREVIEW_SHA256` that `show` printed. Then approve that digest and post. A changed file needs a new preview. A refusal or no answer does not call GitHub.

@@ -10,10 +10,11 @@
 # refused before fetch.
 #
 # --live is a separate trust decision. Passing checks does not pass
-# CURSOR_API_KEY. Set CURSOR_REVIEW_TRUST=1 only after you trust that
-# revision. The key is then given to this checkout's scripts/live-test.sh
-# and the built plugin, still inside the boundary. The revision's shell is
-# not run.
+# CURSOR_API_KEY. Set CURSOR_REVIEW_TRUST=1 and CURSOR_REVIEW_TRUST_SHA to
+# the reviewed commit. The fetched head must be that commit before the
+# archive is extracted, and again immediately before the key is passed.
+# The key is then given to this checkout's scripts/live-test.sh and the
+# built plugin, still inside the boundary. The revision's shell is not run.
 #
 # Exit 0 when the checks pass, 1 when a check fails, 2 when the invocation
 # or the isolation mechanism is unusable.
@@ -122,7 +123,8 @@ check_live_path() {
 
 # Prints skip, skip-failed, skip-untrusted, or run.
 # Arguments: 0|1 --live, then the check exit code.
-# CURSOR_REVIEW_TRUST=1 is required before run. Passing checks is not trust.
+# CURSOR_REVIEW_TRUST=1 and CURSOR_REVIEW_TRUST_SHA are both required before
+# run. Passing checks is not trust, and trust is one commit, not a boolean.
 check_live_action() {
   local live="$1" checks="$2"
   if [[ "$checks" -ne 0 ]]; then
@@ -137,7 +139,23 @@ check_live_action() {
     printf 'skip-untrusted'
     return 0
   fi
+  if [[ ! "${CURSOR_REVIEW_TRUST_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+    printf 'skip-untrusted'
+    return 0
+  fi
   printf 'run'
+}
+
+# Refuse to pass the key unless FETCH_HEAD is still the archived commit and
+# the trusted commit. Prints the commit on success.
+check_refuse_moved_commit() {
+  local archived="$1" again
+  again="$(git -C "$ROOT" rev-parse --verify FETCH_HEAD)"
+  if [[ "$again" != "$archived" ]] || [[ "$again" != "${CURSOR_REVIEW_TRUST_SHA:-}" ]]; then
+    echo "Refusing to forward the key. Fetched ${again}; trusted ${CURSOR_REVIEW_TRUST_SHA:-}; archived ${archived}." >&2
+    return 2
+  fi
+  echo "Check commit: $again"
 }
 
 # Run a command inside the filesystem and process boundary.
@@ -185,6 +203,19 @@ check_main() {
 
   trap check_cleanup EXIT
   git fetch --no-tags origin "pull/${pr}/head"
+  local fetched
+  fetched="$(git -C "$ROOT" rev-parse --verify FETCH_HEAD)"
+  echo "Check commit: $fetched"
+  if [[ -n "${CURSOR_REVIEW_TRUST_SHA:-}" ]]; then
+    if [[ ! "${CURSOR_REVIEW_TRUST_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+      echo "CURSOR_REVIEW_TRUST_SHA must be 40 lowercase hex characters." >&2
+      exit 2
+    fi
+    if [[ "${CURSOR_REVIEW_TRUST_SHA}" != "$fetched" ]]; then
+      echo "Fetched ${fetched}, not the trusted ${CURSOR_REVIEW_TRUST_SHA}. Refusing to archive or run it." >&2
+      exit 2
+    fi
+  fi
   worktree="$(mktemp -d "${TMPDIR:-/tmp}/cursor-pr-check-${pr}.XXXXXX")"
   git -C "$ROOT" archive FETCH_HEAD | tar -x -C "$worktree"
   if [[ -e "$worktree/.git" ]]; then
@@ -228,11 +259,12 @@ check_main() {
       ;;
     skip-untrusted)
       echo "LIVE_TEST=skipped"
-      echo "Passing checks is not a decision to trust this revision. Set CURSOR_REVIEW_TRUST=1 only after that decision. CURSOR_API_KEY was not passed."
+      echo "Passing checks is not a decision to trust this revision. Set CURSOR_REVIEW_TRUST=1 and CURSOR_REVIEW_TRUST_SHA to the reviewed commit. CURSOR_API_KEY was not passed."
       ;;
     run)
       echo "Loading /src/dist/plugin-opencode2.js through a private OpenCode config."
       echo "CURSOR_REVIEW_TRUST=1 was set separately from the check result."
+      check_refuse_moved_commit "$fetched"
       set +e
       "$ROOT/scripts/isolate-run.sh" --src "$worktree" \
         --tool bun --tool node --tool git --tool python3 --tool opencode \

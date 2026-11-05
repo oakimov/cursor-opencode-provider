@@ -13,26 +13,37 @@ same payload returns the review that is already on GitHub.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
 MARKER = re.compile(r"<!-- cursor-review:([0-9a-f]{64}) -->")
+# Values, not the public names of settings. A sentence that names
+# CURSOR_API_KEY or copilot.totalNanoAiu is a review comment, not a secret.
 SECRET = re.compile(
-    r"crsr_|ghp_|github_pat_|x-access-token|AKIA[0-9A-Z]{8}|-----BEGIN |"
-    r"CURSOR_API_KEY|sk-[A-Za-z0-9]|xox[baprs]-",
+    r"crsr_[A-Za-z0-9]|ghp_[A-Za-z0-9]|github_pat_[A-Za-z0-9]|x-access-token|"
+    r"AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY|"
+    r"sk-[A-Za-z0-9]{16,}|xox[baprs]-[A-Za-z0-9-]+",
     re.IGNORECASE,
 )
+# Home-relative paths and any absolute path. A public URL is not one: its
+# slashes follow a scheme colon or another slash, and the colon in https://
+# is not a drive-letter separator.
 ABSOLUTE = re.compile(
-    r"(?:^|[\s\"'`=(])/(?:home|Users|tmp|private|opt|var|workspace|cursor|root)/|"
-    r"[A-Za-z]:[\\/]|file://"
+    r"(?:^|[\s\"'`=(])~(?:/|[A-Za-z0-9_.-]+/)|"
+    r"(?:^|[\s\"'`=(])/(?!/)[^\s\"'`)]+|"
+    r"(?:^|[\s\"'`=(])[A-Za-z]:[\\/]|"
+    r"(?:^|[\s\"'`=(])file://"
 )
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 SESSION = re.compile(r"\bbc-[0-9a-f-]{8,}\b|\bses_[A-Za-z0-9]")
-BILLING = re.compile(r"nanoAiu|credit balance|invoice", re.IGNORECASE)
+BILLING = re.compile(r"credit balance|account balance", re.IGNORECASE)
+DIGEST = re.compile(r"^[0-9a-f]{64}$")
 GREPTILE_ACCOUNT = re.compile(r"greptile.{0,40}(credit|token|billing|account)|"
                               r"(credit|token|billing).{0,40}greptile", re.IGNORECASE)
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -169,21 +180,29 @@ def gh_api(method: str, endpoint: str, payload: dict | None = None, paginate: bo
     return completed.returncode, completed.stdout, completed.stderr
 
 
-def reviews_of(owner: str, repo: str, pull: int) -> list[dict]:
-    code, stdout, stderr = gh_api("GET", f"repos/{owner}/{repo}/pulls/{pull}/reviews", paginate=True)
+def gh_pages(endpoint: str) -> list[dict]:
+    code, stdout, stderr = gh_api("GET", endpoint, paginate=True)
     if code != 0:
         print(stderr.decode("utf-8", errors="replace"), file=sys.stderr)
         raise SystemExit(1)
     pages = json.loads(stdout.decode() or "[]")
     if isinstance(pages, dict):
         pages = [pages]
-    reviews: list[dict] = []
+    items: list[dict] = []
     for page in pages:
         if isinstance(page, list):
-            reviews.extend(item for item in page if isinstance(item, dict))
+            items.extend(item for item in page if isinstance(item, dict))
         elif isinstance(page, dict):
-            reviews.append(page)
-    return reviews
+            items.append(page)
+    return items
+
+
+def reviews_of(owner: str, repo: str, pull: int) -> list[dict]:
+    return gh_pages(f"repos/{owner}/{repo}/pulls/{pull}/reviews")
+
+
+def comments_of(owner: str, repo: str, pull: int) -> list[dict]:
+    return gh_pages(f"repos/{owner}/{repo}/pulls/{pull}/comments")
 
 
 def matching_review(reviews: list[dict], marker: str) -> dict | None:
@@ -194,14 +213,22 @@ def matching_review(reviews: list[dict], marker: str) -> dict | None:
     return None
 
 
-def print_review(review: dict) -> None:
+def print_review(owner: str, repo: str, pull: int, review: dict) -> None:
     url = review.get("html_url") or review.get("url") or ""
     print(f"REVIEW_URL={url}")
-    comments = review.get("comments")
-    if isinstance(comments, list):
-        for comment in comments:
-            if isinstance(comment, dict):
-                print(f"COMMENT_URL={comment.get('html_url') or comment.get('url') or ''}")
+    # Creating a review does not return its inline comments. The comments
+    # route does, keyed by pull_request_review_id.
+    review_id = review.get("id")
+    if not isinstance(review_id, int) or isinstance(review_id, bool):
+        return
+    for comment in comments_of(owner, repo, pull):
+        if comment.get("pull_request_review_id") != review_id:
+            continue
+        print(f"COMMENT_URL={comment.get('html_url') or comment.get('url') or ''}")
+
+
+def preview_path(path: Path) -> Path:
+    return Path(str(path) + ".preview")
 
 
 def show(path: Path) -> None:
@@ -214,6 +241,14 @@ def show(path: Path) -> None:
     if not raw.endswith(b"\n"):
         print("Payload file must end with a newline so the shown bytes are exact.", file=sys.stderr)
         raise SystemExit(2)
+    frozen = preview_path(path)
+    temporary = Path(str(frozen) + ".tmp")
+    temporary.write_bytes(raw)
+    os.chmod(temporary, 0o444)
+    os.replace(temporary, frozen)
+    os.chmod(frozen, 0o444)
+    digest = hashlib.sha256(raw).hexdigest()
+    print(f"PREVIEW_SHA256={digest}", file=sys.stderr)
     sys.stdout.buffer.write(raw)
 
 
@@ -229,11 +264,35 @@ def stamp(path: Path) -> None:
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     refuse_scan(text.encode(), payload)
     path.write_text(text, encoding="utf-8")
+    frozen = preview_path(path)
+    if frozen.exists():
+        frozen.chmod(0o644)
+        frozen.unlink()
     print(f"Stamped {digest}. GitHub was not called.")
 
 
-def approve(payload_path: Path, approval_path: Path) -> None:
-    raw, payload = load_payload(payload_path)
+def approve(payload_path: Path, approval_path: Path, preview_sha: str) -> None:
+    if not isinstance(preview_sha, str) or not DIGEST.fullmatch(preview_sha):
+        print("approve requires the PREVIEW_SHA256 printed by show.", file=sys.stderr)
+        raise SystemExit(2)
+    raw = payload_path.read_bytes()
+    frozen_file = preview_path(payload_path)
+    if not frozen_file.is_file():
+        print("No preview is frozen. Run show and approve that digest. GitHub was not called.", file=sys.stderr)
+        raise SystemExit(5)
+    frozen = frozen_file.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != preview_sha or hashlib.sha256(frozen).hexdigest() != preview_sha or frozen != raw:
+        print("The file is not the preview that was shown. Run show again. GitHub was not called.", file=sys.stderr)
+        raise SystemExit(5)
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        print("Payload must be a JSON object.", file=sys.stderr)
+        raise SystemExit(2) from None
+    if not isinstance(payload, dict):
+        print("Payload must be a JSON object.", file=sys.stderr)
+        raise SystemExit(2)
     refuse_scan(raw, payload)
     problems = validate(payload)
     if problems:
@@ -241,7 +300,8 @@ def approve(payload_path: Path, approval_path: Path) -> None:
         raise SystemExit(2)
     record = {
         "decision": "approve",
-        "payload_sha256": hashlib.sha256(raw).hexdigest(),
+        "payload_sha256": digest,
+        "preview_sha256": preview_sha,
         "identity": identity_of(payload),
         "head": payload["head"],
         "owner": payload["owner"],
@@ -255,6 +315,19 @@ def approve(payload_path: Path, approval_path: Path) -> None:
 def deny(approval_path: Path) -> None:
     approval_path.write_text(json.dumps({"decision": "deny"}, indent=2) + "\n", encoding="utf-8")
     print("Denied. GitHub was not called.")
+
+
+def publication_paths(approval_path: Path, owner: str, repo: str, pull: int, identity: str) -> tuple[Path, Path]:
+    directory = approval_path.parent / ".review-publish"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    key = hashlib.sha256(f"{owner}/{repo}#{pull}:{identity}".encode()).hexdigest()
+    return directory / f"{key}.lock", directory / f"{key}.json"
+
+
+def write_checkpoint(path: Path, record: dict) -> None:
+    temporary = Path(str(path) + ".tmp")
+    temporary.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def post(payload_path: Path, approval_path: Path) -> None:
@@ -272,12 +345,29 @@ def post(payload_path: Path, approval_path: Path) -> None:
         print("Payload is incomplete: " + ", ".join(problems), file=sys.stderr)
         raise SystemExit(2)
     digest = hashlib.sha256(raw).hexdigest()
-    if digest != approval.get("payload_sha256") or identity_of(payload) != approval.get("identity"):
+    if (
+        digest != approval.get("payload_sha256")
+        or digest != approval.get("preview_sha256")
+        or identity_of(payload) != approval.get("identity")
+    ):
         print("The payload changed after approval. GitHub was not called.", file=sys.stderr)
         raise SystemExit(5)
     if payload.get("head") != approval.get("head"):
         print("The approved head does not match the payload. GitHub was not called.", file=sys.stderr)
         raise SystemExit(6)
+    owner, repo, pull = payload["owner"], payload["repo"], payload["pull"]
+    identity = str(approval["identity"])
+    lock_path, checkpoint_path = publication_paths(approval_path, owner, repo, pull, identity)
+    lock = lock_path.open("a+")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        post_locked(payload, approval, digest, checkpoint_path)
+    finally:
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
+
+
+def post_locked(payload: dict, approval: dict, digest: str, checkpoint_path: Path) -> None:
     owner, repo, pull = payload["owner"], payload["repo"], payload["pull"]
     code, stdout, stderr = gh_api("GET", f"repos/{owner}/{repo}/pulls/{pull}")
     if code != 0:
@@ -291,8 +381,9 @@ def post(payload_path: Path, approval_path: Path) -> None:
     marker = f"<!-- cursor-review:{approval['identity']} -->"
     existing = matching_review(reviews_of(owner, repo, pull), marker)
     if existing is not None:
+        write_checkpoint(checkpoint_path, {"state": "posted", "payload_sha256": digest, "review_id": existing.get("id")})
         print("REVIEW_ALREADY_POSTED=1")
-        print_review(existing)
+        print_review(owner, repo, pull, existing)
         return
     body = {
         "commit_id": payload["head"],
@@ -303,12 +394,16 @@ def post(payload_path: Path, approval_path: Path) -> None:
             for item in payload["comments"]
         ],
     }
+    write_checkpoint(checkpoint_path, {"state": "posting", "payload_sha256": digest, "head": payload["head"]})
     code, stdout, stderr = gh_api("POST", f"repos/{owner}/{repo}/pulls/{pull}/reviews", body)
     if code != 0:
         recovered = matching_review(reviews_of(owner, repo, pull), marker)
         if recovered is not None:
+            write_checkpoint(
+                checkpoint_path, {"state": "posted", "payload_sha256": digest, "review_id": recovered.get("id")}
+            )
             print("REVIEW_ALREADY_POSTED=1")
-            print_review(recovered)
+            print_review(owner, repo, pull, recovered)
             return
         print(stderr.decode("utf-8", errors="replace"), file=sys.stderr)
         raise SystemExit(1)
@@ -316,7 +411,8 @@ def post(payload_path: Path, approval_path: Path) -> None:
     if not isinstance(created, dict):
         print("GitHub did not return a review.", file=sys.stderr)
         raise SystemExit(1)
-    print_review(created)
+    write_checkpoint(checkpoint_path, {"state": "posted", "payload_sha256": digest, "review_id": created.get("id")})
+    print_review(owner, repo, pull, created)
 
 
 def main() -> None:
@@ -324,6 +420,7 @@ def main() -> None:
     parser.add_argument("command", choices=("show", "stamp", "approve", "deny", "post"))
     parser.add_argument("payload", nargs="?", type=Path)
     parser.add_argument("approval", nargs="?", type=Path)
+    parser.add_argument("preview", nargs="?")
     args = parser.parse_args()
     if args.command == "show":
         if args.payload is None:
@@ -334,9 +431,9 @@ def main() -> None:
             parser.error("stamp requires a payload file")
         stamp(args.payload)
     elif args.command == "approve":
-        if args.payload is None or args.approval is None:
-            parser.error("approve requires a payload file and an approval file")
-        approve(args.payload, args.approval)
+        if args.payload is None or args.approval is None or args.preview is None:
+            parser.error("approve requires a payload file, an approval file, and the shown preview digest")
+        approve(args.payload, args.approval, args.preview)
     elif args.command == "deny":
         if args.payload is None:
             parser.error("deny requires an approval file")

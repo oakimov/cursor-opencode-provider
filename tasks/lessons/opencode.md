@@ -677,9 +677,9 @@ These are failure lessons shared by both hosts, not a replacement for
 - **Isolate fixture state.** Capture teardown paths before awaiting; restore
   host-agent callbacks and cache overrides. One leaked cache root broke later
   plugin tests (`test/host-interrupt.test.ts`).
-- **A private home is not a credential boundary.** `env -i` and a private `HOME` clear variables and leave the reviewer's files, agent sockets, and the parent git directory readable. Untrusted install and test commands run through `scripts/isolate-run.sh`, which fails closed unless Linux user, mount, and pid namespaces or macOS `sandbox-exec` are usable. The sentinel coverage is `test/review-scripts.test.ts`. Passing those checks is not a decision to pass `CURSOR_API_KEY`.
+- **A private home is not a credential boundary.** `env -i` and a private `HOME` clear variables and leave the reviewer's files, agent sockets, and the parent git directory readable. Untrusted install and test commands run through `scripts/isolate-run.sh`, which fails closed unless Linux user, mount, and pid namespaces or macOS `sandbox-exec` are usable. `--map-root-user` can remount a read-only bind of a user-owned file until those capabilities are dropped in the process that execs the command. The macOS profile allows the dynamic linker and the selected tools, and translates `/src`, `/tmp`, `/home/reviewer`, and `--ro-bind` destinations; a blanket `file-read*` is not a profile. Empty `"${array[@]}"` under `set -u` aborts bash 3.2 before that probe, so the scripts iterate by length. The sentinel coverage is `test/review-scripts.test.ts`. Passing those checks is not a decision to pass `CURSOR_API_KEY`. Trust is `CURSOR_REVIEW_TRUST_SHA` for one fetched commit, checked again before the key is forwarded.
 - **OpenCode keeps the last matching permission rule.** A generated `*` allow after the env denies lets `.env` through, and `/tmp/*` allows every other temp directory. `scripts/configure-opencode.sh` puts the broad allow first and the `.env.example` exception last, and allows only the owned canonical roots. `scripts/opencode-permission.mjs` runs the upstream matcher from commit `958f965`.
-- **A deadline helper and its temp files need one owner.** `scripts/live-test.sh` resolves GNU `timeout` or `gtimeout`, or `LIVE_TEST_TIMEOUT`, and the same EXIT trap that owns the transcript files also owns the plugin-list files. Ordinary cancellation is covered by `test/review-scripts.test.ts`. SIGKILL is not.
+- **A deadline helper and its temp files need one owner.** `scripts/live-test.sh` resolves GNU `timeout` or `gtimeout`, or `LIVE_TEST_TIMEOUT`, and the same EXIT trap that owns the transcript files also owns the plugin-list files. The deadline command is a session leader. Cancellation signals that group and walks `ps -ax -o pid=,ppid=`, then `KILL`s what ignored `TERM`. A failed listing is a cleanup failure. A helper that turns `errexit` back on before returning skips the caller's diagnostics. Ordinary cancellation is covered by `test/review-scripts.test.ts`. SIGKILL of the script itself is not.
 - **A removed temp dir can come back.** Tests left about 200 TMPDIR entries per
   run ([#102](https://github.com/oakimov/cursor-opencode-provider/issues/102)):
   cutting the whole project-folder path put it outside a long cache root;
@@ -698,11 +698,13 @@ These are failure lessons shared by both hosts, not a replacement for
 - **Match CI environments.** Narrow PATH fixtures omitted mkdir; Linux shell
   tests need an init reaper. Ubuntu 24.04 CI denies unprivileged user
   namespaces until `kernel.apparmor_restrict_unprivileged_userns` is 0, and
-  the isolation tests require that namespace rather than skipping. Strip
+  the isolation tests require that namespace rather than skipping. The
+  coverage job checks out the pull request head, so that probe lives in the
+  workflow rather than in a script the head might not contain. Strip
   temporary module copies from coverage and include Bun editor types
   (`scripts/strip-copied-coverage.ts`).
 - **Keep one current policy across docs and prompts.** A rebase can add review
-  rules; reviewer patches still need whole-path validation. A manual Cursor review posts only after the maintainer approves that exact payload and head (`scripts/review-publish.py`); the procedure stays in `docs/pr-review.md`. Changelog fixes
+  rules; reviewer patches still need whole-path validation. A manual Cursor review posts only after the maintainer approves the preview digest `show` printed for that payload and head (`scripts/review-publish.py`). The public-text scan flags secret values and local paths, including `~/...`, and still allows public identifiers such as `CURSOR_API_KEY`. The procedure stays in `docs/pr-review.md`. Changelog fixes
   compare with the release, not an intermediate PR state. A versioned heading
   or package version bump does not establish publication. Verify release status
   and keep entries in the maintainer-designated upcoming release. Concurrent changelog

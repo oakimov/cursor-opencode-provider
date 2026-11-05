@@ -5,8 +5,13 @@
 # read-only /usr and /etc, the tool binaries named with --tool, read-only
 # --ro-bind mounts, and a read-write copy at /src. Host /tmp, /home,
 # /workspace, agent sockets, and git metadata are not mounted. The environment
-# starts empty. macOS uses sandbox-exec with the same allow list. If neither
-# mechanism works, the script exits 2. It does not fall back to env -i.
+# starts empty. --map-root-user grants mount capabilities inside the
+# namespace; those are dropped after the mounts exist and before the command
+# runs, so a read-only bind cannot be remounted writable. macOS uses
+# sandbox-exec. Virtual paths (/src, /tmp, /home/reviewer, /opt/tools, and
+# --ro-bind destinations) are translated to private directories. The profile
+# allows the dynamic linker and the selected tools, not every file read. If
+# neither mechanism works, the script exits 2. It does not fall back to env -i.
 #
 #   scripts/isolate-run.sh --src DIR [--tool NAME] [--ro-bind HOST:DEST] \
 #     [--env NAME] [--set NAME=VALUE] -- COMMAND...
@@ -72,6 +77,16 @@ isolate_github_slug() {
   return 1
 }
 
+# Length of a named array. ${#name[@]} is safe for an empty array under
+# set -u on bash 3.2; expanding "${name[@]}" is not.
+isolate_count() {
+  eval "printf '%s' \${#$1[@]}"
+}
+
+isolate_at() {
+  eval "printf '%s' \"\${$1[$2]}\""
+}
+
 isolate_main() {
   local src=""
   local -a tools=() ro_binds=() env_names=() set_pairs=() command=()
@@ -114,7 +129,7 @@ isolate_main() {
     esac
   done
   [[ -n "$src" && -d "$src" ]] || isolate_unavailable "A readable --src directory is required." || return 2
-  [[ "${#command[@]}" -gt 0 ]] || isolate_unavailable "A command after -- is required." || return 2
+  [[ "$(isolate_count command)" -gt 0 ]] || isolate_unavailable "A command after -- is required." || return 2
   isolate_check_names || return 2
   src="$(cd "$src" && pwd)"
 
@@ -209,24 +224,40 @@ pivot_root . oldroot
 mount -t proc proc /proc
 umount -l /oldroot
 rmdir /oldroot 2>/dev/null || true
-exec /init
+# --map-root-user can remount a read-only bind of a user-owned file.
+# Drop that capability in this process, then replace it with the command.
+if [[ ! -x /usr/bin/python3 || ! -f /drop-caps.py ]]; then
+  echo "python3 is required to drop capabilities before the command." >&2
+  exit 2
+fi
+exec /usr/bin/python3 /drop-caps.py
 EOF
   chmod 0755 "$enter"
   isolate_write_init "$root"
   isolate_write_tools "$root"
   local -a bind_args=()
-  local spec host dest
-  for spec in "${ro_binds[@]}"; do
+  local spec host dest i n
+  n="$(isolate_count ro_binds)"
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    spec="$(isolate_at ro_binds "$i")"
     host="${spec%%:*}"
     dest="${spec#*:}"
     [[ -d "$host" ]] || isolate_unavailable "Read-only source is missing: $host" || return 2
     dest="/${dest#/}"
     bind_args+=("${host}"$'\t'"${dest}")
+    i=$((i + 1))
   done
   # The enter script and stage live on the host and disappear at pivot.
+  # An empty bind list must not be expanded: bash 3.2 treats that as unset.
   set +e
-  unshare --user --map-root-user --mount --pid --fork --mount-proc \
-    bash "$enter" "$root" "$src" "${bind_args[@]}"
+  if [[ "$(isolate_count bind_args)" -gt 0 ]]; then
+    unshare --user --map-root-user --mount --pid --fork --mount-proc \
+      bash "$enter" "$root" "$src" "${bind_args[@]}"
+  else
+    unshare --user --map-root-user --mount --pid --fork --mount-proc \
+      bash "$enter" "$root" "$src"
+  fi
   status=$?
   set -e
   rm -rf "$stage"
@@ -235,9 +266,13 @@ EOF
 }
 
 isolate_write_tools() {
-  local root="$1" name host base seen=" "
+  local root="$1" name host base seen=" " i n
   : >"$root/tool-binds"
-  for name in "${tools[@]}"; do
+  n="$(isolate_count tools)"
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    name="$(isolate_at tools "$i")"
+    i=$((i + 1))
     host="$(command -v "$name" 2>/dev/null || true)"
     [[ -n "$host" && -x "$host" ]] || continue
     case "$host" in
@@ -253,18 +288,26 @@ isolate_write_tools() {
 }
 
 isolate_check_names() {
-  local name value
-  for name in "${env_names[@]}"; do
+  local name value i n
+  n="$(isolate_count env_names)"
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    name="$(isolate_at env_names "$i")"
     [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || isolate_unavailable "Refusing environment name $name." || return 2
+    i=$((i + 1))
   done
-  for name in "${set_pairs[@]}"; do
+  n="$(isolate_count set_pairs)"
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    name="$(isolate_at set_pairs "$i")"
     value="${name%%=*}"
     [[ "$value" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || isolate_unavailable "Refusing --set name." || return 2
+    i=$((i + 1))
   done
 }
 
 isolate_write_env() {
-  local root="$1" name value
+  local root="$1" name value i n
   : >"$root/isolate-env"
   chmod 0600 "$root/isolate-env"
   {
@@ -275,20 +318,32 @@ isolate_write_env() {
     printf 'LOGNAME=reviewer\n'
     printf 'LANG=%s\n' "${LANG:-C.UTF-8}"
     printf 'CI=1\n'
-    for name in "${env_names[@]}"; do
-      value="${!name-}"
-      printf 'export %s=%q\n' "$name" "$value"
-    done
-    for name in "${set_pairs[@]}"; do
-      value="${name#*=}"
-      name="${name%%=*}"
-      printf 'export %s=%q\n' "$name" "$value"
-    done
   } >>"$root/isolate-env"
+  n="$(isolate_count env_names)"
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    name="$(isolate_at env_names "$i")"
+    value="${!name-}"
+    printf 'export %s=%q\n' "$name" "$value" >>"$root/isolate-env"
+    i=$((i + 1))
+  done
+  n="$(isolate_count set_pairs)"
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    name="$(isolate_at set_pairs "$i")"
+    value="${name#*=}"
+    name="${name%%=*}"
+    printf 'export %s=%q\n' "$name" "$value" >>"$root/isolate-env"
+    i=$((i + 1))
+  done
 }
 
 isolate_write_argv() {
   local root="$1"
+  if [[ "$(isolate_count command)" -eq 0 ]]; then
+    echo "A command after -- is required." >&2
+    return 2
+  fi
   python3 - "${command[@]}" >"$root/argv.json" <<'PY'
 import json, sys
 json.dump(sys.argv[1:], sys.stdout)
@@ -316,11 +371,183 @@ cd /src
 exec python3 -c 'import json, os; args = json.load(open("/argv.json")); os.execvp(args[0], args)'
 EOF
   chmod 0755 "$root/init" "$root/enter-command"
+  cat >"$root/drop-caps.py" <<'EOF'
+import ctypes, os, sys
+
+libc = ctypes.CDLL(None, use_errno=True)
+libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+libc.prctl.restype = ctypes.c_int
+
+
+def fail(message):
+    sys.stderr.write(message + "\n")
+    raise SystemExit(2)
+
+
+# PR_CAPBSET_DROP is 24. Caps the kernel does not define return EINVAL (22).
+# Any other failure, including EPERM, refuses to run the command.
+for cap in range(41):
+    ctypes.set_errno(0)
+    if libc.prctl(24, cap, 0, 0, 0) != 0 and ctypes.get_errno() != 22:
+        fail("capability bound drop failed for %s: %s" % (cap, ctypes.get_errno()))
+# PR_SET_NO_NEW_PRIVS is 38.
+if libc.prctl(38, 1, 0, 0, 0) != 0:
+    fail("no_new_privs failed: %s" % ctypes.get_errno())
+
+
+class Header(ctypes.Structure):
+    _fields_ = [("version", ctypes.c_uint32), ("pid", ctypes.c_int)]
+
+
+class Data(ctypes.Structure):
+    _fields_ = [
+        ("effective", ctypes.c_uint32),
+        ("permitted", ctypes.c_uint32),
+        ("inheritable", ctypes.c_uint32),
+    ]
+
+
+header = Header(0x20080522, 0)
+data = (Data * 2)()
+libc.capset.argtypes = [ctypes.POINTER(Header), ctypes.POINTER(Data)]
+libc.capset.restype = ctypes.c_int
+if libc.capset(ctypes.byref(header), ctypes.cast(data, ctypes.POINTER(Data))) != 0:
+    fail("capset failed: %s" % ctypes.get_errno())
+os.execv("/init", ["/init"])
+EOF
 }
 
-# macOS: default-deny profile. This path is not executed on Linux.
-isolate_darwin_profile() {
-  local src="$1" home="$2" tmp="$3" profile="$4" spec host dest
+# Longest virtual prefix first, so /opt/harness wins over a shorter prefix.
+isolate_map_add() {
+  virt_from+=("$1")
+  virt_to+=("$2")
+}
+
+isolate_map_sort() {
+  local n i j left right from to
+  n="$(isolate_count virt_from)"
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    j=0
+    while [[ "$((j + 1))" -lt "$n" ]]; do
+      left="$(isolate_at virt_from "$j")"
+      right="$(isolate_at virt_from "$((j + 1))")"
+      if [[ "${#left}" -lt "${#right}" ]]; then
+        virt_from[j]="$right"
+        virt_from[j + 1]="$left"
+        from="$(isolate_at virt_to "$j")"
+        to="$(isolate_at virt_to "$((j + 1))")"
+        virt_to[j]="$to"
+        virt_to[j + 1]="$from"
+      fi
+      j=$((j + 1))
+    done
+    i=$((i + 1))
+  done
+}
+
+isolate_translate() {
+  local value="$1" i n virt real
+  n="$(isolate_count virt_from)"
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    virt="$(isolate_at virt_from "$i")"
+    real="$(isolate_at virt_to "$i")"
+    if [[ "$value" == "$virt" ]]; then
+      printf '%s' "$real"
+      return 0
+    fi
+    if [[ "$value" == "$virt"/* ]]; then
+      printf '%s' "${real}${value#"$virt"}"
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  printf '%s' "$value"
+}
+
+isolate_profile_quote() {
+  local path="$1"
+  case "$path" in
+    *\"*|*\\*|*\)*|*'('*|*$'\n'*)
+      echo "Refusing a sandbox path that cannot be quoted." >&2
+      return 2
+      ;;
+  esac
+  printf '%s' "$path"
+}
+
+isolate_darwin_allow() {
+  local path
+  path="$(isolate_profile_quote "$1")" || return 2
+  darwin_reads+=("$path")
+}
+
+# Materialize selected tools and the profile. Does not call sandbox-exec.
+# Reads tools, ro_binds, and command from the caller. Sets darwin_home,
+# darwin_tmp, darwin_tools, darwin_profile, and darwin_command.
+isolate_darwin_prepare() {
+  local src="$1" i n spec host dest name real parent path
+  [[ -n "$src" && -d "$src" ]] || return 2
+  darwin_home="$(mktemp -d "${TMPDIR:-/tmp}/cursor-isolate-home.XXXXXX")"
+  darwin_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cursor-isolate-tmp.XXXXXX")"
+  darwin_tools="$(mktemp -d "${TMPDIR:-/tmp}/cursor-isolate-tools.XXXXXX")"
+  darwin_profile="$(mktemp "${TMPDIR:-/tmp}/cursor-isolate-profile.XXXXXX")"
+  virt_from=()
+  virt_to=()
+  darwin_command=()
+  darwin_reads=()
+  isolate_map_add "/src" "$src"
+  isolate_map_add "/tmp" "$darwin_tmp"
+  isolate_map_add "/home/reviewer" "$darwin_home"
+  isolate_map_add "/opt/tools" "$darwin_tools"
+  n="$(isolate_count ro_binds)"
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    spec="$(isolate_at ro_binds "$i")"
+    host="${spec%%:*}"
+    dest="${spec#*:}"
+    dest="/${dest#/}"
+    [[ -d "$host" ]] || {
+      echo "Read-only source is missing: $host" >&2
+      return 2
+    }
+    isolate_map_add "$dest" "$host"
+    isolate_darwin_allow "$host" || return 2
+    i=$((i + 1))
+  done
+  isolate_map_sort
+  n="$(isolate_count tools)"
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    name="$(isolate_at tools "$i")"
+    i=$((i + 1))
+    host="$(command -v "$name" 2>/dev/null || true)"
+    [[ -n "$host" && -x "$host" ]] || continue
+    case "$host" in
+      /usr/*|/bin/*) continue ;;
+    esac
+    ln -sfn "$host" "$darwin_tools/$name"
+    real="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$host")"
+    isolate_darwin_allow "$(dirname "$real")" || return 2
+    parent="$(dirname "$real")"
+    if [[ "$(basename "$parent")" == "bin" ]]; then
+      parent="$(dirname "$parent")"
+      isolate_darwin_allow "$parent" || return 2
+      if [[ -d "$parent/lib" ]]; then
+        isolate_darwin_allow "$parent/lib" || return 2
+      fi
+    fi
+  done
+  for path in \
+    /usr /bin /System /Library \
+    /System/Volumes/Preboot/Cryptexes/OS \
+    /System/Volumes/Preboot/Cryptexes/App \
+    /private/etc /private/var/db/dyld /dev \
+    "$src" "$darwin_home" "$darwin_tmp" "$darwin_tools"
+  do
+    isolate_darwin_allow "$path" || return 2
+  done
   {
     echo '(version 1)'
     echo '(deny default)'
@@ -333,59 +560,87 @@ isolate_darwin_profile() {
     echo '(allow mach-lookup)'
     echo '(allow network*)'
     echo '(allow file-read*'
-    echo '  (subpath "/usr")'
-    echo '  (subpath "/bin")'
-    echo '  (subpath "/System")'
-    echo '  (subpath "/Library")'
-    echo '  (subpath "/dev")'
-    echo '  (subpath "/opt/tools")'
-    printf '  (subpath "%s")\n' "$src"
-    printf '  (subpath "%s")\n' "$home"
-    printf '  (subpath "%s")\n' "$tmp"
-    for spec in "${ro_binds[@]}"; do
-      host="${spec%%:*}"
-      printf '  (subpath "%s")\n' "$host"
+    n="$(isolate_count darwin_reads)"
+    i=0
+    while [[ "$i" -lt "$n" ]]; do
+      printf '  (subpath "%s")\n' "$(isolate_at darwin_reads "$i")"
+      i=$((i + 1))
+    done
+    echo ')'
+    echo '(allow file-map-executable'
+    i=0
+    while [[ "$i" -lt "$n" ]]; do
+      printf '  (subpath "%s")\n' "$(isolate_at darwin_reads "$i")"
+      i=$((i + 1))
     done
     echo ')'
     echo '(allow file-write*'
-    printf '  (subpath "%s")\n' "$src"
-    printf '  (subpath "%s")\n' "$home"
-    printf '  (subpath "%s")\n' "$tmp"
+    printf '  (subpath "%s")\n' "$(isolate_profile_quote "$src")"
+    printf '  (subpath "%s")\n' "$(isolate_profile_quote "$darwin_home")"
+    printf '  (subpath "%s")\n' "$(isolate_profile_quote "$darwin_tmp")"
     echo ')'
-  } >"$profile"
+  } >"$darwin_profile"
+  n="$(isolate_count command)"
+  [[ "$n" -gt 0 ]] || return 2
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    darwin_command+=("$(isolate_translate "$(isolate_at command "$i")")")
+    i=$((i + 1))
+  done
+}
+
+isolate_darwin_cleanup() {
+  [[ -z "${darwin_home:-}" ]] || rm -rf "$darwin_home"
+  [[ -z "${darwin_tmp:-}" ]] || rm -rf "$darwin_tmp"
+  [[ -z "${darwin_tools:-}" ]] || rm -rf "$darwin_tools"
+  [[ -z "${darwin_profile:-}" ]] || rm -f "$darwin_profile"
+  darwin_home=""
+  darwin_tmp=""
+  darwin_tools=""
+  darwin_profile=""
 }
 
 isolate_darwin() {
-  local src="$1" home tmp profile
-  home="$(mktemp -d "${TMPDIR:-/tmp}/cursor-isolate-home.XXXXXX")"
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/cursor-isolate-tmp.XXXXXX")"
-  profile="$(mktemp "${TMPDIR:-/tmp}/cursor-isolate-profile.XXXXXX")"
-  # shellcheck disable=SC2064
-  trap "rm -rf $(printf '%q' "$home") $(printf '%q' "$tmp") $(printf '%q' "$profile")" EXIT
-  isolate_darwin_profile "$src" "$home" "$tmp" "$profile"
-  local -a env_args=(
-    "PATH=/usr/bin:/bin:/opt/tools"
-    "HOME=$home"
-    "TMPDIR=$tmp"
+  local src="$1" status=0 i n name value translated
+  local -a env_args=()
+  darwin_home=""
+  darwin_tmp=""
+  darwin_tools=""
+  darwin_profile=""
+  trap isolate_darwin_cleanup EXIT
+  isolate_darwin_prepare "$src" || return 2
+  env_args=(
+    "PATH=${darwin_tools}:/usr/bin:/bin"
+    "HOME=${darwin_home}"
+    "TMPDIR=${darwin_tmp}"
     "USER=reviewer"
     "LOGNAME=reviewer"
     "LANG=${LANG:-C.UTF-8}"
     "CI=1"
   )
-  local name value
-  for name in "${env_names[@]}"; do
-    [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || isolate_unavailable "Refusing environment name $name." || return 2
+  n="$(isolate_count env_names)"
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    name="$(isolate_at env_names "$i")"
     value="${!name-}"
     env_args+=("$name=$value")
+    i=$((i + 1))
   done
-  for name in "${set_pairs[@]}"; do
-    env_args+=("$name")
+  n="$(isolate_count set_pairs)"
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    name="$(isolate_at set_pairs "$i")"
+    value="${name#*=}"
+    name="${name%%=*}"
+    translated="$(isolate_translate "$value")"
+    env_args+=("$name=$translated")
+    i=$((i + 1))
   done
   set +e
-  sandbox-exec -f "$profile" env -i "${env_args[@]}" "${command[@]}"
-  local status=$?
+  (cd "$src" && sandbox-exec -f "$darwin_profile" env -i "${env_args[@]}" "${darwin_command[@]}")
+  status=$?
   set -e
-  rm -rf "$home" "$tmp" "$profile"
+  isolate_darwin_cleanup
   trap - EXIT
   return "$status"
 }

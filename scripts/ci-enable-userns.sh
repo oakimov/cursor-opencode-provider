@@ -3,6 +3,10 @@
 # tests require them. When the probe fails and the AppArmor sysctl is set,
 # clear it and probe again. Exit 0 when a user, mount, and pid namespace
 # can be created. Exit 1 when it still cannot.
+#
+# CI does not run this file. The coverage job checks out the pull request
+# head, which may predate it, so .github/workflows/ci.yml inlines the same
+# probe. Keep the two copies in sync.
 set -euo pipefail
 
 probe() {

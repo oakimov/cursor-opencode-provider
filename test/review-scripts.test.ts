@@ -35,6 +35,10 @@ function textEvent(text: string): string {
   return JSON.stringify({ type: "text", part: { type: "text", text } })
 }
 
+function hostKernel(): string {
+  return spawnSync("uname", ["-s"], { encoding: "utf8" }).stdout.trim()
+}
+
 function selectedPython(): string {
   const result = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" })
   const found = (result.stdout || "").trim()
@@ -405,9 +409,15 @@ describe("isolated check", () => {
         CURSOR_REVIEW_TRUST=1
         check_live_action 1 0
         printf '\\n'
+        CURSOR_REVIEW_TRUST_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        check_live_action 1 0
+        printf '\\n'
+        CURSOR_REVIEW_TRUST_SHA=not-a-commit
+        check_live_action 1 0
+        printf '\\n'
       `)
       expect(decision.status, decision.stderr).toBe(0)
-      expect(decision.stdout).toBe("skip\nskip-failed\nskip-untrusted\nskip-failed\nrun\n")
+      expect(decision.stdout).toBe("skip\nskip-failed\nskip-untrusted\nskip-failed\nskip-untrusted\nrun\nskip-untrusted\n")
 
       const result = bashHere(`
         set -euo pipefail
@@ -484,13 +494,14 @@ exit 1
     try {
       const passed = run("bash", ["scripts/live-test.sh"], { env })
       expect(passed.status, `${passed.stdout}\n${passed.stderr}`).toBe(0)
+      const pluginPath = fs.realpathSync(path.join(tree, "dist/plugin-opencode2.js"))
       expect(passed.stdout).toContain(`WORKTREE=${tree}`)
-      expect(passed.stdout).toContain(`PLUGIN_PATH=${tree}/dist/plugin-opencode2.js`)
+      expect(passed.stdout).toContain(`PLUGIN_PATH=${pluginPath}`)
       expect(passed.stdout).toContain("PLUGIN_VERSION=9.9.9")
-      expect(passed.stdout).toContain(`PLUGIN_LOADED=CURSOR_REVIEW_PLUGIN=${tree}/dist/plugin-opencode2.js version=9.9.9`)
+      expect(passed.stdout).toContain(`PLUGIN_LOADED=CURSOR_REVIEW_PLUGIN=${pluginPath} version=9.9.9`)
       expect(passed.stdout).toContain("LIVE_TEST=passed")
       expect(passed.stdout).not.toContain(secret)
-      expect(passed.stdout).toContain(path.join(reviewHome, "config", "opencode2"))
+      expect(passed.stdout).toContain(fs.realpathSync(path.join(reviewHome, "config", "opencode2")))
       const config = JSON.parse(fs.readFileSync(path.join(reviewHome, "config", "opencode2", "opencode.json"), "utf8"))
       expect(config.plugins).toHaveLength(1)
       expect(config.plugin).toBeUndefined()
@@ -548,12 +559,155 @@ exit 0
     expect(result.stdout).toContain("KEY=")
     expect(result.stdout).not.toContain(secret)
     expect(result.stdout).not.toContain("super-secret")
-    expect(result.stdout).toContain("HOME=/home/reviewer")
-    expect(result.stdout).toContain("TMP=/tmp")
+    if (hostKernel() === "Linux") {
+      expect(result.stdout).toContain("HOME=/home/reviewer")
+      expect(result.stdout).toContain("TMP=/tmp")
+    } else {
+      expect(result.stdout).toContain("HOME=")
+      expect(result.stdout).not.toContain(`HOME=${process.env.HOME}`)
+      expect(result.stdout).not.toContain("HOME=/home/reviewer")
+    }
     expect(fs.existsSync(home!)).toBe(false)
   })
 
+  it("does not archive a commit other than the trusted one", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-trust-"))
+    const log = path.join(directory, "git.log")
+    const trusted = "a".repeat(40)
+    const fetched = "b".repeat(40)
+    try {
+      const mismatch = bashHere(`
+        set -euo pipefail
+        source scripts/isolated-check.sh
+        git() {
+          printf '%s\\n' "$*" >> "$LOG"
+          if [[ "$*" == *fetch* ]]; then return 0; fi
+          if [[ "$*" == *rev-parse* ]]; then printf '%s\\n' "$FETCHED"; return 0; fi
+          if [[ "$*" == *archive* ]]; then printf 'ARCHIVED\\n' >> "$LOG"; return 0; fi
+          echo "unexpected git $*" >&2
+          return 1
+        }
+        tar() { printf 'TAR\\n' >> "$LOG"; }
+        check_main 156
+      `, { LOG: log, FETCHED: fetched, CURSOR_REVIEW_TRUST: "1", CURSOR_REVIEW_TRUST_SHA: trusted })
+      expect(mismatch.status).toBe(2)
+      expect(mismatch.stderr).toContain(`Fetched ${fetched}, not the trusted ${trusted}`)
+      expect(mismatch.stdout).toContain(`Check commit: ${fetched}`)
+      const trace = fs.readFileSync(log, "utf8")
+      expect(trace).not.toContain("ARCHIVED")
+      expect(trace).not.toContain("TAR")
+
+      fs.writeFileSync(log, "")
+      const moved = bashHere(`
+        set -euo pipefail
+        source scripts/isolated-check.sh
+        git() {
+          if [[ "$*" == *rev-parse* ]]; then printf '%s\\n' "$MOVED"; return 0; fi
+          return 1
+        }
+        check_refuse_moved_commit "$ARCHIVED"
+      `, { MOVED: fetched, ARCHIVED: trusted, CURSOR_REVIEW_TRUST_SHA: trusted })
+      expect(moved.status).toBe(2)
+      expect(moved.stderr).toContain("Refusing to forward the key")
+      expect(moved.stderr).toContain(fetched)
+
+      const same = bashHere(`
+        set -euo pipefail
+        source scripts/isolated-check.sh
+        git() {
+          if [[ "$*" == *rev-parse* ]]; then printf '%s\\n' "$MOVED"; return 0; fi
+          return 1
+        }
+        check_refuse_moved_commit "$ARCHIVED"
+      `, { MOVED: trusted, ARCHIVED: trusted, CURSOR_REVIEW_TRUST_SHA: trusted })
+      expect(same.status, same.stderr).toBe(0)
+      expect(same.stdout).toContain(`Check commit: ${trusted}`)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("translates darwin virtual paths and does not allow every file read", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-darwin-"))
+    const src = path.join(directory, "src")
+    const harness = path.join(directory, "harness")
+    const secretDir = path.join(directory, "secret-dir")
+    const toolDir = path.join(directory, "cellar", "tool", "1", "bin")
+    try {
+    fs.mkdirSync(src)
+    fs.mkdirSync(harness)
+    fs.mkdirSync(secretDir)
+    fs.mkdirSync(path.join(directory, "cellar", "tool", "1", "lib"), { recursive: true })
+    fs.mkdirSync(toolDir, { recursive: true })
+    fs.writeFileSync(path.join(toolDir, "mytool"), "#!/bin/sh\nexit 0\n")
+    fs.chmodSync(path.join(toolDir, "mytool"), 0o755)
+      const result = bashHere(`
+        set -euo pipefail
+        source scripts/isolate-run.sh
+        darwin_home=""
+        darwin_tmp=""
+        darwin_tools=""
+        darwin_profile=""
+        cleanup() {
+          [[ -z "$darwin_home" ]] || rm -rf "$darwin_home"
+          [[ -z "$darwin_tmp" ]] || rm -rf "$darwin_tmp"
+          [[ -z "$darwin_tools" ]] || rm -rf "$darwin_tools"
+          [[ -z "$darwin_profile" ]] || rm -f "$darwin_profile"
+        }
+        trap cleanup EXIT
+        src="$SRC"
+        tools=(mytool)
+        ro_binds=("$HARNESS:/opt/harness")
+        env_names=()
+        set_pairs=("OPENCODE_CONFIG_ROOT=/src" "OPENCODE_REVIEW_HOME=/tmp/review-opencode")
+        command=(bash /opt/harness/scripts/live-test.sh /src/file.txt)
+        isolate_darwin_prepare "$src"
+        printf 'TOOLS=%s\\n' "$darwin_tools"
+        echo '---PROFILE---'
+        cat "$darwin_profile"
+        echo '---COMMAND---'
+        n="$(isolate_count darwin_command)"
+        i=0
+        while [[ "$i" -lt "$n" ]]; do
+          isolate_at darwin_command "$i"
+          printf '\\n'
+          i=$((i + 1))
+        done
+        echo '---TRANSLATED---'
+        isolate_translate /src
+        printf '\\n'
+        isolate_translate /tmp/review-opencode
+        printf '\\n'
+        echo '---LINK---'
+        readlink "$darwin_tools/mytool"
+      `, { SRC: src, HARNESS: harness, PATH: `${toolDir}:/usr/bin:/bin` })
+      expect(result.status, result.stderr).toBe(0)
+      const profile = result.stdout.split("---PROFILE---\n")[1]?.split("---COMMAND---\n")[0] ?? ""
+      const command = result.stdout.split("---COMMAND---\n")[1]?.split("---TRANSLATED---\n")[0]?.trim().split("\n") ?? []
+      const translated = result.stdout.split("---TRANSLATED---\n")[1]?.trim().split("\n") ?? []
+      expect(profile.split("\n")).not.toContain("(allow file-read*)")
+      expect(profile).toContain("(allow file-map-executable")
+      expect(profile).toContain("/System/Volumes/Preboot/Cryptexes/OS")
+      expect(profile).toContain("/private/var/db/dyld")
+      expect(profile).toContain("/private/etc")
+      expect(profile).toContain(harness)
+      expect(profile).not.toContain(secretDir)
+      const write = profile.split("(allow file-write*")[1] ?? ""
+      expect(write).toContain(src)
+      expect(write).not.toContain(harness)
+      expect(command).toEqual(["bash", path.join(harness, "scripts/live-test.sh"), path.join(src, "file.txt")])
+      expect(translated[0]).toBe(src)
+      expect(translated[1]).toMatch(/\/review-opencode$/)
+      expect(result.stdout.split("---LINK---\n")[1]?.trim()).toBe(path.join(toolDir, "mytool"))
+      const toolRoot = path.join(directory, "cellar", "tool", "1")
+      expect(profile).toContain(toolRoot)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
   it("hides host files and refuses to modify the trusted harness", () => {
+    if (hostKernel() !== "Linux") return
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-boundary-"))
     const src = path.join(directory, "src")
     const secretFile = path.join(directory, "sentinel")
@@ -581,6 +735,18 @@ attempt("ESCAPE", lambda: pathlib.Path("/src/escape").read_text())
 attempt("REL", lambda: pathlib.Path("/src/rel").read_text())
 attempt("HARNESS", lambda: pathlib.Path(harness).write_text("PWNED\\n") or "ok")
 attempt("RO", lambda: pathlib.Path("/opt/harness/harness.txt").write_text("PWNED\\n") or "ok")
+import subprocess
+pathlib.Path("/src/copied").mkdir(exist_ok=True)
+remount = subprocess.run(["mount", "-o", "remount,bind,rw", "/opt/harness"], capture_output=True, text=True)
+print("REMOUNT=" + str(remount.returncode))
+copied = subprocess.run(["mount", "--bind", "/opt/harness", "/src/copied"], capture_output=True, text=True)
+print("REMOUNT_BIND=" + str(copied.returncode))
+attempt("REMOUNT_WRITE", lambda: pathlib.Path("/opt/harness/harness.txt").write_text("PWNED\\n") or "ok")
+for line in pathlib.Path("/proc/self/status").read_text().splitlines():
+    if line.startswith("CapEff:"):
+        print(line.replace("\\t", " "))
+pathlib.Path("/src/owned.txt").write_text("ok\\n")
+print("OWNED=ok")
 print("WORKSPACE=" + str(pathlib.Path("/workspace").exists()))
 print("GIT=" + str(pathlib.Path("/src/.git").exists()))
 print("SOCKET=" + str(pathlib.Path(socket).exists()))
@@ -616,6 +782,11 @@ print("SOCKET=" + str(pathlib.Path(socket).exists()))
       expect(result.stdout).toContain("REL_ERR=FileNotFoundError")
       expect(result.stdout).toContain("HARNESS_ERR=FileNotFoundError")
       expect(result.stdout).toContain("RO_ERR=")
+      expect(result.stdout).toMatch(/REMOUNT=[1-9]/)
+      expect(result.stdout).toMatch(/REMOUNT_BIND=[1-9]/)
+      expect(result.stdout).toContain("REMOUNT_WRITE_ERR=")
+      expect(result.stdout).toContain("CapEff: 0000000000000000")
+      expect(result.stdout).toContain("OWNED=ok")
       expect(result.stdout).toContain("WORKSPACE=False")
       expect(result.stdout).toContain("GIT=False")
       expect(result.stdout).toContain("SOCKET=False")
@@ -697,6 +868,24 @@ print("SAW=" + str(found))
     const base = result.stdout.trim()
     expect(fs.readdirSync(base)).toEqual([])
     fs.rmSync(base, { recursive: true, force: true })
+  })
+
+  it("keeps user-namespace setup in the workflow instead of the pull request checkout", () => {
+    const yaml = fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8")
+    expect(yaml).not.toContain("bash scripts/ci-enable-userns.sh")
+    expect(yaml).toContain("kernel.apparmor_restrict_unprivileged_userns")
+    expect(yaml).toContain("*userns-step")
+  })
+
+  it("runs a command when no tools or environment names are passed", () => {
+    if (hostKernel() !== "Linux") return
+    const src = fs.mkdtempSync(path.join(os.tmpdir(), "review-empty-arrays-"))
+    try {
+      const result = run("bash", ["scripts/isolate-run.sh", "--src", src, "--", "/usr/bin/true"])
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)
+    } finally {
+      fs.rmSync(src, { recursive: true, force: true })
+    }
   })
 })
 
@@ -873,6 +1062,180 @@ describe("live test deadlines and cleanup", () => {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
       if (fs.existsSync(pidFile)) spawnSync("kill", ["-KILL", fs.readFileSync(pidFile, "utf8").trim()])
       fs.rmSync(directory, { recursive: true, force: true })
+    }
+  }, 20000)
+
+  it("prints redacted diagnostics when discovery, the model, or the deadline fails", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "live-diagnose-"))
+    const bin = path.join(directory, "bin")
+    const reviewHome = path.join(directory, "review-home")
+    const python = selectedPython()
+    fs.mkdirSync(bin)
+    fs.mkdirSync(path.join(directory, "dist"), { recursive: true })
+    fs.writeFileSync(path.join(directory, "package.json"), JSON.stringify({ version: "9.9.9" }) + "\n")
+    fs.writeFileSync(path.join(directory, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(directory, "dist/plugin-opencode2.js"), "export default {}\n")
+    writeTimeoutAdapter(path.join(bin, "review-timeout"), python)
+    const env = {
+      HOME: directory,
+      PATH: `${bin}:/usr/bin:/bin`,
+      CURSOR_API_KEY: secret,
+      OPENCODE_CONFIG_ROOT: directory,
+      OPENCODE_REVIEW_HOME: reviewHome,
+      LIVE_TEST_TIMEOUT: path.join(bin, "review-timeout"),
+      LIVE_TEST_PYTHON: python,
+    }
+    try {
+      fs.writeFileSync(path.join(bin, "opencode"), "#!/bin/sh\necho deliberate-failure >&2\nexit 23\n")
+      fs.chmodSync(path.join(bin, "opencode"), 0o755)
+      const discovery = run("bash", ["scripts/live-test.sh"], { env })
+      expect(discovery.status, `${discovery.stdout}\n${discovery.stderr}`).toBe(1)
+      expect(discovery.stdout).toContain("LIVE_TEST=failed")
+      expect(discovery.stdout).toContain("plugin_list_exit=23")
+      expect(discovery.stdout).toContain("deliberate-failure")
+      expect(fs.readdirSync(path.join(reviewHome, "tmp")).filter((name) => name.startsWith("tmp."))).toEqual([])
+
+      fs.writeFileSync(
+        path.join(bin, "opencode"),
+        `#!/bin/sh
+if [ "$1" = plugin ]; then
+  echo "CURSOR_REVIEW_PLUGIN=$CURSOR_REVIEW_PLUGIN_PATH version=$CURSOR_REVIEW_PLUGIN_VERSION" >&2
+  exit 0
+fi
+echo "CURSOR_REVIEW_PLUGIN_INIT count=1 path=$CURSOR_REVIEW_PLUGIN_PATH" >&2
+echo deliberate-failure >&2
+exit 23
+`,
+      )
+      const model = run("bash", ["scripts/live-test.sh"], { env })
+      expect(model.status, `${model.stdout}\n${model.stderr}`).toBe(1)
+      expect(model.stdout).toContain("LIVE_TEST=failed")
+      expect(model.stdout).toContain("opencode_exit=23")
+      expect(model.stdout).toContain("deliberate-failure")
+
+      fs.writeFileSync(path.join(bin, "review-timeout"), "#!/bin/sh\necho deadline-fired >&2\nexit 124\n")
+      fs.chmodSync(path.join(bin, "review-timeout"), 0o755)
+      const expired = run("bash", ["scripts/live-test.sh"], { env })
+      expect(expired.status, `${expired.stdout}\n${expired.stderr}`).toBe(1)
+      expect(expired.stdout).toContain("LIVE_TEST=failed")
+      expect(expired.stdout).toContain("plugin_list_exit=124")
+      expect(expired.stdout).toContain("deadline-fired")
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("kills a descendant that ignores TERM and one hidden from ps", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "live-kill-"))
+    const bin = path.join(directory, "bin")
+    const reviewHome = path.join(directory, "review-home")
+    const parentPid = path.join(directory, "parent.pid")
+    const childPid = path.join(directory, "child.pid")
+    const python = selectedPython()
+    fs.mkdirSync(bin)
+    fs.mkdirSync(path.join(directory, "dist"), { recursive: true })
+    fs.writeFileSync(path.join(directory, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(directory, "dist/plugin-opencode2.js"), "export default {}\n")
+    writeTimeoutAdapter(path.join(bin, "review-timeout"), python)
+    fs.writeFileSync(
+      path.join(bin, "opencode"),
+      `#!/bin/sh
+echo $$ > ${JSON.stringify(parentPid)}
+${JSON.stringify(python)} -c 'import os,signal,time,sys
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+open(sys.argv[1],"w").write(str(os.getpid()))
+while True:
+    time.sleep(30)
+' ${JSON.stringify(childPid)} &
+wait
+`,
+    )
+    fs.chmodSync(path.join(bin, "opencode"), 0o755)
+    const child = spawn("bash", ["scripts/live-test.sh"], {
+      cwd: root,
+      env: {
+        ...process.env,
+        HOME: directory,
+        PATH: `${bin}:/usr/bin:/bin`,
+        CURSOR_API_KEY: secret,
+        OPENCODE_CONFIG_ROOT: directory,
+        OPENCODE_REVIEW_HOME: reviewHome,
+        LIVE_TEST_TIMEOUT: path.join(bin, "review-timeout"),
+        LIVE_TEST_PYTHON: python,
+      },
+    })
+    const pause = () => new Promise((resolve) => setTimeout(resolve, 50))
+    const started = Date.now()
+    try {
+      while (!fs.existsSync(childPid)) {
+        if (Date.now() - started > 8000) throw new Error("resistant descendant did not start")
+        await pause()
+      }
+      child.kill("SIGTERM")
+      const killed = Date.now()
+      while (child.exitCode === null && child.signalCode === null) {
+        if (Date.now() - killed > 8000) throw new Error("live test did not exit after SIGTERM")
+        await pause()
+      }
+      expect(spawnSync("kill", ["-0", fs.readFileSync(childPid, "utf8").trim()]).status).not.toBe(0)
+      expect(spawnSync("kill", ["-0", fs.readFileSync(parentPid, "utf8").trim()]).status).not.toBe(0)
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+      for (const file of [parentPid, childPid]) {
+        if (fs.existsSync(file)) spawnSync("kill", ["-KILL", fs.readFileSync(file, "utf8").trim()])
+      }
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+
+    const hidden = fs.mkdtempSync(path.join(os.tmpdir(), "live-ps-"))
+    const hiddenBin = path.join(hidden, "bin")
+    const hiddenHome = path.join(hidden, "review-home")
+    const hiddenPid = path.join(hidden, "sleep.pid")
+    fs.mkdirSync(hiddenBin)
+    fs.mkdirSync(path.join(hidden, "dist"), { recursive: true })
+    fs.writeFileSync(path.join(hidden, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(hidden, "dist/plugin-opencode2.js"), "export default {}\n")
+    writeTimeoutAdapter(path.join(hiddenBin, "review-timeout"), python)
+    fs.writeFileSync(path.join(hiddenBin, "ps"), "#!/bin/sh\nexit 1\n")
+    fs.chmodSync(path.join(hiddenBin, "ps"), 0o755)
+    fs.writeFileSync(path.join(hiddenBin, "opencode"), `#!/bin/sh\necho $$ > ${JSON.stringify(hiddenPid)}\nsleep 60\n`)
+    fs.chmodSync(path.join(hiddenBin, "opencode"), 0o755)
+    const listed = spawn("bash", ["scripts/live-test.sh"], {
+      cwd: root,
+      env: {
+        ...process.env,
+        HOME: hidden,
+        PATH: `${hiddenBin}:/usr/bin:/bin`,
+        CURSOR_API_KEY: secret,
+        OPENCODE_CONFIG_ROOT: hidden,
+        OPENCODE_REVIEW_HOME: hiddenHome,
+        LIVE_TEST_TIMEOUT: path.join(hiddenBin, "review-timeout"),
+        LIVE_TEST_PYTHON: python,
+      },
+    })
+    let stderr = ""
+    listed.stderr?.on("data", (chunk) => { stderr += chunk })
+    const hiddenStarted = Date.now()
+    try {
+      while (!fs.existsSync(hiddenPid)) {
+        if (Date.now() - hiddenStarted > 8000) throw new Error("hidden sleeper did not start")
+        await pause()
+      }
+      listed.kill("SIGTERM")
+      const closed = await new Promise<number | null>((resolve) => {
+        const timer = setTimeout(() => resolve(null), 8000)
+        listed.on("close", (status) => {
+          clearTimeout(timer)
+          resolve(status)
+        })
+      })
+      if (closed === null) throw new Error("live test did not exit after a failed process listing")
+      expect(stderr).toContain("Process listing failed")
+      expect(spawnSync("kill", ["-0", fs.readFileSync(hiddenPid, "utf8").trim()]).status).not.toBe(0)
+    } finally {
+      if (listed.exitCode === null && listed.signalCode === null) listed.kill("SIGKILL")
+      if (fs.existsSync(hiddenPid)) spawnSync("kill", ["-KILL", fs.readFileSync(hiddenPid, "utf8").trim()])
+      fs.rmSync(hidden, { recursive: true, force: true })
     }
   }, 20000)
 })
