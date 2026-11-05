@@ -63,12 +63,28 @@ plug_dir.mkdir(parents=True, exist_ok=True)
     encoding="utf-8",
 )
 marker = f"CURSOR_REVIEW_PLUGIN={plugin} version={version}"
+init_prefix = "CURSOR_REVIEW_PLUGIN_INIT count="
+# One registration. OpenCode ignores a file URL in `plugin` and would also
+# import dist/plugin-opencode2.js itself, so the provider would start twice.
 (plug_dir / "index.js").write_text(
+    "import plugin from " + json.dumps(plugin.as_uri()) + "\n"
     "console.error(" + json.dumps(marker) + ")\n"
-    + f'export {{ default }} from "{plugin.as_uri()}";\n',
+    "const setup = plugin.setup.bind(plugin)\n"
+    "let inits = 0\n"
+    "plugin.setup = async (ctx) => {\n"
+    "  inits += 1\n"
+    "  console.error(" + json.dumps(init_prefix) + " + inits + " + json.dumps(f" path={plugin}") + ")\n"
+    "  return setup(ctx)\n"
+    "}\n"
+    "export default plugin\n",
     encoding="utf-8",
 )
+# The pong prompt runs no shell. Deny every command. Add an allow entry only
+# after a live run shows OpenCode refused a command this test needs.
+# `opencode run --auto` would approve an unlisted external directory, so
+# everything outside this checkout and the private config directories is denied.
 external = {
+    "*": "deny",
     "/tmp/*": "allow",
     f"{root}/*": "allow",
     f"{config_dir}/*": "allow",
@@ -81,7 +97,7 @@ config = {
     "$schema": "https://opencode.ai/config.json",
     "lsp": False,
     "permission": {
-        "bash": {"*": "allow"},
+        "bash": {"*": "deny"},
         "read": {"env": "deny", "*.env": "deny", "*.env.*": "deny", "*.env.example": "allow", "*": "allow"},
         "edit": {"env": "deny", "*.env": "deny", "*.env.*": "deny", "*.env.example": "allow", "*": "allow"},
         "external_directory": external,
@@ -90,7 +106,6 @@ config = {
         "explore": {"mode": "subagent", "model": {"providerID": "cursor", "model": "default"}},
     },
     "plugins": [str(plug_dir)],
-    "plugin": [plugin.as_uri()],
 }
 (config_dir / "opencode.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 (env_file).write_text(

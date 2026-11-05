@@ -44,17 +44,32 @@ if ! command -v opencode >/dev/null 2>&1; then
 fi
 
 marker="CURSOR_REVIEW_PLUGIN=${CURSOR_REVIEW_PLUGIN_PATH} version=${CURSOR_REVIEW_PLUGIN_VERSION}"
+init_line="CURSOR_REVIEW_PLUGIN_INIT count=1 path=${CURSOR_REVIEW_PLUGIN_PATH}"
 list_out="$(mktemp)"
 list_err="$(mktemp)"
 cleanup_list() { rm -f "$list_out" "$list_err"; }
-set +e
-timeout 60 opencode plugin list --standalone --print-logs --log-level info >"$list_out" 2>"$list_err"
-list_code=$?
-set -e
-if [[ "$list_code" -ne 0 ]] || ! grep -F "$marker" "$list_err" >/dev/null; then
+marker_count=0
+list_init=0
+list_code=0
+# Plugin discovery can exit before the import log is flushed. Retry only
+# while that log is absent. More than one import or setup fails immediately.
+for _attempt in 1 2 3 4 5; do
+  set +e
+  timeout 60 opencode plugin list --standalone --print-logs --log-level info >"$list_out" 2>"$list_err"
+  list_code=$?
+  set -e
+  marker_count=$(grep -c -F "$marker" "$list_err" || true)
+  list_init=$(grep -c -F "CURSOR_REVIEW_PLUGIN_INIT " "$list_err" || true)
+  if [[ "$list_code" -ne 0 || "$marker_count" -gt 1 || "$list_init" -gt 1 || "$marker_count" -eq 1 ]]; then
+    break
+  fi
+  sleep 0.2
+done
+if [[ "$list_code" -ne 0 || "$marker_count" -ne 1 || "$list_init" -gt 1 ]]; then
   echo "LIVE_TEST=failed"
-  echo "OpenCode did not load the worktree plugin."
+  echo "OpenCode did not load the worktree plugin once."
   echo "expected=$marker"
+  echo "marker_count=$marker_count list_init=$list_init"
   python3 - "$list_err" "$list_code" <<'PY'
 import os, sys
 path, code = sys.argv[1], sys.argv[2]
@@ -70,6 +85,9 @@ PY
 fi
 cleanup_list
 echo "PLUGIN_LOADED=$marker"
+echo "OPENCODE_CONFIG_BEGIN"
+cat "$OPENCODE_CONFIG_DIR/opencode.json"
+echo "OPENCODE_CONFIG_END"
 
 cd "$TREE"
 model="${OPENCODE_LIVE_MODEL:-cursor/composer-2.5}"
@@ -82,10 +100,24 @@ cleanup() { rm -f "$stdout_file" "$stderr_file"; }
 trap cleanup EXIT
 
 set +e
-timeout 180 opencode run --standalone --auto --format json --log-level error \
+# info plus --print-logs, so the wrapper's setup log reaches stderr. The reply stays on stdout.
+timeout 180 opencode run --standalone --print-logs --auto --format json --log-level info \
   --model "$model" "$prompt" >"$stdout_file" 2>"$stderr_file"
 code=$?
 set -e
+
+init_count=$(grep -c -F "$init_line" "$stdout_file" "$stderr_file" || true)
+init_any=$(grep -c -F "CURSOR_REVIEW_PLUGIN_INIT " "$stdout_file" "$stderr_file" || true)
+# grep -c with two files prints "file:count" lines. Sum them.
+init_count=$(printf '%s\n' "$init_count" | awk -F: '{ s += $NF } END { print s + 0 }')
+init_any=$(printf '%s\n' "$init_any" | awk -F: '{ s += $NF } END { print s + 0 }')
+if [[ "$init_count" -ne 1 || "$init_any" -ne 1 ]]; then
+  echo "LIVE_TEST=failed"
+  echo "OpenCode initialized the provider ${init_any} times."
+  echo "expected=$init_line"
+  exit 1
+fi
+echo "PLUGIN_INIT_COUNT=1"
 
 set +e
 python3 "$SCRIPT_ROOT/scripts/live-reply.py" "$stdout_file" "$stderr_file" "$code" "$model"

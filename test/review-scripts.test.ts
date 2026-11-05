@@ -130,9 +130,9 @@ describe("configure opencode", () => {
       const config = JSON.parse(fs.readFileSync(path.join(directory, ".opencode-local/opencode.json"), "utf8"))
       expect(config.$schema).toBe("https://opencode.ai/config.json")
       expect(config.plugins[0]).toContain("plugins/cursor")
-      expect(config.plugin[0]).toContain("file://")
-      expect(config.plugin[0]).toContain("plugin-opencode2.js")
-      expect(config.permission.bash["*"]).toBe("allow")
+      expect(config.plugin).toBeUndefined()
+      expect(config.permission.bash["*"]).toBe("deny")
+      expect(config.permission.bash["git *"]).toBeUndefined()
       expect(config.permission.read.env).toBe("deny")
       expect(config.agents.explore.model.providerID).toBe("cursor")
       expect(config.mcp).toBeUndefined()
@@ -145,6 +145,8 @@ describe("configure opencode", () => {
       expect(plugin).toContain("file://")
       expect(plugin).toContain("%20")
       expect(plugin).toContain("CURSOR_REVIEW_PLUGIN=")
+      expect(plugin).toContain("CURSOR_REVIEW_PLUGIN_INIT count=")
+      expect(plugin.match(/export default/g)).toHaveLength(1)
     } finally {
       fs.rmSync(parent, { recursive: true, force: true })
     }
@@ -203,14 +205,15 @@ describe("cloud agent install", () => {
     const environment = JSON.parse(fs.readFileSync(path.join(root, ".cursor/environment.json"), "utf8")) as {
       install: string
     }
-    const heredoc = (source: string) => source.match(/<<'PY'\n([\s\S]*?)\nPY/)?.[1]
     expect(environment.install).toBe(script)
     expect(environment.install).toContain('OPENCODE_PIN="2.2.5"')
     expect(environment.install).not.toContain("scripts/configure-opencode.sh")
     expect(environment.install).not.toContain("scripts/cloud-agent-install.sh")
-    expect(heredoc(script)).toContain('"plugins": [str(plug_dir)]')
-    expect(heredoc(script)).not.toContain("CURSOR_REVIEW_PLUGIN=")
-    expect(heredoc(configure)).toContain("CURSOR_REVIEW_PLUGIN=")
+    expect(environment.install).not.toContain("opencode.json")
+    expect(environment.install).not.toContain("CURSOR_REVIEW_PLUGIN")
+    expect(script).not.toContain("<<'PY'")
+    expect(configure).toContain("CURSOR_REVIEW_PLUGIN_INIT")
+    expect(configure).not.toContain('"plugin":')
   })
 
   it("does not install when sourced, and reads the pinned version", () => {
@@ -378,6 +381,7 @@ sys.stderr.write((match.group(0) if match else "no-marker") + "\\n")'
   exit 0
 fi
 if [ "$1" = run ]; then
+  printf '%s\\n' "CURSOR_REVIEW_PLUGIN_INIT count=1 path=$CURSOR_REVIEW_PLUGIN_PATH" >&2
   printf '%s\\n' '{"type":"text","part":{"type":"text","text":"pong"}}'
   exit 0
 fi
@@ -404,9 +408,30 @@ exit 1
       expect(passed.stdout).not.toContain(secret)
       expect(passed.stdout).toContain(path.join(reviewHome, "config", "opencode2"))
       const config = JSON.parse(fs.readFileSync(path.join(reviewHome, "config", "opencode2", "opencode.json"), "utf8"))
-      expect(config.plugins[0]).toContain(path.join(reviewHome, "config", "opencode2", "plugins", "cursor"))
-      expect(config.plugin[0]).toContain("file://")
+      expect(config.plugins).toHaveLength(1)
+      expect(config.plugin).toBeUndefined()
+      expect(config.permission.bash["*"]).toBe("deny")
+      expect(passed.stdout).toContain("PLUGIN_INIT_COUNT=1")
       expect(fs.existsSync(path.join(tree, ".opencode-local"))).toBe(false)
+
+      fs.writeFileSync(
+        path.join(bin, "opencode"),
+        `#!/bin/sh
+if [ "$1" = plugin ]; then
+  echo "CURSOR_REVIEW_PLUGIN=$OPENCODE_CONFIG_ROOT/dist/plugin-opencode2.js version=9.9.9" >&2
+  exit 0
+fi
+echo "CURSOR_REVIEW_PLUGIN_INIT count=1 path=$CURSOR_REVIEW_PLUGIN_PATH" >&2
+echo "CURSOR_REVIEW_PLUGIN_INIT count=2 path=$CURSOR_REVIEW_PLUGIN_PATH" >&2
+printf '%s\\n' '{"type":"text","part":{"type":"text","text":"pong"}}'
+exit 0
+`,
+      )
+      fs.chmodSync(path.join(bin, "opencode"), 0o755)
+      const twice = run("bash", ["scripts/live-test.sh"], { env })
+      expect(twice.status, `${twice.stdout}\n${twice.stderr}`).toBe(1)
+      expect(twice.stdout).toContain("initialized the provider 2 times")
+      expect(twice.stdout).not.toContain("LIVE_TEST=passed")
 
       fs.writeFileSync(path.join(bin, "opencode"), "#!/bin/sh\nif [ \"$1\" = run ]; then echo ran > \"$HOME/ran-model\"; fi\nexit 0\n")
       const failed = run("bash", ["scripts/live-test.sh"], { env: { ...env, HOME: tree } })
