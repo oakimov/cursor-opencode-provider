@@ -13,11 +13,12 @@ From the repo root:
 
 ```bash
 scripts/review-pr.sh <pr-number-or-url>
+scripts/review-pr.sh <pr-number-or-url> --live
 ```
 
-Use `scripts/review-pr.sh --local` only when the change is the checkout you already have. The script checks out the pull request in a temporary worktree, installs dependencies, builds, runs `bun test`, and runs `scripts/live-test.sh`.
+Use `scripts/review-pr.sh --local` only when the change is the checkout you already have, including uncommitted files. The script checks out a contributor pull request in a temporary worktree. Install, build, and `bun test` for that pull request run without reviewer credentials. `--live` is a separate trust decision to run that revision's `scripts/live-test.sh` with `CURSOR_API_KEY`.
 
-Read the script summary. `LIVE_TEST=skipped` means `CURSOR_API_KEY` is unset. That is not a failure. `LIVE_TEST=failed` or `UNIT_TESTS=failed` is a failure.
+Read the script summary. `LIVE_TEST=skipped` means the key is unset, or `--live` was not passed for a contributor pull request. That is not a failure. `LIVE_TEST=failed` or `UNIT_TESTS=failed` is a failure.
 
 ## Apply these rules on every review
 

@@ -3,7 +3,9 @@
 # Output is gitignored (.opencode-local/) because the paths are absolute.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CONFIG_DIR="${OPENCODE_CONFIG_DIR:-$ROOT/.opencode-local}"
+# Always this checkout's directory. OPENCODE_CONFIG_DIR is the user's saved
+# OpenCode config and must not be replaced by a plugins-only file.
+CONFIG_DIR="$ROOT/.opencode-local"
 ENTRY="$ROOT/dist/index.js"
 PLUGIN="$ROOT/dist/plugin-opencode2.js"
 

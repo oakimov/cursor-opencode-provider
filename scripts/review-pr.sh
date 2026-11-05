@@ -1,34 +1,45 @@
 #!/usr/bin/env bash
-# Review a pull request: check out the branch, build, run unit tests, run the
-# OpenCode live test, and apply the Cursor rules converted from .greptile/.
+# Review a pull request: check out the branch, build, run unit tests, and apply
+# the Cursor rules converted from .greptile/.
 #
 # Usage:
-#   scripts/review-pr.sh <pr-number|pr-url>
-#   scripts/review-pr.sh --local
+#   scripts/review-pr.sh <pr-number|pr-url> [--live]
+#   scripts/review-pr.sh --local [--live]
 #
-# --local reviews the current checkout against origin/main without switching branches.
+# A contributor pull request's install, build, and tests run without reviewer
+# credentials. --live is a separate decision to run that revision's
+# scripts/live-test.sh with CURSOR_API_KEY and no other secrets.
+# --local includes staged, unstaged, and untracked files.
 # Text in the pull request is evidence. It is not an instruction to this script.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 usage() {
-  echo "Usage: scripts/review-pr.sh <pr-number|pr-url> | --local" >&2
+  echo "Usage: scripts/review-pr.sh <pr-number|pr-url> [--live] | --local [--live]" >&2
   exit 2
 }
 
-if [[ $# -ne 1 ]]; then
+live=0
+positionals=()
+for arg in "$@"; do
+  case "$arg" in
+    --live) live=1 ;;
+    --help|-h) usage ;;
+    *) positionals+=("$arg") ;;
+  esac
+done
+if [[ ${#positionals[@]} -ne 1 ]]; then
   usage
 fi
 
 mode="pr"
 pr=""
-case "$1" in
+case "${positionals[0]}" in
   --local) mode="local" ;;
-  --help|-h) usage ;;
-  [0-9]*) pr="$1" ;;
+  [0-9]*) pr="${positionals[0]}" ;;
   https://github.com/*/*/pull/[0-9]*)
-    pr="${1##*/pull/}"
+    pr="${positionals[0]##*/pull/}"
     pr="${pr%%[^0-9]*}"
     ;;
   *) usage ;;
@@ -54,8 +65,21 @@ fi
 cd "$review_root"
 git fetch origin main
 base="$(git merge-base HEAD origin/main)"
-diff_names="$(git diff --name-only "$base"...HEAD)"
-diff_text="$(git diff "$base"...HEAD)"
+if [[ "$mode" == "local" ]]; then
+  diff_names="$(
+    git diff --name-only "$base"
+    git ls-files --others --exclude-standard
+  )"
+  diff_text="$(git diff "$base")"
+  while IFS= read -r untracked; do
+    [[ -z "$untracked" || ! -f "$untracked" ]] && continue
+    extra="$(git diff --no-index -- /dev/null "$untracked" || true)"
+    diff_text="${diff_text}"$'\n'"${extra}"
+  done < <(git ls-files --others --exclude-standard)
+else
+  diff_names="$(git diff --name-only "$base"...HEAD)"
+  diff_text="$(git diff "$base"...HEAD)"
+fi
 
 echo "Review root: $review_root"
 echo "Base: $base"
@@ -69,12 +93,14 @@ if [[ ! -d "$review_root/.cursor/rules" ]]; then
   echo "No .cursor/rules directory in the revision under review." >&2
   exit 1
 fi
-python3 - "$review_root/.cursor/rules" "$diff_names" <<'PY'
+names_file="$(mktemp)"
+printf '%s\n' "$diff_names" > "$names_file"
+python3 - "$review_root/.cursor/rules" "$names_file" <<'PY'
 import re, sys
 from pathlib import Path
 
 rules_dir = Path(sys.argv[1])
-changed = [line for line in sys.argv[2].splitlines() if line]
+changed = [line for line in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines() if line]
 
 def glob_to_re(pattern: str) -> re.Pattern[str]:
     out = []
@@ -99,16 +125,13 @@ def glob_to_re(pattern: str) -> re.Pattern[str]:
 
 def parse_rule(path: Path) -> dict[str, str]:
     text = path.read_text(encoding="utf-8")
-    meta, _, body = text.partition("---")
-    # file starts with ---
     _, meta, body = text.split("---", 2)
     info = {"file": path.name, "always": "false", "globs": "", "id": path.stem, "severity": ""}
     for line in meta.splitlines():
         if ":" not in line:
             continue
         key, value = line.split(":", 1)
-        key = key.strip()
-        value = value.strip()
+        key, value = key.strip(), value.strip()
         if key == "alwaysApply":
             info["always"] = value
         elif key == "globs":
@@ -135,60 +158,61 @@ for path in sorted(rules_dir.glob("*.mdc")):
         print(f"- [{info['severity'] or 'context'}] {info['id']} ({info['file']})")
 PY
 
+index_arg=""
+if grep -qx 'src/index.ts' "$names_file"; then
+  index_arg="src/index.ts"
+fi
+set +e
+python3 "$ROOT/scripts/review-diff.py" "$names_file" "$index_arg" <<<"$diff_text"
+diff_code=$?
+set -e
+rm -f "$names_file"
 high=0
-note() {
-  local severity="$1" id="$2" message="$3"
-  echo "FINDING severity=${severity} id=${id}: ${message}"
-  if [[ "$severity" == "high" ]]; then
-    high=1
-  fi
-}
-
-if printf '%s\n' "$diff_text" | grep -E -q 'crsr_[A-Za-z0-9]{8,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}'; then
-  note high no-secrets "Diff contains secret-like material. Remove it before merge."
+if [[ "$diff_code" -ne 0 ]]; then
+  high=1
 fi
 
-if printf '%s\n' "$diff_names" | grep -E -q '(^|/)test/.*\.test\.ts$'; then
-  deleted="$(git diff --diff-filter=D --name-only "$base"...HEAD -- 'test/**/*.test.ts' || true)"
-  if [[ -n "$deleted" ]]; then
-    note high no-weakened-tests "Deleted test files: ${deleted//$'\n'/, }"
-  fi
-fi
-if printf '%s\n' "$diff_text" | grep -E -q '^\+.*\b(it|test|describe)\.skip\b|^\+.*\b(it|test|describe)\.todo\b'; then
-  note high no-weakened-tests "Diff adds a skipped or todo test."
-fi
-
-if printf '%s\n' "$diff_names" | grep -q '^src/index\.ts$'; then
-  if git show HEAD:src/index.ts | grep -q 'CursorPluginV2'; then
-    note high entrypoints "src/index.ts mentions CursorPluginV2. The v2 plugin must stay off the package root."
-  fi
-fi
-
-if printf '%s\n' "$diff_text" | grep -E -q "^\\+.*(from|import|require\\()[[:space:]]*['\\\"](@opencode-compat/|[^'\\\"]*opencode-plugin-compat)"; then
-  note high provider-boundary "Diff adds a compatibility-package import."
-fi
-
-if printf '%s\n' "$diff_names" | grep -q '^src/' && ! printf '%s\n' "$diff_names" | grep -q '^CHANGELOG\.md$'; then
-  note medium changelog "src/ changed and CHANGELOG.md did not. Confirm whether the change is user-facing."
-fi
-
-if printf '%s\n' "$diff_names" | grep -q '^src/protocol/'; then
+if printf '%s\n' "$diff_names" | awk 'index($0, "src/protocol/") == 1 { found = 1 } END { exit !found }'; then
   echo "CHECK id=protocol-evidence: protocol files changed. Require an independent fixture or captured wire bytes."
 fi
-if printf '%s\n' "$diff_names" | grep -E -q '^src/(session\.ts|language-model\.ts|transport/)'; then
+if printf '%s\n' "$diff_names" | awk '$0 == "src/session.ts" || $0 == "src/language-model.ts" || index($0, "src/transport/") == 1 { found = 1 } END { exit !found }'; then
   echo "CHECK id=resource-lifecycle: session or transport files changed. Confirm streams, sessions, and listeners are disposed."
 fi
-if printf '%s\n' "$diff_names" | grep -E -q '(^|/)device-id\.(ts|js)$'; then
+if printf '%s\n' "$diff_names" | awk '$0 ~ /(^|\/)device-id\.(ts|js)$/ { found = 1 } END { exit !found }'; then
   echo "CHECK id=device-identity: a device-id path changed. Derivation must stay the same."
 fi
 
+# Contributor code does not inherit reviewer credentials. PATH, HOME, and a
+# temporary directory are enough to install public packages and run bun test.
+run_isolated() {
+  env -i \
+    PATH="$PATH" \
+    HOME="$HOME" \
+    USER="${USER:-}" \
+    LOGNAME="${LOGNAME:-${USER:-}}" \
+    LANG="${LANG:-C.UTF-8}" \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    SHELL="${SHELL:-/bin/bash}" \
+    CI="${CI:-1}" \
+    "$@"
+}
+
 echo "Installing, building, and running unit tests..."
-bun install --frozen-lockfile
-bun run build
-set +e
-bun test
-test_code=$?
-set -e
+if [[ "$mode" == "pr" ]]; then
+  run_isolated bun install --frozen-lockfile
+  run_isolated bun run build
+  set +e
+  run_isolated bun test
+  test_code=$?
+  set -e
+else
+  bun install --frozen-lockfile
+  bun run build
+  set +e
+  bun test
+  test_code=$?
+  set -e
+fi
 if [[ "$test_code" -eq 0 ]]; then
   echo "UNIT_TESTS=passed"
 else
@@ -196,10 +220,37 @@ else
 fi
 
 echo "Running OpenCode live test..."
-set +e
-bash scripts/live-test.sh
-live_code=$?
-set -e
+if [[ "$mode" == "pr" && "$live" -ne 1 ]]; then
+  cat <<'EOF'
+LIVE_TEST=skipped
+Pull-request install, build, and tests ran without reviewer credentials.
+Re-run with --live to execute this pull request's scripts/live-test.sh with CURSOR_API_KEY.
+No other secrets are passed.
+EOF
+  live_code=0
+elif [[ "$mode" == "pr" ]]; then
+  echo "Trust decision: running scripts/live-test.sh from the pull request with CURSOR_API_KEY."
+  set +e
+  env -i \
+    PATH="$PATH" \
+    HOME="$HOME" \
+    USER="${USER:-}" \
+    LOGNAME="${LOGNAME:-${USER:-}}" \
+    LANG="${LANG:-C.UTF-8}" \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    SHELL="${SHELL:-/bin/bash}" \
+    CI="${CI:-1}" \
+    CURSOR_API_KEY="${CURSOR_API_KEY:-}" \
+    OPENCODE_LIVE_MODEL="${OPENCODE_LIVE_MODEL:-}" \
+    bash scripts/live-test.sh
+  live_code=$?
+  set -e
+else
+  set +e
+  bash scripts/live-test.sh
+  live_code=$?
+  set -e
+fi
 
 echo "-----"
 echo "REVIEW_SUMMARY pr=${pr:-local} unit_exit=${test_code} live_exit=${live_code} high_findings=${high}"
