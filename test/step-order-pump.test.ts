@@ -14,7 +14,7 @@ import { billingLedger } from "../src/billing.js"
 import { resetToolRequestsListedSeenForTests } from "../src/parallel-step.js"
 import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
 import { encodeJsonAsValue, readAllFields } from "../src/protocol/struct.js"
-import { toolsToDescriptors } from "../src/protocol/tools.js"
+import { OPENCODE_1_TOOL_DIALECT, OPENCODE_2_TOOL_DIALECT, toolsToDescriptors } from "../src/protocol/tools.js"
 import { HELD_CALL_CANCELLED_REASON } from "../src/step-order.js"
 import { sessionManager, type CursorSession, type Frame } from "../src/session.js"
 import { sessionFixture } from "./session-fixture.js"
@@ -390,6 +390,35 @@ describe("model order in a step that changes a file", () => {
 
     expect(toolCalls(f.parts).map((call) => call.toolName)).toEqual(["write"])
     expect(replyText(f.writes, 2)).toContain(HELD_CALL_CANCELLED_REASON)
+    expect(finishes(f.parts).at(-1)!.finishReason.unified).toBe("stop")
+  })
+
+  const uncountedRefusalCases = [OPENCODE_1_TOOL_DIALECT, OPENCODE_2_TOOL_DIALECT].flatMap(dialect =>
+    [false, true].flatMap(lateCount => [false, true].map(interrupted => ({ dialect, lateCount, interrupted }))))
+
+  it.each(uncountedRefusalCases)("cancels an uncounted follower ($dialect.shellTool, late count: $lateCount, interrupted: $interrupted)", async ({ dialect, lateCount, interrupted }) => {
+    const root = workspace()
+    const target = path.join(root, "new.txt")
+    const f = fixture([editStarted("edit", target), writeExec(1, target, "created\n", "edit")], root)
+    f.session.hostToolDialect = dialect
+    const tools = f.session.toolCatalog!.map(tool => tool.name === "bash" ? { ...tool, name: dialect.shellTool } : tool)
+    f.session.toolCatalog = tools
+    f.session.toolDescriptors = toolsToDescriptors(tools, "opencode")
+
+    // The first host call finishes before count-capability discovery.
+    await f.run()
+    expect(toolCalls(f.parts).map(call => call.toolName)).toEqual(["write"])
+    expect(f.session.stepOrder?.listedCount).toBeUndefined()
+    await answer(f.session, toolCalls(f.parts)[0]!, 1, interrupted
+      ? { error: "Tool execution aborted", interrupted: true }
+      : { error: "Permission rejected", refusal: "rejected" })
+    // The same generation's follower arrives before its count, if there is one.
+    f.push(shellStarted("shell"), shellExec(2, "shell"), ...(lateCount ? [listed(2)] : []), ended())
+    await f.run()
+
+    expect(toolCalls(f.parts).map(call => call.toolName)).toEqual(["write"])
+    expect(replyText(f.writes, 2)).toContain(HELD_CALL_CANCELLED_REASON)
+    expect(f.session.pending.size).toBe(0)
     expect(finishes(f.parts).at(-1)!.finishReason.unified).toBe("stop")
   })
 

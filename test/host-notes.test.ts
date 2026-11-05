@@ -896,6 +896,22 @@ describe("host note injection outcomes", () => {
       .toEqual({ inFlight: [], undelivered: [NOTE] })
   })
 
+  it("keeps a delivered note until the Run stores a checkpoint after the ack", async () => {
+    const { live, injectionId } = await injectNote("ses_delivered_unsaved")
+    // Cursor stores the step's checkpoint, then delivers; the next checkpoint never comes.
+    const frames: Frame[] = [
+      { flags: 0, payload: encodeMessage("AgentServerMessage", { conversation_checkpoint_update: Uint8Array.from([7]) }) },
+      injectionState(injectionId, delivered),
+      turnEnded(),
+    ]
+    live.frames = {
+      next: async () => frames.length > 0 ? { done: false, value: frames.shift()! } : { done: true, value: undefined },
+    } as CursorSession["frames"]
+    await pump(live, controller, { textId: "t", reasoningId: "r" })
+
+    expect(await hostNoteAfterRestart(root, "ses_delivered_unsaved")).toBe(NOTE)
+  })
+
   it("clears a note Cursor delivered", async () => {
     const { live, injectionId } = await injectNote("ses_delivered")
     await pump(serverSends(live, injectionState(injectionId, { queued: {} }), injectionState(injectionId, delivered)),

@@ -126,12 +126,42 @@ describe("step order", () => {
     expect(takeReleasableExecs(order).map((exec) => exec.execId)).toEqual([3])
   })
 
-  it("starts a new step once every call of the last one finished", () => {
+  it("starts a new step once every listed call of the last one finished", () => {
     const order = createStepOrder<number, undefined>()
+    noteOrderedCallCount(order, 1)
     announceCall(order, "edit", true)
     expect(orderExec(order, "edit", true)).toBe("run")
     runExec(order, "edit", 1, false)
     noteExecResult(order, 1, "refused")
+    announceCall(order, "next", false)
+    expect(order.calls.has("edit")).toBe(false)
+    expect(orderExec(order, "next", false)).toBe("run")
+  })
+
+  it.each([false, true])("retains refusal when the count arrives late (before follower: %s)", countBeforeFollower => {
+    const order = createStepOrder<number, undefined>()
+    announceCall(order, "edit", true)
+    runExec(order, "edit", 1, false)
+    noteExecResult(order, 1, "refused")
+    if (countBeforeFollower) noteOrderedCallCount(order, 2)
+    announceCall(order, "late", false)
+    expect(orderExec(order, "late", false)).toBe("cancel")
+    finishCall(order, "late")
+    if (!countBeforeFollower) noteOrderedCallCount(order, 2)
+    announceCall(order, "next", false)
+    expect(order.calls.has("edit")).toBe(false)
+    expect(orderExec(order, "next", false)).toBe("run")
+  })
+
+  it("retains an uncounted refusal until an explicit new generation", () => {
+    const order = createStepOrder<number, undefined>()
+    announceCall(order, "edit", true)
+    runExec(order, "edit", 1, false)
+    noteExecResult(order, 1, "refused")
+    announceCall(order, "late", false)
+    expect(orderExec(order, "late", false)).toBe("cancel")
+    finishCall(order, "late")
+    startOrderedStep(order)
     announceCall(order, "next", false)
     expect(order.calls.has("edit")).toBe(false)
     expect(orderExec(order, "next", false)).toBe("run")
