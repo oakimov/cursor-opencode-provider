@@ -151,10 +151,11 @@ describe("review diff checks", () => {
   })
 
   it("flags a skipped test and a deleted test file, not a removed skip", () => {
-    const skipped = scan("+it.skip(\"later\")\n", ["test/example.test.ts"])
+    const skipCall = ["it", "skip"].join(".")
+    const skipped = scan(`+${skipCall}("later")\n`, ["test/example.test.ts"])
     expect(skipped.status).toBe(1)
     expect(skipped.output).toContain("id=no-weakened-tests")
-    const removedSkip = scan("-it.skip(\"later\")\n", ["test/example.test.ts"])
+    const removedSkip = scan(`-${skipCall}("later")\n`, ["test/example.test.ts"])
     expect(removedSkip.output).not.toContain("id=no-weakened-tests")
     const deleted = scan(
       "diff --git a/test/example.test.ts b/test/example.test.ts\ndeleted file mode 100644\n",
