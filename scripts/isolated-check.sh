@@ -4,9 +4,10 @@
 #
 #   scripts/isolated-check.sh <pr-number|https://github.com/owner/repo/pull/N> [--live]
 #
-# --live is a trust decision. After the checks pass, it runs that revision's
-# scripts/live-test.sh with CURSOR_API_KEY and nothing else. A failed check
-# does not receive the key.
+# --live is a trust decision. After the checks pass, this checkout's
+# scripts/live-test.sh loads the worktree's built plugin through a private
+# OpenCode config. The revision's shell is not run. A failed check does not
+# receive the key.
 #
 # Exit 0 when the checks pass, 1 when a check fails, 2 when the invocation is invalid.
 set -euo pipefail
@@ -176,14 +177,15 @@ check_main() {
   case "$action" in
     skip)
       echo "LIVE_TEST=skipped"
-      echo "Pass --live only when this change needs a live OpenCode run and you trust scripts/live-test.sh with CURSOR_API_KEY."
+      echo "Pass --live only when this change needs a live OpenCode run and you trust this checkout's harness with CURSOR_API_KEY."
       ;;
     skip-failed)
       echo "LIVE_TEST=skipped"
-      echo "Checks failed, so this pull request's live script did not run and did not receive CURSOR_API_KEY."
+      echo "Checks failed, so the live test did not run and did not receive CURSOR_API_KEY."
       ;;
     run)
-      echo "Running this pull request's scripts/live-test.sh with CURSOR_API_KEY."
+      echo "Worktree: $worktree"
+      echo "Loading $worktree/dist/plugin-opencode2.js through a private OpenCode config."
       set +e
       env -i \
         PATH="$(check_live_path)" \
@@ -196,7 +198,9 @@ check_main() {
         CI=1 \
         CURSOR_API_KEY="${CURSOR_API_KEY:-}" \
         OPENCODE_LIVE_MODEL="${OPENCODE_LIVE_MODEL:-}" \
-        bash scripts/live-test.sh
+        OPENCODE_CONFIG_ROOT="$worktree" \
+        OPENCODE_REVIEW_HOME="$isolate_tmp/review-opencode" \
+        bash "$ROOT/scripts/live-test.sh"
       live_code=$?
       set -e
       ;;

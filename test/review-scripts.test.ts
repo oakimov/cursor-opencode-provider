@@ -128,15 +128,43 @@ describe("configure opencode", () => {
       expect(result.status, result.stderr).toBe(0)
       expect(fs.readFileSync(sentinel, "utf8")).toBe("{\"keep\":true}\n")
       const config = JSON.parse(fs.readFileSync(path.join(directory, ".opencode-local/opencode.json"), "utf8"))
+      expect(config.$schema).toBe("https://opencode.ai/config.json")
       expect(config.plugins[0]).toContain("plugins/cursor")
+      expect(config.plugin[0]).toContain("file://")
+      expect(config.plugin[0]).toContain("plugin-opencode2.js")
+      expect(config.permission.bash["*"]).toBe("allow")
+      expect(config.permission.read.env).toBe("deny")
+      expect(config.agents.explore.model.providerID).toBe("cursor")
+      expect(config.mcp).toBeUndefined()
+      expect(config.provider).toBeUndefined()
       const env = fs.readFileSync(path.join(directory, ".opencode-local/env"), "utf8")
       expect(env).toContain("dir with space")
       expect(env).toContain("'")
+      expect(env).toContain("XDG_CACHE_HOME=")
       const plugin = fs.readFileSync(path.join(directory, ".opencode-local/plugins/cursor/index.js"), "utf8")
       expect(plugin).toContain("file://")
-      expect(plugin).not.toContain("dir with space")
+      expect(plugin).toContain("%20")
+      expect(plugin).toContain("CURSOR_REVIEW_PLUGIN=")
     } finally {
       fs.rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  it("writes the config for an explicit root", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "configure-root-"))
+    fs.mkdirSync(path.join(directory, "dist"))
+    fs.writeFileSync(path.join(directory, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(directory, "dist/plugin-opencode2.js"), "export default {}\n")
+    try {
+      const result = run("bash", ["scripts/configure-opencode.sh"], {
+        env: { ...process.env, OPENCODE_CONFIG_ROOT: directory },
+      })
+      expect(result.status, result.stderr).toBe(0)
+      expect(fs.existsSync(path.join(directory, ".opencode-local/opencode.json"))).toBe(true)
+      const plugin = fs.readFileSync(path.join(directory, ".opencode-local/plugins/cursor/index.js"), "utf8")
+      expect(plugin).toContain(directory)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
     }
   })
 })
@@ -169,6 +197,50 @@ describe("live test script", () => {
 })
 
 describe("cloud agent install", () => {
+  it("matches the environment install string and the config writer", () => {
+    const script = fs.readFileSync(path.join(root, "scripts/cloud-agent-install.sh"), "utf8")
+    const configure = fs.readFileSync(path.join(root, "scripts/configure-opencode.sh"), "utf8")
+    const environment = JSON.parse(fs.readFileSync(path.join(root, ".cursor/environment.json"), "utf8")) as {
+      install: string
+    }
+    const heredoc = (source: string) => source.match(/<<'PY'\n([\s\S]*?)\nPY/)?.[1]
+    expect(environment.install).toBe(script)
+    expect(environment.install).toContain('OPENCODE_PIN="2.2.5"')
+    expect(environment.install).not.toContain("scripts/configure-opencode.sh")
+    expect(environment.install).not.toContain("scripts/cloud-agent-install.sh")
+    expect(heredoc(script)).toContain('"plugins": [str(plug_dir)]')
+    expect(heredoc(script)).not.toContain("CURSOR_REVIEW_PLUGIN=")
+    expect(heredoc(configure)).toContain("CURSOR_REVIEW_PLUGIN=")
+  })
+
+  it("does not install when sourced, and reads the pinned version", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "install-source-"))
+    const bin = path.join(directory, "bin")
+    fs.mkdirSync(bin)
+    fs.writeFileSync(path.join(bin, "curl"), "#!/bin/sh\necho called > \"$HOME/curl-called\"\nexit 1\n")
+    fs.writeFileSync(path.join(bin, "opencode"), "#!/bin/sh\necho 'opencode v2.2.5'\n")
+    fs.chmodSync(path.join(bin, "curl"), 0o755)
+    fs.chmodSync(path.join(bin, "opencode"), 0o755)
+    try {
+      const result = bashHere(
+        `
+        set -euo pipefail
+        source scripts/cloud-agent-install.sh
+        printf 'pin %s\\n' "$OPENCODE_PIN"
+        printf 'match %s\\n' "$(opencode_version_of "$BIN/opencode")"
+        printf 'missing %s\\n' "$(opencode_version_of "$BIN/missing")"
+        printf 'sourced\\n'
+        `,
+        { HOME: directory, PATH: `${bin}:/usr/bin:/bin`, BIN: bin },
+      )
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stdout).toBe("pin 2.2.5\nmatch 2.2.5\nmissing \nsourced\n")
+      expect(fs.existsSync(path.join(directory, "curl-called"))).toBe(false)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
   it("stops when the OpenCode installer cannot be downloaded", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "install-fail-"))
     const bin = path.join(directory, "bin")
@@ -283,6 +355,67 @@ describe("isolated check", () => {
       expect(fs.existsSync(tmp!)).toBe(false)
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("loads the worktree plugin from a private config and stops when OpenCode does not", () => {
+    const tree = fs.mkdtempSync(path.join(os.tmpdir(), "review-builtin-live-"))
+    const bin = path.join(tree, "bin")
+    const reviewHome = path.join(tree, "review-home")
+    fs.mkdirSync(path.join(tree, "dist"), { recursive: true })
+    fs.mkdirSync(bin)
+    fs.writeFileSync(path.join(tree, "package.json"), JSON.stringify({ version: "9.9.9" }) + "\n")
+    fs.writeFileSync(path.join(tree, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(tree, "dist/plugin-opencode2.js"), "export default {}\n")
+    fs.writeFileSync(
+      path.join(bin, "opencode"),
+      `#!/bin/sh
+if [ "$1" = plugin ]; then
+  python3 -c 'import os, pathlib, re, sys
+text = pathlib.Path(os.environ["OPENCODE_CONFIG_DIR"], "plugins", "cursor", "index.js").read_text()
+match = re.search(r"CURSOR_REVIEW_PLUGIN=\\S+ version=\\S+", text)
+sys.stderr.write((match.group(0) if match else "no-marker") + "\\n")'
+  exit 0
+fi
+if [ "$1" = run ]; then
+  printf '%s\\n' '{"type":"text","part":{"type":"text","text":"pong"}}'
+  exit 0
+fi
+echo "unexpected $*" >&2
+exit 1
+`,
+    )
+    fs.chmodSync(path.join(bin, "opencode"), 0o755)
+    const env = {
+      HOME: tree,
+      PATH: `${bin}:/usr/bin:/bin`,
+      CURSOR_API_KEY: secret,
+      OPENCODE_CONFIG_ROOT: tree,
+      OPENCODE_REVIEW_HOME: reviewHome,
+    }
+    try {
+      const passed = run("bash", ["scripts/live-test.sh"], { env })
+      expect(passed.status, `${passed.stdout}\n${passed.stderr}`).toBe(0)
+      expect(passed.stdout).toContain(`WORKTREE=${tree}`)
+      expect(passed.stdout).toContain(`PLUGIN_PATH=${tree}/dist/plugin-opencode2.js`)
+      expect(passed.stdout).toContain("PLUGIN_VERSION=9.9.9")
+      expect(passed.stdout).toContain(`PLUGIN_LOADED=CURSOR_REVIEW_PLUGIN=${tree}/dist/plugin-opencode2.js version=9.9.9`)
+      expect(passed.stdout).toContain("LIVE_TEST=passed")
+      expect(passed.stdout).not.toContain(secret)
+      expect(passed.stdout).toContain(path.join(reviewHome, "config", "opencode2"))
+      const config = JSON.parse(fs.readFileSync(path.join(reviewHome, "config", "opencode2", "opencode.json"), "utf8"))
+      expect(config.plugins[0]).toContain(path.join(reviewHome, "config", "opencode2", "plugins", "cursor"))
+      expect(config.plugin[0]).toContain("file://")
+      expect(fs.existsSync(path.join(tree, ".opencode-local"))).toBe(false)
+
+      fs.writeFileSync(path.join(bin, "opencode"), "#!/bin/sh\nif [ \"$1\" = run ]; then echo ran > \"$HOME/ran-model\"; fi\nexit 0\n")
+      const failed = run("bash", ["scripts/live-test.sh"], { env: { ...env, HOME: tree } })
+      expect(failed.status).toBe(1)
+      expect(failed.stdout).toContain("LIVE_TEST=failed")
+      expect(failed.stdout).toContain("did not load")
+      expect(fs.existsSync(path.join(tree, "ran-model"))).toBe(false)
+    } finally {
+      fs.rmSync(tree, { recursive: true, force: true })
     }
   })
 

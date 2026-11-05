@@ -4,7 +4,7 @@
 
 ### Added
 
-- Cloud agents can install the OpenCode CLI and load this checkout's built OpenCode 2 plugin. `bun run live-test` runs that plugin through `opencode run`. It reads `CURSOR_API_KEY` and skips when that variable is unset. `scripts/isolated-check.sh` runs a contributor tree's install, build, typecheck, and unit tests with a private home and temp directory, no reviewer secrets, and without dependency lifecycle scripts. `--live` passes `CURSOR_API_KEY` to that tree's live test only after those checks pass.
+- Cloud agents can install the OpenCode CLI and load this checkout's built OpenCode 2 plugin. The install in `.cursor/environment.json` is `scripts/cloud-agent-install.sh`, so it also runs on `main` before that file exists: Bun, zsh, OpenCode 2.2.5 from the official installer, dependencies, the build, and `.opencode-local/`. `bun run live-test` runs that plugin through `opencode run`. It reads `CURSOR_API_KEY` and skips when that variable is unset. `scripts/isolated-check.sh` fetches `pull/<n>/head` into its own worktree, removes that worktree on every exit, and runs install, build, typecheck, and unit tests there with a private home and temp directory, no reviewer secrets, and without dependency lifecycle scripts. `--live` passes `CURSOR_API_KEY` only after those checks pass. It does not run the revision's shell. A private OpenCode 2 config, with its own config, cache, data, state, and temp directories, loads `dist/plugin-opencode2.js` built in that worktree, and the live test stops unless OpenCode logs that path and the package version.
 - Recovery-only diagnostics (`CURSOR_PROVIDER_RECOVERY_DEBUG=1`) record interruption, recovery decisions, and host-call/result IDs without logging prompt or tool payloads.
 
 ### Changed

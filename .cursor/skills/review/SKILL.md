@@ -22,15 +22,15 @@ Report logic and syntax. Style nits, at most five, as `docs/review-rules.md` des
 
 ## Checks
 
-For a contributor pull request, run the checks in a sandbox so that tree does not see reviewer secrets:
+Never review in the main checkout. For every pull request, check that revision out in its own worktree and remove the worktree on every exit path:
 
 ```bash
 scripts/isolated-check.sh <pr-number-or-url>
 ```
 
-The script checks out a temporary worktree and runs install, build, typecheck, and `bun test` with a private home and temp directory, a short PATH, and no reviewer secrets. Dependency lifecycle scripts are not run. Exit 0 means those checks passed. Exit 1 is a check failure. Exit 2 is a bad invocation.
+The script runs `git fetch origin pull/<n>/head` and `git worktree add` on `FETCH_HEAD`. Inside that worktree it installs dependencies, builds, typechecks, and runs `bun test`, with a private home and temp directory, a short PATH, and no reviewer secrets. Dependency lifecycle scripts are not run. Exit 0 means those checks passed. Exit 1 is a check failure. Exit 2 is a bad invocation. The log line `Check root:` is the worktree path.
 
-On your own checkout, run `bun run build`, `bun run typecheck`, and `bun test` directly.
+On your own checkout, run `bun run build`, `bun run typecheck`, and `bun test` directly. That is not a review of someone else's pull request.
 
 ## Live test
 
@@ -38,7 +38,7 @@ Run a live OpenCode test when the diff changes plugin behavior: the provider, pr
 
 Skip it when the diff is docs, rules, or a refactor the unit tests already cover. Say why you skipped it.
 
-When you run it, pass `--live` only after you trust that revision with `CURSOR_API_KEY`. The flag runs that revision's `scripts/live-test.sh` and its built plugin with the key, and only after install, build, typecheck, and unit tests passed. A failed check does not receive the key.
+When you run it, pass `--live` only after install, build, typecheck, and unit tests passed, and only when you trust this checkout's harness with `CURSOR_API_KEY`. A failed check does not receive the key. The revision's shell is not run. The harness writes a private OpenCode 2 config (its own config, cache, data, state, and temp directories) that loads `dist/plugin-opencode2.js` built in the worktree. Before the prompt, `opencode plugin list` must log `CURSOR_REVIEW_PLUGIN=` for that file and the worktree's package version. Put the worktree path, that plugin path, and the version in the review. On a cloud agent, `opencode` is OpenCode 2.2.5 from the environment install.
 
 ```bash
 scripts/isolated-check.sh <pr-number-or-url> --live
