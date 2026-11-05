@@ -432,7 +432,7 @@ Set `CURSOR_AGENT_TRANSCRIPTS_FOLDER` before starting OpenCode (or its daemon). 
 
 ## Development
 
-Changes listed under [Unreleased](CHANGELOG.md#unreleased) describe the development checkout; use a rebuilt local install to test them before a release. Maintainer guides and incident lessons are linked from the [documentation index](docs/README.md). Cloud-agent pull request review and the OpenCode live test are in [docs/pr-review.md](docs/pr-review.md).
+Changes listed under [Unreleased](CHANGELOG.md#unreleased) describe the development checkout; use a rebuilt local install to test them before a release. Maintainer guides and incident lessons are linked from the [documentation index](docs/README.md). The OpenCode live test and isolated pull-request checks are in [docs/pr-review.md](docs/pr-review.md).
 
 ```bash
 bun install          # install dependencies

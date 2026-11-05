@@ -49,9 +49,6 @@ cursor-models.json
 test-headers.mjs
 test-real-request.ts
 
-# Nested repo created while testing quoted review paths
-test/.review-local-quoted/
-
 # Firecrawl
 .firecrawl/
 
