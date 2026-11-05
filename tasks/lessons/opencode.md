@@ -747,6 +747,13 @@ These are failure lessons shared by both hosts, not a replacement for
   head, bind each approved resolution to that discussion, and require actual
   resolved readback. Preserve the review receipt across partial thread-action
   failures; neither an outdated anchor nor an author's reply proves a repair.
+- **An approval wait outlives temporary cleanup.** A successful `show` froze a
+  preview that the agent then removed with its temporary review directory.
+  Review results, ledgers, previews, and publication state belong in a persistent
+  private store. Keep recoverable exact bytes before reporting a preview, and
+  distinguish refusing publication from instructing discard. Exercise loss of
+  the old temporary working tree and reject cleanup of a pending or changed
+  review (`test/review-publish.test.ts`, review artifact retention).
 - **App permissions are not a VM token's effective permissions.** A repository
   read succeeded while the COMMENT review endpoint rejected the sandbox
   credential with HTTP 403. A declared App grant does not prove that token's

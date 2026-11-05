@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Manual reviews keep results and frozen previews in persistent private storage until publication or explicit discard; guarded cleanup refuses an unposted review ([#156](https://github.com/oakimov/cursor-opencode-provider/pull/156)).
 - Manual Cursor re-reviews resolve verified fixed or refuted findings after approval, confirm the thread state, and refuse omitted threads or changed discussions ([#156](https://github.com/oakimov/cursor-opencode-provider/pull/156)).
 - Offline review evaluations include their policy context and ledger validator, and calibration preparation reports missing Git revisions before creating output. Ledger comparison rejects analysis for a different review head ([#156](https://github.com/oakimov/cursor-opencode-provider/pull/156)).
 - The isolated live test finds OpenCode when the installer linked it at `/usr/local/bin`. That path is not on the boundary PATH, so the real `opencode` file is placed under `/opt/tools` and its directory is not mounted ([#156](https://github.com/oakimov/cursor-opencode-provider/pull/156)).

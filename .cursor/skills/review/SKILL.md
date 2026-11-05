@@ -105,6 +105,23 @@ not establish that a changed image, tool, or cancellation behavior worked.
 
 ## Private ledger
 
+Start a private persistent workspace with
+`python3 scripts/review-publish.py start <owner> <repo> <pull>`. It creates a
+unique directory under gitignored `.review-artifacts/` and binds `review.json`.
+Keep the ledger, thread inventory, payload, frozen preview, approval, and
+publication journal there too. Do not put them under TMPDIR, caches, scratch
+checkouts, or an EXIT cleanup trap. Disposable isolated check copies are separate.
+
+Stop for approval with those files intact and give their private location and
+preview digest to the maintainer. `render` and `show` also print a durable
+`REVIEW_RETAINED` recovery directory. Those paths stay out of public PR text.
+Delete review artifacts only after confirmed publication or an explicit
+maintainer instruction to discard that review. A refusal to publish is not a
+discard instruction. Neither a failed/unknown send, an interruption, a stale
+head, nor routine temporary-file cleanup permits deletion. Never use `rm -rf`
+or a general cleanup on pending review directories. Use the guarded `cleanup`
+command in `docs/pr-review.md`; keep earlier pending revisions too.
+
 Keep a private evidence ledger, one entry per behavior: contract and source
 locations, scenarios, expected versus observed results, supporting commands or
 source traces, uncovered branches, downstream observations, and limits. Write

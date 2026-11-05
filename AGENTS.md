@@ -29,6 +29,13 @@ agent protocol. TypeScript ESM; Bun installs/tests; `tsc` builds `dist/`.
   resolves the client version its own cache root (`withTempHostCache` or
   `useTempHostCache`, `test/host-cache.ts`). Node test scripts
   import `test/node-tmpdir.mjs` first for the TMPDIR guard.
+- Pending review artifacts are durable work, not disposable scratch. Use
+  `review-publish.py start` and the gitignored `.review-artifacts/` store,
+  outside TMPDIR. Keep the result, ledger, payload, frozen preview, approval,
+  and publication journal until confirmed posting or an explicit maintainer
+  discard instruction. No cleanup, denial, interrupted turn, failed send, or
+  changed PR head authorizes deletion. Preserve legacy pending files even if
+  they were mistakenly put under TMPDIR; the cleanup rule above is no exception.
 
 ## Non-negotiable provider / compatibility-layer boundary
 

@@ -442,6 +442,12 @@ checks the discussion and revision again and confirms resolved readback; a
 summary or an author reply alone does not close a thread. See the
 [re-review procedure](docs/pr-review.md#re-review-and-thread-resolution).
 
+Review results and previews live in persistent, gitignored `.review-artifacts/`,
+created by `review-publish.py start`. They survive approval waits and ordinary
+temporary-file cleanup. The publisher retains recovery copies and permits
+guarded cleanup only after publication or an explicit discard instruction;
+see [artifact retention](docs/pr-review.md#artifact-retention).
+
 ```bash
 bun install          # install dependencies
 bun run build        # compile TypeScript → dist/

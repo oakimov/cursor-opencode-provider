@@ -1074,6 +1074,143 @@ def preview_path(path: Path) -> Path:
     return Path(str(path) + ".preview")
 
 
+ARTIFACT_KIND = "cursor-review-artifacts-v1"
+
+
+def artifact_root() -> Path:
+    root = Path(os.environ.get("REVIEW_ARTIFACT_DIR") or Path(__file__).resolve().parents[1] / ".review-artifacts")
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return root.resolve()
+
+
+def artifact_manifest(directory: Path) -> dict | None:
+    record = read_json_object(directory / ".retention.json")
+    return record if record and record.get("kind") == ARTIFACT_KIND else None
+
+
+def managed_artifacts(path: Path) -> Path | None:
+    root = artifact_root()
+    for directory in path.resolve().parents:
+        if directory == root:
+            break
+        if root in directory.parents and artifact_manifest(directory):
+            return directory
+    return None
+
+
+def artifact_tree(directory: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(directory.rglob("*")):
+        if path.is_symlink():
+            raise SystemExit("Review artifacts contain a symlink; cleanup was refused.")
+        if path.is_file() and path != directory / ".retention.json":
+            digest.update(path.relative_to(directory).as_posix().encode())
+            digest.update(b"\0")
+            data = path.read_bytes()
+            digest.update(len(data).to_bytes(8, "big"))
+            digest.update(data)
+    return digest.hexdigest()
+
+
+def register_artifacts(directory: Path, payload: dict) -> None:
+    record = artifact_manifest(directory) or {"kind": ARTIFACT_KIND, "identities": [], "posted": {}}
+    identity = identity_of(payload)
+    record["identities"] = sorted(set(record["identities"]) | {identity})
+    record["state"] = "pending"
+    write_checkpoint(directory / ".retention.json", record)
+
+
+def refuse_discarded(payload: dict) -> None:
+    if (artifact_root() / "discarded" / f"{identity_of(payload)}.json").exists():
+        raise SystemExit("This review was explicitly discarded. Create a fresh review and preview; it was not posted.")
+
+
+def retain_artifacts(raw: bytes, payload: dict, source: bytes | None = None, frozen: bool = False) -> Path:
+    refuse_discarded(payload)
+    directory = artifact_root() / f"preview-{hashlib.sha256(raw).hexdigest()}"
+    if directory.is_symlink():
+        raise SystemExit("The retained review directory is a symlink; refusing to write outside the store.")
+    directory.mkdir(mode=0o700, exist_ok=True)
+    files = {"payload.json": raw}
+    if source is not None:
+        files["review.json"] = source
+        files[f"source-{hashlib.sha256(source).hexdigest()}.json"] = source
+    elif isinstance(payload.get("result"), dict):
+        files["review.json"] = (json.dumps(payload["result"], indent=2, ensure_ascii=False) + "\n").encode()
+    if frozen:
+        files["payload.json.preview"] = raw
+    for name, content in files.items():
+        target = directory / name
+        if target.is_symlink():
+            raise SystemExit("A retained review file is a symlink; refusing to overwrite it.")
+        if target.exists():
+            if target.read_bytes() != content:
+                if name == "review.json" and json_object(target.read_bytes()) == payload.get("result"):
+                    continue
+                raise SystemExit("Retained review bytes differ; refusing to overwrite the recovery copy.")
+            continue
+        temporary = directory / f".{name}.{os.getpid()}.tmp"
+        temporary.write_bytes(content)
+        temporary.chmod(0o600)
+        os.replace(temporary, target)
+    register_artifacts(directory, payload)
+    return directory
+
+
+def start_review(owner: str, repo: str, pull: int) -> None:
+    if not NAME.fullmatch(owner) or not NAME.fullmatch(repo) or pull < 1:
+        raise SystemExit("Invalid pull request target.")
+    head, base, readable = read_pull(owner, repo, pull)
+    if not readable:
+        raise SystemExit("The pull request revision is unreadable.")
+    directory = Path(tempfile.mkdtemp(prefix=f"run-{owner}-{repo}-{pull}-", dir=artifact_root()))
+    write_checkpoint(directory / ".retention.json", {"kind": ARTIFACT_KIND, "identities": [], "posted": {}, "state": "pending"})
+    write_checkpoint(directory / "review.json", {"owner": owner, "repo": repo, "pull": pull, "head": head, "base": base, "runtime": "linux"})
+    (directory / "review.json").chmod(0o600)
+    print(directory)
+
+
+def retain_receipt(payload_path: Path, payload: dict, checkpoint_path: Path) -> None:
+    receipt = read_json_object(checkpoint_path)
+    if not receipt or receipt.get("state") != "posted":
+        raise SystemExit("Review publication is unconfirmed; artifacts remain pending.")
+    identity = identity_of(payload)
+    directories = [path for path in artifact_root().iterdir() if not path.is_symlink() and path.is_dir() and artifact_manifest(path)]
+    working = managed_artifacts(payload_path)
+    if working and working not in directories:
+        directories.append(working)
+    for directory in directories:
+        record = artifact_manifest(directory)
+        if record is None or identity not in record["identities"]:
+            continue
+        record["posted"][identity] = {"review_id": receipt["review_id"], "review_url": receipt["review_url"]}
+        if all(key in record["posted"] for key in record["identities"]):
+            record["state"] = "posted"
+            record["treeSha256"] = artifact_tree(directory)
+        write_checkpoint(directory / ".retention.json", record)
+
+
+def cleanup_artifacts(directory: Path, instruction: str | None) -> None:
+    root = artifact_root()
+    if directory.is_symlink() or directory.resolve().parent != root:
+        raise SystemExit("Cleanup accepts only a managed review directory directly under REVIEW_ARTIFACT_DIR.")
+    directory = directory.resolve()
+    record = artifact_manifest(directory)
+    if record is None:
+        raise SystemExit("No managed review artifact record; cleanup was refused.")
+    if instruction is not None:
+        if not instruction.strip():
+            raise SystemExit("Discard requires the maintainer's explicit instruction.")
+        audit = root / "discarded"
+        audit.mkdir(mode=0o700, exist_ok=True)
+        for identity in record["identities"] or [directory.name]:
+            write_checkpoint(audit / f"{identity}.json", {"instruction": instruction, "decision": "discard"})
+    elif record.get("state") != "posted" or record.get("treeSha256") != artifact_tree(directory):
+        raise SystemExit("Review artifacts are pending or changed. Retain them until confirmed publication or an explicit discard instruction.")
+    shutil.rmtree(directory)
+    print("REVIEW_ARTIFACTS_REMOVED=1")
+
+
 def show(path: Path) -> None:
     raw, payload = load_payload(path)
     refuse_scan(raw, payload)
@@ -1091,6 +1228,11 @@ def show(path: Path) -> None:
     os.replace(temporary, frozen)
     os.chmod(frozen, 0o444)
     digest = hashlib.sha256(raw).hexdigest()
+    retained = retain_artifacts(raw, payload, frozen=True)
+    working = managed_artifacts(path)
+    if working and working != retained:
+        register_artifacts(working, payload)
+    print(f"REVIEW_RETAINED={retained}", file=sys.stderr)
     print(f"PREVIEW_SHA256={digest}", file=sys.stderr)
     sys.stdout.buffer.write(raw)
 
@@ -1148,6 +1290,7 @@ def approve(payload_path: Path, approval_path: Path, preview_sha: str) -> None:
     if problems:
         print("Payload is incomplete: " + ", ".join(problems), file=sys.stderr)
         raise SystemExit(2)
+    refuse_discarded(payload)
     write_record(
         approval_path,
         {
@@ -1226,6 +1369,7 @@ def authorized_post(payload_path: Path, approval_path: Path) -> tuple[bytes, dic
         print("Approval was not granted. GitHub was not called.", file=sys.stderr)
         raise SystemExit(4)
     raw, payload = load_payload(payload_path)
+    refuse_discarded(payload)
     refuse_scan(raw, payload)
     problems = validate(payload)
     if problems:
@@ -1349,6 +1493,7 @@ def post(payload_path: Path, approval_path: Path) -> None:
             require_same_operation(payload_path, approval_path, pinned)
         post_locked(payload_path, approval_path, payload, approval, digest, pinned, checkpoint_path)
         resolve_threads(payload_path, approval_path, payload, pinned, checkpoint_path)
+        retain_receipt(payload_path, payload, checkpoint_path)
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)
         lock.close()
@@ -1517,6 +1662,11 @@ def render(source: Path, dest: Path) -> None:
     temporary = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
     temporary.write_text(text, encoding="utf-8")
     os.replace(temporary, dest)
+    retained = retain_artifacts(text.encode(), payload, source=raw)
+    working = managed_artifacts(dest)
+    if working and working != retained:
+        register_artifacts(working, payload)
+    print(f"REVIEW_RETAINED={retained}", file=sys.stderr)
     print(f"REVIEW_OUTCOME={result['outcome']}", file=sys.stderr)
     if result["outcome"] == "incomplete":
         print("The review is incomplete and cannot be published. GitHub was not called.", file=sys.stderr)
@@ -1526,14 +1676,21 @@ def render(source: Path, dest: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Show or post an approved COMMENT review.")
-    parser.add_argument("command", choices=("show", "stamp", "approve", "deny", "post", "render", "bind", "threads", "auth-info"))
+    parser.add_argument("command", choices=("show", "stamp", "approve", "deny", "post", "render", "bind", "threads", "start", "cleanup", "auth-info"))
     parser.add_argument("payload", nargs="?", type=Path)
     parser.add_argument("approval", nargs="?", type=Path)
     parser.add_argument("preview", nargs="?")
     parser.add_argument("extra", nargs="?")
+    parser.add_argument("--discard-instruction")
     args = parser.parse_args()
+    if args.discard_instruction is not None and args.command != "cleanup":
+        parser.error("--discard-instruction is only valid with cleanup")
     if args.command == "auth-info":
         auth_info()
+    elif args.command == "cleanup":
+        if args.payload is None:
+            parser.error("cleanup requires a managed review directory")
+        cleanup_artifacts(args.payload, args.discard_instruction)
     elif args.command == "show":
         if args.payload is None:
             parser.error("show requires a payload file")
@@ -1554,14 +1711,16 @@ def main() -> None:
         if args.payload is None or args.approval is None:
             parser.error("render requires a result file and an output file")
         render(args.payload, args.approval)
-    elif args.command in {"bind", "threads"}:
+    elif args.command in {"bind", "threads", "start"}:
         if args.payload is None or args.approval is None or args.preview is None:
             parser.error("bind requires owner, repo, and pull")
         try:
             pull = int(args.preview)
         except ValueError:
             parser.error("bind pull must be an integer")
-        if args.command == "threads":
+        if args.command == "start":
+            start_review(str(args.payload), str(args.approval), pull)
+        elif args.command == "threads":
             json.dump(thread_inventory(str(args.payload), str(args.approval), pull), sys.stdout, indent=2)
             sys.stdout.write("\n")
         else:

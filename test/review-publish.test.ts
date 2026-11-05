@@ -96,10 +96,11 @@ function withApp(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 function run(args: string[], env: NodeJS.ProcessEnv, cwd = root): { status: number; stdout: string; stderr: string } {
+  const artifacts = env.REVIEW_ARTIFACT_DIR || path.join(env.GH_STATE ? path.dirname(String(env.GH_STATE)) : path.dirname(path.resolve(cwd, args[1] || "unused")), "retained")
   const result = spawnSync(python, publisherArgs(args), {
     cwd,
     encoding: "utf8",
-    env: withApp({ ...process.env, PYTHONDONTWRITEBYTECODE: "1", ...env }),
+    env: withApp({ ...process.env, PYTHONDONTWRITEBYTECODE: "1", REVIEW_ARTIFACT_DIR: artifacts, ...env }),
   })
   return { status: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" }
 }
@@ -489,7 +490,7 @@ function spawnPost(payload: string, approval: string, env: NodeJS.ProcessEnv): C
   return spawn(python, publisherArgs(["post", payload, approval]), {
     cwd: root,
     detached: true,
-    env: withApp({ ...process.env, PYTHONDONTWRITEBYTECODE: "1", ...env }),
+    env: withApp({ ...process.env, PYTHONDONTWRITEBYTECODE: "1", REVIEW_ARTIFACT_DIR: env.REVIEW_ARTIFACT_DIR || path.join(env.GH_STATE ? path.dirname(String(env.GH_STATE)) : path.dirname(payload), "retained"), ...env }),
   })
 }
 
@@ -871,7 +872,7 @@ describe("review publication", () => {
     fs.writeFileSync(path.join(state, "head"), head + "\n")
     writeGh(bin)
     fs.writeFileSync(payload, draft([{ path: "scripts/review-publish.py", line: 50, side: "RIGHT", body: "P2. Concurrent posts must not both create a review." }]))
-    const env = withApp({ ...process.env, PYTHONDONTWRITEBYTECODE: "1", PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_SLOW_POST: "1" })
+    const env = withApp({ ...process.env, PYTHONDONTWRITEBYTECODE: "1", REVIEW_ARTIFACT_DIR: path.join(directory, "retained"), PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_SLOW_POST: "1" })
     const runPost = () => new Promise<{ status: number; stdout: string; stderr: string }>((resolve) => {
       const child = spawn(python, publisherArgs(["post", payload, approval]), {
         cwd: root,
@@ -1254,7 +1255,7 @@ describe("review publication", () => {
         cwd: root,
         detached: true,
         stdio: "ignore",
-        env: withApp({ ...process.env, PYTHONDONTWRITEBYTECODE: "1", PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_HOLD_POST: "1" }),
+        env: withApp({ ...process.env, PYTHONDONTWRITEBYTECODE: "1", REVIEW_ARTIFACT_DIR: path.join(directory, "retained"), PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_HOLD_POST: "1" }),
       })
       waitFor("in-flight post", () => {
         const dir = path.join(directory, ".review-publish")
@@ -1506,14 +1507,16 @@ describe("review publication", () => {
 
   it("publishes the documented payload.json sequence through the fake API", () => {
     expect(documentedPublishCommands()).toEqual([
-      "python3 scripts/review-publish.py bind owner repo 156 review.json",
-      "python3 scripts/review-publish.py render review.json payload.json",
-      "python3 scripts/review-publish.py stamp payload.json",
-      "python3 scripts/review-publish.py show payload.json",
-      'python3 scripts/review-publish.py approve payload.json approval.json "$PREVIEW_SHA256"',
-      "python3 scripts/review-publish.py post payload.json approval.json",
-      "python3 scripts/review-publish.py deny approval.json",
-      "python3 scripts/review-publish.py threads owner repo 156 > threads.json",
+      'python3 scripts/review-publish.py bind owner repo 156 "$review_dir/review.json"',
+      'python3 scripts/review-publish.py render "$review_dir/review.json" "$review_dir/payload.json"',
+      'python3 scripts/review-publish.py stamp "$review_dir/payload.json"',
+      'python3 scripts/review-publish.py show "$review_dir/payload.json"',
+      'python3 scripts/review-publish.py approve "$review_dir/payload.json" "$review_dir/approval.json" "$PREVIEW_SHA256"',
+      'python3 scripts/review-publish.py post "$review_dir/payload.json" "$review_dir/approval.json"',
+      'python3 scripts/review-publish.py deny "$review_dir/approval.json"',
+      'python3 scripts/review-publish.py cleanup "$review_dir"',
+      'python3 scripts/review-publish.py cleanup "$review_dir" --discard-instruction "Discard this review."',
+      'python3 scripts/review-publish.py threads owner repo 156 > "$review_dir/threads.json"',
     ])
     const { directory, bin, state } = freshReview("review-documented-")
     const review = path.join(directory, "review.json")
@@ -1811,6 +1814,132 @@ function resolutionsOf(state: string): string[] {
   const file = path.join(state, "resolves")
   return fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean) : []
 }
+
+describe("review artifact retention", () => {
+  it("defaults to the harness store rather than the process temp directory or working directory", () => {
+    const { directory, bin, state } = freshReview("review-default-store-")
+    try {
+      const harness = path.join(directory, "harness")
+      const scripts = path.join(harness, "scripts")
+      const temporary = path.join(directory, "ephemeral")
+      fs.mkdirSync(scripts, { recursive: true })
+      fs.mkdirSync(temporary)
+      const script = path.join(scripts, "review-publish.py")
+      fs.copyFileSync(path.join(root, "scripts/review-publish.py"), script)
+      const processEnv: NodeJS.ProcessEnv = { ...process.env, PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, TMPDIR: temporary, PYTHONDONTWRITEBYTECODE: "1" }
+      delete processEnv.REVIEW_ARTIFACT_DIR
+      const started = spawnSync(python, [script, "start", "oakimov", "cursor-opencode-provider", "156"], { cwd: temporary, env: processEnv, encoding: "utf8" })
+      expect(started.status, started.stderr).toBe(0)
+      const workspace = started.stdout.trim()
+      expect(path.dirname(workspace)).toBe(fs.realpathSync(path.join(harness, ".review-artifacts")))
+      fs.rmSync(temporary, { recursive: true })
+      expect(fs.existsSync(path.join(workspace, "review.json"))).toBe(true)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("starts in durable storage and recovers the exact shown preview after temporary working files are removed", () => {
+    const fixture = freshReview("review-retention-")
+    const { directory, bin, state } = fixture
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    try {
+      const started = run(["start", "oakimov", "cursor-opencode-provider", "156"], env)
+      expect(started.status, started.stderr).toBe(0)
+      const workspace = started.stdout.trim()
+      expect(path.dirname(workspace)).toBe(fs.realpathSync(path.join(directory, "retained")))
+      expect(fs.statSync(workspace).mode & 0o777).toBe(0o700)
+      expect(JSON.parse(fs.readFileSync(path.join(workspace, "review.json"), "utf8")).head).toBe(head)
+      expect(run(["cleanup", workspace], env).status).not.toBe(0)
+
+      // Reproduce the legacy mistake without losing the durable copy.
+      const temporary = path.join(directory, "ephemeral")
+      fs.mkdirSync(temporary)
+      const source = path.join(temporary, "review.json")
+      const payload = path.join(temporary, "preview.json")
+      const original = JSON.stringify(structuredResult(), null, 2) + "\n"
+      fs.writeFileSync(source, original)
+      const rendered = run(["render", source, payload], env)
+      expect(rendered.status).toBe(0)
+      const draftStore = rendered.stderr.match(/REVIEW_RETAINED=(.+)/)![1]!
+      fs.writeFileSync(source, JSON.stringify(structuredResult()))
+      expect(run(["render", source, payload], env).status).toBe(0)
+      expect(fs.readFileSync(path.join(draftStore, "review.json"), "utf8")).toBe(original)
+      expect(fs.readdirSync(draftStore).filter((name) => name.startsWith("source-")).length).toBe(2)
+      expect(run(["stamp", payload], env).status).toBe(0)
+      const shown = run(["show", payload], env)
+      expect(shown.status, shown.stderr).toBe(0)
+      const retained = shown.stderr.match(/REVIEW_RETAINED=(.+)/)?.[1]
+      expect(retained).toBeDefined()
+      const saved = path.join(retained!, "payload.json")
+      fs.rmSync(temporary, { recursive: true })
+      expect(fs.readFileSync(saved, "utf8")).toBe(shown.stdout)
+      expect(fs.readFileSync(`${saved}.preview`, "utf8")).toBe(shown.stdout)
+      expect(createHash("sha256").update(fs.readFileSync(saved)).digest("hex")).toBe(previewDigest(shown.stderr))
+      expect(JSON.parse(fs.readFileSync(path.join(retained!, "review.json"), "utf8"))).toEqual(structuredResult())
+      expect(run(["cleanup", retained!], env).stderr).toContain("pending")
+      const approval = path.join(retained!, "approval.json")
+      expect(run(["approve", saved, approval, previewDigest(shown.stderr)], env).status).toBe(0)
+      expect(run(["deny", approval], env).status).toBe(0)
+      expect(run(["cleanup", retained!], env).status).not.toBe(0)
+      expect(fs.existsSync(saved)).toBe(true)
+      expect(postsOf(state)).toBe(0)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("retains unconfirmed publication and permits explicit discard without resending", () => {
+    const { directory, payload, approval, bin, state } = freshReview("review-retention-posted-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    try {
+      fs.writeFileSync(payload, draft([]))
+      expect(run(["stamp", payload], env).status).toBe(0)
+      const shown = run(["show", payload], env)
+      const retained = shown.stderr.match(/REVIEW_RETAINED=(.+)/)![1]!
+      expect(run(["approve", payload, approval, previewDigest(shown.stderr)], env).status).toBe(0)
+      const unknown = run(["post", payload, approval], { ...env, GH_FAIL: "1" })
+      expect(unknown.status).not.toBe(0)
+      expect(run(["cleanup", retained], env).status).not.toBe(0)
+      // Explicit discard ends an unconfirmed attempt; it is not permission to resend.
+      const discarded = run(["cleanup", retained, "--discard-instruction", "Discard this unposted review."], env)
+      expect(discarded.status, discarded.stderr).toBe(0)
+      expect(fs.existsSync(retained)).toBe(false)
+      expect(run(["post", payload, approval], env).stderr).toContain("explicitly discarded")
+      expect(postsOf(state)).toBe(1)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("cleans a posted workspace while refusing changed artifacts and directories outside the store", () => {
+    const { directory, bin, state } = freshReview("review-durable-cleanup-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    try {
+      const workspace = run(["start", "oakimov", "cursor-opencode-provider", "156"], env).stdout.trim()
+      const source = path.join(workspace, "review.json")
+      const payload = path.join(workspace, "payload.json")
+      const approval = path.join(workspace, "approval.json")
+      fs.writeFileSync(source, JSON.stringify(structuredResult()))
+      expect(run(["render", source, payload], env).status).toBe(0)
+      expect(run(["stamp", payload], env).status).toBe(0)
+      const shown = run(["show", payload], env)
+      const retained = shown.stderr.match(/REVIEW_RETAINED=(.+)/)![1]!
+      expect(run(["approve", payload, approval, previewDigest(shown.stderr)], env).status).toBe(0)
+      expect(run(["post", payload, approval], env).status).toBe(0)
+      fs.writeFileSync(source, JSON.stringify(structuredResult({ limitations: ["A new draft needs another review."] })))
+      expect(run(["cleanup", workspace], env).status).not.toBe(0)
+      expect(fs.existsSync(source)).toBe(true)
+      expect(run(["cleanup", directory], env).status).not.toBe(0)
+      expect(run(["cleanup", retained], env).status).toBe(0)
+      expect(fs.existsSync(retained)).toBe(false)
+      expect(run(["cleanup", workspace, "--discard-instruction", "Discard the revised draft."], env).status).toBe(0)
+      expect(fs.existsSync(workspace)).toBe(false)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+})
 
 describe("review thread resolution", () => {
   it("reads all replies and pages, then resolves only approved fixed or refuted findings as the App", () => {

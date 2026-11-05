@@ -17,6 +17,7 @@ Read the diff, the files it changes, their callers, docs/review-rules.md, and th
 Run scripts/isolated-check.sh on that pull request.
 Perform the review procedure in `.cursor/skills/review/SKILL.md`: inventory behaviors, trace consumers, falsify candidates, then run the omission pass as a separate check. Keep the private ledger out of the payload.
 Record that revision, render one structured COMMENT review with scripts/review-publish.py, and show the payload.
+Use review-publish.py start for a persistent workspace. Keep the review files until confirmed publication or an explicit instruction to discard; never remove them during temporary cleanup.
 Stop. Do not post, approve, or merge. An incomplete result is not a finished review.
 ```
 
@@ -63,13 +64,17 @@ Record the harness revision, the case revision, the model, and whether the
 review actually finished, including misses and false positives. If no fresh
 reviewer ran, report that detection is unverified.
 
+Start the review in persistent storage, then complete the bound result and
+ledger in the printed workspace. Keep `review_dir` for subsequent commands:
+
 ```bash
-python3 scripts/review-publish.py bind owner repo 156 review.json
-python3 scripts/review-ledger.py check ledger.json
-python3 scripts/review-ledger.py compare ledger.json review.json
-python3 scripts/review-publish.py render review.json payload.json
-python3 scripts/review-publish.py stamp payload.json
-python3 scripts/review-publish.py show payload.json
+review_dir="$(python3 scripts/review-publish.py start owner repo 156)"
+python3 scripts/review-publish.py bind owner repo 156 "$review_dir/review.json"
+python3 scripts/review-ledger.py check "$review_dir/ledger.json"
+python3 scripts/review-ledger.py compare "$review_dir/ledger.json" "$review_dir/review.json"
+python3 scripts/review-publish.py render "$review_dir/review.json" "$review_dir/payload.json"
+python3 scripts/review-publish.py stamp "$review_dir/payload.json"
+python3 scripts/review-publish.py show "$review_dir/payload.json"
 ```
 
 `stamp` inserts the marker that makes a retry find the same review. `show` prints the file on stdout and `PREVIEW_SHA256=` on stderr. It freezes those bytes and does not call GitHub. The maintainer replies with approval of that exact preview, or refuses it. No answer leaves GitHub unchanged. Approval to publish comments is not approval to merge. A file that changes after `show` needs a new `show` and a new approval.
@@ -77,8 +82,8 @@ python3 scripts/review-publish.py show payload.json
 After an explicit approval of the printed digest:
 
 ```bash
-python3 scripts/review-publish.py approve payload.json approval.json "$PREVIEW_SHA256"
-python3 scripts/review-publish.py post payload.json approval.json
+python3 scripts/review-publish.py approve "$review_dir/payload.json" "$review_dir/approval.json" "$PREVIEW_SHA256"
+python3 scripts/review-publish.py post "$review_dir/payload.json" "$review_dir/approval.json"
 ```
 
 Use that publisher for clean reviews too. Do not use a discussion-comment tool,
@@ -93,8 +98,53 @@ preview. Readback checks do not authorize additional GitHub mutations.
 `approve` records the preview digest, base, head, and runtime locally, and only when the file and the frozen preview are still those bytes. `approve` and `post` take the rendered payload, the same file `stamp` and `show` froze. `post` takes the publication lock and then reads the approval and the payload again. It reads them again after each read-only GitHub lookup. Each read must be the same pull request, base, head, runtime, identity, preview digest, and approval generation as the approval that was current when the lock was acquired. A denial or a different approval is not sent, including a replacement that would be valid on its own. After the reviews lookup, and immediately before it sends, `post` reads the pull request again and then reads the pinned approval and payload again. It mints the GitHub App installation token and reads that approval once more. A different base or head stops the send and requires a refreshed review and a new approval. A push that lands after that read can still be published on the approved commit. A request that was already sent is not cancelled. Two posts of the same payload share one lock. When a send does not confirm delivery, a later `post` checks whether the review is visible and does not send a second request. A response that shows GitHub rejected the request can be retried. A returned review URL has to name the approved pull request; otherwise the send stays unconfirmed and is not repeated. A review id that was already confirmed is not posted again. A later `post` returns that review and its comment URLs, or stops when the id is no longer listed, even if the summary no longer contains the marker. The checkpoint keeps the review id and comment ids. The review is a `COMMENT` on the approved commit. Comment URLs come from the pull request's review-comments list. `deny` records a refusal and `post` then makes no GitHub call:
 
 ```bash
-python3 scripts/review-publish.py deny approval.json
+python3 scripts/review-publish.py deny "$review_dir/approval.json"
 ```
+
+## Artifact retention
+
+The default store is `.review-artifacts/` in the harness checkout. It is
+gitignored, private, and separate from TMPDIR, cache eviction, scratch trees,
+and isolated-check cleanup. `REVIEW_ARTIFACT_DIR` may select another persistent
+volume; do not point it at temporary storage. `start` creates a unique private
+workspace and an initial bound `review.json`. Write all review working files
+there, including the ledger, thread inventory, approval, and publication journal.
+
+`render` retains the result and rendered payload. Before `show` reports success,
+it retains the exact payload, a frozen preview, and the structured result under
+a digest-specific directory, printed privately as `REVIEW_RETAINED`. A legacy
+temporary working directory can therefore be lost without losing those bytes.
+Resume using that directory's `review.json`, `payload.json`, and
+`payload.json.preview`, and obtain approval of the same shown digest. Recovery
+does not supply approval or authorize a send. These retained files are never
+automatically deleted. This is local VM storage, not an external backup service.
+
+Pending reviews must survive the approval wait, refusal to publish, tool errors,
+unknown delivery, cancellation, and a moved head. None is an instruction to
+discard. Ordinary cleanup must exclude the review store; never use `rm -rf`
+or an EXIT trap on it. Preserve pending artifacts that a legacy run placed
+under TMPDIR too. Keep old revisions until posted or explicitly discarded.
+
+The only supported deletion command is guarded cleanup. After a confirmed
+review and completion of its thread actions, `post` records the receipt and
+the artifact tree. Cleanup refuses pending, partial, or subsequently changed
+workspaces:
+
+```bash
+python3 scripts/review-publish.py cleanup "$review_dir"
+```
+
+If the maintainer explicitly instructs the bot to discard this review, quote
+that instruction instead. Do not infer it from a denial or the end of a turn:
+
+```bash
+python3 scripts/review-publish.py cleanup "$review_dir" --discard-instruction "Discard this review."
+```
+
+This records the instruction privately before deletion and prevents the same
+discarded review identity from being posted later. Retained recovery directories
+use the same cleanup rules. Keep the location and digest in the private final
+handoff while waiting; a successful `show` is not publication.
 
 ## Re-review and thread resolution
 
@@ -103,7 +153,7 @@ classifying earlier findings. The private inventory includes complete paginated
 discussions and a digest of their comment ids, URLs, bodies, and edit timestamps:
 
 ```bash
-python3 scripts/review-publish.py threads owner repo 156 > threads.json
+python3 scripts/review-publish.py threads owner repo 156 > "$review_dir/threads.json"
 ```
 
 Follow the skill's re-review procedure. Verify the current code and relevant
