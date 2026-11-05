@@ -5,7 +5,9 @@ import {
   IMAGE_PROBE_CODE,
   imageProbeVerdict,
   planImageProbe,
+  probeFailureReport,
   renderImageInputModule,
+  staleNotice,
 } from "../scripts/probe-cursor-image-input.js"
 import { CURSOR_IMAGE_INPUT } from "../src/image-input-data.js"
 import { cursorModelReadsImages } from "../src/model-metadata.js"
@@ -57,6 +59,32 @@ describe("live image-input probe", () => {
       .toEqual(["a", "b", "c"])
     expect(() => planImageProbe(["a"], committed, { all: false, prune: false, models: ["gone"] }))
       .toThrow("Not in Cursor's live model list: gone")
+  })
+
+  it("reports a failed retest as keeping its result, and only an untested model as tried again", () => {
+    const committed = { recorded: true }
+    expect(probeFailureReport([
+      { id: "recorded", reason: "capacity_limit" },
+      { id: "fresh", reason: "unclear reply \"...\"" },
+    ], committed)).toEqual([
+      "Not recorded; the next run probes them again:",
+      "  fresh: unclear reply \"...\"",
+      "Kept the previous result; retest with --model <id>:",
+      "  recorded: capacity_limit",
+    ])
+    // The next default run plans no retest for the kept id.
+    expect(planImageProbe(["recorded", "fresh"], committed, { all: false, prune: false, models: [] }).targets)
+      .toEqual(["fresh"])
+    expect(probeFailureReport([], committed)).toEqual([])
+  })
+
+  it("claims removed stale ids only when a prune actually writes", () => {
+    expect(staleNotice([], { check: false, prune: true })).toBeUndefined()
+    expect(staleNotice(["old"], { check: false, prune: true }))
+      .toBe("Recorded models this account does not list (removed): old")
+    for (const options of [{ check: true, prune: true }, { check: false, prune: false }]) {
+      expect(staleNotice(["old", "older"], options)).toBe("Recorded models this account does not list: old, older")
+    }
   })
 
   it("renders a sorted generated module that the committed record matches", () => {

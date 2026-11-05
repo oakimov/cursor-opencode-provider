@@ -7,8 +7,9 @@
  *
  * By default a model is probed once, when it first appears in Cursor's live
  * list: one short Run on its default variant with a fixture image whose text
- * appears nowhere else. A Run that fails or answers unclearly records nothing,
- * so the next run probes that model again. `--model` and `--all` retest
+ * appears nowhere else. A Run that fails or answers unclearly changes nothing:
+ * an untested model stays unrecorded, so the next run probes it again; a
+ * retested model keeps its previous result. `--model` and `--all` retest
  * recorded models on request. Results are never removed implicitly: the live
  * list is per account, so `--prune` alone drops ids it no longer lists. Needs a
  * Cursor credential: `CURSOR_API_KEY`, else the browser login OpenCode stored.
@@ -117,6 +118,33 @@ export function planImageProbe(
   return { targets, record, missing, stale }
 }
 
+/** The stale-id line; `--check` never writes, so it never claims a removal. */
+export function staleNotice(
+  stale: readonly string[],
+  options: Pick<ImageProbeOptions, "check" | "prune">,
+): string | undefined {
+  if (!stale.length) return undefined
+  const removed = options.prune && !options.check ? " (removed)" : ""
+  return `Recorded models this account does not list${removed}: ${stale.join(", ")}`
+}
+
+/**
+ * What a failed probe changed: an untested model is tried again by the next
+ * default run, while a recorded model keeps its result until retested.
+ */
+export function probeFailureReport(
+  failures: ReadonlyArray<{ id: string; reason: string }>,
+  committed: ImageInputRecord,
+): string[] {
+  const line = ({ id, reason }: { id: string; reason: string }) => `  ${id}: ${reason}`
+  const untested = failures.filter(({ id }) => !Object.hasOwn(committed, id))
+  const retested = failures.filter(({ id }) => Object.hasOwn(committed, id))
+  return [
+    ...(untested.length ? ["Not recorded; the next run probes them again:", ...untested.map(line)] : []),
+    ...(retested.length ? ["Kept the previous result; retest with --model <id>:", ...retested.map(line)] : []),
+  ]
+}
+
 async function credential(): Promise<{ accessToken: string } | { apiKey: string }> {
   const apiKey = process.env.CURSOR_API_KEY
   if (apiKey) return { apiKey }
@@ -169,9 +197,8 @@ async function main(): Promise<void> {
   const liveModels = await fetchModels(token)
   const liveIds = liveModels.map((model) => model.id)
   const { targets, record, missing, stale } = planImageProbe(liveIds, CURSOR_IMAGE_INPUT, options)
-  if (stale.length) {
-    console.log(`Recorded models this account does not list${options.prune ? " (removed)" : ""}: ${stale.join(", ")}`)
-  }
+  const notice = staleNotice(stale, options)
+  if (notice) console.log(notice)
 
   if (options.check) {
     if (missing.length) {
@@ -185,7 +212,7 @@ async function main(): Promise<void> {
   const image = new Uint8Array(await readFile(new URL("../test/fixtures/image-probe.png", import.meta.url)))
   const cacheDir = await mkdtemp(path.join(os.tmpdir(), "cursor-image-probe-"))
   const previousCache = getHostCacheDirOverride()
-  const failures: string[] = []
+  const failures: Array<{ id: string; reason: string }> = []
   try {
     await writeCache(cacheDir, { schemaVersion: MODEL_CACHE_SCHEMA_VERSION, fetchedAt: Date.now(), models: liveModels })
     const cursor = createCursor({ name: "cursor", ...auth, cacheDir })
@@ -193,7 +220,7 @@ async function main(): Promise<void> {
       const { reply, error } = await probe(cursor.languageModel(id), id, image)
       const verdict = error ? undefined : imageProbeVerdict(reply)
       if (verdict === undefined) {
-        failures.push(`${id}: ${error ?? `unclear reply ${JSON.stringify(reply.trim().slice(0, 300))}`}`)
+        failures.push({ id, reason: error ?? `unclear reply ${JSON.stringify(reply.trim().slice(0, 300))}` })
         continue
       }
       record[id] = verdict
@@ -210,7 +237,7 @@ async function main(): Promise<void> {
   await writeFile(dest, renderImageInputModule(record))
   console.log(`Wrote src/image-input-data.ts (${Object.keys(record).length} models)`)
   if (failures.length) {
-    console.error(`Not recorded; the next run probes them again:\n  ${failures.join("\n  ")}`)
+    console.error(probeFailureReport(failures, CURSOR_IMAGE_INPUT).join("\n"))
     process.exit(1)
   }
 }
