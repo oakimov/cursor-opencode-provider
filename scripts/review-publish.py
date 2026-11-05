@@ -6,16 +6,20 @@ approve records a local approval of those exact bytes and that head.
 deny records a local refusal. post with a denial, or with no approval,
 does not call GitHub.
 post re-reads the approval after it takes the publication lock, and again
-after each read-only lookup and immediately before it sends. That read
-must be the same pull request, head, identity, preview digest, and
-approval generation. A denial or a different approval is not sent, even
-when the replacement is valid by itself. A request that was already sent
-is not cancelled. A send that does not confirm delivery is not repeated.
-A confirmed review id is delivery. A later post returns that review, or
-stops when it is not visible, and does not send another.
-render checks a structured result and writes the COMMENT payload.
+after each read-only lookup. That read must be the same pull request,
+head, identity, preview digest, and approval generation. A denial or a
+different approval is not sent, even when the replacement is valid by
+itself. After the reviews lookup, and immediately before it sends, post
+reads the pull request again and then re-reads that pinned operation. A
+moved base or head is not sent; refresh the review and approve it again.
+A push after that read can still land on the approved commit. A request
+that was already sent is not cancelled. A send that does not confirm
+delivery is not repeated. A confirmed review id is delivery. A later post
+returns that review, or stops when it is not visible, and does not send
+another. render checks a structured result and writes the COMMENT payload.
+approve and post take that payload file, the same file show froze.
 bind records the pull request's base and head. An incomplete result is
-not published. post rechecks that revision and keeps the returned ids.
+not published. post keeps the returned ids.
 """
 
 from __future__ import annotations
@@ -832,6 +836,33 @@ def require_same_operation(payload_path: Path, approval_path: Path, pinned: tupl
         raise SystemExit(5)
 
 
+def read_pull(owner: str, repo: str, pull: int) -> tuple[object, object, bool]:
+    code, stdout, stderr = gh_api("GET", f"repos/{owner}/{repo}/pulls/{pull}")
+    if code != 0:
+        print(stderr.decode("utf-8", errors="replace"), file=sys.stderr)
+        raise SystemExit(1)
+    try:
+        current = json.loads(stdout.decode() or "{}")
+    except json.JSONDecodeError:
+        return None, None, False
+    return interpret_pull(current, pull)
+
+
+def reject_moved_revision(
+    fetched_head: object,
+    fetched_base: object,
+    readable: bool,
+    approved_head: str,
+    approved_base: str,
+) -> None:
+    if not readable or fetched_head != approved_head or fetched_base != approved_base:
+        print(
+            "The pull request revision changed. Refresh the review and approve it again. GitHub was not called.",
+            file=sys.stderr,
+        )
+        raise SystemExit(6)
+
+
 def review_body(payload: dict) -> dict:
     return {
         "commit_id": payload["head"],
@@ -892,19 +923,9 @@ def post_locked(
     approved_head = payload["head"]
     approved_base = payload["base"]
     marker = f"<!-- cursor-review:{approval['identity']} -->"
-    code, stdout, stderr = gh_api("GET", f"repos/{owner}/{repo}/pulls/{pull}")
-    if code != 0:
-        print(stderr.decode("utf-8", errors="replace"), file=sys.stderr)
-        raise SystemExit(1)
-    current = json.loads(stdout.decode() or "{}")
-    fetched_head, fetched_base, readable = interpret_pull(current, pull)
+    fetched_head, fetched_base, readable = read_pull(owner, repo, pull)
     require_same_operation(payload_path, approval_path, pinned)
-    if not readable or fetched_head != approved_head or fetched_base != approved_base:
-        print(
-            "The pull request revision changed. Refresh the review and approve it again. GitHub was not called.",
-            file=sys.stderr,
-        )
-        raise SystemExit(6)
+    reject_moved_revision(fetched_head, fetched_base, readable, approved_head, approved_base)
     reviews = reviews_of(owner, repo, pull)
     require_same_operation(payload_path, approval_path, pinned)
     existing = matching_review(reviews, marker)
@@ -929,6 +950,11 @@ def post_locked(
         {"state": "posting", "payload_sha256": digest, "head": approved_head, "base": approved_base},
     )
     try:
+        # The reviews lookup is the last preparatory read. Fetch the remote
+        # revision after it, immediately before sending, then re-read the
+        # pinned local operation. A push after this fetch is not covered.
+        fetched_head, fetched_base, readable = read_pull(owner, repo, pull)
+        reject_moved_revision(fetched_head, fetched_base, readable, approved_head, approved_base)
         require_same_operation(payload_path, approval_path, pinned)
     except SystemExit:
         # The request was not sent. Drop the checkpoint so it is not an unsettled delivery.

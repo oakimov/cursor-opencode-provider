@@ -18,9 +18,9 @@ function selectedPython(): string {
 
 const python = selectedPython()
 
-function run(args: string[], env: NodeJS.ProcessEnv): { status: number; stdout: string; stderr: string } {
+function run(args: string[], env: NodeJS.ProcessEnv, cwd = root): { status: number; stdout: string; stderr: string } {
   const result = spawnSync(python, [path.join(root, "scripts/review-publish.py"), ...args], {
-    cwd: root,
+    cwd,
     encoding: "utf8",
     env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1", ...env },
   })
@@ -274,6 +274,18 @@ function collect(child: ChildProcess): Promise<{ status: number; stdout: string;
     child.stderr?.on("data", (chunk) => { stderr += chunk })
     child.on("close", (status) => resolve({ status: status ?? 1, stdout, stderr }))
   })
+}
+
+function documentedPublishCommands(): string[] {
+  const doc = fs.readFileSync(path.join(root, "docs/pr-review.md"), "utf8")
+  const commands: string[] = []
+  for (const block of doc.matchAll(/```bash\n([\s\S]*?)```/g)) {
+    for (const line of block[1].split("\n")) {
+      const trimmed = line.trim()
+      if (trimmed.startsWith("python3 scripts/review-publish.py ")) commands.push(trimmed)
+    }
+  }
+  return commands
 }
 
 function checkpointText(directory: string): string {
@@ -1144,7 +1156,112 @@ describe("review publication", () => {
       fs.rmSync(directory, { recursive: true, force: true })
     }
   })
+
+  it("publishes the documented payload.json sequence through the fake API", () => {
+    expect(documentedPublishCommands()).toEqual([
+      "python3 scripts/review-publish.py bind owner repo 156 review.json",
+      "python3 scripts/review-publish.py render review.json payload.json",
+      "python3 scripts/review-publish.py stamp payload.json",
+      "python3 scripts/review-publish.py show payload.json",
+      'python3 scripts/review-publish.py approve payload.json approval.json "$PREVIEW_SHA256"',
+      "python3 scripts/review-publish.py post payload.json approval.json",
+      "python3 scripts/review-publish.py deny approval.json",
+    ])
+    const { directory, bin, state } = freshReview("review-documented-")
+    const review = path.join(directory, "review.json")
+    const payload = path.join(directory, "payload.json")
+    const approval = path.join(directory, "approval.json")
+    fs.writeFileSync(path.join(state, "base"), `${"a".repeat(40)}\n`)
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    try {
+      fs.writeFileSync(review, JSON.stringify(structuredResult(), null, 2) + "\n")
+      const bound = run(["bind", "oakimov", "cursor-opencode-provider", "156", "review.json"], env, directory)
+      expect(bound.status, bound.stderr).toBe(0)
+      expect(JSON.parse(fs.readFileSync(review, "utf8")).findings).toHaveLength(1)
+      const rendered = run(["render", "review.json", "payload.json"], env, directory)
+      expect(rendered.status, rendered.stderr).toBe(0)
+      expect(rendered.stderr).toContain("REVIEW_OUTCOME=findings")
+      expect(run(["stamp", "payload.json"], env, directory).status).toBe(0)
+      const shown = run(["show", "payload.json"], env, directory)
+      expect(shown.status, shown.stderr).toBe(0)
+      expect(shown.stdout).toBe(fs.readFileSync(payload, "utf8"))
+      expect(fs.existsSync(`${payload}.preview`)).toBe(true)
+      expect(fs.existsSync(`${review}.preview`)).toBe(false)
+      const digest = previewDigest(shown.stderr)
+      const resultFile = run(["approve", "review.json", "approval.json", digest], env, directory)
+      expect(resultFile.status, resultFile.stderr).toBe(5)
+      expect(resultFile.stderr).toContain("No preview is frozen")
+      expect(fs.existsSync(approval)).toBe(false)
+      expect(postsOf(state)).toBe(0)
+      const approved = run(["approve", "payload.json", "approval.json", digest], env, directory)
+      expect(approved.status, approved.stderr).toBe(0)
+      const posted = run(["post", "payload.json", "approval.json"], env, directory)
+      expect(posted.status, `${posted.stdout}\n${posted.stderr}`).toBe(0)
+      expect(posted.stdout).toContain("REVIEW_URL=https://github.com/oakimov/cursor-opencode-provider/pull/156#pullrequestreview-1")
+      expect(posted.stdout).toContain("COMMENT_URL=")
+      const stored = JSON.parse(fs.readFileSync(path.join(state, "reviews.json"), "utf8")) as Array<{ request: { commit_id: string; comments: Array<{ path: string; body: string }> } }>
+      expect(stored).toHaveLength(1)
+      expect(stored[0]?.request.commit_id).toBe(head)
+      expect(stored[0]?.request.comments[0]?.path).toBe("scripts/review-publish.py")
+      expect(stored[0]?.request.comments[0]?.body).toContain("High: Replacement approval is sent to the locked pull request")
+      expect(callsOf(state).filter((line) => line.startsWith("POST "))).toEqual([
+        "POST repos/oakimov/cursor-opencode-provider/pulls/156/reviews",
+      ])
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("does not publish when the head moves during the reviews lookup", async () => {
+    await expectNoPublishWhenRevisionMoves("head")
+  }, 15000)
+
+  it("does not publish when the base moves during the reviews lookup", async () => {
+    await expectNoPublishWhenRevisionMoves("base")
+  }, 15000)
 })
+
+async function expectNoPublishWhenRevisionMoves(kind: "head" | "base"): Promise<void> {
+  const { directory, payload, approval, bin, state } = freshReview(`review-move-${kind}-`)
+  fs.writeFileSync(path.join(state, "base"), `${"a".repeat(40)}\n`)
+  const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_HOLD_GET: "1" }
+  const pull = "GET repos/oakimov/cursor-opencode-provider/pulls/156"
+  let child: ChildProcess | undefined
+  try {
+    installDraft(payload, approval, env, 156, "Summary of the checked diff.\n", "P1. A moved revision during lookup must not be published.")
+    const approvalBytes = fs.readFileSync(approval)
+    child = spawnPost(payload, approval, env)
+    const done = collect(child)
+    waitFor("reviews lookup", () => callsOf(state).some((line) => line.endsWith("/reviews")))
+    const duringLookup = callsOf(state)
+    expect(duringLookup.filter((line) => line === pull)).toHaveLength(1)
+    expect(duringLookup.some((line) => line.endsWith("/reviews"))).toBe(true)
+    expect(duringLookup.some((line) => line.startsWith("POST "))).toBe(false)
+    if (kind === "head") fs.writeFileSync(path.join(state, "head"), `${otherHead}\n`)
+    else fs.writeFileSync(path.join(state, "base"), `${"d".repeat(40)}\n`)
+    fs.writeFileSync(path.join(state, "release"), "go\n")
+    const result = await done
+    expect(result.status, `${result.stdout}\n${result.stderr}\n${callsOf(state).join("\n")}\n${postBodies(state)}`).toBe(6)
+    expect(result.stderr).toContain("The pull request revision changed. Refresh the review and approve it again.")
+    expect(postsOf(state)).toBe(0)
+    expect(postBodies(state)).toBe("")
+    expect(fs.readFileSync(approval).equals(approvalBytes)).toBe(true)
+    expect(JSON.parse(fs.readFileSync(path.join(state, "reviews.json"), "utf8"))).toEqual([])
+    const calls = callsOf(state)
+    const reviewsAt = calls.findIndex((line) => line.endsWith("/reviews"))
+    const pullGets = calls.map((line, index) => ({ line, index })).filter((item) => item.line === pull)
+    expect(pullGets).toHaveLength(2)
+    expect(pullGets[0]!.index).toBeLessThan(reviewsAt)
+    expect(pullGets[1]!.index).toBeGreaterThan(reviewsAt)
+    expect(calls.some((line) => line.startsWith("POST "))).toBe(false)
+    const journalDir = path.join(directory, ".review-publish")
+    const journals = fs.existsSync(journalDir) ? fs.readdirSync(journalDir).filter((name) => name.endsWith(".json")) : []
+    expect(journals).toEqual([])
+  } finally {
+    stopProcess(child)
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
+}
 
 function structuredResult(overrides: Record<string, unknown> = {}) {
   const finding = {
