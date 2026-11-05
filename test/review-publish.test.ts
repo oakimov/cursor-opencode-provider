@@ -18,29 +18,162 @@ function selectedPython(): string {
 
 const python = selectedPython()
 
+function writeAppKey(state: string): void {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-app-key-"))
+  const pemPath = path.join(directory, "app.pem")
+  const pubPath = path.join(directory, "app.pub")
+  try {
+    const generated = spawnSync("openssl", ["genrsa", "-out", pemPath, "2048"], { encoding: "utf8" })
+    if (generated.status !== 0) throw new Error(generated.stderr || "openssl genrsa failed")
+    const derived = spawnSync("openssl", ["rsa", "-in", pemPath, "-pubout", "-out", pubPath], { encoding: "utf8" })
+    if (derived.status !== 0) throw new Error(derived.stderr || "openssl rsa failed")
+    fs.writeFileSync(path.join(state, "app.pem"), fs.readFileSync(pemPath))
+    fs.chmodSync(path.join(state, "app.pem"), 0o600)
+    fs.writeFileSync(path.join(state, "app.pub"), fs.readFileSync(pubPath))
+    fs.writeFileSync(path.join(state, "app-id"), "12345\n")
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
+}
+
+function withApp(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const next = { ...env }
+  if (next.REVIEW_APP_UNCONFIGURED === "1") {
+    delete next.REVIEW_APP_UNCONFIGURED
+    for (const key of Object.keys(next)) {
+      if (key.startsWith("REVIEW_APP_")) delete next[key]
+    }
+    return next
+  }
+  const state = next.GH_STATE ? String(next.GH_STATE) : ""
+  const pemPath = state ? path.join(state, "app.pem") : ""
+  if (!next.REVIEW_APP_ID) next.REVIEW_APP_ID = "12345"
+  if (next.REVIEW_APP_INSTALLATION_ID === undefined) next.REVIEW_APP_INSTALLATION_ID = "67890"
+  const omit = next.REVIEW_APP_OMIT_KEY === "1"
+  delete next.REVIEW_APP_OMIT_KEY
+  if (omit) {
+    delete next.REVIEW_APP_PRIVATE_KEY
+    delete next.REVIEW_APP_PRIVATE_KEY_FILE
+    return next
+  }
+  if (!next.REVIEW_APP_PRIVATE_KEY && !next.REVIEW_APP_PRIVATE_KEY_FILE && pemPath && fs.existsSync(pemPath)) {
+    next.REVIEW_APP_PRIVATE_KEY = fs.readFileSync(pemPath, "utf8")
+  }
+  return next
+}
+
 function run(args: string[], env: NodeJS.ProcessEnv, cwd = root): { status: number; stdout: string; stderr: string } {
   const result = spawnSync(python, [path.join(root, "scripts/review-publish.py"), ...args], {
     cwd,
     encoding: "utf8",
-    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1", ...env },
+    env: withApp({ ...process.env, PYTHONDONTWRITEBYTECODE: "1", ...env }),
   })
   return { status: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" }
 }
 
 function writeGh(bin: string): void {
   fs.mkdirSync(bin)
+  writeAppKey(path.join(path.dirname(bin), "state"))
   const script = `#!${python}
-import json, os, sys, time
+import base64, json, os, subprocess, sys, tempfile, time
 from pathlib import Path
 state = Path(os.environ["GH_STATE"])
 args = sys.argv[1:]
+if args and args[0] == "api":
+    args = args[1:]
 method = "GET"
-if "--method" in args:
-    method = args[args.index("--method") + 1]
-endpoints = [item for item in args if item.startswith("repos/")]
-endpoint = endpoints[-1]
+positional = []
+index = 0
+while index < len(args):
+    item = args[index]
+    if item == "--method":
+        method = args[index + 1]
+        index += 2
+        continue
+    if item in ("--input", "-H", "--header", "-f", "-F", "-X"):
+        index += 2
+        continue
+    if item.startswith("-"):
+        index += 1
+        continue
+    positional.append(item)
+    index += 1
+endpoint = positional[-1]
+
+def b64decode(part):
+    pad = "=" * ((4 - len(part) % 4) % 4)
+    return base64.urlsafe_b64decode(part + pad)
+
+def verify_jwt(token):
+    parts = token.split(".")
+    if len(parts) != 3:
+        sys.stderr.write("HTTP 401\\n")
+        raise SystemExit(1)
+    try:
+        header = json.loads(b64decode(parts[0]))
+        payload = json.loads(b64decode(parts[1]))
+        signature = b64decode(parts[2])
+    except Exception:
+        sys.stderr.write("HTTP 401\\n")
+        raise SystemExit(1)
+    if header.get("alg") != "RS256" or str(payload.get("iss")) != (state / "app-id").read_text(encoding="utf-8").strip():
+        sys.stderr.write("HTTP 401\\n")
+        raise SystemExit(1)
+    now = int(time.time())
+    try:
+        issued = int(payload.get("iat"))
+        expires = int(payload.get("exp"))
+    except (TypeError, ValueError):
+        sys.stderr.write("HTTP 401\\n")
+        raise SystemExit(1)
+    if issued < now - 180 or issued > now + 30 or expires <= now or expires > issued + 600:
+        sys.stderr.write("HTTP 401\\n")
+        raise SystemExit(1)
+    descriptor, name = tempfile.mkstemp(dir=state)
+    try:
+        os.write(descriptor, signature)
+    finally:
+        os.close(descriptor)
+    try:
+        checked = subprocess.run(
+            ["openssl", "dgst", "-sha256", "-verify", str(state / "app.pub"), "-signature", name],
+            input=(parts[0] + "." + parts[1]).encode(),
+            capture_output=True,
+        )
+    finally:
+        os.unlink(name)
+    if checked.returncode != 0:
+        sys.stderr.write("HTTP 401\\n")
+        raise SystemExit(1)
+    (state / "jwt-iss").write_text(str(payload["iss"]), encoding="utf-8")
+
+def note_key():
+    leaked = bool(os.environ.get("REVIEW_APP_PRIVATE_KEY") or os.environ.get("REVIEW_APP_PRIVATE_KEY_FILE"))
+    flag = state / "saw-app-key"
+    if leaked or not flag.exists():
+        flag.write_text("1" if leaked else "0", encoding="utf-8")
+
+note_key()
 with (state / "calls").open("a", encoding="utf-8") as handle:
     handle.write(method + " " + endpoint + "\\n")
+token = os.environ.get("GH_TOKEN", "")
+if endpoint.startswith("app/installations/") and endpoint.endswith("/access_tokens"):
+    if os.environ.get("GH_MINT_FAIL") == "1":
+        sys.stderr.write("HTTP 401 Bad credentials\\n")
+        raise SystemExit(1)
+    verify_jwt(token)
+    issued = "ghp_notabot" if os.environ.get("GH_MINT_USER") == "1" else "ghs_testinstallationtoken"
+    json.dump({"token": issued}, sys.stdout)
+    raise SystemExit(0)
+if endpoint.endswith("/installation"):
+    verify_jwt(token)
+    json.dump({"id": 67890}, sys.stdout)
+    raise SystemExit(0)
+if method == "POST" and endpoint.endswith("/reviews"):
+    if token != "ghs_testinstallationtoken":
+        sys.stderr.write("HTTP 403 Resource not accessible by integration\\n")
+        raise SystemExit(1)
+    (state / "review-auth").write_text("app", encoding="utf-8")
 reviews_path = state / "reviews.json"
 comments_path = state / "comments.json"
 reviews = json.loads(reviews_path.read_text(encoding="utf-8") or "[]")
@@ -198,7 +331,7 @@ function callsOf(state: string): string[] {
 }
 
 function postsOf(state: string): number {
-  return callsOf(state).filter((line) => line.startsWith("POST ")).length
+  return callsOf(state).filter((line) => /^POST repos\/\S+\/pulls\/\d+\/reviews$/.test(line)).length
 }
 
 function sleep(ms: number): void {
@@ -257,7 +390,7 @@ function spawnPost(payload: string, approval: string, env: NodeJS.ProcessEnv): C
   return spawn(python, [path.join(root, "scripts/review-publish.py"), "post", payload, approval], {
     cwd: root,
     detached: true,
-    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1", ...env },
+    env: withApp({ ...process.env, PYTHONDONTWRITEBYTECODE: "1", ...env }),
   })
 }
 
@@ -524,7 +657,7 @@ describe("review publication", () => {
     fs.writeFileSync(path.join(state, "head"), head + "\n")
     writeGh(bin)
     fs.writeFileSync(payload, draft([{ path: "scripts/review-publish.py", line: 50, side: "RIGHT", body: "P2. Concurrent posts must not both create a review." }]))
-    const env = { ...process.env, PYTHONDONTWRITEBYTECODE: "1", PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_SLOW_POST: "1" }
+    const env = withApp({ ...process.env, PYTHONDONTWRITEBYTECODE: "1", PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_SLOW_POST: "1" })
     const runPost = () => new Promise<{ status: number; stdout: string; stderr: string }>((resolve) => {
       const child = spawn(python, [path.join(root, "scripts/review-publish.py"), "post", payload, approval], {
         cwd: root,
@@ -907,7 +1040,7 @@ describe("review publication", () => {
         cwd: root,
         detached: true,
         stdio: "ignore",
-        env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1", PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_HOLD_POST: "1" },
+        env: withApp({ ...process.env, PYTHONDONTWRITEBYTECODE: "1", PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_HOLD_POST: "1" }),
       })
       waitFor("in-flight post", () => {
         const dir = path.join(directory, ".review-publish")
@@ -1205,8 +1338,130 @@ describe("review publication", () => {
       expect(stored[0]?.request.comments[0]?.path).toBe("scripts/review-publish.py")
       expect(stored[0]?.request.comments[0]?.body).toContain("High: Replacement approval is sent to the locked pull request")
       expect(callsOf(state).filter((line) => line.startsWith("POST "))).toEqual([
+        "POST app/installations/67890/access_tokens",
         "POST repos/oakimov/cursor-opencode-provider/pulls/156/reviews",
       ])
+      expect(fs.readFileSync(path.join(state, "review-auth"), "utf8")).toBe("app")
+      expect(fs.readFileSync(path.join(state, "saw-app-key"), "utf8")).toBe("0")
+      expect(fs.readFileSync(path.join(state, "jwt-iss"), "utf8")).toBe("12345")
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("refuses a review until the GitHub App private key can sign", () => {
+    const { directory, payload, approval, bin, state } = freshReview("review-app-missing-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    try {
+      installDraft(payload, approval, env, 156, "Summary of the checked diff.\n", "P1. A missing app key must not post.")
+      const missing = run(["post", payload, approval], { ...env, REVIEW_APP_UNCONFIGURED: "1" })
+      expect(missing.status, missing.stderr).toBe(4)
+      expect(missing.stderr).toContain("REVIEW_APP_ID")
+      expect(missing.stderr).toContain("GitHub was not called.")
+      expect(missing.stderr).toContain("was not used")
+      expect(callsOf(state)).toEqual([])
+
+      const secretOnly = run(["post", payload, approval], {
+        ...env,
+        REVIEW_APP_ID: "12345",
+        REVIEW_APP_OMIT_KEY: "1",
+        REVIEW_APP_CLIENT_SECRET: "not-the-app-key",
+      })
+      expect(secretOnly.status, secretOnly.stderr).toBe(4)
+      expect(secretOnly.stderr).toContain("client secret")
+      expect(secretOnly.stderr).toContain("GitHub was not called.")
+      expect(callsOf(state)).toEqual([])
+
+      const userToken = run(["post", payload, approval], {
+        ...env,
+        REVIEW_APP_PRIVATE_KEY: "ghp_exampletoken",
+      })
+      expect(userToken.status, userToken.stderr).toBe(4)
+      expect(userToken.stderr).toContain("cannot be the app key")
+      expect(userToken.stderr).not.toContain("ghp_exampletoken")
+      expect(callsOf(state)).toEqual([])
+
+      const pem = fs.readFileSync(path.join(state, "app.pem"), "utf8")
+      const both = run(["post", payload, approval], {
+        ...env,
+        REVIEW_APP_PRIVATE_KEY: pem,
+        REVIEW_APP_PRIVATE_KEY_FILE: path.join(state, "app.pem"),
+      })
+      expect(both.status, both.stderr).toBe(4)
+      expect(both.stderr).toContain("only one")
+      expect(callsOf(state)).toEqual([])
+
+      fs.chmodSync(path.join(state, "app.pem"), 0o644)
+      const readable = run(["post", payload, approval], {
+        ...env,
+        REVIEW_APP_PRIVATE_KEY_FILE: path.join(state, "app.pem"),
+      })
+      expect(readable.status, readable.stderr).toBe(4)
+      expect(readable.stderr).toContain("readable only by its owner")
+      expect(readable.stderr).not.toContain("BEGIN")
+      expect(callsOf(state)).toEqual([])
+      fs.chmodSync(path.join(state, "app.pem"), 0o600)
+
+      const link = path.join(state, "linked.pem")
+      fs.symlinkSync(path.join(state, "app.pem"), link)
+      const linked = run(["post", payload, approval], { ...env, REVIEW_APP_PRIVATE_KEY_FILE: link })
+      expect(linked.status, linked.stderr).toBe(4)
+      expect(linked.stderr).toContain("unreadable")
+      expect(callsOf(state)).toEqual([])
+
+      const broken = run(["post", payload, approval], {
+        ...env,
+        REVIEW_APP_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nnot-a-key\n-----END PRIVATE KEY-----\n",
+      })
+      expect(broken.status, broken.stderr).toBe(4)
+      expect(broken.stderr).toContain("could not sign")
+      expect(broken.stderr).not.toContain("not-a-key")
+      expect(callsOf(state)).toEqual([])
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("posts as the GitHub App and does not accept another credential", () => {
+    const { directory, payload, approval, bin, state } = freshReview("review-app-post-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    const pem = fs.readFileSync(path.join(state, "app.pem"), "utf8")
+    try {
+      installDraft(payload, approval, env, 156, "Summary of the checked diff.\n", "P1. The review must be posted by the app.")
+      const escaped = `"${pem.trim().replaceAll("\n", "\\n")}"`
+      const posted = run(["post", payload, approval], { ...env, REVIEW_APP_PRIVATE_KEY: escaped, REVIEW_APP_INSTALLATION_ID: "" })
+      expect(posted.status, `${posted.stdout}\n${posted.stderr}`).toBe(0)
+      expect(posted.stderr).not.toContain("PRIVATE KEY")
+      expect(posted.stderr).not.toContain("ghs_")
+      expect(fs.readFileSync(path.join(state, "review-auth"), "utf8")).toBe("app")
+      expect(fs.readFileSync(path.join(state, "saw-app-key"), "utf8")).toBe("0")
+      expect(fs.readFileSync(path.join(state, "jwt-iss"), "utf8")).toBe("12345")
+      expect(callsOf(state)).toContain("GET repos/oakimov/cursor-opencode-provider/installation")
+      expect(callsOf(state).filter((line) => line.startsWith("POST "))).toEqual([
+        "POST app/installations/67890/access_tokens",
+        "POST repos/oakimov/cursor-opencode-provider/pulls/156/reviews",
+      ])
+
+      fs.writeFileSync(path.join(state, "reviews.json"), "[]\n")
+      fs.rmSync(path.join(directory, ".review-publish"), { recursive: true, force: true })
+      for (const name of ["review-auth", "jwt-iss", "calls"]) fs.rmSync(path.join(state, name), { force: true })
+      const rejected = run(["post", payload, approval], { ...env, REVIEW_APP_ID: "99999" })
+      expect(rejected.status, rejected.stderr).toBe(4)
+      expect(rejected.stderr).toContain("did not authorize")
+      expect(rejected.stderr).not.toContain("PRIVATE KEY")
+      expect(postsOf(state)).toBe(0)
+      expect(callsOf(state).some((line) => line.endsWith("/reviews") && line.startsWith("POST "))).toBe(false)
+      const journalDir = path.join(directory, ".review-publish")
+      const journals = fs.existsSync(journalDir) ? fs.readdirSync(journalDir).filter((name) => name.endsWith(".json")) : []
+      expect(journals).toEqual([])
+
+      fs.writeFileSync(path.join(state, "calls"), "")
+      const userMint = run(["post", payload, approval], { ...env, GH_MINT_USER: "1" })
+      expect(userMint.status, userMint.stderr).toBe(4)
+      expect(userMint.stderr).toContain("did not return an app installation token")
+      expect(userMint.stderr).not.toContain("ghp_")
+      expect(postsOf(state)).toBe(0)
+      expect(JSON.parse(fs.readFileSync(path.join(state, "reviews.json"), "utf8"))).toEqual([])
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
     }

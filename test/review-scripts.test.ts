@@ -559,8 +559,8 @@ exit 0
       trap check_cleanup EXIT
       check_begin_sandbox
       printf 'home %s\\n' "$isolate_home"
-      ISOLATE_SRC="$SRC" check_run_isolated /bin/sh -c 'printf "KEY=%s\\nSECRET=%s\\nHOME=%s\\nTMP=%s\\n" "\${CURSOR_API_KEY-}" "\${SECRET_TOKEN-}" "$HOME" "$TMPDIR"'
-    `, { ...process.env, CURSOR_API_KEY: secret, SECRET_TOKEN: "super-secret", SRC: src })
+      ISOLATE_SRC="$SRC" check_run_isolated /bin/sh -c 'printf "KEY=%s\\nSECRET=%s\\nAPPKEY=%s\\nHOME=%s\\nTMP=%s\\n" "\${CURSOR_API_KEY-}" "\${SECRET_TOKEN-}" "\${REVIEW_APP_PRIVATE_KEY-}" "$HOME" "$TMPDIR"'
+    `, { ...process.env, CURSOR_API_KEY: secret, SECRET_TOKEN: "super-secret", REVIEW_APP_PRIVATE_KEY: "app-key-material", SRC: src })
     fs.rmSync(src, { recursive: true, force: true })
     expect(result.status, result.stderr).toBe(0)
     const home = result.stdout.match(/^home (\S+)$/m)?.[1]
@@ -568,6 +568,8 @@ exit 0
     expect(result.stdout).toContain("KEY=")
     expect(result.stdout).not.toContain(secret)
     expect(result.stdout).not.toContain("super-secret")
+    expect(result.stdout).not.toContain("app-key-material")
+    expect(result.stdout).toContain("APPKEY=")
     if (hostKernel() === "Linux") {
       expect(result.stdout).toContain("HOME=/home/reviewer")
       expect(result.stdout).toContain("TMP=/tmp")

@@ -10,7 +10,10 @@ after each read-only lookup. That read must be the same pull request,
 head, identity, preview digest, and approval generation. A denial or a
 different approval is not sent, even when the replacement is valid by
 itself. After the reviews lookup, and immediately before it sends, post
-reads the pull request again and then re-reads that pinned operation. A
+reads the pull request again and then re-reads that pinned operation.
+It mints a GitHub App installation token and reads the approval once
+more. The review author is that app's bot. A client secret, a user
+token, and the ambient gh login are not used. A
 moved base or head is not sent; refresh the review and approve it again.
 A push after that read can still land on the approved commit. A request
 that was already sent is not cancelled. A send that does not confirm
@@ -25,13 +28,18 @@ not published. post keeps the returned ids.
 from __future__ import annotations
 
 import argparse
+import base64
 import fcntl
 import hashlib
 import json
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 MARKER = re.compile(r"<!-- cursor-review:([0-9a-f]{64}) -->")
@@ -530,7 +538,137 @@ def refuse_scan(raw: bytes, payload: dict) -> None:
         raise SystemExit(3)
 
 
-def gh_api(method: str, endpoint: str, payload: dict | None = None, paginate: bool = False) -> tuple[int, bytes, bytes]:
+def b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def redact_secret(text: str) -> str:
+    text = re.sub(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]+", "[redacted]", text)
+    text = re.sub(r"\bgithub_pat_[A-Za-z0-9_]+", "[redacted]", text)
+    return re.sub(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}", "[redacted]", text)
+
+
+def refuse_publication(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(4)
+
+
+def normalize_pem(value: str) -> bytes:
+    text = value.strip().lstrip("\ufeff")
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    text = text.replace("\r\n", "\n")
+    if "\\n" in text:
+        text = text.replace("\\n", "\n")
+    if not text.endswith("\n"):
+        text += "\n"
+    return text.encode()
+
+
+def read_private_key() -> bytes:
+    file_name = os.environ.get("REVIEW_APP_PRIVATE_KEY_FILE", "").strip()
+    inline = os.environ.get("REVIEW_APP_PRIVATE_KEY", "")
+    if file_name and inline.strip():
+        refuse_publication(
+            "Set only one of REVIEW_APP_PRIVATE_KEY and REVIEW_APP_PRIVATE_KEY_FILE. GitHub was not called."
+        )
+    if file_name:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(file_name, flags)
+        except OSError:
+            refuse_publication("The GitHub App private key file is unreadable. GitHub was not called.")
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+                refuse_publication(
+                    "The GitHub App private key file must be a regular file readable only by its owner. GitHub was not called."
+                )
+            pem = os.read(descriptor, 64 * 1024)
+            if os.read(descriptor, 1):
+                refuse_publication("The GitHub App private key file is not a usable key. GitHub was not called.")
+        finally:
+            os.close(descriptor)
+        return pem
+    if inline.strip():
+        return normalize_pem(inline)
+    if os.environ.get("REVIEW_APP_CLIENT_SECRET", "").strip():
+        refuse_publication(
+            "A GitHub App client secret cannot post a review. "
+            "Set REVIEW_APP_PRIVATE_KEY to the app private key. GitHub was not called."
+        )
+    refuse_publication(
+        "Review publication needs the GitHub App private key in REVIEW_APP_PRIVATE_KEY. "
+        "The agent login was not used. GitHub was not called."
+    )
+
+
+def sign_app_jwt(app_id: str, pem: bytes) -> str:
+    now = int(time.time())
+    header = b64url(json.dumps({"alg": "RS256", "typ": "JWT"}, separators=(",", ":")).encode())
+    payload = b64url(
+        json.dumps({"iat": now - 60, "exp": now + 540, "iss": app_id}, separators=(",", ":")).encode()
+    )
+    signing = f"{header}.{payload}".encode()
+    completed: subprocess.CompletedProcess[bytes] | None = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="review-app-") as directory:
+            key_path = Path(directory) / "key.pem"
+            descriptor = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.write(descriptor, pem if pem.endswith(b"\n") else pem + b"\n")
+            finally:
+                os.close(descriptor)
+            completed = subprocess.run(
+                ["openssl", "dgst", "-sha256", "-sign", str(key_path)],
+                input=signing,
+                capture_output=True,
+            )
+    except FileNotFoundError:
+        refuse_publication("openssl is required to sign the GitHub App request. GitHub was not called.")
+    if completed is None or completed.returncode != 0 or not completed.stdout:
+        refuse_publication("The GitHub App private key could not sign the request. GitHub was not called.")
+    return signing.decode() + "." + b64url(completed.stdout)
+
+
+def load_app_material() -> tuple[str, bytes]:
+    app_id = os.environ.get("REVIEW_APP_ID", "").strip()
+    if not re.fullmatch(r"[0-9]+", app_id):
+        refuse_publication(
+            "Review publication needs REVIEW_APP_ID for the GitHub App. "
+            "A user token was not used. GitHub was not called."
+        )
+    installation = os.environ.get("REVIEW_APP_INSTALLATION_ID", "").strip()
+    if installation and not re.fullmatch(r"[0-9]+", installation):
+        refuse_publication("REVIEW_APP_INSTALLATION_ID is invalid. GitHub was not called.")
+    if shutil.which("openssl") is None:
+        refuse_publication("openssl is required to sign the GitHub App request. GitHub was not called.")
+    pem = read_private_key()
+    if pem.lstrip().startswith((b"ghp_", b"github_pat_", b"gho_", b"ghu_", b"ghr_", b"ghs_")):
+        refuse_publication("A user or installation token cannot be the app key. GitHub was not called.")
+    if b"PRIVATE KEY" not in pem:
+        refuse_publication("REVIEW_APP_PRIVATE_KEY is not a GitHub App private key. GitHub was not called.")
+    sign_app_jwt(app_id, pem)
+    return app_id, pem
+
+
+def publisher_env(token: str | None) -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("REVIEW_APP_")}
+    if token is not None:
+        env["GH_TOKEN"] = token
+        env["GITHUB_TOKEN"] = token
+    return env
+
+
+def gh_api(
+    method: str,
+    endpoint: str,
+    payload: dict | None = None,
+    paginate: bool = False,
+    token: str | None = None,
+) -> tuple[int, bytes, bytes]:
     command = ["gh", "api", "--method", method]
     if paginate:
         command.extend(["--paginate", "--slurp"])
@@ -539,8 +677,48 @@ def gh_api(method: str, endpoint: str, payload: dict | None = None, paginate: bo
     if payload is not None:
         command.extend(["--input", "-"])
         data = json.dumps(payload).encode()
-    completed = subprocess.run(command, input=data, capture_output=True)
+    completed = subprocess.run(command, input=data, capture_output=True, env=publisher_env(token))
     return completed.returncode, completed.stdout, completed.stderr
+
+
+def json_object(raw: bytes) -> dict | None:
+    try:
+        value = json.loads(raw.decode() or "{}")
+    except (UnicodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def installation_token(owner: str, repo: str, app_id: str, pem: bytes) -> str:
+    jwt = sign_app_jwt(app_id, pem)
+    installation = os.environ.get("REVIEW_APP_INSTALLATION_ID", "").strip()
+    if not installation:
+        code, stdout, stderr = gh_api("GET", f"repos/{owner}/{repo}/installation", token=jwt)
+        found = json_object(stdout)
+        located = found.get("id") if found else None
+        if code != 0 or not isinstance(located, int) or isinstance(located, bool):
+            print(
+                "The GitHub App installation for this repository was not found. The review was not posted.",
+                file=sys.stderr,
+            )
+            detail = redact_secret(stderr.decode("utf-8", errors="replace")).strip()
+            if detail:
+                print(detail, file=sys.stderr)
+            raise SystemExit(4)
+        installation = str(located)
+    code, stdout, stderr = gh_api("POST", f"app/installations/{installation}/access_tokens", token=jwt)
+    if code != 0:
+        print("The GitHub App did not authorize the review. The review was not posted.", file=sys.stderr)
+        detail = redact_secret(stderr.decode("utf-8", errors="replace")).strip()
+        if detail:
+            print(detail, file=sys.stderr)
+        raise SystemExit(4)
+    issued = json_object(stdout)
+    token = issued.get("token") if issued else None
+    if not isinstance(token, str) or re.fullmatch(r"ghs_[A-Za-z0-9]+", token) is None:
+        print("GitHub did not return an app installation token. The review was not posted.", file=sys.stderr)
+        raise SystemExit(4)
+    return token
 
 
 def gh_pages(endpoint: str) -> list[dict]:
@@ -920,6 +1098,7 @@ def post_locked(
     checkpoint_path: Path,
 ) -> None:
     owner, repo, pull = payload["owner"], payload["repo"], payload["pull"]
+    app_id, pem = load_app_material()
     approved_head = payload["head"]
     approved_base = payload["base"]
     marker = f"<!-- cursor-review:{approval['identity']} -->"
@@ -951,27 +1130,36 @@ def post_locked(
     )
     try:
         # The reviews lookup is the last preparatory read. Fetch the remote
-        # revision after it, immediately before sending, then re-read the
-        # pinned local operation. A push after this fetch is not covered.
+        # revision, mint the installation token, and re-read the pinned
+        # approval. A push after this fetch is not covered. A changed
+        # revision or approval is not sent.
         fetched_head, fetched_base, readable = read_pull(owner, repo, pull)
         reject_moved_revision(fetched_head, fetched_base, readable, approved_head, approved_base)
+        require_same_operation(payload_path, approval_path, pinned)
+        token = installation_token(str(owner), str(repo), app_id, pem)
         require_same_operation(payload_path, approval_path, pinned)
     except SystemExit:
         # The request was not sent. Drop the checkpoint so it is not an unsettled delivery.
         checkpoint_path.unlink(missing_ok=True)
         raise
-    code, stdout, stderr = gh_api("POST", f"repos/{owner}/{repo}/pulls/{pull}/reviews", review_body(payload))
+    code, stdout, stderr = gh_api(
+        "POST",
+        f"repos/{owner}/{repo}/pulls/{pull}/reviews",
+        review_body(payload),
+        token=token,
+    )
     if code != 0:
         recovered = matching_review(reviews_of(owner, repo, pull), marker)
         if recovered is not None:
             record_visible_review(owner, repo, pull, recovered, digest, checkpoint_path, approved_head, True)
             return
-        if PROVEN_REJECTION.search(stderr.decode("utf-8", errors="replace")):
+        detail = stderr.decode("utf-8", errors="replace")
+        if PROVEN_REJECTION.search(detail):
             write_checkpoint(checkpoint_path, {"state": "rejected", "payload_sha256": digest, "head": payload["head"]})
-            print(stderr.decode("utf-8", errors="replace"), file=sys.stderr)
+            print(redact_secret(detail), file=sys.stderr)
             raise SystemExit(1)
         print("Delivery is unknown. GitHub was not called again.", file=sys.stderr)
-        print(stderr.decode("utf-8", errors="replace"), file=sys.stderr)
+        print(redact_secret(detail), file=sys.stderr)
         raise SystemExit(1)
     try:
         created = json.loads(stdout.decode() or "{}")

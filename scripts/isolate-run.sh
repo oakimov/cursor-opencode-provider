@@ -21,8 +21,8 @@
 #     [--env NAME] [--set NAME=VALUE] -- COMMAND...
 #
 # --env copies one existing variable in. --set passes a literal. Review
-# credentials stay out unless a caller passes that variable after a separate
-# trust decision.
+# credentials, including REVIEW_APP_PRIVATE_KEY, stay out unless a caller
+# passes that variable after a separate trust decision.
 set -euo pipefail
 
 isolate_unshare_detail=""
