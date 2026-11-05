@@ -2,7 +2,7 @@
 
 OpenCode is the runtime for a live test of this plugin. A review of a pull request is a reading of the diff, the code, and `.cursor/rules/`, plus build, typecheck, and unit tests. Do not send the diff or a review prompt to `opencode run`.
 
-Cloud agents install from the `install` string in `.cursor/environment.json`. That string is `scripts/cloud-agent-install.sh`, so a build of `main` does not need this branch's files. It installs Bun, zsh, and Python when they are missing, installs OpenCode 2.2.5 with the official installer (`https://opencode.ai/v2/install --version 2.2.5`) and links it on `PATH`, installs dependencies, and builds this package. It does not write an OpenCode config.
+Cloud agents install from the `install` string in `.cursor/environment.json`. That string is `scripts/cloud-agent-install.sh`, so a build of `main` does not need this branch's files. It installs Bun, zsh, and Python when they are missing, installs or upgrades OpenCode to the current release with the official installer (`https://opencode.ai/v2/install`, no version argument) and links `opencode` and `opencode2` on `PATH`, installs dependencies, and builds this package. It does not write an OpenCode config.
 
 ## Configure and live test
 

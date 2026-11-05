@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Idempotent Cloud Agent bootstrap. .cursor/environment.json install is this
 # file, so a build of main does not need this path to exist.
-OPENCODE_PIN="2.2.5"
+# OpenCode is not pinned. Each run installs the current release when the
+# copy in ~/.opencode is missing or older.
 
 opencode_version_of() {
   local bin="$1"
@@ -12,6 +13,26 @@ opencode_version_of() {
     installed="${installed#v}"
   fi
   printf '%s' "$installed"
+}
+
+# metadata is the JSON from https://opencode.ai/update/api/latest/cli/npm
+opencode_version_from_metadata() {
+  local metadata="$1"
+  local version
+  version="$(printf '%s' "$metadata" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')"
+  version="${version#v}"
+  printf '%s' "$version"
+}
+
+latest_opencode_version() {
+  local metadata version
+  metadata="$(curl -fsSL https://opencode.ai/update/api/latest/cli/npm)"
+  version="$(opencode_version_from_metadata "$metadata")"
+  if [[ -z "$version" ]]; then
+    echo "Could not read the latest OpenCode release." >&2
+    return 1
+  fi
+  printf '%s' "$version"
 }
 
 install_main() {
@@ -40,11 +61,14 @@ install_main() {
     sudo apt-get install -y python3
   fi
 
-  if [[ "$(opencode_version_of "$HOME/.opencode/bin/opencode")" != "$OPENCODE_PIN" ]]; then
-    echo "Installing OpenCode ${OPENCODE_PIN}"
-    curl -fsSL https://opencode.ai/v2/install | bash -s -- --version "$OPENCODE_PIN" --no-modify-path
+  installed="$(opencode_version_of "$HOME/.opencode/bin/opencode")"
+  latest="$(latest_opencode_version)"
+  if [[ "$installed" != "$latest" ]]; then
+    echo "Installing OpenCode ${latest}"
+    # No version argument: the official installer selects the current release.
+    curl -fsSL https://opencode.ai/v2/install | bash -s -- --no-modify-path
   else
-    echo "OpenCode ${OPENCODE_PIN} already installed"
+    echo "OpenCode ${installed} is current"
   fi
   sudo ln -sf "$HOME/.opencode/bin/opencode" /usr/local/bin/opencode
   if [[ -x "$HOME/.opencode/bin/opencode2" ]]; then
@@ -60,7 +84,7 @@ install_main() {
 
   # OpenCode config is not written here. The review harness writes it after
   # this install, including on main, where that harness is absent.
-  /usr/local/bin/opencode --version
+  echo "OpenCode $(opencode_version_of /usr/local/bin/opencode)"
 }
 
 if [[ -z "${BASH_SOURCE[0]:-}" || "${BASH_SOURCE[0]}" == "$0" ]]; then

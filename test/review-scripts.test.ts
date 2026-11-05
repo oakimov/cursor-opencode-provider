@@ -206,7 +206,11 @@ describe("cloud agent install", () => {
       install: string
     }
     expect(environment.install).toBe(script)
-    expect(environment.install).toContain('OPENCODE_PIN="2.2.5"')
+    expect(environment.install).not.toContain("OPENCODE_PIN")
+    expect(environment.install).not.toContain("2.2.5")
+    expect(environment.install).not.toContain("bash -s -- --version")
+    expect(environment.install).toContain("https://opencode.ai/v2/install | bash -s -- --no-modify-path")
+    expect(environment.install).toContain("https://opencode.ai/update/api/latest/cli/npm")
     expect(environment.install).not.toContain("scripts/configure-opencode.sh")
     expect(environment.install).not.toContain("scripts/cloud-agent-install.sh")
     expect(environment.install).not.toContain("opencode.json")
@@ -216,12 +220,12 @@ describe("cloud agent install", () => {
     expect(configure).not.toContain('"plugin":')
   })
 
-  it("does not install when sourced, and reads the pinned version", () => {
+  it("does not install when sourced, and reads a reported version", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "install-source-"))
     const bin = path.join(directory, "bin")
     fs.mkdirSync(bin)
     fs.writeFileSync(path.join(bin, "curl"), "#!/bin/sh\necho called > \"$HOME/curl-called\"\nexit 1\n")
-    fs.writeFileSync(path.join(bin, "opencode"), "#!/bin/sh\necho 'opencode v2.2.5'\n")
+    fs.writeFileSync(path.join(bin, "opencode"), "#!/bin/sh\necho 'opencode v9.9.9'\n")
     fs.chmodSync(path.join(bin, "curl"), 0o755)
     fs.chmodSync(path.join(bin, "opencode"), 0o755)
     try {
@@ -229,7 +233,7 @@ describe("cloud agent install", () => {
         `
         set -euo pipefail
         source scripts/cloud-agent-install.sh
-        printf 'pin %s\\n' "$OPENCODE_PIN"
+        printf 'parsed %s\\n' "$(opencode_version_from_metadata '{"version":"v9.9.9","package":"@opencode/cli"}')"
         printf 'match %s\\n' "$(opencode_version_of "$BIN/opencode")"
         printf 'missing %s\\n' "$(opencode_version_of "$BIN/missing")"
         printf 'sourced\\n'
@@ -237,7 +241,7 @@ describe("cloud agent install", () => {
         { HOME: directory, PATH: `${bin}:/usr/bin:/bin`, BIN: bin },
       )
       expect(result.status, result.stderr).toBe(0)
-      expect(result.stdout).toBe("pin 2.2.5\nmatch 2.2.5\nmissing \nsourced\n")
+      expect(result.stdout).toBe("parsed 9.9.9\nmatch 9.9.9\nmissing \nsourced\n")
       expect(fs.existsSync(path.join(directory, "curl-called"))).toBe(false)
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
