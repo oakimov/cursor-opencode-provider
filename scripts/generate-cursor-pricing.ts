@@ -66,6 +66,7 @@ const DISPLAY_NAME_TO_MODEL_ID: Record<string, string> = {
   "Claude Sonnet 5": "claude-sonnet-5",
   "Claude Sonnet 5.5": "claude-sonnet-5-5",
   "Composer 2.5": "composer-2.5",
+  "DeepSeek V4.1 Flash 1017": "deepseek-v41-flash-1017",
   "Gemini 2.5 Flash": "gemini-2.5-flash",
   "Gemini 3 Flash": "gemini-3-flash",
   "Gemini 3.1 Pro": "gemini-3.1-pro",

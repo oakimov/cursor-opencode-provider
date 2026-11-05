@@ -115,6 +115,11 @@ export const CURSOR_MODEL_COSTS = {
     "output": 15,
     "cache_read": 0.5
   },
+  "deepseek-v41-flash-1017": {
+    "input": 0.3,
+    "output": 1.2,
+    "cache_read": 0.006
+  },
   "gemini-2.5-flash": {
     "input": 0.3,
     "output": 2.5,
@@ -352,6 +357,9 @@ export const CURSOR_MODEL_CONTEXTS = {
   },
   "composer-2.5": {
     "maxContext": 200000
+  },
+  "deepseek-v41-flash-1017": {
+    "maxContext": 1000000
   },
   "gemini-2.5-flash": {
     "maxContext": 200000,
