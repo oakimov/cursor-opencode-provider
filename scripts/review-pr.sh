@@ -164,7 +164,7 @@ if printf '%s\n' "$diff_names" | grep -q '^src/index\.ts$'; then
   fi
 fi
 
-if printf '%s\n' "$diff_text" | grep -E -q '^\+.*@opencode-compat/|^\+.*opencode-plugin-compat'; then
+if printf '%s\n' "$diff_text" | grep -E -q "^\\+.*(from|import|require\\()[[:space:]]*['\\\"](@opencode-compat/|[^'\\\"]*opencode-plugin-compat)"; then
   note high provider-boundary "Diff adds a compatibility-package import."
 fi
 
@@ -178,7 +178,7 @@ fi
 if printf '%s\n' "$diff_names" | grep -E -q '^src/(session\.ts|language-model\.ts|transport/)'; then
   echo "CHECK id=resource-lifecycle: session or transport files changed. Confirm streams, sessions, and listeners are disposed."
 fi
-if printf '%s\n' "$diff_names" | grep -E -q 'device-id'; then
+if printf '%s\n' "$diff_names" | grep -E -q '(^|/)device-id\.(ts|js)$'; then
   echo "CHECK id=device-identity: a device-id path changed. Derivation must stay the same."
 fi
 
