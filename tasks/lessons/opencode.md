@@ -696,8 +696,11 @@ These are failure lessons shared by both hosts, not a replacement for
   silently permit removal (`test/process-cleanup.test.ts`). Test log content
   separately from its path-bearing diagnostic header (`test/debug.test.ts`).
 - **Match CI environments.** Narrow PATH fixtures omitted mkdir; Linux shell
-  tests need an init reaper. Strip temporary module copies from coverage and
-  include Bun editor types (`scripts/strip-copied-coverage.ts`).
+  tests need an init reaper. Ubuntu 24.04 CI denies unprivileged user
+  namespaces until `kernel.apparmor_restrict_unprivileged_userns` is 0, and
+  the isolation tests require that namespace rather than skipping. Strip
+  temporary module copies from coverage and include Bun editor types
+  (`scripts/strip-copied-coverage.ts`).
 - **Keep one current policy across docs and prompts.** A rebase can add review
   rules; reviewer patches still need whole-path validation. A manual Cursor review posts only after the maintainer approves that exact payload and head (`scripts/review-publish.py`); the procedure stays in `docs/pr-review.md`. Changelog fixes
   compare with the release, not an intermediate PR state. A versioned heading

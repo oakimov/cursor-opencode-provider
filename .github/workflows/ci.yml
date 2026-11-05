@@ -33,6 +33,11 @@ jobs:
       - name: Install zsh
         run: sudo apt-get update && sudo apt-get install -y zsh
 
+      # ubuntu-latest denies unprivileged user namespaces. The isolation
+      # tests require them and fail closed when unshare cannot create one.
+      - name: Allow user namespaces
+        run: bash scripts/ci-enable-userns.sh
+
       - name: Typecheck
         run: bun run typecheck
 
@@ -92,6 +97,9 @@ jobs:
 
       - name: Install zsh
         run: sudo apt-get update && sudo apt-get install -y zsh
+
+      - name: Allow user namespaces
+        run: bash scripts/ci-enable-userns.sh
 
       # Keep in step with the test job's commands.
       - name: Test

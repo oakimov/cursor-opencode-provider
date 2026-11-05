@@ -16,21 +16,33 @@
 # trust decision.
 set -euo pipefail
 
+isolate_unshare_detail=""
+isolate_mechanism_name=""
+
+# Sets isolate_mechanism_name. Also prints that name. A command substitution
+# would drop isolate_unshare_detail, so callers in this script invoke it
+# directly.
 isolate_mechanism() {
   local os
   os="$(uname -s)"
   if [[ "$os" == "Linux" ]]; then
-    if unshare --user --map-root-user --mount --pid --fork --mount-proc true >/dev/null 2>&1; then
-      printf 'linux-unshare'
+    local err
+    # stderr is the command substitution; stdout from `true` is discarded.
+    if err="$(unshare --user --map-root-user --mount --pid --fork --mount-proc true 2>&1 >/dev/null)"; then
+      isolate_mechanism_name="linux-unshare"
+      printf '%s' "$isolate_mechanism_name"
       return 0
     fi
+    isolate_unshare_detail="$err"
   elif [[ "$os" == "Darwin" ]]; then
     if command -v sandbox-exec >/dev/null 2>&1; then
-      printf 'darwin-sandbox'
+      isolate_mechanism_name="darwin-sandbox"
+      printf '%s' "$isolate_mechanism_name"
       return 0
     fi
   fi
-  printf 'unavailable'
+  isolate_mechanism_name="unavailable"
+  printf '%s' "$isolate_mechanism_name"
   return 1
 }
 
@@ -61,7 +73,7 @@ isolate_github_slug() {
 }
 
 isolate_main() {
-  local src="" mechanism=""
+  local src=""
   local -a tools=() ro_binds=() env_names=() set_pairs=() command=()
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -106,12 +118,16 @@ isolate_main() {
   isolate_check_names || return 2
   src="$(cd "$src" && pwd)"
 
-  mechanism="$(isolate_mechanism)" || true
-  case "$mechanism" in
+  isolate_mechanism >/dev/null || true
+  case "$isolate_mechanism_name" in
     linux-unshare) isolate_linux "$src" ;;
     darwin-sandbox) isolate_darwin "$src" ;;
     *)
-      isolate_unavailable "Linux needs working user, mount, and pid namespaces (unshare). macOS needs sandbox-exec." || return 2
+      local reason="Linux needs working user, mount, and pid namespaces (unshare). macOS needs sandbox-exec."
+      if [[ -n "$isolate_unshare_detail" ]]; then
+        reason="${reason}"$'\n'"${isolate_unshare_detail}"
+      fi
+      isolate_unavailable "$reason" || return 2
       ;;
   esac
 }
