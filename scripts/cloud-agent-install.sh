@@ -2,7 +2,9 @@
 # Idempotent Cloud Agent bootstrap: Bun, zsh, OpenCode CLI, dependencies, build,
 # and a local OpenCode 2 config that loads this repo's built plugin.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+export PYTHONDONTWRITEBYTECODE=1
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
 
 if [[ ! -x "${HOME}/.bun/bin/bun" ]]; then
   curl -fsSL https://bun.sh/install | bash

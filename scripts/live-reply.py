@@ -28,11 +28,14 @@ def assistant_reply(transcript: str) -> str:
         text = part.get("text")
         if isinstance(text, str):
             chunks.append(text)
-    return "".join(chunks).strip()
+    return "".join(chunks)
 
 
 def reply_is_pong(transcript: str) -> bool:
-    return assistant_reply(transcript) == "pong"
+    reply = assistant_reply(transcript)
+    if reply.endswith("\n"):
+        reply = reply[:-1]
+    return reply == "pong"
 
 
 def main() -> int:
@@ -40,17 +43,29 @@ def main() -> int:
         print("usage: live-reply.py stdout stderr exit_code model", file=sys.stderr)
         return 2
     out_path, err_path, code_s, model = sys.argv[1:]
-    code = int(code_s)
+    try:
+        code = int(code_s)
+    except ValueError:
+        print("LIVE_TEST=failed", file=sys.stderr)
+        print("exit code is not an integer", file=sys.stderr)
+        return 2
     key = os.environ.get("CURSOR_API_KEY", "")
 
     def redact(text: str) -> str:
         return text.replace(key, "[REDACTED]") if key else text
 
-    raw = open(out_path, encoding="utf-8", errors="replace").read()
-    err = open(err_path, encoding="utf-8", errors="replace").read()
+    try:
+        with open(out_path, encoding="utf-8", errors="replace") as stdout:
+            raw = stdout.read()
+        with open(err_path, encoding="utf-8", errors="replace") as stderr:
+            err = stderr.read()
+    except OSError as exc:
+        print("LIVE_TEST=failed", file=sys.stderr)
+        print(f"cannot read transcript: {exc.strerror}", file=sys.stderr)
+        return 2
     passed = code == 0 and reply_is_pong(raw)
     print(f"LIVE_TEST={'passed' if passed else 'failed'}")
-    print(f"model={model}")
+    print(f"model={redact(model)}")
     print(f"opencode_exit={code}")
     if not passed:
         print("--- opencode stdout ---")

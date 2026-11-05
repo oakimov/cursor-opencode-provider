@@ -1,5 +1,5 @@
 ---
-description: Read the Greptile context files for paths the diff touches.
+description: Read the review context files for paths the diff touches.
 alwaysApply: true
 ---
 
@@ -7,7 +7,7 @@ Greptile id: files-json
 Severity: context
 Scope: the paths listed below (from .greptile/files.json)
 
-`.greptile/files.json` attaches context rather than extra rule text. Cursor rules cannot attach those files automatically. When a review touches a listed scope, read the file and apply it.
+These files are review context, including the paths recorded in `.greptile/files.json`. Read the ones whose scope the diff touches. A review does this itself; it does not wait for Greptile to attach them.
 
 - `docs/review-rules.md` — every review. Review rubric, blockers, evidence, and how to write findings.
 - `CONTRIBUTING.md` — every review. Pull request scope, verification, and changelog requirements.

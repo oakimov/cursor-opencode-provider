@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Write an isolated OpenCode 2 config that loads this checkout's built plugin.
-# Output is gitignored (.opencode-local/) because the paths are absolute.
+# Output is gitignored (.opencode-local/). OPENCODE_CONFIG_DIR is not read or replaced.
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# Always this checkout's directory. OPENCODE_CONFIG_DIR is the user's saved
-# OpenCode config and must not be replaced by a plugins-only file.
 CONFIG_DIR="$ROOT/.opencode-local"
 ENTRY="$ROOT/dist/index.js"
 PLUGIN="$ROOT/dist/plugin-opencode2.js"
@@ -14,37 +13,31 @@ if [[ ! -f "$ENTRY" || ! -f "$PLUGIN" ]]; then
   exit 1
 fi
 
-mkdir -p "$CONFIG_DIR/plugins/cursor"
-cat > "$CONFIG_DIR/plugins/cursor/package.json" <<'EOF'
-{
-  "name": "cursor-local",
-  "type": "module",
-  "main": "./index.js"
-}
-EOF
-
-python3 - "$PLUGIN" "$CONFIG_DIR/plugins/cursor/index.js" <<'PY'
-import pathlib, sys
-plugin = pathlib.Path(sys.argv[1]).resolve().as_uri()
-pathlib.Path(sys.argv[2]).write_text(
-    f'export {{ default }} from "{plugin}";\n',
+python3 - "$PLUGIN" "$CONFIG_DIR" "$ENTRY" <<'PY'
+import json, pathlib, shlex, sys
+plugin = pathlib.Path(sys.argv[1]).resolve()
+config_dir = pathlib.Path(sys.argv[2]).resolve()
+entry = pathlib.Path(sys.argv[3]).resolve()
+plug_dir = config_dir / "plugins" / "cursor"
+plug_dir.mkdir(parents=True, exist_ok=True)
+(plug_dir / "package.json").write_text(
+    json.dumps({"name": "cursor-local", "type": "module", "main": "./index.js"}, indent=2) + "\n",
     encoding="utf-8",
 )
-PY
-
-python3 - "$CONFIG_DIR" <<'PY'
-import json, pathlib, sys
-config_dir = pathlib.Path(sys.argv[1]).resolve()
+(plug_dir / "index.js").write_text(
+    f'export {{ default }} from "{plugin.as_uri()}";\n',
+    encoding="utf-8",
+)
 (config_dir / "opencode.json").write_text(
-    json.dumps({"plugins": [str(config_dir / "plugins" / "cursor")]}, indent=2) + "\n",
+    json.dumps({"plugins": [str(plug_dir)]}, indent=2) + "\n",
+    encoding="utf-8",
+)
+(config_dir / "env").write_text(
+    f"export OPENCODE_CONFIG_DIR={shlex.quote(str(config_dir))}\n"
+    f"export CURSOR_OPENCODE2_DEV_ENTRY={shlex.quote(str(entry))}\n",
     encoding="utf-8",
 )
 PY
-
-cat > "$CONFIG_DIR/env" <<EOF
-export OPENCODE_CONFIG_DIR=$(printf '%q' "$CONFIG_DIR")
-export CURSOR_OPENCODE2_DEV_ENTRY=$(printf '%q' "$ENTRY")
-EOF
 
 echo "OpenCode config: $CONFIG_DIR/opencode.json"
 echo "CURSOR_OPENCODE2_DEV_ENTRY=$ENTRY"

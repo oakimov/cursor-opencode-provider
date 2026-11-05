@@ -3,6 +3,7 @@
 # Required secret: CURSOR_API_KEY (a Cursor user API key). No other secrets are read.
 # Optional: OPENCODE_LIVE_MODEL (default cursor/composer-2.5).
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
@@ -32,6 +33,8 @@ model="${OPENCODE_LIVE_MODEL:-cursor/composer-2.5}"
 prompt='Reply with exactly the word pong and nothing else.'
 stdout_file="$(mktemp)"
 stderr_file="$(mktemp)"
+# Invoked by the EXIT trap below.
+# shellcheck disable=SC2317
 cleanup() { rm -f "$stdout_file" "$stderr_file"; }
 trap cleanup EXIT
 

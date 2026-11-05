@@ -4,7 +4,7 @@
 
 ### Added
 
-- Cloud agents can install the OpenCode CLI and load this checkout's built OpenCode 2 plugin. `bun run live-test` runs `opencode run` against that plugin. It reads `CURSOR_API_KEY` and skips with a clear message when that variable is unset. `scripts/review-pr.sh` checks out a pull request, builds, runs the unit tests, and runs that live test. `.cursor/rules/` mirrors the Greptile rules in `.greptile/config.json` for those reviews.
+- Cloud agents can install the OpenCode CLI and load this checkout's built OpenCode 2 plugin. `bun run live-test` runs `opencode run` against that plugin. It reads `CURSOR_API_KEY` and skips when that variable is unset. `scripts/review-pr.sh` reviews a pull request from the diff and `.cursor/rules/` on its own. Greptile comments are optional evidence when they already exist. A contributor tree's install and tests run with a private home and temp directory, no reviewer secrets, and without dependency lifecycle scripts. `--live` passes `CURSOR_API_KEY` to that tree's live test only after unit tests pass and no high finding is present.
 - Recovery-only diagnostics (`CURSOR_PROVIDER_RECOVERY_DEBUG=1`) record interruption, recovery decisions, and host-call/result IDs without logging prompt or tool payloads.
 
 ### Changed
@@ -16,9 +16,7 @@
 
 ### Fixed
 
-- Local pull-request review includes untracked files whose names Git quotes, and deletes its temporary file list if reading a rule fails.
-- The documented OpenCode review command loads `.opencode-local/env` first, so `cursor/default` is this checkout's provider rather than OpenCode's default catalog.
-- Pull-request review runs a contributor's install and tests without reviewer credentials. `scripts/review-pr.sh --live` is required before that revision's live test receives `CURSOR_API_KEY`. The live check accepts only an assistant reply of exactly `pong`, and local OpenCode setup always writes `.opencode-local/` instead of replacing `OPENCODE_CONFIG_DIR`.
+- Pull-request review no longer gives contributor code the reviewer's credentials, home, or temp directory, and it no longer follows a quoted untracked path or a symlink into the diff. A pull number or URL that is not a canonical GitHub pull target is rejected before git runs. Local OpenCode setup writes `.opencode-local/`, and the documented review command sources that file. The live check accepts only an assistant reply of exactly `pong`.
 - Tool steps with a known call count close promptly when an edit's write reuses its permission-read call ID, avoiding an unnecessary idle-guard wait before dependent commands ([#152](https://github.com/oakimov/cursor-opencode-provider/pull/152), [@nkoynov](https://github.com/nkoynov)).
 - Held tool calls no longer get stuck after a locally rejected read, run after a queued withdrawal, or escape an earlier edit denial when they arrive after a host step split ([#152](https://github.com/oakimov/cursor-opencode-provider/pull/152)).
 - A command the model runs after a file change in the same step (a `git commit`, a test run, a `gh` post) no longer runs before the change lands. Both OpenCode majors run a step's tool calls at once, so in a step that changes a file the provider now sends the calls that follow it, in the model's order, in a later step once the change finished, including while the change waits on a permission prompt. The change also waits for the calls before it, and several changes in one step run one after another. When the user denies or stops the change, the calls after it are not run and Cursor is told so. Steps without a file change still run every call at once ([#151](https://github.com/oakimov/cursor-opencode-provider/issues/151), [discussion #145](https://github.com/oakimov/cursor-opencode-provider/discussions/145), [@nkoynov](https://github.com/nkoynov)).
