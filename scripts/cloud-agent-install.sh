@@ -58,33 +58,8 @@ install_main() {
     exit 1
   fi
 
-  python3 - "$ROOT/dist/plugin-opencode2.js" "$ROOT/.opencode-local" "$ROOT/dist/index.js" <<'PY'
-import json, pathlib, shlex, sys
-plugin = pathlib.Path(sys.argv[1]).resolve()
-config_dir = pathlib.Path(sys.argv[2]).resolve()
-entry = pathlib.Path(sys.argv[3]).resolve()
-plug_dir = config_dir / "plugins" / "cursor"
-plug_dir.mkdir(parents=True, exist_ok=True)
-(plug_dir / "package.json").write_text(
-    json.dumps({"name": "cursor-local", "type": "module", "main": "./index.js"}, indent=2) + "\n",
-    encoding="utf-8",
-)
-(plug_dir / "index.js").write_text(
-    f'export {{ default }} from "{plugin.as_uri()}";\n',
-    encoding="utf-8",
-)
-(config_dir / "opencode.json").write_text(
-    json.dumps({"plugins": [str(plug_dir)]}, indent=2) + "\n",
-    encoding="utf-8",
-)
-(config_dir / "env").write_text(
-    f"export OPENCODE_CONFIG_DIR={shlex.quote(str(config_dir))}\n"
-    f"export CURSOR_OPENCODE2_DEV_ENTRY={shlex.quote(str(entry))}\n",
-    encoding="utf-8",
-)
-PY
-
-  echo "OpenCode config: $ROOT/.opencode-local/opencode.json"
+  # OpenCode config is not written here. The review harness writes it after
+  # this install, including on main, where that harness is absent.
   /usr/local/bin/opencode --version
 }
 
