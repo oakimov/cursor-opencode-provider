@@ -391,7 +391,19 @@ describe("review ledger and score", () => {
     }],
     omissions: [],
     omissionsNone: "The failed refresh and the following default run were both exercised.",
-    passes: { candidatesValidated: true, omissionsAnalyzed: true },
+    retries: [{
+      behavior: "sync",
+      operation: "forced refresh of an existing recorded id",
+      forced: "The mocked fetch answered an error for the forced refresh.",
+      promise: "The failing run reported the id stays due.",
+      persisted: "The record kept the old value and due was left empty: 1 refresh attempt, 0 ids due.",
+      retried: "The next default run made 0 fetch attempts: due was empty.",
+      consumer: "query served the previous value.",
+      exit: "The forced run exited 1; the next default run exited 0.",
+      verdict: "violated",
+    }],
+    retriesNone: "",
+    passes: { candidatesValidated: true, omissionsAnalyzed: true, failedWorkAnalyzed: true },
   }
   const review = {
     head: "local",
@@ -432,6 +444,26 @@ describe("review ledger and score", () => {
       writeJson(path.join(prepared.mount, "ledger.json"), unfinished)
       expect(python(["scripts/review-ledger.py", "check", "ledger.json"], prepared.mount).status).toBe(2)
       expect(python(["scripts/review-ledger.py", "compare", "ledger.json", "review.json"], prepared.mount).status).not.toBe(0)
+      const unanalyzed = structuredClone(ledger)
+      unanalyzed.passes.failedWorkAnalyzed = false
+      unanalyzed.retries = []
+      unanalyzed.retriesNone = ""
+      writeJson(path.join(prepared.mount, "ledger.json"), unanalyzed)
+      expect(python(["scripts/review-ledger.py", "check", "ledger.json"], prepared.mount).status).toBe(2)
+      expect(python(["scripts/review-ledger.py", "compare", "ledger.json", "review.json"], prepared.mount).status).not.toBe(0)
+      const badVerdict = structuredClone(ledger)
+      badVerdict.retries[0].verdict = "maybe"
+      writeJson(path.join(prepared.mount, "ledger.json"), badVerdict)
+      const verdict = python(["scripts/review-ledger.py", "check", "ledger.json"], prepared.mount)
+      expect(verdict.status).toBe(1)
+      expect(verdict.stderr).toContain("verdict")
+      const unjustified = structuredClone(ledger)
+      unjustified.retries = []
+      unjustified.retriesNone = ""
+      writeJson(path.join(prepared.mount, "ledger.json"), unjustified)
+      const missing = python(["scripts/review-ledger.py", "check", "ledger.json"], prepared.mount)
+      expect(missing.status).toBe(1)
+      expect(missing.stderr).toContain("retriesNone")
     } finally {
       removeOuts()
     }

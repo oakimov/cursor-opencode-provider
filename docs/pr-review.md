@@ -15,7 +15,7 @@ Review https://github.com/oakimov/cursor-opencode-provider/pull/N.
 Follow .cursor/skills/review/SKILL.md and docs/pr-review.md.
 Read the diff, the files it changes, their callers, docs/review-rules.md, and the existing review threads.
 Run scripts/isolated-check.sh on that pull request.
-Perform the review procedure in `.cursor/skills/review/SKILL.md`: inventory behaviors, trace consumers, falsify candidates, then run the omission pass as a separate check. Keep the private ledger out of the payload.
+Perform the review procedure in `.cursor/skills/review/SKILL.md`: inventory behaviors, trace consumers, falsify candidates, then run the omission pass as a separate check, and run the failed-work retry check (the two-invocation sequence) for each relevant stateful operation. Keep the private ledger out of the payload.
 Record that revision, render one structured COMMENT review with scripts/review-publish.py, and show the payload.
 Use review-publish.py start for a persistent workspace. Keep the review files until confirmed publication or an explicit instruction to discard; never remove them during temporary cleanup.
 Stop. Do not post, approve, or merge. An incomplete result is not a finished review.
@@ -28,11 +28,16 @@ Write the review as a result, then render it. The result records the same reposi
 `bind` reads the pull request and records its base and head. When the result file already has a different revision, `bind` stops and leaves the file unchanged. `render` checks the result and writes the payload. `REVIEW_OUTCOME=incomplete` means the analysis did not reach a defensible review: the diff was unreadable, a tool was unavailable, or the result is malformed. That file can be read and cannot be stamped or posted. Rendering is not publication. Showing the preview is not approval. Approval is not a merge.
 
 Structured results require an `adversarial` check in addition to `diff` and test
-results. That check attests that both completion passes in the review skill
-finished: candidate validation, and a separate omission pass. Neither pass
-establishes the other. `passed` means both finished; findings still belong in
-`findings`. Only a docs or comment-only diff may mark it `skipped`, with a
-reason. The attestation is not proof that defects were found.
+results. That check attests that all three completion passes in the review skill
+finished: candidate validation, a separate omission pass, and the failed-work
+retry check — the two-invocation sequence each relevant stateful operation must
+get: an existing record or cached result, a forced update with an injected
+error or unclear response, the persisted state and the retry the failing run
+promises, then the ordinary entrypoint again without force flags, measuring
+whether it actually retries, what the consumer receives, and its exit status.
+No pass establishes another. `passed` means all three finished; findings still
+belong in `findings`. Only a docs or comment-only diff may mark it `skipped`,
+with a reason. The attestation is not proof that defects were found.
 
 An actionable finding states the contract and where it comes from, a reachable
 trigger, the causal path, and the downstream consequence that violates the
@@ -45,8 +50,10 @@ existing rubric and do not include the ledger.
 The private ledger is `scripts/review-ledger.py`. `check` validates it.
 `compare` requires every public finding to be an actionable candidate that
 survived falsification, requires the ledger's `revision` to equal the result's
-full `head` commit, and rejects a clean or findings result when either pass is
-unfinished. The `local` revision is only for offline evaluation with a `local`
+full `head` commit, and rejects a clean or findings result when any pass is
+unfinished. The ledger's `retries` entries record each failed-work sequence
+with its operation counts and persisted state. The `local` revision is only
+for offline evaluation with a `local`
 result head; it cannot validate a result bound to a PR commit. Run both before
 `render`. A ledger that validates is not
 a correct or complete review. Tests can pass, including helper tests, while

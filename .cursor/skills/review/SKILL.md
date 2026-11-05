@@ -63,6 +63,24 @@ outside `src/`.
    effects, and failure, then the next retry, use, or restart. Passing
    candidate validation does not mean the omission pass was done, and the
    reverse is also true.
+7. Run the failed-work retry check for each relevant stateful operation the
+   change touches — records, caches, persisted state, generators, discovery
+   or refresh flows. With mocked external services, start from an existing
+   successful record or cached result, force an update by injecting an error
+   or unclear response, and read the persisted state and the retry the
+   failing run promises. Then run the ordinary entrypoint again, without the
+   force flags, and measure whether it actually retries, what data the
+   consumer receives, and its exit status. The symptom to catch: the update
+   fails and promises a retry, but leaves the state marked complete; the next
+   normal run performs no retry, serves the old result, and exits
+   successfully. Exercise the real selection, persistence, and orchestration;
+   mock only external services. Record the two-invocation sequence in the
+   private ledger's `retries`, with operation counts and persisted state.
+   Promote it to a finding only when it violates a cited contract: retaining
+   last-known-good data can be valid, but retry scheduling must still satisfy
+   the promised behavior, and a release gate rejecting an untested model is
+   expected unless another requirement contradicts it. Neither the omission
+   pass nor candidate validation establishes this one.
 
 A counterexample becomes an actionable finding only after you establish the
 expected behavior and its source, a reachable trigger, the actual causal path
@@ -130,17 +148,19 @@ notes out of the public result and payload.
 
 `scripts/review-ledger.py check` must accept the ledger, and
 `scripts/review-ledger.py compare` must accept it against the result, before
-`render`. The ledger records two completion passes, `candidatesValidated` and
-`omissionsAnalyzed`. A pass that did not happen leaves the review incomplete.
+`render`. The ledger records three completion passes: `candidatesValidated`,
+`omissionsAnalyzed`, and `failedWorkAnalyzed` (the failed-work retry check),
+plus the `retries` two-invocation sequences with their operation counts and
+persisted state. A pass that did not happen leaves the review incomplete.
 The ledger is not published, and a ledger that validates is not evidence that
 the findings are true or complete.
 
 Record a concise account in the result check named `adversarial`, separate
-from build and tests. Use `passed` when both passes finished, even if they
-produced findings. If required analysis is blocked, use `unavailable` and an
-incomplete outcome. `skipped` is only for a justified docs or comment-only
-diff, with a reason. That status attests that the passes were done. It is not
-machine proof of semantic correctness.
+from build and tests. Use `passed` when all three passes finished, even if
+they produced findings. If required analysis is blocked, use `unavailable`
+and an incomplete outcome. `skipped` is only for a justified docs or
+comment-only diff, with a reason. That status attests that the passes were
+done. It is not machine proof of semantic correctness.
 
 ## Re-review earlier threads
 

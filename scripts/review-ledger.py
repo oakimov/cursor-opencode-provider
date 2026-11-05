@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate a private review ledger and compare it with a public result.
 
-The ledger is not a review. A passing check means the two completion passes
+The ledger is not a review. A passing check means the three completion passes
 were recorded and that actionable candidates name a contract, a trigger, a
 causal path, and a violation. It does not mean those claims are true or that
 the omission pass found every defect.
@@ -19,7 +19,7 @@ REVISION = re.compile(r"^(?:local|[0-9a-f]{40})$")
 ABSOLUTE = re.compile(r"(?:^|[\s\"'`])(?:~)?/")
 LIVE_CLAIM = re.compile(r"production incident|\blive model\b|\bin production\b", re.IGNORECASE)
 
-LEDGER_KEYS = {"revision", "behaviors", "candidates", "omissions", "omissionsNone", "passes"}
+LEDGER_KEYS = {"revision", "behaviors", "candidates", "omissions", "omissionsNone", "retries", "retriesNone", "passes"}
 CONTRACT_KEYS = {"path", "line", "note"}
 SCENARIO_KEYS = {"id", "category", "applicable", "reason", "expected", "observed", "evidence", "downstream"}
 CANDIDATE_KEYS = {
@@ -28,7 +28,9 @@ CANDIDATE_KEYS = {
     "provenance", "policyConflict", "citedRequirement",
 }
 OMISSION_KEYS = {"behavior", "transition", "reason"}
-PASS_KEYS = {"candidatesValidated", "omissionsAnalyzed"}
+RETRY_KEYS = {"behavior", "operation", "forced", "promise", "persisted", "retried", "consumer", "exit", "verdict"}
+RETRY_VERDICTS = {"satisfied", "violated"}
+PASS_KEYS = {"candidatesValidated", "omissionsAnalyzed", "failedWorkAnalyzed"}
 DISPOSITIONS = {"actionable", "refuted", "policy", "operational", "hypothesis"}
 SCENARIO_EVIDENCE = {"reproduced", "source", "synthetic", "native", "live", "unverified", "not-run"}
 KINDS = {"synthetic", "source", "native", "live", "unverified"}
@@ -236,19 +238,43 @@ def check_ledger(ledger: object) -> list[str]:
     elif omissions and ledger.get("omissionsNone").strip():
         problems.append("omissionsNone")
 
+    retries = ledger.get("retries")
+    if not isinstance(retries, list):
+        problems.append("retries")
+        retries = []
+    for index, item in enumerate(retries):
+        prefix = f"retries[{index}]"
+        if not isinstance(item, dict) or set(item) != RETRY_KEYS:
+            problems.append(prefix)
+            continue
+        if item.get("behavior") not in behavior_ids:
+            problems.append(f"{prefix}.behavior")
+        for field in ("operation", "forced", "promise", "persisted", "retried", "consumer", "exit"):
+            if not text_field(item.get(field)):
+                problems.append(f"{prefix}.{field}")
+        if item.get("verdict") not in RETRY_VERDICTS:
+            problems.append(f"{prefix}.verdict")
+    if not isinstance(ledger.get("retriesNone"), str):
+        problems.append("retriesNone")
+    elif retries and ledger.get("retriesNone").strip():
+        problems.append("retriesNone")
+
     passes = ledger.get("passes")
     if not isinstance(passes, dict) or set(passes) != PASS_KEYS:
         problems.append("passes")
     else:
         validated = passes.get("candidatesValidated")
         analyzed = passes.get("omissionsAnalyzed")
-        if not isinstance(validated, bool) or not isinstance(analyzed, bool):
+        retry_analyzed = passes.get("failedWorkAnalyzed")
+        if not isinstance(validated, bool) or not isinstance(analyzed, bool) or not isinstance(retry_analyzed, bool):
             problems.append("passes")
-        elif analyzed and not problems:
+        elif analyzed and retry_analyzed and not problems:
             if unevidenced - omitted_ids:
                 problems.append("omissions.coverage")
             if not omissions and not text_field(ledger.get("omissionsNone")):
                 problems.append("omissionsNone")
+            if not retries and not text_field(ledger.get("retriesNone")):
+                problems.append("retriesNone")
     return problems
 
 
@@ -258,6 +284,7 @@ def passes_complete(ledger: dict) -> bool:
         isinstance(passes, dict)
         and passes.get("candidatesValidated") is True
         and passes.get("omissionsAnalyzed") is True
+        and passes.get("failedWorkAnalyzed") is True
     )
 
 

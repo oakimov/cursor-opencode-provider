@@ -51,9 +51,12 @@ Evaluation adapter (applies equally to both instruction snapshots):
   The local result has outcome (clean, findings, or incomplete), findings, and
   limits. Each finding has id, title, explanation, trigger, consequence,
   evidence, path, and line. Ledger candidates and findings share ids.
-  Use the ledger schema and enums in scripts/review-ledger.py. Record both the
-  candidate-validation and omission passes even with the baseline snapshot.
-  A valid ledger is a completion check, not a detection score.
+  Use the ledger schema and enums in scripts/review-ledger.py. Record the
+  candidate-validation, omission, and failed-work retry passes even with the
+  baseline snapshot. For each relevant stateful operation, record the
+  two-invocation retry sequence: the forced failure with its persisted state
+  and retry promise, then the ordinary entrypoint's actual retry, served data,
+  and exit status. A valid ledger is a completion check, not a detection score.
 - Before finishing, run from this mount root:
   python3 scripts/review-ledger.py check ledger.json
   python3 scripts/review-ledger.py compare ledger.json review.json
@@ -350,6 +353,7 @@ def score_review(review: dict, truth: dict, ledger: dict | None = None) -> dict:
         report["ledger"] = {
             "candidatesValidated": isinstance(passes, dict) and passes.get("candidatesValidated") is True,
             "omissionsAnalyzed": isinstance(passes, dict) and passes.get("omissionsAnalyzed") is True,
+            "failedWorkAnalyzed": isinstance(passes, dict) and passes.get("failedWorkAnalyzed") is True,
         }
     return report
 
