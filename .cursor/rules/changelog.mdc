@@ -1,0 +1,10 @@
+---
+description: Medium. User-facing behavior changes need an Unreleased changelog line.
+alwaysApply: true
+---
+
+Greptile id: changelog
+Severity: medium
+Scope: all files (Greptile rule had no scope)
+
+A user-facing behavior change needs a CHANGELOG.md line under ## [Unreleased].

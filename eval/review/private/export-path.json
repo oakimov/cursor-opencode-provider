@@ -1,0 +1,38 @@
+{
+  "heldout": false,
+  "variants": {
+    "buggy": {
+      "defects": [
+        {
+          "id": "rejected-path-is-published",
+          "paths": ["export.py"],
+          "lines": [1, 80],
+          "symbols": ["def export"],
+          "causal": [
+            ["reject", "refus", "leaves the workspace"],
+            ["writ", "creat", "approv"],
+            ["publish", "outside", "workspace"]
+          ]
+        }
+      ],
+      "nonDefects": [],
+      "absentDefects": []
+    },
+    "fixed": {
+      "defects": [],
+      "nonDefects": [],
+      "absentDefects": [
+        {
+          "id": "rejected-path-is-published",
+          "paths": ["export.py"],
+          "lines": [1, 80],
+          "symbols": ["def export"],
+          "causal": [
+            ["reject", "refus"],
+            ["still writes", "writes anyway", "approves"]
+          ]
+        }
+      ]
+    }
+  }
+}

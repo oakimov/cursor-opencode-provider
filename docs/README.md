@@ -14,6 +14,7 @@ variables and limitations. Host setup belongs in the matching guide.
 | [CLI parity](cli-parity.md) | Provider support inventory and historical CLI comparison |
 | [Cache decisions](cache-aggressive-hold-approval.md) | Approved conversation-retention design and source guards |
 | [Review rules](review-rules.md) | PR review criteria |
+| [Pull request review](pr-review.md) | Manual Cursor review, isolated checks, and the live plugin test |
 
 Maintainers: [AGENTS.md](../AGENTS.md) owns current architecture and release
 requirements, with implementation pointers rather than incident histories;

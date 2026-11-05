@@ -1,0 +1,22 @@
+{
+  "heldout": false,
+  "variants": {
+    "subject": {
+      "defects": [],
+      "nonDefects": [
+        {
+          "id": "usable-retirement",
+          "paths": ["reconcile.py"],
+          "lines": [1, 20],
+          "symbols": ["def reconcile"],
+          "causal": [
+            ["shorter", "retir", "absent"],
+            ["remov", "delet"],
+            ["corrupt", "damag", "defect", "bug", "wrong"]
+          ]
+        }
+      ],
+      "absentDefects": []
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "heldout": false,
+  "variants": {
+    "subject": {
+      "defects": [],
+      "nonDefects": [
+        {
+          "id": "observed-true-is-not-a-guarantee",
+          "paths": ["capability.py"],
+          "lines": [1, 30],
+          "symbols": ["def apply"],
+          "causal": [
+            ["intermittent", "unforced", "later"],
+            ["clear", "erase", "should update", "must clear"],
+            ["observed", "guarantee"]
+          ]
+        }
+      ],
+      "absentDefects": []
+    }
+  }
+}

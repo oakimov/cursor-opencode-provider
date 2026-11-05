@@ -14,8 +14,9 @@ agent protocol. TypeScript ESM; Bun installs/tests; `tsc` builds `dist/`.
   current requirements here and dated validation in private run reports.
 - Keep operator behavior in [README.md](README.md) and the matching
   [host guide](docs/README.md). Follow [CONTRIBUTING.md](CONTRIBUTING.md) and the
-  [review rules](docs/review-rules.md), including every Greptile finding and
-  applicable Codecov issue. User-facing changes need an Unreleased changelog line.
+  [review rules](docs/review-rules.md), including every Greptile finding, every
+  Cursor review finding, and each applicable Codecov issue. User-facing changes
+  need an Unreleased changelog line.
 - Never leave TMPDIR remnants, from tests, scripts or your own scratch work
   (files, directories, worktrees, detached processes and their logs). Remove
   what you create before finishing; first await the writes and stop the
@@ -28,6 +29,13 @@ agent protocol. TypeScript ESM; Bun installs/tests; `tsc` builds `dist/`.
   resolves the client version its own cache root (`withTempHostCache` or
   `useTempHostCache`, `test/host-cache.ts`). Node test scripts
   import `test/node-tmpdir.mjs` first for the TMPDIR guard.
+- Pending review artifacts are durable work, not disposable scratch. Use
+  `review-publish.py start` and the gitignored `.review-artifacts/` store,
+  outside TMPDIR. Keep the result, ledger, payload, frozen preview, approval,
+  and publication journal until confirmed posting or an explicit maintainer
+  discard instruction. No cleanup, denial, interrupted turn, failed send, or
+  changed PR head authorizes deletion. Preserve legacy pending files even if
+  they were mistakenly put under TMPDIR; the cleanup rule above is no exception.
 
 ## Non-negotiable provider / compatibility-layer boundary
 

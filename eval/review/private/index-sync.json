@@ -1,0 +1,41 @@
+{
+  "heldout": false,
+  "variants": {
+    "buggy": {
+      "defects": [
+        {
+          "id": "failed-refresh-skips-retry",
+          "paths": ["sync_index.py"],
+          "lines": [1, 120],
+          "symbols": ["def run"],
+          "causal": [
+            ["fail", "error"],
+            ["due"],
+            ["next", "default", "later"],
+            ["skip", "exits 0", "exit 0", "does not fetch"]
+          ]
+        }
+      ],
+      "nonDefects": [],
+      "absentDefects": []
+    },
+    "fixed": {
+      "defects": [],
+      "nonDefects": [],
+      "absentDefects": [
+        {
+          "id": "failed-refresh-skips-retry",
+          "paths": ["sync_index.py"],
+          "lines": [1, 120],
+          "symbols": ["def run"],
+          "causal": [
+            ["fail", "error"],
+            ["due"],
+            ["next", "default", "later"],
+            ["skip", "exits 0", "exit 0", "does not fetch"]
+          ]
+        }
+      ]
+    }
+  }
+}

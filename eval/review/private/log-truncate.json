@@ -1,0 +1,21 @@
+{
+  "heldout": true,
+  "variants": {
+    "subject": {
+      "defects": [],
+      "nonDefects": [
+        {
+          "id": "stored-line-truncation",
+          "paths": ["log_line.py"],
+          "lines": [1, 10],
+          "symbols": ["def store_line"],
+          "causal": [
+            ["truncat", "1024"],
+            ["defect", "bug", "wrong", "should keep", "data loss"]
+          ]
+        }
+      ],
+      "absentDefects": []
+    }
+  }
+}

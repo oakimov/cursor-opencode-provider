@@ -1,0 +1,11 @@
+---
+description: High. Do not import a compatibility package or detect another host.
+globs: src/**,test/**,package.json
+alwaysApply: false
+---
+
+Greptile id: provider-boundary
+Severity: high
+Scope: src/**, test/**, package.json
+
+Provider source, tests, package metadata, and published output must not import a compatibility package, detect another host, or alias another provider. Unknown advertised tool names may pass through. Recognizing another host's tool, schema, or result is a blocker.

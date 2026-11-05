@@ -57,9 +57,11 @@ When opening one:
 
 ### Review and coverage requirements
 
-- **Resolve every Greptile finding before merge, regardless of severity**, including minor issues and nits. Address each finding and resolve its review thread; leave no open Greptile issues.
+Greptile review comments and Cursor review comments have the same weight. Both may be present on the same pull request. Resolve either source the same way.
+
+- **Resolve every Greptile finding and every Cursor review finding before merge, regardless of severity**, including minor issues and nits. Address each finding and resolve its review thread; leave no open Greptile or Cursor review issues.
 - **Provide sufficient test coverage for new and changed behavior**, including relevant error paths. Address uncovered changes and coverage regressions reported by Codecov; all applicable Codecov checks must pass under the repository's [coverage configuration](codecov.yml).
-- **PRs with unresolved Greptile findings or Codecov coverage issues will be closed if they go 3 days without an update addressing those issues.** Keep the PR updated while working through review and coverage feedback.
+- **PRs with unresolved Greptile, Cursor, or Codecov deficiencies will be closed if they go 3 days without an update addressing those issues.** Keep the PR updated while working through review and coverage feedback.
 
 ## License
 

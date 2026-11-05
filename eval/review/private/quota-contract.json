@@ -1,0 +1,39 @@
+{
+  "heldout": false,
+  "variants": {
+    "buggy": {
+      "defects": [
+        {
+          "id": "over-limit-accepted",
+          "paths": ["check.py", "tests/test_check.py"],
+          "lines": [1, 40],
+          "symbols": ["def main"],
+          "causal": [
+            ["limit"],
+            ["accept", "returns 0", "exit 0", "writes"],
+            ["requirement"]
+          ]
+        }
+      ],
+      "nonDefects": [],
+      "absentDefects": []
+    },
+    "fixed": {
+      "defects": [],
+      "nonDefects": [],
+      "absentDefects": [
+        {
+          "id": "over-limit-accepted",
+          "paths": ["check.py", "tests/test_check.py"],
+          "lines": [1, 40],
+          "symbols": ["def main"],
+          "causal": [
+            ["limit"],
+            ["accept", "returns 0", "exit 0"],
+            ["requirement"]
+          ]
+        }
+      ]
+    }
+  }
+}

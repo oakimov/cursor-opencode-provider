@@ -1,0 +1,11 @@
+---
+description: Medium. A runtime behavior change needs a bun test regression.
+globs: src/**
+alwaysApply: false
+---
+
+Greptile id: behavior-test
+Severity: medium
+Scope: src/**
+
+A runtime behavior change needs a regression test in test/ that bun test can run.

@@ -428,13 +428,28 @@ Set `CURSOR_AGENT_TRANSCRIPTS_FOLDER` before starting OpenCode (or its daemon). 
 
 ## Development
 
-Changes listed under [Unreleased](CHANGELOG.md#unreleased) describe the development checkout; use a rebuilt local install to test them before a release. Maintainer guides and incident lessons are linked from the [documentation index](docs/README.md).
+Changes listed under [Unreleased](CHANGELOG.md#unreleased) describe the development checkout; use a rebuilt local install to test them before a release. Maintainer guides and incident lessons are linked from the [documentation index](docs/README.md). The manual Cursor review, isolated pull-request checks, and OpenCode live test are in [docs/pr-review.md](docs/pr-review.md).
+
+Manual Cloud Agent reviews publish through the configured GitHub App after exact-preview approval. See the [App publisher setup](docs/pr-review.md#github-app-publisher) for `REVIEW_APP_ID`, the private key and optional installation ID. Tokens are restricted to this repository and retain the installation's configured permissions; the returned grant must include review-write access. `review-publish.py auth-info` reports configuration without printing secrets. Reviews use the App's bot identity, with no automatic review trigger.
+
+Re-reviews verify earlier threads and replies, and resolve fixed or refuted
+findings through the App after approval of the listed actions. The publisher
+checks the discussion and revision again and confirms resolved readback; a
+summary or an author reply alone does not close a thread. See the
+[re-review procedure](docs/pr-review.md#re-review-and-thread-resolution).
+
+Review results and previews live in persistent, gitignored `.review-artifacts/`,
+created by `review-publish.py start`. They survive approval waits and ordinary
+temporary-file cleanup. The publisher retains recovery copies and permits
+guarded cleanup only after publication or an explicit discard instruction;
+see [artifact retention](docs/pr-review.md#artifact-retention).
 
 ```bash
 bun install          # install dependencies
 bun run build        # compile TypeScript → dist/
 bun run typecheck    # type-check without emit
 bun test             # run unit tests
+bun run live-test    # OpenCode live run; skips unless CURSOR_API_KEY is set
 bun run test:node-http2 # Node HTTP/2 cleanup, drain, cancellation and memory regressions
 bun run test:watch   # watch mode
 bun run generate:pricing  # refresh src/pricing-data.ts from Cursor docs

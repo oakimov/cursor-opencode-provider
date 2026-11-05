@@ -1,0 +1,38 @@
+{
+  "heldout": true,
+  "variants": {
+    "buggy": {
+      "defects": [
+        {
+          "id": "role-dropped-from-cache-key",
+          "paths": ["cache_alias.py"],
+          "lines": [1, 20],
+          "symbols": ["def fetch"],
+          "causal": [
+            ["role"],
+            ["subject", "key"],
+            ["reuses", "returns the other", "alias", "same value"]
+          ]
+        }
+      ],
+      "nonDefects": [],
+      "absentDefects": []
+    },
+    "fixed": {
+      "defects": [],
+      "nonDefects": [],
+      "absentDefects": [
+        {
+          "id": "role-dropped-from-cache-key",
+          "paths": ["cache_alias.py"],
+          "lines": [1, 20],
+          "symbols": ["def fetch"],
+          "causal": [
+            ["role"],
+            ["reuses", "ignores the role", "same value"]
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "heldout": false,
+  "variants": {
+    "buggy": {
+      "defects": [
+        {
+          "id": "lock-dropped-before-mutation",
+          "paths": ["ledger/lock.py"],
+          "lines": [1, 30],
+          "symbols": ["def update"],
+          "causal": [
+            ["lock", "flock"],
+            ["before", "released", "unlock"],
+            ["mutat", "reserve"]
+          ]
+        }
+      ],
+      "nonDefects": [],
+      "absentDefects": []
+    },
+    "fixed": {
+      "defects": [],
+      "nonDefects": [],
+      "absentDefects": [
+        {
+          "id": "lock-dropped-before-mutation",
+          "paths": ["ledger/lock.py"],
+          "lines": [1, 40],
+          "symbols": ["def update"],
+          "causal": [
+            ["lock"],
+            ["before the mutation", "released before", "unlocks before"]
+          ]
+        }
+      ]
+    }
+  }
+}

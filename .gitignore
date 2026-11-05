@@ -5,6 +5,9 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# Generated local OpenCode config (absolute paths)
+.opencode-local/
+
 # Environment / secrets
 .env
 .env.*
@@ -37,6 +40,7 @@ coverage/
 # Local planning / scratch / agent dumps
 tasks/plans/
 scratch/
+.review-artifacts/
 agent-tools/
 
 # Regenerated local caches

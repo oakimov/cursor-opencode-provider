@@ -1,0 +1,11 @@
+---
+description: High. Do not change device-id or client-identity derivation.
+globs: src/**,test/**
+alwaysApply: false
+---
+
+Greptile id: device-identity
+Severity: high
+Scope: src/**, test/**
+
+Do not change device-id or client-identity derivation.

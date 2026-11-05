@@ -1,0 +1,95 @@
+{
+  "marker": "REVIEW_EVAL_ANSWER",
+  "revision": "fcf331e8ceb3a169f6f72205e5df262991bf9e1f",
+  "base": "f122fe36afe85500ee0164ec2a24ebdfd23b13dc",
+  "heldout": false,
+  "note": "Adjudication key for one calibration replay. Do not mount this file or put it in a review prompt.",
+  "variants": {
+    "subject": {
+      "defects": [
+        {
+          "id": "unusable-discovery-erases-records",
+          "paths": ["scripts/probe-cursor-image-input.ts"],
+          "lines": [57, 197],
+          "symbols": ["compareImageInputRecord"],
+          "causal": [
+            ["empty", "no models", "missing models"],
+            ["stale", "delet", "remov"],
+            ["exits 0", "exit 0"]
+          ]
+        },
+        {
+          "id": "quoted-refusal-is-decisive",
+          "paths": ["scripts/probe-cursor-image-input.ts"],
+          "lines": [46, 54],
+          "symbols": ["imageProbeVerdict"],
+          "evidence": "synthetic",
+          "causal": [
+            ["no image"],
+            ["false", "text-only", "text only"],
+            ["quot", "sentence", "instruction"]
+          ]
+        },
+        {
+          "id": "failed-refresh-skips-next-default",
+          "paths": ["scripts/probe-cursor-image-input.ts"],
+          "lines": [160, 197],
+          "symbols": ["failures"],
+          "causal": [
+            ["--model", "forced", "retest"],
+            ["fail", "error", "unclear"],
+            ["preserv", "existing record", "kept the record", "leaves the previous"],
+            ["next default", "subsequent run", "next run"],
+            ["skip", "does not probe", "not probe", "exits 0"]
+          ]
+        }
+      ],
+      "nonDefects": [
+        {
+          "id": "shorter-live-list-is-not-by-itself-corruption",
+          "paths": ["scripts/probe-cursor-image-input.ts"],
+          "lines": [57, 197],
+          "symbols": ["stale"],
+          "causal": [
+            ["already recorded", "shorter", "smaller", "only one"],
+            ["stale", "remov", "delet"]
+          ]
+        },
+        {
+          "id": "history-budget-rejection",
+          "paths": ["src/image-input.ts"],
+          "lines": [333, 386],
+          "symbols": ["extractCursorHistoryImages"],
+          "causal": [
+            ["20"],
+            ["budget", "mib"],
+            ["history"]
+          ]
+        },
+        {
+          "id": "observed-support-is-not-a-guarantee",
+          "paths": ["src/image-input-data.ts"],
+          "lines": [1, 80],
+          "symbols": ["deepseek-v41-flash-1017"],
+          "causal": [
+            ["record"],
+            ["image"],
+            ["does not retest", "will not change", "single"]
+          ]
+        },
+        {
+          "id": "untested-id-fails-the-release-gate",
+          "paths": ["scripts/probe-cursor-image-input.ts"],
+          "lines": [149, 165],
+          "symbols": ["--check"],
+          "causal": [
+            ["--check"],
+            ["untested", "unrecorded", "missing"],
+            ["exited 1", "exits 1"]
+          ]
+        }
+      ],
+      "absentDefects": []
+    }
+  }
+}

@@ -33,6 +33,37 @@ jobs:
       - name: Install zsh
         run: sudo apt-get update && sudo apt-get install -y zsh
 
+      # ubuntu-latest denies unprivileged user namespaces. The isolation
+      # tests require them and fail closed when unshare cannot create one.
+      # Inlined so a pull request head that predates scripts/ci-enable-userns.sh
+      # can still run. Keep this probe in sync with that script for local use.
+      - &userns-step
+        name: Allow user namespaces
+        run: |
+          set -euo pipefail
+          probe() {
+            unshare --user --map-root-user --mount --pid --fork --mount-proc true
+          }
+          if probe >/dev/null 2>&1; then
+            echo "user namespaces already available"
+            exit 0
+          fi
+          sysctl_path=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [[ -r "$sysctl_path" && "$(cat "$sysctl_path")" != "0" ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          clone_path=/proc/sys/kernel/unprivileged_userns_clone
+          if [[ -r "$clone_path" && "$(cat "$clone_path")" != "1" ]]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          if probe >/dev/null 2>&1; then
+            echo "user namespaces enabled"
+            exit 0
+          fi
+          echo "unshare still cannot create a user, mount, and pid namespace." >&2
+          probe || true
+          exit 1
+
       - name: Typecheck
         run: bun run typecheck
 
@@ -92,6 +123,8 @@ jobs:
 
       - name: Install zsh
         run: sudo apt-get update && sudo apt-get install -y zsh
+
+      - *userns-step
 
       # Keep in step with the test job's commands.
       - name: Test
