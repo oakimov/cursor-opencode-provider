@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test"
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import type { LanguageModelV3StreamPart } from "@ai-sdk/provider"
 import { deliverContinuationResults, drainSessionUntilTurnEnded, pump, pumpWithRecovery, resetTurnStateForTests, settleRunSavesForTests } from "../src/language-model.js"
@@ -34,6 +35,17 @@ const question = (tool_call_id: string) => frame({ interaction_query: {
   }),
 } })
 const completed = (call_id: string) => frame({ interaction_update: { tool_call_completed: { call_id } } })
+/**
+ * ExecServerMessage #30/#31 (`ForceBackground{Shell,Subagent}Args|1 tool_call_id`)
+ * are not in the decoder's schema; the pump finds them by raw field.
+ */
+const forceBackground = (field: number, id: number, toolCallId: string): Frame => {
+  const callId = new TextEncoder().encode(toolCallId)
+  const args = [0x0a, callId.length, ...callId]
+  const tag = (field << 3) | 2
+  const exec = [0x08, id, (tag & 0x7f) | 0x80, tag >> 7, args.length, ...args]
+  return { flags: 0, payload: Uint8Array.of(0x12, exec.length, ...exec) }
+}
 
 function fixture(frames: Frame[]) {
   const writes: Uint8Array[] = []
@@ -513,6 +525,75 @@ describe("parallel tool-call pump", () => {
     await pump(session, collect().controller, ids)
     expect(stale).toBe(true)
     expect(decodeMessage<any>("AgentClientMessage", writes[0]!).exec_client_message.id).toBe(40)
+  })
+
+  it.each([30, 31])("does not extend a held step for force-background request #%d", async field => {
+    const { session, writes } = fixture([listed(2), shell(1), forceBackground(field, 40, "call-1"), shell(2)])
+    const next = session.frames.next.bind(session.frames)
+    let reads = 0
+    let stale = false
+    session.frames.next = () => {
+      reads++
+      if (reads === 3) session.parallelStep!.lastProgressAt = Date.now() - 1_400
+      if (reads === 4) stale = Date.now() - session.parallelStep!.lastProgressAt >= 1_400
+      return next()
+    }
+    await pump(session, collect().controller, ids)
+    expect(stale).toBe(true)
+    expect(decodeMessage<any>("AgentClientMessage", writes[0]!).exec_client_message.id).toBe(40)
+  })
+
+  // https://github.com/oakimov/cursor-opencode-provider/issues/155, test by @nkoynov.
+  it("closes a shell's step while Cursor keeps asking to background it for a queued note", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-note-stall-"))
+    const target = path.join(root, "data.txt")
+    fs.writeFileSync(target, "payload line\n")
+    const requests = [2, 3, 4, 5, 6].map(id => forceBackground(30, id, "shell-call"))
+    const frames = [
+      frame({ interaction_update: { tool_call_started: {
+        call_id: "read-call", tool_call: { read_tool_call: { args: { path: target } } },
+      } } }),
+      frame({ exec_server_message: { id: 0, read_args: { path: target, tool_call_id: "read-call" } } }),
+      frame({ interaction_update: { tool_call_started: {
+        call_id: "shell-call", tool_call: { shell_tool_call: { args: { command: "sleep 3; echo SLEPT" } } },
+      } } }),
+      listed(2), shell(1, "shell-call"),
+      ...requests, text("after"),
+    ]
+    const { session, writes } = fixture(frames)
+    const tools = [...session.toolCatalog!, { name: "read", description: "Read" }]
+    session.toolCatalog = tools
+    session.toolDescriptors = toolsToDescriptors(tools, "opencode")
+    session.requestContext.env = { workspace_paths: [root] }
+    const next = session.frames.next.bind(session.frames)
+    // Each request stands for about 0.6 s of Cursor retrying while the shell runs.
+    session.frames.next = async () => {
+      const result = await next()
+      if (!result.done && requests.includes(result.value) && session.parallelStep) {
+        session.parallelStep.lastProgressAt -= 1_000
+      }
+      return result
+    }
+    try {
+      const first = collect()
+      await pump(session, first.controller, ids)
+      expect(toolCalls(first.parts).map(p => p.toolName)).toEqual(["read"])
+      const read = toolCalls(first.parts)[0]!
+      expect(await deliverContinuationResults(session, [{
+        sessionId: session.sessionId, execId: 0, toolCallId: read.toolCallId, toolName: "read", output: "payload line",
+      }])).toBe(session)
+
+      const second = collect()
+      await pump(session, second.controller, ids)
+      expect(toolCalls(second.parts).map(p => p.toolName)).toEqual(["bash"])
+      expect(finishes(second.parts).map(p => p.finishReason.unified)).toEqual(["tool-calls"])
+      expect(session.pending.has(1)).toBe(true)
+      expect(frames.length).toBeGreaterThan(0)
+      const answered = writes.map(bytes => decodeMessage<any>("AgentClientMessage", bytes).exec_client_message?.id)
+      expect(answered).toContain(2)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it("clears an aborted step's emission state while retaining its pending exec", async () => {

@@ -133,7 +133,7 @@ import { hostPatchTool, isHostPatchTool } from "./protocol/apply-patch.js"
 import { buildGitDiffUnavailableMessages } from "./protocol/git-diff.js"
 import { runtimeExecMessages, runtimeRootFromContext } from "./runtime-files.js"
 import { createManagedTerminal } from "./terminal-runner.js"
-import { cursorExecVariantByRequestField, describeCursorExecVariant } from "./protocol/exec-variants.js"
+import { cursorExecVariantByRequestField, describeCursorExecVariant, isExecRequestWithoutNewCall } from "./protocol/exec-variants.js"
 import { appendCheckpointUserGrounding, appendWorkspaceRootGrounding } from "./protocol/workspace-grounding.js"
 import {
   progressOnlyContinuationPrompt,
@@ -6129,8 +6129,10 @@ export async function pump(
         toolCallDelta: !!iu?.tool_call_delta,
         toolCallStarted: !!iu?.tool_call_started,
         // Completions reset progress only when they resolve a new call below.
-        // Setup probes are control traffic, like heartbeat/KV.
-        exec: !!esm && !esm.request_context_args && !esm.mcp_state_exec_args,
+        // Setup probes and requests about a call already sent (Cursor retries
+        // force-background while a held shell runs) are control traffic, like
+        // heartbeat/KV.
+        exec: !!esm && !isExecRequestWithoutNewCall(detectExecVariantField(payload)),
         interactionQuery: !!interactionQuery,
         textDelta: !!iu?.text_delta,
         thinkingDelta: !!iu?.thinking_delta,
