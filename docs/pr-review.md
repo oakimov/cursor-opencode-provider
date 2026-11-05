@@ -194,8 +194,26 @@ do not call the re-review finished. Retrying `post` reuses its review receipt.
 It confirms already-resolved threads without sending again, retries a proven
 HTTP rejection after the grant is corrected, and never blindly resends an
 ambiguous mutation or re-resolves a thread reopened after a confirmed action.
-Those cases require renewed analysis and a changed preview. No thread is
-resolved before approval, and replies are not automatically posted.
+A rejection GitHub words `Resource not accessible by integration` counts as
+proven. A retry after the review is posted does not demand classification of
+threads that review itself opened; a reply on them does. Those cases require
+renewed analysis and a changed preview. No thread is resolved before approval,
+and replies are not automatically posted.
+
+When a confirmed review leaves an approved resolution uncompleted, finish it
+with the completion script instead of resending by hand:
+
+```bash
+python3 scripts/complete-resolutions.py "$review_dir/payload.json" "$review_dir/approval.json"
+```
+
+It takes the same approved payload and approval, so the bytes must still match
+the approved digest and the review must be visible with its stamp marker and a
+confirmed receipt in the publication journal. It takes the same publication
+lock as `post`, reuses the publisher's resolution machinery (per-thread
+verification, ambiguity guards, `THREAD_RESOLVED` readback), and is idempotent:
+an already-resolved thread is confirmed, not re-resolved. It sends no review,
+reply, or comment, and never resolves a thread outside the approved actions.
 
 ## Configure and live test
 
@@ -208,8 +226,12 @@ the App on this repository with **Pull requests: Read and write** and disable
 webhooks for this manually initiated workflow. A client secret or ambient
 user token is not a publishing credential.
 
-The publisher requests an installation token restricted to this repository
-and `pull_requests: write`, and checks the returned grant. App JWT requests use
+The publisher requests an installation token scoped to this repository. The
+token carries the installation's granted permissions rather than a
+`pull_requests`-only downselect, because GitHub forbids the
+`resolveReviewThread` mutation for the downselected token even though it
+accepts the review POST; the returned grant must still include
+`pull_requests: write` for the review request. App JWT requests use
 Bearer authentication; installation tokens are opaque and can use GitHub's
 legacy or stateless format. See [GitHub's token documentation](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app).
 `python3 scripts/review-publish.py auth-info` reports only configuration/source

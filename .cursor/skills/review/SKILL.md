@@ -163,8 +163,12 @@ reason and source/test evidence. Include those actions in the exact preview.
 After approval, `post` submits the review and resolves those threads through
 the App. Confirm every `THREAD_RESOLVED` receipt. Do not claim resolution from
 a posted summary, a reply, or a proposed action. If any action fails, report
-the submitted review and remaining thread actions separately. Do not send
-direct mutations outside the publisher or resolve threads before approval.
+the submitted review and remaining thread actions separately, then finish the
+approved resolutions with `python3 scripts/complete-resolutions.py <payload>
+<approval>` — it reuses the confirmed review receipt and the same approval, is
+idempotent for already-resolved threads, and prints the same `THREAD_RESOLVED`
+receipts. Do not send direct mutations outside the publisher or resolve
+threads before approval.
 
 ## Checks
 

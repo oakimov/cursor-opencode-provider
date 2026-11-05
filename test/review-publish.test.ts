@@ -18,7 +18,7 @@ function selectedPython(): string {
 
 const python = selectedPython()
 
-function publisherArgs(args: string[]): string[] {
+function publisherArgs(args: string[], script = path.join(root, "scripts/review-publish.py")): string[] {
   // Keep the real JWT/HTTP construction; route only the HTTPS boundary to fake gh.
   return ["-c", `
 import http.client, json, os, runpy, subprocess, sys
@@ -48,7 +48,7 @@ http.client.HTTPSConnection = Connection
 script = sys.argv.pop(1)
 sys.argv[0] = script
 runpy.run_path(script, run_name="__main__")
-`, path.join(root, "scripts/review-publish.py"), ...args]
+`, script, ...args]
 }
 
 function writeAppKey(state: string): void {
@@ -95,14 +95,35 @@ function withApp(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return next
 }
 
-function run(args: string[], env: NodeJS.ProcessEnv, cwd = root): { status: number; stdout: string; stderr: string } {
+function processEnvWithoutReviewApp(): NodeJS.ProcessEnv {
+  // A cloud agent injects its own REVIEW_APP_* credentials into every process.
+  // The fake boundary verifies against fixture values, so ambient credentials
+  // must not reach the publisher; a test that names them still wins.
+  const next: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key.startsWith("REVIEW_APP_")) continue
+    next[key] = value
+  }
+  return next
+}
+
+function run(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  cwd = root,
+  script = path.join(root, "scripts/review-publish.py"),
+): { status: number; stdout: string; stderr: string } {
   const artifacts = env.REVIEW_ARTIFACT_DIR || path.join(env.GH_STATE ? path.dirname(String(env.GH_STATE)) : path.dirname(path.resolve(cwd, args[1] || "unused")), "retained")
-  const result = spawnSync(python, publisherArgs(args), {
+  const result = spawnSync(python, publisherArgs(args, script), {
     cwd,
     encoding: "utf8",
-    env: withApp({ ...process.env, PYTHONDONTWRITEBYTECODE: "1", REVIEW_ARTIFACT_DIR: artifacts, ...env }),
+    env: withApp({ ...processEnvWithoutReviewApp(), PYTHONDONTWRITEBYTECODE: "1", REVIEW_ARTIFACT_DIR: artifacts, ...env }),
   })
   return { status: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" }
+}
+
+function runComplete(env: NodeJS.ProcessEnv, ...args: string[]) {
+  return run(args, env, root, path.join(root, "scripts/complete-resolutions.py"))
 }
 
 function writeGh(bin: string): void {
@@ -205,6 +226,9 @@ if endpoint == "graphql":
             handle.write(variables["id"] + "\\n")
         if os.environ.get("GH_RESOLVE_FORBIDDEN") == "1" or os.environ.get("GH_RESOLVE_FORBIDDEN_THREAD") == variables["id"]:
             sys.stderr.write("HTTP 403\\n")
+            raise SystemExit(1)
+        if os.environ.get("GH_RESOLVE_INTEGRATION") == "1" or os.environ.get("GH_RESOLVE_INTEGRATION_THREAD") == variables["id"]:
+            sys.stderr.write("Resource not accessible by integration\\n")
             raise SystemExit(1)
         thread = next(item for item in threads if item["id"] == variables["id"])
         if os.environ.get("GH_RESOLVE_UNKNOWN") != "1" or os.environ.get("GH_RESOLVE_COMMIT") == "1":
@@ -490,7 +514,7 @@ function spawnPost(payload: string, approval: string, env: NodeJS.ProcessEnv): C
   return spawn(python, publisherArgs(["post", payload, approval]), {
     cwd: root,
     detached: true,
-    env: withApp({ ...process.env, PYTHONDONTWRITEBYTECODE: "1", REVIEW_ARTIFACT_DIR: env.REVIEW_ARTIFACT_DIR || path.join(env.GH_STATE ? path.dirname(String(env.GH_STATE)) : path.dirname(payload), "retained"), ...env }),
+    env: withApp({ ...processEnvWithoutReviewApp(), PYTHONDONTWRITEBYTECODE: "1", REVIEW_ARTIFACT_DIR: env.REVIEW_ARTIFACT_DIR || path.join(env.GH_STATE ? path.dirname(String(env.GH_STATE)) : path.dirname(payload), "retained"), ...env }),
   })
 }
 
@@ -574,7 +598,7 @@ describe("review publication", () => {
       expect(posted.status, posted.stderr).toBe(0)
       expect(posted.stdout).toContain("#pullrequestreview-1")
       expect(JSON.parse(fs.readFileSync(path.join(state, "mint-body"), "utf8"))).toEqual({
-        repositories: ["cursor-opencode-provider"], permissions: { pull_requests: "write" },
+        repositories: ["cursor-opencode-provider"],
       })
       expect(JSON.parse(fs.readFileSync(path.join(state, "app-http"), "utf8").trim())).toEqual({
         method: "POST", endpoint: "/app/installations/67890/access_tokens", bearer: true,
@@ -872,7 +896,7 @@ describe("review publication", () => {
     fs.writeFileSync(path.join(state, "head"), head + "\n")
     writeGh(bin)
     fs.writeFileSync(payload, draft([{ path: "scripts/review-publish.py", line: 50, side: "RIGHT", body: "P2. Concurrent posts must not both create a review." }]))
-    const env = withApp({ ...process.env, PYTHONDONTWRITEBYTECODE: "1", REVIEW_ARTIFACT_DIR: path.join(directory, "retained"), PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_SLOW_POST: "1" })
+    const env = withApp({ ...processEnvWithoutReviewApp(), PYTHONDONTWRITEBYTECODE: "1", REVIEW_ARTIFACT_DIR: path.join(directory, "retained"), PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_SLOW_POST: "1" })
     const runPost = () => new Promise<{ status: number; stdout: string; stderr: string }>((resolve) => {
       const child = spawn(python, publisherArgs(["post", payload, approval]), {
         cwd: root,
@@ -1255,7 +1279,7 @@ describe("review publication", () => {
         cwd: root,
         detached: true,
         stdio: "ignore",
-        env: withApp({ ...process.env, PYTHONDONTWRITEBYTECODE: "1", REVIEW_ARTIFACT_DIR: path.join(directory, "retained"), PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_HOLD_POST: "1" }),
+        env: withApp({ ...processEnvWithoutReviewApp(), PYTHONDONTWRITEBYTECODE: "1", REVIEW_ARTIFACT_DIR: path.join(directory, "retained"), PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_HOLD_POST: "1" }),
       })
       waitFor("in-flight post", () => {
         const dir = path.join(directory, ".review-publish")
@@ -2113,4 +2137,137 @@ describe("review thread resolution", () => {
       }
     }
   }, 20000)
+
+  it("records an integration-forbidden rejection as proven and retries it after the grant is corrected", () => {
+    const fixture = freshReview("review-resolve-integration-")
+    const { directory, payload, approval, state } = fixture
+    try {
+      const { env } = resolutionDraft(fixture, ["fixed", "refuted"])
+      expect(approve(payload, approval, env).status).toBe(0)
+      const denied = run(["post", payload, approval], { ...env, GH_RESOLVE_INTEGRATION_THREAD: "PRRT_fixture0" })
+      expect(denied.status).not.toBe(0)
+      expect(denied.stderr).toContain("Resource not accessible by integration")
+      expect(denied.stdout).toContain("REVIEW_URL=")
+      expect(denied.stdout).not.toContain("THREAD_RESOLVED=")
+      expect(checkpointText(directory)).toContain('"state": "posted"')
+      expect(checkpointText(directory)).toContain('"state": "rejected"')
+      expect(checkpointText(directory)).not.toContain('"state": "sending"')
+      const retried = run(["post", payload, approval], env)
+      expect(retried.status, retried.stderr).toBe(0)
+      expect(retried.stdout).toContain("THREAD_RESOLVED=PRRT_fixture0")
+      expect(retried.stdout).toContain("THREAD_RESOLVED=PRRT_fixture1")
+      expect(postsOf(state)).toBe(1)
+      expect(resolutionsOf(state)).toEqual(["PRRT_fixture0", "PRRT_fixture0", "PRRT_fixture1"])
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("a retry after posting skips classification of the review's own open comment threads but not replies on them", () => {
+    const fixture = freshReview("review-own-threads-")
+    const { directory, payload, approval, state, bin } = fixture
+    try {
+      const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+      const earlier = {
+        id: "PRRT_earlier",
+        isResolved: false,
+        pullRequest: { number: 156, repository: { nameWithOwner: "oakimov/cursor-opencode-provider" } },
+        comments: [
+          { id: "original", url: "https://github.com/oakimov/cursor-opencode-provider/pull/156#discussion_r900", body: "Earlier review finding", updatedAt: "2026-01-01T00:00:00Z" },
+          { id: "reply", url: "https://github.com/oakimov/cursor-opencode-provider/pull/156#discussion_r901", body: "The author says this is addressed.", updatedAt: "2026-01-02T00:00:00Z" },
+        ],
+      }
+      fs.writeFileSync(path.join(state, "threads.json"), JSON.stringify([earlier]))
+      const inventory = run(["threads", "oakimov", "cursor-opencode-provider", "156"], env)
+      expect(inventory.status, inventory.stderr).toBe(0)
+      const snapshot = (JSON.parse(inventory.stdout) as { threads: Array<{ snapshot: string }> }).threads[0]!.snapshot
+      const source = path.join(directory, "result.json")
+      fs.writeFileSync(source, JSON.stringify(structuredResult({
+        prior: [{ id: "earlier-0", status: "fixed", source: earlier.comments[0]!.url, note: "Verified the current branch against its regression test." }],
+        mutations: [{ action: "resolve", thread: "PRRT_earlier", finding: "earlier-0", snapshot, body: "The earlier finding is addressed at the reviewed head.", evidence: "scripts/review-publish.py:1; test/review-publish.test.ts:1" }],
+      })))
+      expect(run(["render", source, payload], env).status).toBe(0)
+      expect(run(["stamp", payload], env).status).toBe(0)
+      expect(approve(payload, approval, env).status).toBe(0)
+      // The review posts with one inline finding; its first resolution is rejected.
+      const denied = run(["post", payload, approval], { ...env, GH_RESOLVE_INTEGRATION_THREAD: "PRRT_earlier" })
+      expect(denied.status).not.toBe(0)
+      expect(postsOf(state)).toBe(1)
+      // GitHub now also lists the posted review's own comment as an open thread.
+      const posted = JSON.parse(fs.readFileSync(path.join(state, "comments.json"), "utf8")) as Array<{ html_url: string }>
+      expect(posted).toHaveLength(1)
+      const own = {
+        id: "PRRT_own",
+        isResolved: false,
+        pullRequest: { number: 156, repository: { nameWithOwner: "oakimov/cursor-opencode-provider" } },
+        comments: posted.map((row) => ({ id: `own-${row.html_url}`, url: row.html_url, body: "Current review finding", updatedAt: "2026-01-03T00:00:00Z" })),
+      }
+      fs.writeFileSync(path.join(state, "threads.json"), JSON.stringify([earlier, own]))
+      const retried = run(["post", payload, approval], env)
+      expect(retried.status, retried.stderr).toBe(0)
+      expect(postsOf(state)).toBe(1)
+      expect(retried.stdout).toContain("THREAD_RESOLVED=PRRT_earlier")
+      expect(resolutionsOf(state)).toEqual(["PRRT_earlier", "PRRT_earlier"])
+      // A reply on the review's own thread still demands a fresh review.
+      const threads = JSON.parse(fs.readFileSync(path.join(state, "threads.json"), "utf8")) as Array<{ comments: Array<{ id: string; url: string; body: string; updatedAt: string }> }>
+      threads[1]!.comments.push({ id: "author-reply", url: posted[0]!.html_url + "-reply", body: "The author responds to the finding.", updatedAt: "2026-01-04T00:00:00Z" })
+      fs.writeFileSync(path.join(state, "threads.json"), JSON.stringify(threads))
+      const refused = run(["post", payload, approval], env)
+      expect(refused.status).not.toBe(0)
+      expect(refused.stderr).toContain("not classified")
+      expect(resolutionsOf(state)).toHaveLength(2)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("completes rejected resolutions idempotently through complete-resolutions.py", () => {
+    const fixture = freshReview("review-complete-resolutions-")
+    const { directory, payload, approval, state } = fixture
+    try {
+      const { env } = resolutionDraft(fixture, ["fixed", "refuted"])
+      expect(approve(payload, approval, env).status).toBe(0)
+      const denied = run(["post", payload, approval], { ...env, GH_RESOLVE_FORBIDDEN_THREAD: "PRRT_fixture1" })
+      expect(denied.status).not.toBe(0)
+      expect(denied.stdout).toContain("REVIEW_URL=")
+      expect(denied.stdout).toContain("THREAD_RESOLVED=PRRT_fixture0")
+      expect(denied.stdout).not.toContain("THREAD_RESOLVED=PRRT_fixture1")
+      const finished = runComplete(env, payload, approval)
+      expect(finished.status, finished.stderr).toBe(0)
+      expect(finished.stdout).toContain("THREAD_RESOLVED=PRRT_fixture0")
+      expect(finished.stdout).toContain("THREAD_RESOLVED=PRRT_fixture1")
+      expect(postsOf(state)).toBe(1)
+      expect(resolutionsOf(state)).toEqual(["PRRT_fixture0", "PRRT_fixture1", "PRRT_fixture1"])
+      const again = runComplete(env, payload, approval)
+      expect(again.status, again.stderr).toBe(0)
+      expect(again.stdout).toContain("THREAD_RESOLVED=PRRT_fixture0")
+      expect(again.stdout).toContain("THREAD_RESOLVED=PRRT_fixture1")
+      expect(resolutionsOf(state)).toHaveLength(3)
+      expect(postsOf(state)).toBe(1)
+      expect(fs.readFileSync(path.join(state, "saw-app-key"), "utf8")).toBe("0")
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  }, 20000)
+
+  it("complete-resolutions.py refuses a missing approval and a review without a confirmed receipt", () => {
+    const fixture = freshReview("review-complete-refusals-")
+    const { directory, payload, approval, state } = fixture
+    try {
+      const { env } = resolutionDraft(fixture, ["fixed"])
+      const unapproved = runComplete(env, payload, approval)
+      expect(unapproved.status).toBe(4)
+      expect(unapproved.stderr).toContain("No approval file")
+      expect(postsOf(state)).toBe(0)
+      expect(resolutionsOf(state)).toEqual([])
+      expect(approve(payload, approval, env).status).toBe(0)
+      const unreceived = runComplete(env, payload, approval)
+      expect(unreceived.status).toBe(1)
+      expect(unreceived.stderr).toContain("No confirmed review receipt")
+      expect(postsOf(state)).toBe(0)
+      expect(resolutionsOf(state)).toEqual([])
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
 })

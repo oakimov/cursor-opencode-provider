@@ -65,7 +65,10 @@ ABSOLUTE = re.compile(
     r"(?:^|[\s\"'`=(\[<])[A-Za-z]:[\\/]|"
     r"(?:^|[\s\"'`=(\[<])file://"
 )
-PROVEN_REJECTION = re.compile(r"\bHTTP\s+4\d\d\b|validation failed", re.IGNORECASE)
+PROVEN_REJECTION = re.compile(
+    r"\bHTTP\s+4\d\d\b|validation failed|resource not accessible by integration",
+    re.IGNORECASE,
+)
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 SESSION = re.compile(r"\bbc-[0-9a-f-]{8,}\b|\bses_[A-Za-z0-9]")
 BILLING = re.compile(r"credit balance|account balance", re.IGNORECASE)
@@ -797,8 +800,13 @@ def installation_token(owner: str, repo: str, app_id: str, pem: bytes) -> str:
                 print(detail, file=sys.stderr)
             raise SystemExit(4)
         installation = str(located)
+    # The token stays scoped to this repository, but carries the installation's
+    # granted permissions instead of a pull_requests-only downselect: GitHub
+    # forbids the resolveReviewThread mutation for the downselected token even
+    # though it accepts the review POST. The returned grant must still include
+    # Pull requests: write for the review request itself.
     code, stdout, stderr = app_api("POST", f"app/installations/{installation}/access_tokens", jwt, {
-        "repositories": [repo], "permissions": {"pull_requests": "write"},
+        "repositories": [repo],
     })
     if code != 0:
         print("The GitHub App did not authorize the review. The review was not posted.", file=sys.stderr)
@@ -1486,7 +1494,18 @@ def post(payload_path: Path, approval_path: Path) -> None:
             require_same_operation(payload_path, approval_path, pinned)
             reject_moved_revision(inventory["head"], inventory["base"], True, payload["head"], payload["base"])
             classified = {item["source"] for item in payload["result"]["prior"]}
-            if any(not thread["isResolved"] and thread["comments"][0]["url"] not in classified for thread in inventory["threads"]):
+            # A retry after this review posted must not demand classification of
+            # threads that review itself opened; a reply on them still does.
+            journal = read_json_object(checkpoint_path)
+            own_urls = set()
+            if isinstance(journal, dict) and journal.get("state") == "posted" and isinstance(journal.get("comment_urls"), list):
+                own_urls = {url for url in journal["comment_urls"] if isinstance(url, str)}
+            if any(
+                not thread["isResolved"]
+                and thread["comments"][0]["url"] not in classified
+                and not (own_urls and all(comment["url"] in own_urls for comment in thread["comments"]))
+                for thread in inventory["threads"]
+            ):
                 raise SystemExit("An open earlier review thread was not classified. Re-review its discussion before publication.")
         for action in resolution_targets(payload):
             checked_thread(payload, action)
