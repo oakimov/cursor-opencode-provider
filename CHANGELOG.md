@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Publish CI enables user namespaces so isolation tests pass on ubuntu-latest.
 - Soft-deny background-shell probes no longer keep a tool step open ~5 minutes while Cursor delivers a host note ([#155](https://github.com/oakimov/cursor-opencode-provider/issues/155), [@nkoynov](https://github.com/nkoynov)).
 - Review harness: persistent private storage, re-review resolution, offline eval/ledger checks, `/usr/local/bin` OpenCode in the isolate, GitHub App token scoping, analysis receipts, and Linux orphan reaping ([#156](https://github.com/oakimov/cursor-opencode-provider/pull/156)).
 - Image input follows live model probes instead of Cursor's list flag (Grok 4.7, Composer 2.5, Kimi K2.7 Code; Kimi K3 text-only) ([#157](https://github.com/oakimov/cursor-opencode-provider/pull/157), [@thaoran](https://github.com/thaoran)).

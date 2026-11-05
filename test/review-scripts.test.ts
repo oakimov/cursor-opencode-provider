@@ -1090,6 +1090,10 @@ print("SAW=" + str(found))
     expect(yaml).not.toContain("bash scripts/ci-enable-userns.sh")
     expect(yaml).toContain("kernel.apparmor_restrict_unprivileged_userns")
     expect(yaml).toContain("*userns-step")
+    const publish = fs.readFileSync(path.join(root, ".github/workflows/publish.yml"), "utf8")
+    expect(publish).not.toContain("bash scripts/ci-enable-userns.sh")
+    expect(publish).toContain("kernel.apparmor_restrict_unprivileged_userns")
+    expect(publish).toContain("Allow user namespaces")
   })
 
   it("runs a command when no tools or environment names are passed", () => {
