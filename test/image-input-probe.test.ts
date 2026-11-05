@@ -4,6 +4,7 @@ import {
   compareImageInputRecord,
   IMAGE_PROBE_CODE,
   imageProbeVerdict,
+  planImageProbe,
   renderImageInputModule,
 } from "../scripts/probe-cursor-image-input.js"
 import { CURSOR_IMAGE_INPUT } from "../src/image-input-data.js"
@@ -15,9 +16,13 @@ describe("live image-input probe", () => {
     for (const reply of ["Text: Q4X8-2756", "`q4x8 2756`", "**Q4X8–2756**", "Q4X8-2756\nNO IMAGE elsewhere"]) {
       expect(imageProbeVerdict(reply)).toBe(true)
     }
-    for (const reply of ["NO IMAGE", "No image.", "no-image"]) expect(imageProbeVerdict(reply)).toBe(false)
-    // Neither a transcription nor a refusal needs a person, not a guess.
-    for (const reply of ["", "A red square, a blue circle and a green triangle.", "Q4X8-2757"]) {
+    for (const reply of ["NO IMAGE", "No image.", "no-image", " NO IMAGE\n"]) expect(imageProbeVerdict(reply)).toBe(false)
+    // Neither a transcription nor exactly the requested refusal records nothing.
+    for (const reply of [
+      "", "A red square, a blue circle and a green triangle.", "Q4X8-2757",
+      "Red square. NO IMAGE is what I would say if the pixels were missing.",
+      "NO IMAGE. Actually I can see a red square.",
+    ]) {
       expect(imageProbeVerdict(reply)).toBeUndefined()
     }
   })
@@ -28,6 +33,30 @@ describe("live image-input probe", () => {
       stale: ["retired"],
     })
     expect(compareImageInputRecord([], {})).toEqual({ missing: [], stale: [] })
+  })
+
+  it("never changes the record from an empty or partial live list unless asked to prune", () => {
+    const committed = { kept: true, retired: false, other: true }
+    expect(() => planImageProbe([], committed, { all: false, prune: true, models: [] }))
+      .toThrow("AvailableModels listed no models; the record is unchanged")
+    expect(planImageProbe(["kept"], committed, { all: false, prune: false, models: [] })).toEqual({
+      targets: [], record: committed, missing: [], stale: ["other", "retired"],
+    })
+    expect(planImageProbe(["kept", "new"], committed, { all: false, prune: true, models: [] })).toEqual({
+      targets: ["new"], record: { kept: true }, missing: ["new"], stale: ["other", "retired"],
+    })
+    expect(committed).toEqual({ kept: true, retired: false, other: true })
+  })
+
+  it("retests recorded models only on request", () => {
+    const committed = { a: true, b: false }
+    expect(planImageProbe(["a", "b", "c"], committed, { all: false, prune: false, models: [] }).targets).toEqual(["c"])
+    expect(planImageProbe(["a", "b", "c"], committed, { all: false, prune: false, models: ["b", "c"] }).targets)
+      .toEqual(["c", "b"])
+    expect(planImageProbe(["a", "b", "c"], committed, { all: true, prune: false, models: [] }).targets)
+      .toEqual(["a", "b", "c"])
+    expect(() => planImageProbe(["a"], committed, { all: false, prune: false, models: ["gone"] }))
+      .toThrow("Not in Cursor's live model list: gone")
   })
 
   it("renders a sorted generated module that the committed record matches", () => {

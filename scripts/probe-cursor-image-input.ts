@@ -9,13 +9,15 @@
  * list: one short Run on its default variant with a fixture image whose text
  * appears nowhere else. A Run that fails or answers unclearly records nothing,
  * so the next run probes that model again. `--model` and `--all` retest
- * recorded models on request. Needs a Cursor credential: `CURSOR_API_KEY`,
- * else the browser login OpenCode stored.
+ * recorded models on request. Results are never removed implicitly: the live
+ * list is per account, so `--prune` alone drops ids it no longer lists. Needs a
+ * Cursor credential: `CURSOR_API_KEY`, else the browser login OpenCode stored.
  *
  *   bun run generate:images                   # probe newly listed models only
  *   bun run generate:images -- --model <id>   # retest these ids (repeatable)
  *   bun run generate:images -- --all          # retest every live model
- *   bun run generate:images -- --check        # fail if live models and the record differ
+ *   bun run generate:images -- --prune        # also drop ids Cursor no longer lists
+ *   bun run generate:images -- --check        # fail if a live model has no result
  */
 
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
@@ -44,13 +46,14 @@ const PROBE_TIMEOUT_MS = 180_000
 export type ImageInputRecord = Record<string, boolean>
 
 /**
- * `true` when the reply transcribes the probe code, `false` when it says it
- * sees no image, `undefined` when the reply is neither and needs a person.
+ * `true` when the reply transcribes the probe code, `false` when the whole
+ * reply is the requested `NO IMAGE`, `undefined` for anything else (such as a
+ * description that quotes the instruction), which records nothing.
  */
 export function imageProbeVerdict(reply: string): boolean | undefined {
   const compact = reply.toUpperCase().replace(/[^A-Z0-9]/g, "")
   if (compact.includes(IMAGE_PROBE_CODE.replace(/[^A-Z0-9]/g, ""))) return true
-  if (compact.includes("NOIMAGE")) return false
+  if (compact === "NOIMAGE") return false
   return undefined
 }
 
@@ -79,18 +82,39 @@ export const CURSOR_IMAGE_INPUT = ${JSON.stringify(sorted, null, 2)} as const
 `
 }
 
-type Options = { check: boolean; all: boolean; models: string[] }
+export type ImageProbeOptions = { check: boolean; all: boolean; prune: boolean; models: string[] }
 
-function parseArgs(argv: string[]): Options {
-  const options: Options = { check: false, all: false, models: [] }
+function parseArgs(argv: string[]): ImageProbeOptions {
+  const options: ImageProbeOptions = { check: false, all: false, prune: false, models: [] }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!
     if (arg === "--check") options.check = true
     else if (arg === "--all") options.all = true
+    else if (arg === "--prune") options.prune = true
     else if (arg === "--model" && argv[i + 1]) options.models.push(argv[++i]!)
     else throw new Error(`Unknown argument: ${arg}`)
   }
   return options
+}
+
+/**
+ * The ids to probe and the record to start from. An empty live list is a
+ * failed discovery, never a reason to change the record; recorded ids leave it
+ * only with `--prune`.
+ */
+export function planImageProbe(
+  liveIds: readonly string[],
+  committed: ImageInputRecord,
+  options: Pick<ImageProbeOptions, "all" | "prune" | "models">,
+): { targets: string[]; record: ImageInputRecord; missing: string[]; stale: string[] } {
+  if (liveIds.length === 0) throw new Error("AvailableModels listed no models; the record is unchanged")
+  const unknown = options.models.filter((id) => !liveIds.includes(id))
+  if (unknown.length) throw new Error(`Not in Cursor's live model list: ${unknown.join(", ")}`)
+  const { missing, stale } = compareImageInputRecord(liveIds, committed)
+  const record = { ...committed }
+  if (options.prune) for (const id of stale) delete record[id]
+  const targets = options.all ? [...liveIds] : [...new Set([...missing, ...options.models])]
+  return { targets, record, missing, stale }
 }
 
 async function credential(): Promise<{ accessToken: string } | { apiKey: string }> {
@@ -144,24 +168,19 @@ async function main(): Promise<void> {
   const token = await resolveBearerToken(auth)
   const liveModels = await fetchModels(token)
   const liveIds = liveModels.map((model) => model.id)
-  const record: ImageInputRecord = { ...CURSOR_IMAGE_INPUT }
-  const { missing, stale } = compareImageInputRecord(liveIds, record)
-
-  if (options.check) {
-    if (missing.length || stale.length) {
-      if (missing.length) console.error(`Untested Cursor models: ${missing.join(", ")}`)
-      if (stale.length) console.error(`Recorded models Cursor no longer lists: ${stale.join(", ")}`)
-      console.error("Run: bun run generate:images")
-      process.exit(1)
-    }
-    console.log(`OK: ${liveIds.length} live models; image-input-data.ts up to date`)
-    return
+  const { targets, record, missing, stale } = planImageProbe(liveIds, CURSOR_IMAGE_INPUT, options)
+  if (stale.length) {
+    console.log(`Recorded models this account does not list${options.prune ? " (removed)" : ""}: ${stale.join(", ")}`)
   }
 
-  const unknown = options.models.filter((id) => !liveIds.includes(id))
-  if (unknown.length) throw new Error(`Not in Cursor's live model list: ${unknown.join(", ")}`)
-  const targets = options.all ? liveIds : [...new Set([...missing, ...options.models])]
-  for (const id of stale) delete record[id]
+  if (options.check) {
+    if (missing.length) {
+      console.error(`Untested Cursor models: ${missing.join(", ")}\nRun: bun run generate:images`)
+      process.exit(1)
+    }
+    console.log(`OK: ${liveIds.length} live models have a recorded result`)
+    return
+  }
 
   const image = new Uint8Array(await readFile(new URL("../test/fixtures/image-probe.png", import.meta.url)))
   const cacheDir = await mkdtemp(path.join(os.tmpdir(), "cursor-image-probe-"))
@@ -189,7 +208,7 @@ async function main(): Promise<void> {
 
   const dest = path.join(import.meta.dir, "..", "src", "image-input-data.ts")
   await writeFile(dest, renderImageInputModule(record))
-  console.log(`Wrote src/image-input-data.ts (${Object.keys(record).length} models; ${stale.length} removed)`)
+  console.log(`Wrote src/image-input-data.ts (${Object.keys(record).length} models)`)
   if (failures.length) {
     console.error(`Not recorded; the next run probes them again:\n  ${failures.join("\n  ")}`)
     process.exit(1)

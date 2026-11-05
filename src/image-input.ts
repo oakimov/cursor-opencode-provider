@@ -16,7 +16,7 @@ export type CursorHistoryImageExtraction = {
   images: CursorImageInput[]
   hashes: string[]
   duplicateCount: number
-  /** Unreadable optional tool media; explicit user attachments still fail loudly. */
+  /** Unreadable tool media or earlier images past the budget; this turn's attachments still fail loudly. */
   omittedCount?: number
 }
 
@@ -367,7 +367,12 @@ export async function extractCursorHistoryImages(
       duplicateCount++
       continue
     }
-    assertImageSize(image.data.length, maxBytes - totalBytes)
+    // Earlier images are context, not this turn's attachments: one that no
+    // longer fits the combined budget is omitted, like an oversized tool image.
+    if (image.data.length > maxBytes - totalBytes) {
+      omittedCount++
+      continue
+    }
     totalBytes += image.data.length
     images.push(image)
     hashes.push(hash)

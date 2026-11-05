@@ -492,6 +492,25 @@ describe("history images through a full provider Run", () => {
     }
   }, 30_000)
 
+  it("opens a text turn with a note when an earlier image cannot be attached", () => withRoot(async (root) => {
+    onRun = (run, message) => { if (message.run_request) endTurnOn(run, checkpoint(runs.indexOf(run) + 1)) }
+    const prompt = [
+      user("Read the screenshot."),
+      { role: "assistant", content: [{ type: "tool-call", toolCallId: "call_shot", toolName: "read", input: { filePath: "shot.png" } }] },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: "call_shot", toolName: "read", output: { type: "content", value: [
+        { type: "text", text: "Image read successfully" },
+        { type: "file-data", mediaType: "image/png", data: "!!!" },
+      ] } }] },
+      assistant("Done."),
+      user("What next?"),
+    ] as Prompt
+    expect(textOf(await collect(model(root), prompt, "ses_images_omitted"))).toBe("Done.")
+    expect(sentImages(0)).toEqual([])
+    expect(request(0).action.user_message_action.user_message.text as string).toContain(
+      "[1 earlier image(s) could not be attached: unreadable, or past the 20 MiB image budget. Their pixels are unavailable.]",
+    )
+  }), 30_000)
+
   it("attaches an explicit image once, and not again after a restart", () => withRoot(async (root) => {
     const sessionKey = "ses_images_restart"
     onRun = (run, message) => { if (message.run_request) endTurnOn(run, checkpoint(runs.indexOf(run) + 1)) }

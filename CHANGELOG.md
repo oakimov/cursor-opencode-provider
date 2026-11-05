@@ -15,6 +15,7 @@
 ### Fixed
 
 - Image attachments work with Grok 4.7, Composer 2.5 and Kimi K2.7 Code on both OpenCode majors. Cursor's model list marks them text-only, but their Runs read images. Kimi K3 is now text-only: Cursor's list says it reads images, but its Run does not. Image input now follows the provider's own live test of each Cursor model instead of that flag; a model the test has not seen read an image is text-only, since Cursor drops images for such a model without an error. Images the host passes are no longer refused with "does not support image input", and tool and history images are no longer dropped ([#157](https://github.com/oakimov/cursor-opencode-provider/pull/157), [@thaoran](https://github.com/thaoran)).
+- A text message no longer fails when earlier images in the conversation exceed the 20 MiB image budget. Images that don't fit are left out with a note to the model.
 - Stopping a turn while a tool's image is still being prepared for Cursor now ends the held Cursor Run instead of leaving it waiting on that tool result.
 - Tool steps with a known call count close promptly when an edit's write reuses its permission-read call ID, avoiding an unnecessary idle-guard wait before dependent commands ([#152](https://github.com/oakimov/cursor-opencode-provider/pull/152), [@nkoynov](https://github.com/nkoynov)).
 - Held tool calls no longer get stuck after a locally rejected read, run after a queued withdrawal, or escape an earlier edit denial when they arrive after a host step split ([#152](https://github.com/oakimov/cursor-opencode-provider/pull/152)).

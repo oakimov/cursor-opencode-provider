@@ -352,11 +352,11 @@ steps 1–5 below succeed in this turn.** CI or a previous run cannot replace th
 3. Run `bun run check:pricing` successfully. Commit mapping/fixture/generated
    `src/pricing-data.ts` changes **before** the version bump commit.
 4. Run `bun run generate:images` with a Cursor credential. It live-tests each
-   model Cursor lists once, when it has no recorded result, and drops retired
-   ones; it does not retest recorded models (`--model <id>` or `--all` do, on
-   request). A failed or unclear probe records nothing and the next run tries
-   that model again. Rerun until exit 0; commit `src/image-input-data.ts`
-   before the version bump.
+   model Cursor lists once, when it has no recorded result; it does not retest
+   recorded models (`--model <id>` or `--all` do, on request) or remove ids the
+   account does not list (`--prune` does). A failed or unclear probe records
+   nothing and the next run tries that model again. Rerun until exit 0; commit
+   `src/image-input-data.ts` before the version bump.
 5. Finalize `CHANGELOG.md`: cover every user-facing change since the release,
    rename Unreleased to `[X.Y.Z] - YYYY-MM-DD` using the UTC release date, and
    insert a fresh empty Unreleased section.

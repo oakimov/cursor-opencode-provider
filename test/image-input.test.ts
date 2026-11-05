@@ -359,8 +359,19 @@ describe("Cursor image input", () => {
       lastUser,
     ]
 
-    expect(extractCursorPromptImages(prompt, lastUser, {
-      maxBytes: 3,
-    })).rejects.toBeInstanceOf(UnsupportedFunctionalityError)
+    // The budget holds: the earlier image that no longer fits is omitted, not sent.
+    const result = await extractCursorPromptImages(prompt, lastUser, { maxBytes: 3 })
+    expect(result.images.map((image) => Array.from(image.data))).toEqual([[1, 2]])
+    expect(result.omittedCount).toBe(1)
+    // This turn's own attachment past the budget still fails loudly.
+    expect(extractCursorPromptImages(prompt, lastUser, { maxBytes: 1 }))
+      .rejects.toBeInstanceOf(UnsupportedFunctionalityError)
+  })
+
+  it("keeps a text follow-up working when earlier images exceed the budget", async () => {
+    const earlier = { role: "user", content: [{ type: "file", mediaType: "image/png", data: "AQID" }] }
+    const followUp = { role: "user", content: [{ type: "text", text: "thanks" }] }
+    const result = await extractCursorPromptImages([earlier, followUp], followUp, { maxBytes: 2 })
+    expect(result).toEqual({ images: [], hashes: [], duplicateCount: 0, omittedCount: 1 })
   })
 })

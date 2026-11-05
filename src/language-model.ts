@@ -2409,8 +2409,9 @@ async function startSession(
       )
   if (imageExtraction.omittedCount) {
     userText = appendMidConversationMessage(userText,
-      `[${imageExtraction.omittedCount} historical tool image(s) could not be decoded; their pixels are unavailable.]`)
-    trace(`image input: omitted ${imageExtraction.omittedCount} unreadable tool image(s)`)
+      `[${imageExtraction.omittedCount} earlier image(s) could not be attached: unreadable, or past the ` +
+      `${MAX_CURSOR_IMAGE_INPUT_BYTES / 1024 / 1024} MiB image budget. Their pixels are unavailable.]`)
+    trace(`image input: omitted ${imageExtraction.omittedCount} unreadable or over-budget earlier image(s)`)
   }
   if (imageExtraction.duplicateCount > 0) {
     trace(`image input: skipped ${imageExtraction.duplicateCount} previously sent history image(s)`)
