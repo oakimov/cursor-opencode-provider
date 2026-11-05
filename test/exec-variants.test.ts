@@ -5,6 +5,7 @@ import {
   cursorExecVariantByRequestField,
   cursorExecVariantByRequestName,
   describeCursorExecVariant,
+  isExecRequestWithoutNewCall,
 } from "../src/protocol/exec-variants.js"
 import {
   buildUnsupportedExecDeny,
@@ -253,5 +254,18 @@ describe("unsupported exec deny wire shapes", () => {
 
   it("cites ForceBackgroundStatus error = 2", () => {
     expect(FORCE_BACKGROUND_STATUS_ERROR).toBe(2)
+  })
+
+  it("marks setup probes and force-background requests as carrying no new call", () => {
+    const withoutNewCall = CURSOR_EXEC_VARIANTS
+      .filter((variant) => isExecRequestWithoutNewCall(variant.requestField))
+      .map((variant) => variant.requestName)
+    expect(withoutNewCall).toEqual([
+      "request_context_args",
+      "force_background_shell_args",
+      "force_background_subagent_args",
+      "mcp_state_exec_args",
+    ])
+    expect(isExecRequestWithoutNewCall(undefined)).toBe(false)
   })
 })

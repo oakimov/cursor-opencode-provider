@@ -347,6 +347,15 @@ These are failure lessons shared by both hosts, not a replacement for
   guard's delay before releasing followers. Held and locally refused phases
   need the same accounting; genuinely late display completions still do not
   count (`test/step-order-pump.test.ts`, earlier permission-read cases).
+- **Only a possible new call extends a held step.** Every exec frame reset the
+  idle guard, so while a held shell ran, Cursor's `force_background_shell_args`
+  retries (about every 0.6 s, to deliver a queued host note) kept the step open
+  for about 5 minutes until Cursor gave up on the note
+  ([#155](https://github.com/oakimov/cursor-opencode-provider/issues/155)).
+  Cursor CLI handles that request only by looking up the running call by
+  `tool_call_id`. Setup probes and requests about a call already sent are control
+  traffic, like heartbeat and KV (`isExecRequestWithoutNewCall`,
+  `test/parallel-pump.test.ts`).
 
 - **Gate the unavoidable transition and stop on refusal.** The model wrote a
   plan and stopped without volunteering SwitchMode. Attach approval to

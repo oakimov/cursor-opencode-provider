@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- A tool step no longer stays open for about 5 minutes when Cursor, waiting to deliver a host note such as a nested `AGENTS.md`, keeps asking to move the step's running shell to the background. Those requests concern a call already sent, so they no longer count as new tool activity, and the step closes in time for the shell's result and the note to arrive in the same turn ([#155](https://github.com/oakimov/cursor-opencode-provider/issues/155), [@nkoynov](https://github.com/nkoynov)).
 - Manual reviews keep results and frozen previews in persistent private storage until publication or explicit discard; guarded cleanup refuses an unposted review ([#156](https://github.com/oakimov/cursor-opencode-provider/pull/156)).
 - Manual Cursor re-reviews resolve verified fixed or refuted findings after approval, confirm the thread state, and refuse omitted threads or changed discussions ([#156](https://github.com/oakimov/cursor-opencode-provider/pull/156)).
 - Offline review evaluations include their policy context and ledger validator, and calibration preparation reports missing Git revisions before creating output. Ledger comparison rejects analysis for a different review head ([#156](https://github.com/oakimov/cursor-opencode-provider/pull/156)).
