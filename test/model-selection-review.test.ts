@@ -28,6 +28,26 @@ function variant(context: string, effort: string, fast = false): ModelVariant {
 }
 
 describe("adversarial model selection", () => {
+  it("advertises Grok 4.7 images for every context/Fast entry on both hosts despite a false live flag", () => {
+    const [model] = mapAvailableModelsResponse({ models: [{
+      name: "grok-4.7", supportsImages: false,
+      variants: ["256k", "500k"].flatMap((context) =>
+        [false, true].map((fast) => variant(context, "high", fast)),
+      ),
+    }] })
+    expect(model?.supportsImages).toBe(false)
+    const classic = modelsToConfig([model!])
+    const modern = modelsToCatalogModelMap([model!])
+    for (const id of ["grok-4.7", "grok-4.7-fast", "grok-4.7-500k", "grok-4.7-500k-fast"]) {
+      expect(classic[id].attachment).toBe(true)
+      expect(classic[id].modalities.input).toEqual(["text", "image"])
+      expect(modern[id]?.capabilities.input).toEqual(["text", "image"])
+      expect(modern[id]?.modelID).toBe("grok-4.7")
+    }
+    // Discovery remains unmodified: the correction belongs to capability resolution.
+    expect(model?.supportsImages).toBe(false)
+  })
+
   it("derives context limits from marked tiers when default flags are absent", () => {
     const [model] = mapAvailableModelsResponse({ models: [{ name: "tiered", variants: [
       variant("500k", "low"), variant("256k", "low"),

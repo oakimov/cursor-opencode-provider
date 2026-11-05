@@ -639,8 +639,12 @@ These are failure lessons shared by both hosts, not a replacement for
   passes (`test/debug.test.ts`, `test/read-cap-repro.test.ts`).
 - **Model metadata has separate owners.** Keep wire parameters isolated; make
   metadata-changing variants separate catalog entries. Invalidate cache schema
-  before config consumes it; live negative capabilities outrank docs
-  (`test/model-metadata.test.ts`). PRs #84/#86/#95 showed that tier selection
+  before config consumes it; live negative capabilities outrank docs unless
+  independent Run evidence verifies a discovery mismatch. Grok 4.7 accepted
+  image pixels despite a false live flag; correct only the verified wire id
+  through the shared resolver, not the cache or every negative flag, and test
+  both host catalogs, image delivery, and warm checkpoint continuity
+  (`test/model-metadata.test.ts`, `test/host-notes-run.test.ts`). PRs #84/#86/#95 showed that tier selection
   must precede speed preference, defaults must survive catalog partitioning,
   and unmatched hints must not rewrite an advertised tuple. Exercise marked
   non-1M tiers and duplicate ids (`test/model-selection-review.test.ts`,

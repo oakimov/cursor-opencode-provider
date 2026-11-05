@@ -54,4 +54,14 @@ describe("Cursor model context metadata", () => {
     expect(resolveCursorModelSupportsImages("grok-4.6")).toBe(false)
     expect(resolveCursorModelSupportsImages("unknown-model")).toBe(false)
   })
+
+  it("corrects Grok 4.7's false image flag without widening other wire ids", () => {
+    for (const value of [undefined, false, true]) {
+      expect(resolveCursorModelSupportsImages("grok-4.7", value)).toBe(true)
+    }
+    for (const id of ["grok-4.6", "grok-4.8", "grok-4.7-other", "unknown-model", "toString"]) {
+      expect(resolveCursorModelSupportsImages(id, false)).toBe(false)
+    }
+    expect(resolveCursorModelSupportsImages("unknown-model", true)).toBe(true)
+  })
 })

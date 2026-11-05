@@ -100,6 +100,10 @@ without a variant retains Cursor's declared default effort for that tier.
 Saved 500k variants on the base/Fast entries remain valid after upgrading;
 reselect the dedicated 500k entry to use its full host context budget.
 
+Grok 4.7's base, Fast, and 500k entries accept image attachments even when
+Cursor's model list reports `supportsImages: false`; the shared capability
+resolver corrects this verified mismatch without changing your model cache.
+
 ## Usage and cost
 
 Tool steps report estimates of streamed output and reasoning; the final step

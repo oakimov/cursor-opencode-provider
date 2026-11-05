@@ -218,9 +218,10 @@ The provider advertises `text` + `image` input only when the selected Cursor mod
 
 Image support is resolved in this order:
 
-1. Live `AvailableModels.supportsImages` metadata, including authoritative `false` values
-2. The `Capabilities` column in Cursor's [`docs.md`](https://cursor.com/docs.md), generated alongside context and pricing metadata
-3. Text-only when neither source describes the model
+1. A verified correction for the `grok-4.7` wire model, whose image input works despite `AvailableModels` reporting `false`; this covers its base, Fast, and 500k entries
+2. Live `AvailableModels.supportsImages` metadata, including authoritative `false` values for other models
+3. The `Capabilities` column in Cursor's [`docs.md`](https://cursor.com/docs.md), generated alongside context and pricing metadata
+4. Text-only when neither source describes the model
 
 OpenCode image file parts are decoded from bytes, base64/data URLs, local file URLs, or HTTP(S) URLs and sent through Cursor's `UserMessage.selected_context.selected_images` field. Fresh and rebased Runs normalize the same image formats as held-Run continuations, including AI SDK `image-data` / `image-url` and OpenCode attachment URLs. A Run that resumes a checkpoint skips the history images that exact checkpoint is known to hold (by content hash, recorded when a turn ends on a checkpoint of its own and kept in the restart snapshot); a Run without a checkpoint sends them all.
 
