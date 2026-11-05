@@ -10,8 +10,10 @@
 # runs, so a read-only bind cannot be remounted writable. macOS uses
 # sandbox-exec. Virtual paths (/src, /tmp, /home/reviewer, /opt/tools, and
 # --ro-bind destinations) are translated to private directories. The profile
-# allows the dynamic linker and the selected tools, not every file read. If
-# neither mechanism works, the script exits 2. It does not fall back to env -i.
+# allows the dynamic linker, a read of the root directory itself, and the
+# selected tool files. It does not allow a tool's parent directory or every
+# file read. If neither mechanism works, the script exits 2. It does not fall
+# back to env -i.
 #
 #   scripts/isolate-run.sh --src DIR [--tool NAME] [--ro-bind HOST:DEST] \
 #     [--env NAME] [--set NAME=VALUE] -- COMMAND...
@@ -483,12 +485,48 @@ isolate_darwin_allow() {
   darwin_reads+=("$path")
 }
 
+# Allow one executable or one library file. A directory allow would include
+# neighboring credentials, so a selected tool never grants its prefix.
+isolate_darwin_allow_file() {
+  local path
+  [[ -f "$1" ]] || return 0
+  path="$(isolate_profile_quote "$1")" || return 2
+  darwin_files+=("$path")
+}
+
+# Record absolute shared libraries the binary names. Do not infer a prefix.
+isolate_darwin_note_dependencies() {
+  local bin="$1" listing line dep
+  [[ -f "$bin" ]] || return 0
+  listing=""
+  if command -v otool >/dev/null 2>&1; then
+    listing="$(otool -L "$bin" 2>/dev/null || true)"
+  elif command -v ldd >/dev/null 2>&1; then
+    listing="$(ldd "$bin" 2>/dev/null || true)"
+  fi
+  [[ -n "$listing" ]] || return 0
+  while IFS= read -r line; do
+    if [[ "$line" == *"=>"* ]]; then
+      dep="${line#*=>}"
+    else
+      dep="$line"
+    fi
+    dep="${dep%% (*}"
+    dep="${dep#"${dep%%[![:space:]]*}"}"
+    dep="${dep%"${dep##*[![:space:]]}"}"
+    case "$dep" in
+      /*) isolate_darwin_allow_file "$dep" || return 2 ;;
+    esac
+  done <<< "$listing"
+}
+
 # Materialize selected tools and the profile. Does not call sandbox-exec.
 # Reads tools, ro_binds, and command from the caller. Sets darwin_home,
 # darwin_tmp, darwin_tools, darwin_profile, and darwin_command.
 isolate_darwin_prepare() {
-  local src="$1" i n spec host dest name real parent path
+  local src="$1" i n spec host dest name real path
   [[ -n "$src" && -d "$src" ]] || return 2
+  darwin_files=()
   darwin_home="$(mktemp -d "${TMPDIR:-/tmp}/cursor-isolate-home.XXXXXX")"
   darwin_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cursor-isolate-tmp.XXXXXX")"
   darwin_tools="$(mktemp -d "${TMPDIR:-/tmp}/cursor-isolate-tools.XXXXXX")"
@@ -529,15 +567,8 @@ isolate_darwin_prepare() {
     esac
     ln -sfn "$host" "$darwin_tools/$name"
     real="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$host")"
-    isolate_darwin_allow "$(dirname "$real")" || return 2
-    parent="$(dirname "$real")"
-    if [[ "$(basename "$parent")" == "bin" ]]; then
-      parent="$(dirname "$parent")"
-      isolate_darwin_allow "$parent" || return 2
-      if [[ -d "$parent/lib" ]]; then
-        isolate_darwin_allow "$parent/lib" || return 2
-      fi
-    fi
+    isolate_darwin_allow_file "$real" || return 2
+    isolate_darwin_note_dependencies "$real" || return 2
   done
   for path in \
     /usr /bin /System /Library \
@@ -560,17 +591,32 @@ isolate_darwin_prepare() {
     echo '(allow mach-lookup)'
     echo '(allow network*)'
     echo '(allow file-read*'
+    # The root directory inode. A subpath of "/" would allow every file.
+    echo '  (literal "/")'
     n="$(isolate_count darwin_reads)"
     i=0
     while [[ "$i" -lt "$n" ]]; do
       printf '  (subpath "%s")\n' "$(isolate_at darwin_reads "$i")"
       i=$((i + 1))
     done
+    n="$(isolate_count darwin_files)"
+    i=0
+    while [[ "$i" -lt "$n" ]]; do
+      printf '  (literal "%s")\n' "$(isolate_at darwin_files "$i")"
+      i=$((i + 1))
+    done
     echo ')'
     echo '(allow file-map-executable'
+    n="$(isolate_count darwin_reads)"
     i=0
     while [[ "$i" -lt "$n" ]]; do
       printf '  (subpath "%s")\n' "$(isolate_at darwin_reads "$i")"
+      i=$((i + 1))
+    done
+    n="$(isolate_count darwin_files)"
+    i=0
+    while [[ "$i" -lt "$n" ]]; do
+      printf '  (literal "%s")\n' "$(isolate_at darwin_files "$i")"
       i=$((i + 1))
     done
     echo ')'

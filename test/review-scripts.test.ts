@@ -491,6 +491,7 @@ exit 1
       LIVE_TEST_PYTHON: python,
       TIMEOUT_LOG: timeoutLog,
     }
+    let aliasParent: string | undefined
     try {
       const passed = run("bash", ["scripts/live-test.sh"], { env })
       expect(passed.status, `${passed.stdout}\n${passed.stderr}`).toBe(0)
@@ -516,7 +517,7 @@ exit 1
         path.join(bin, "opencode"),
         `#!/bin/sh
 if [ "$1" = plugin ]; then
-  echo "CURSOR_REVIEW_PLUGIN=$OPENCODE_CONFIG_ROOT/dist/plugin-opencode2.js version=9.9.9" >&2
+  echo "CURSOR_REVIEW_PLUGIN=$CURSOR_REVIEW_PLUGIN_PATH version=$CURSOR_REVIEW_PLUGIN_VERSION" >&2
   exit 0
 fi
 echo "CURSOR_REVIEW_PLUGIN_INIT count=1 path=$CURSOR_REVIEW_PLUGIN_PATH" >&2
@@ -526,9 +527,16 @@ exit 0
 `,
       )
       fs.chmodSync(path.join(bin, "opencode"), 0o755)
-      const twice = run("bash", ["scripts/live-test.sh"], { env })
+      aliasParent = fs.mkdtempSync(path.join(os.tmpdir(), "review-alias-"))
+      const alias = path.join(aliasParent, "root")
+      fs.symlinkSync(tree, alias)
+      expect(fs.realpathSync(alias)).toBe(fs.realpathSync(tree))
+      expect(alias).not.toBe(fs.realpathSync(tree))
+      const twice = run("bash", ["scripts/live-test.sh"], { env: { ...env, OPENCODE_CONFIG_ROOT: alias } })
       expect(twice.status, `${twice.stdout}\n${twice.stderr}`).toBe(1)
       expect(twice.stdout).toContain("initialized the provider 2 times")
+      expect(twice.stdout).toContain(`path=${pluginPath}`)
+      expect(twice.stdout).not.toContain(`${alias}/dist/plugin-opencode2.js`)
       expect(twice.stdout).not.toContain("LIVE_TEST=passed")
 
       fs.writeFileSync(path.join(bin, "opencode"), "#!/bin/sh\nif [ \"$1\" = run ]; then echo ran > \"$HOME/ran-model\"; fi\nexit 0\n")
@@ -538,6 +546,7 @@ exit 0
       expect(failed.stdout).toContain("did not load")
       expect(fs.existsSync(path.join(tree, "ran-model"))).toBe(false)
     } finally {
+      if (aliasParent) fs.rmSync(aliasParent, { recursive: true, force: true })
       fs.rmSync(tree, { recursive: true, force: true })
     }
   })
@@ -550,7 +559,7 @@ exit 0
       trap check_cleanup EXIT
       check_begin_sandbox
       printf 'home %s\\n' "$isolate_home"
-      ISOLATE_SRC="$SRC" check_run_isolated python3 -c 'import os; print("KEY="+os.environ.get("CURSOR_API_KEY","")); print("SECRET="+os.environ.get("SECRET_TOKEN","")); print("HOME="+os.environ["HOME"]); print("TMP="+os.environ["TMPDIR"])'
+      ISOLATE_SRC="$SRC" check_run_isolated /bin/sh -c 'printf "KEY=%s\\nSECRET=%s\\nHOME=%s\\nTMP=%s\\n" "\${CURSOR_API_KEY-}" "\${SECRET_TOKEN-}" "$HOME" "$TMPDIR"'
     `, { ...process.env, CURSOR_API_KEY: secret, SECRET_TOKEN: "super-secret", SRC: src })
     fs.rmSync(src, { recursive: true, force: true })
     expect(result.status, result.stderr).toBe(0)
@@ -627,6 +636,68 @@ exit 0
     }
   })
 
+  it("archives the captured commit when FETCH_HEAD moves during archive", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-archive-sha-"))
+    const log = path.join(directory, "git.log")
+    const archiveArg = path.join(directory, "archive-arg")
+    const trusted = "a".repeat(40)
+    const other = "b".repeat(40)
+    try {
+      const result = bashHere(`
+        set -euo pipefail
+        source scripts/isolated-check.sh
+        git() {
+          printf '%s\\n' "$*" >> "$LOG"
+          if [[ "$*" == *fetch* ]]; then return 0; fi
+          if [[ "$*" == *rev-parse* ]]; then printf '%s\\n' "$TRUSTED"; return 0; fi
+          if [[ "$*" == *archive* ]]; then
+            printf '%s\\n' "\${@: -1}" > "$ARCHIVE_ARG"
+            return 0
+          fi
+          echo "unexpected git $*" >&2
+          return 1
+        }
+        tar() {
+          local dest=""
+          while [[ "$#" -gt 0 ]]; do
+            if [[ "$1" == -C ]]; then dest="$2"; shift 2; continue; fi
+            shift
+          done
+          [[ -n "$dest" ]]
+          local obj
+          obj="$(cat "$ARCHIVE_ARG")"
+          if [[ "$obj" == FETCH_HEAD ]]; then obj="$OTHER"; fi
+          printf '%s\\n' "$obj" > "$dest/REV"
+        }
+        check_step() { echo "\${1}=passed"; return 0; }
+        check_run_live() {
+          echo "LIVE_TREE_REVISION=$(cat "$1/REV")"
+          if [[ -n "\${CURSOR_API_KEY:-}" ]]; then echo "KEY_WAS_AVAILABLE=1"; fi
+          return 0
+        }
+        check_main 156 --live
+      `, {
+        LOG: log,
+        ARCHIVE_ARG: archiveArg,
+        TRUSTED: trusted,
+        OTHER: other,
+        CURSOR_REVIEW_TRUST: "1",
+        CURSOR_REVIEW_TRUST_SHA: trusted,
+        CURSOR_API_KEY: "harmless",
+        PATH: "/usr/bin:/bin",
+      })
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)
+      expect(result.stdout).toContain(`LIVE_TREE_REVISION=${trusted}`)
+      expect(result.stdout).not.toContain(`LIVE_TREE_REVISION=${other}`)
+      expect(result.stdout).toContain("KEY_WAS_AVAILABLE=1")
+      expect(result.stdout).not.toContain("harmless")
+      expect(fs.readFileSync(archiveArg, "utf8").trim()).toBe(trusted)
+      expect(fs.readFileSync(log, "utf8")).not.toContain("archive FETCH_HEAD")
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
   it("translates darwin virtual paths and does not allow every file read", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-darwin-"))
     const src = path.join(directory, "src")
@@ -637,10 +708,18 @@ exit 0
     fs.mkdirSync(src)
     fs.mkdirSync(harness)
     fs.mkdirSync(secretDir)
-    fs.mkdirSync(path.join(directory, "cellar", "tool", "1", "lib"), { recursive: true })
+    const toolRoot = path.join(directory, "cellar", "tool", "1")
+    const outsideBin = path.join(directory, "outside", "bin")
+    fs.mkdirSync(path.join(toolRoot, "lib"), { recursive: true })
     fs.mkdirSync(toolDir, { recursive: true })
+    fs.mkdirSync(outsideBin, { recursive: true })
     fs.writeFileSync(path.join(toolDir, "mytool"), "#!/bin/sh\nexit 0\n")
     fs.chmodSync(path.join(toolDir, "mytool"), 0o755)
+    fs.writeFileSync(path.join(toolRoot, "credential"), "SECRET\n", { mode: 0o600 })
+    fs.writeFileSync(path.join(outsideBin, "other"), "#!/bin/sh\nexit 0\n")
+    fs.chmodSync(path.join(outsideBin, "other"), 0o755)
+    fs.writeFileSync(path.join(directory, "outside", "secret"), "SECRET\n", { mode: 0o600 })
+    fs.symlinkSync(path.join(outsideBin, "other"), path.join(toolDir, "other"))
       const result = bashHere(`
         set -euo pipefail
         source scripts/isolate-run.sh
@@ -656,7 +735,7 @@ exit 0
         }
         trap cleanup EXIT
         src="$SRC"
-        tools=(mytool)
+        tools=(mytool other)
         ro_binds=("$HARNESS:/opt/harness")
         env_names=()
         set_pairs=("OPENCODE_CONFIG_ROOT=/src" "OPENCODE_REVIEW_HOME=/tmp/review-opencode")
@@ -686,6 +765,8 @@ exit 0
       const command = result.stdout.split("---COMMAND---\n")[1]?.split("---TRANSLATED---\n")[0]?.trim().split("\n") ?? []
       const translated = result.stdout.split("---TRANSLATED---\n")[1]?.trim().split("\n") ?? []
       expect(profile.split("\n")).not.toContain("(allow file-read*)")
+      expect(profile).toContain('(literal "/")')
+      expect(profile).not.toContain('(subpath "/")')
       expect(profile).toContain("(allow file-map-executable")
       expect(profile).toContain("/System/Volumes/Preboot/Cryptexes/OS")
       expect(profile).toContain("/private/var/db/dyld")
@@ -699,8 +780,83 @@ exit 0
       expect(translated[0]).toBe(src)
       expect(translated[1]).toMatch(/\/review-opencode$/)
       expect(result.stdout.split("---LINK---\n")[1]?.trim()).toBe(path.join(toolDir, "mytool"))
-      const toolRoot = path.join(directory, "cellar", "tool", "1")
-      expect(profile).toContain(toolRoot)
+      const toolFile = path.join(toolDir, "mytool")
+      const otherFile = path.join(outsideBin, "other")
+      expect(profile).toContain(`(literal "${toolFile}")`)
+      expect(profile).toContain(`(literal "${otherFile}")`)
+      expect(profile).not.toContain(`(subpath "${toolRoot}")`)
+      expect(profile).not.toContain(`(subpath "${toolDir}")`)
+      expect(profile).not.toContain(`(subpath "${path.join(toolRoot, "lib")}")`)
+      expect(profile).not.toContain(`(subpath "${path.join(directory, "outside")}")`)
+      expect(profile).not.toContain(path.join(toolRoot, "credential"))
+      expect(profile).not.toContain(path.join(directory, "outside", "secret"))
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("allows only the root directory inode and the selected tool file", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-darwin-root-"))
+    const src = path.join(directory, "src")
+    const prefix = path.join(directory, "private-prefix")
+    const bin = path.join(prefix, "bin")
+    const sentinel = path.join(prefix, "credential")
+    const tool = path.join(bin, "mytool")
+    fs.mkdirSync(src)
+    fs.mkdirSync(bin, { recursive: true })
+    fs.writeFileSync(tool, "#!/bin/sh\nexit 0\n")
+    fs.chmodSync(tool, 0o755)
+    fs.writeFileSync(sentinel, "SECRET\n", { mode: 0o600 })
+    const script = `
+      set -euo pipefail
+      source scripts/isolate-run.sh
+      darwin_home=""
+      darwin_tmp=""
+      darwin_tools=""
+      darwin_profile=""
+      cleanup() {
+        [[ -z "$darwin_home" ]] || rm -rf "$darwin_home"
+        [[ -z "$darwin_tmp" ]] || rm -rf "$darwin_tmp"
+        [[ -z "$darwin_tools" ]] || rm -rf "$darwin_tools"
+        [[ -z "$darwin_profile" ]] || rm -f "$darwin_profile"
+      }
+      trap cleanup EXIT
+      src="$SRC"
+      tools=(mytool)
+      ro_binds=()
+      env_names=()
+      set_pairs=()
+      command=(/usr/bin/true)
+      isolate_darwin_prepare "$src"
+      cat "$darwin_profile"
+    `
+    try {
+      for (const shell of ["bash", "/bin/bash"]) {
+        const result = run(shell, ["-c", script], { env: { SRC: src, PATH: `${bin}:/usr/bin:/bin` } })
+        expect(result.status, `${shell}\n${result.stderr}`).toBe(0)
+        expect(result.stdout).toContain('(literal "/")')
+        expect(result.stdout).not.toContain('(subpath "/")')
+        expect(result.stdout.split("\n")).not.toContain("(allow file-read*)")
+        expect(result.stdout).toContain(`(literal "${tool}")`)
+        expect(result.stdout).not.toContain(`(subpath "${prefix}")`)
+        expect(result.stdout).not.toContain(`(subpath "${bin}")`)
+        expect(result.stdout).not.toContain(sentinel)
+      }
+      if (hostKernel() === "Darwin" && fs.existsSync("/usr/bin/sandbox-exec")) {
+        for (const shell of ["bash", "/bin/bash"]) {
+          for (const args of [["/usr/bin/true"], ["/bin/echo", "ok"], ["/bin/bash", "-c", "exit 0"]]) {
+            const ran = run(shell, ["scripts/isolate-run.sh", "--src", src, "--tool", "mytool", "--", ...args], {
+              env: { PATH: `${bin}:/usr/bin:/bin` },
+            })
+            expect(ran.status, `${shell} ${args.join(" ")}\n${ran.stderr}`).toBe(0)
+          }
+        }
+        const leaked = run("bash", ["scripts/isolate-run.sh", "--src", src, "--tool", "mytool", "--", "/bin/cat", sentinel], {
+          env: { PATH: `${bin}:/usr/bin:/bin` },
+        })
+        expect(leaked.status).not.toBe(0)
+        expect(leaked.stdout).not.toContain("SECRET")
+      }
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
     }

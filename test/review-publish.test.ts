@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test"
-import { spawn, spawnSync } from "node:child_process"
+import { spawn, spawnSync, type ChildProcess } from "node:child_process"
+import { createHash } from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -45,8 +46,16 @@ comments_path = state / "comments.json"
 reviews = json.loads(reviews_path.read_text(encoding="utf-8") or "[]")
 comments = json.loads(comments_path.read_text(encoding="utf-8")) if comments_path.exists() else []
 if method == "POST":
+    if os.environ.get("GH_HOLD_POST") == "1":
+        release = state / "release"
+        while not release.exists():
+            time.sleep(0.05)
     if os.environ.get("GH_SLOW_POST") == "1":
         time.sleep(0.4)
+    if os.environ.get("GH_REJECT") == "1":
+        sys.stdin.read()
+        sys.stderr.write("HTTP 422 Validation Failed\\n")
+        raise SystemExit(1)
     payload = json.load(sys.stdin)
     review_id = len(reviews) + 1
     review = {
@@ -85,6 +94,10 @@ if endpoint.endswith("/comments"):
     dump(comments)
     raise SystemExit(0)
 if endpoint.endswith("/reviews"):
+    if os.environ.get("GH_HOLD_GET") == "1":
+        release = state / "release"
+        while not release.exists():
+            time.sleep(0.05)
     dump([item["review"] for item in reviews])
     raise SystemExit(0)
 head = (state / "head").read_text(encoding="utf-8").strip()
@@ -130,6 +143,92 @@ function callsOf(state: string): string[] {
 
 function postsOf(state: string): number {
   return callsOf(state).filter((line) => line.startsWith("POST ")).length
+}
+
+function sleep(ms: number): void {
+  Bun.sleepSync(ms)
+}
+
+function waitFor(label: string, predicate: () => boolean): void {
+  const started = Date.now()
+  while (!predicate()) {
+    if (Date.now() - started > 8000) throw new Error(`timed out waiting for ${label}`)
+    sleep(50)
+  }
+}
+
+function publicationLock(approval: string): string {
+  const record = JSON.parse(fs.readFileSync(approval, "utf8")) as { owner: string; repo: string; pull: number; identity: string }
+  const key = createHash("sha256").update(`${record.owner}/${record.repo}#${record.pull}:${record.identity}`).digest("hex")
+  const directory = path.join(path.dirname(approval), ".review-publish")
+  fs.mkdirSync(directory, { recursive: true })
+  return path.join(directory, `${key}.lock`)
+}
+
+function holdLock(lock: string): { release: () => Promise<void> } {
+  const held = `${lock}.held`
+  const releaseFlag = `${lock}.release`
+  const child = spawn(python, ["-c", `
+import fcntl, os, sys, time
+lock, held, release = sys.argv[1:]
+fd = open(lock, "a+")
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(held, "w", encoding="utf-8").write("held\\n")
+while not os.path.exists(release):
+    time.sleep(0.05)
+fcntl.flock(fd, fcntl.LOCK_UN)
+fd.close()
+`, lock, held, releaseFlag])
+  waitFor("lock holder", () => fs.existsSync(held))
+  return {
+    async release() {
+      fs.writeFileSync(releaseFlag, "go\n")
+      const started = Date.now()
+      while (Date.now() - started < 2000) {
+        try {
+          process.kill(child.pid ?? 0, 0)
+        } catch {
+          return
+        }
+        await Bun.sleep(20)
+      }
+      child.kill("SIGKILL")
+    },
+  }
+}
+
+function spawnPost(payload: string, approval: string, env: NodeJS.ProcessEnv): ChildProcess {
+  return spawn(python, [path.join(root, "scripts/review-publish.py"), "post", payload, approval], {
+    cwd: root,
+    detached: true,
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1", ...env },
+  })
+}
+
+function stopProcess(child: ChildProcess | undefined): void {
+  if (!child?.pid || child.exitCode !== null) return
+  try { process.kill(-child.pid, "SIGKILL") } catch { /* already gone */ }
+}
+
+function collect(child: ChildProcess): Promise<{ status: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    let stdout = ""
+    let stderr = ""
+    child.stdout?.on("data", (chunk) => { stdout += chunk })
+    child.stderr?.on("data", (chunk) => { stderr += chunk })
+    child.on("close", (status) => resolve({ status: status ?? 1, stdout, stderr }))
+  })
+}
+
+function checkpointText(directory: string): string {
+  const names = fs.readdirSync(path.join(directory, ".review-publish")).filter((name) => name.endsWith(".json"))
+  expect(names).toHaveLength(1)
+  return fs.readFileSync(path.join(directory, ".review-publish", names[0]!), "utf8")
+}
+
+function queuedOnLock(child: ChildProcess): boolean {
+  if (child.exitCode !== null || child.pid === undefined) return false
+  return fs.readFileSync("/proc/locks", "utf8").split("\n").some((line) => line.includes("->") && line.includes(` ${child.pid} `))
 }
 
 describe("review publication", () => {
@@ -244,7 +343,7 @@ describe("review publication", () => {
     }
   })
 
-  it("recovers a committed post that reported failure and retries one that did not commit", () => {
+  it("recovers a committed post that reported failure and does not send it again", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-partial-"))
     const payload = path.join(directory, "payload.json")
     const approval = path.join(directory, "approval.json")
@@ -259,17 +358,16 @@ describe("review publication", () => {
     try {
       expect(run(["stamp", payload], env).status).toBe(0)
       expect(approve(payload, approval, env).status).toBe(0)
-      const failed = run(["post", payload, approval], env)
-      expect(failed.status).toBe(1)
-      expect(JSON.parse(fs.readFileSync(path.join(state, "reviews.json"), "utf8"))).toEqual([])
       const committed = run(["post", payload, approval], { ...env, GH_COMMIT: "1" })
       expect(committed.status, `${committed.stdout}\n${committed.stderr}`).toBe(0)
       expect(committed.stdout).toContain("REVIEW_ALREADY_POSTED=1")
       expect(JSON.parse(fs.readFileSync(path.join(state, "reviews.json"), "utf8"))).toHaveLength(1)
+      expect(postsOf(state)).toBe(1)
       const retry = run(["post", payload, approval], env)
       expect(retry.status, retry.stderr).toBe(0)
       expect(retry.stdout).toContain("REVIEW_ALREADY_POSTED=1")
       expect(JSON.parse(fs.readFileSync(path.join(state, "reviews.json"), "utf8"))).toHaveLength(1)
+      expect(postsOf(state)).toBe(1)
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
     }
@@ -404,6 +502,11 @@ describe("review publication", () => {
       { body: "CURSOR_API_KEY is unset, so the live test skips.", status: 0 },
       { body: "copilot.totalNanoAiu is an aggregate counter.", status: 0 },
       { body: "See scripts/configure-opencode.sh, https://github.com/oakimov/cursor-opencode-provider/pull/156, and https://cursor.com/settings.", status: 0 },
+      { body: "See [the diff](https://example.test/public) and <https://cursor.com/settings>.", status: 0 },
+      { body: "Source: https://example.test/public", status: 0 },
+      { body: "[/srv/private-repo/file.ts](https://example.test/public)", status: 3, problem: "absolute local path" },
+      { body: "<file:///srv/private-repo/file.ts>", status: 3, problem: "absolute local path" },
+      { body: "Source:/srv/private-repo/file.ts", status: 3, problem: "absolute local path" },
       { body: "The private checkout is ~/work/repo.", status: 3, problem: "absolute local path" },
       { body: "The private checkout is /srv/checkouts/private.", status: 3, problem: "absolute local path" },
       { body: "The value is crsr_secret.", status: 3, problem: "secret" },
@@ -416,6 +519,212 @@ describe("review publication", () => {
         if (sample.problem) expect(stamped.stderr).toContain(sample.problem)
       }
       expect(callsOf(state)).toEqual([])
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("does not post a denial or a replaced payload that arrives while the post is queued", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-queued-"))
+    const payload = path.join(directory, "payload.json")
+    const approval = path.join(directory, "approval.json")
+    const bin = path.join(directory, "bin")
+    const state = path.join(directory, "state")
+    fs.mkdirSync(state)
+    fs.writeFileSync(path.join(state, "reviews.json"), "[]\n")
+    fs.writeFileSync(path.join(state, "head"), head + "\n")
+    writeGh(bin)
+    fs.writeFileSync(payload, draft([{ path: "scripts/review-publish.py", line: 40, side: "RIGHT", body: "P1. A queued denial must not be published." }]))
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    let holder: { release: () => void } | undefined
+    let child: ChildProcess | undefined
+    try {
+      expect(run(["stamp", payload], env).status).toBe(0)
+      expect(approve(payload, approval, env).status).toBe(0)
+      holder = holdLock(publicationLock(approval))
+      child = spawnPost(payload, approval, env)
+      const finished = collect(child)
+      waitFor("queued post", () => queuedOnLock(child!))
+      expect(child.exitCode).toBeNull()
+      expect(postsOf(state)).toBe(0)
+      const denied = run(["deny", approval], env)
+      expect(denied.status, denied.stderr).toBe(0)
+      const record = JSON.parse(fs.readFileSync(approval, "utf8")) as { decision: string; generation: number }
+      expect(record.decision).toBe("deny")
+      expect(record.generation).toBeGreaterThan(1)
+      await holder.release()
+      holder = undefined
+      const result = await finished
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(4)
+      expect(result.stderr).toContain("GitHub was not called.")
+      expect(postsOf(state)).toBe(0)
+
+      fs.writeFileSync(payload, draft([{ path: "scripts/review-publish.py", line: 40, side: "RIGHT", body: "P1. A replaced payload must not be published." }]))
+      expect(run(["stamp", payload], env).status).toBe(0)
+      expect(approve(payload, approval, env).status).toBe(0)
+      const original = fs.readFileSync(payload, "utf8")
+      holder = holdLock(publicationLock(approval))
+      child = spawnPost(payload, approval, env)
+      const replaced = collect(child)
+      waitFor("queued replacement", () => queuedOnLock(child!))
+      fs.writeFileSync(payload, `${original}\n`)
+      await holder.release()
+      holder = undefined
+      const changed = await replaced
+      expect(changed.status, `${changed.stdout}\n${changed.stderr}`).toBe(5)
+      expect(postsOf(state)).toBe(0)
+    } finally {
+      await holder?.release()
+      stopProcess(child)
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  }, 15000)
+
+  it("does not post a denial or a replaced payload that arrives during the preparatory reads", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-inflight-read-"))
+    const payload = path.join(directory, "payload.json")
+    const approval = path.join(directory, "approval.json")
+    const bin = path.join(directory, "bin")
+    const state = path.join(directory, "state")
+    fs.mkdirSync(state)
+    fs.writeFileSync(path.join(state, "reviews.json"), "[]\n")
+    fs.writeFileSync(path.join(state, "head"), head + "\n")
+    writeGh(bin)
+    fs.writeFileSync(payload, draft([{ path: "scripts/review-publish.py", line: 41, side: "RIGHT", body: "P1. A denial during lookup must not be published." }]))
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_HOLD_GET: "1" }
+    let child: ChildProcess | undefined
+    try {
+      expect(run(["stamp", payload], env).status).toBe(0)
+      expect(approve(payload, approval, env).status).toBe(0)
+      child = spawnPost(payload, approval, env)
+      const deniedCall = collect(child)
+      waitFor("reviews lookup", () => callsOf(state).some((line) => line.startsWith("GET ") && line.endsWith("/reviews")))
+      expect(run(["deny", approval], env).status).toBe(0)
+      expect(JSON.parse(fs.readFileSync(approval, "utf8")).decision).toBe("deny")
+      fs.writeFileSync(path.join(state, "release"), "go\n")
+      const denied = await deniedCall
+      expect(denied.status, `${denied.stdout}\n${denied.stderr}`).toBe(4)
+      expect(postsOf(state)).toBe(0)
+      fs.rmSync(path.join(state, "release"))
+
+      fs.writeFileSync(payload, draft([{ path: "scripts/review-publish.py", line: 41, side: "RIGHT", body: "P1. A payload edit during lookup must not be published." }]))
+      expect(run(["stamp", payload], env).status).toBe(0)
+      expect(approve(payload, approval, env).status).toBe(0)
+      const original = fs.readFileSync(payload, "utf8")
+      child = spawnPost(payload, approval, env)
+      const editedCall = collect(child)
+      waitFor("second reviews lookup", () => callsOf(state).filter((line) => line.endsWith("/reviews")).length >= 2)
+      fs.writeFileSync(payload, `${original}\n`)
+      fs.writeFileSync(path.join(state, "release"), "go\n")
+      const edited = await editedCall
+      expect(edited.status, `${edited.stdout}\n${edited.stderr}`).toBe(5)
+      expect(postsOf(state)).toBe(0)
+    } finally {
+      stopProcess(child)
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  }, 15000)
+
+  it("does not send a second request when delivery is unknown", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-unknown-"))
+    const payload = path.join(directory, "payload.json")
+    const approval = path.join(directory, "approval.json")
+    const bin = path.join(directory, "bin")
+    const state = path.join(directory, "state")
+    fs.mkdirSync(state)
+    fs.writeFileSync(path.join(state, "reviews.json"), "[]\n")
+    fs.writeFileSync(path.join(state, "head"), head + "\n")
+    writeGh(bin)
+    fs.writeFileSync(payload, draft([{ path: "scripts/review-publish.py", line: 42, side: "RIGHT", body: "P2. An unsettled post must not be repeated." }]))
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_FAIL: "1" }
+    let child: ChildProcess | undefined
+    try {
+      expect(run(["stamp", payload], env).status).toBe(0)
+      expect(approve(payload, approval, env).status).toBe(0)
+      const lost = run(["post", payload, approval], env)
+      expect(lost.status).toBe(1)
+      expect(lost.stderr).toContain("Delivery is unknown. GitHub was not called again.")
+      expect(JSON.parse(fs.readFileSync(path.join(state, "reviews.json"), "utf8"))).toEqual([])
+      expect(checkpointText(directory)).toContain('"state": "posting"')
+      const again = run(["post", payload, approval], env)
+      expect(again.status, again.stderr).toBe(1)
+      expect(again.stderr).toContain("The previous post did not confirm delivery. GitHub was not called again.")
+      expect(postsOf(state)).toBe(1)
+
+      const stored = JSON.parse(fs.readFileSync(payload, "utf8")) as { body: string }
+      fs.writeFileSync(path.join(state, "reviews.json"), JSON.stringify([{
+        request: stored,
+        review: { id: 7, body: stored.body, html_url: "https://github.com/oakimov/cursor-opencode-provider/pull/156#pullrequestreview-7" },
+      }]))
+      const visible = run(["post", payload, approval], env)
+      expect(visible.status, `${visible.stdout}\n${visible.stderr}`).toBe(0)
+      expect(visible.stdout).toContain("REVIEW_ALREADY_POSTED=1")
+      expect(visible.stdout).toContain("pullrequestreview-7")
+      expect(postsOf(state)).toBe(1)
+      expect(checkpointText(directory)).toContain('"state": "posted"')
+
+      fs.writeFileSync(path.join(state, "reviews.json"), "[]\n")
+      fs.rmSync(path.join(directory, ".review-publish"), { recursive: true, force: true })
+      child = spawn(python, [path.join(root, "scripts/review-publish.py"), "post", payload, approval], {
+        cwd: root,
+        detached: true,
+        stdio: "ignore",
+        env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1", PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_HOLD_POST: "1" },
+      })
+      waitFor("in-flight post", () => {
+        const dir = path.join(directory, ".review-publish")
+        const posting = fs.existsSync(dir) && fs.readdirSync(dir).some((name) => name.endsWith(".json") && fs.readFileSync(path.join(dir, name), "utf8").includes('"state": "posting"'))
+        return posting && postsOf(state) >= 2
+      })
+      stopProcess(child)
+      const stopped = child?.pid
+      child = undefined
+      if (stopped) {
+        const started = Date.now()
+        while (Date.now() - started < 2000) {
+          try { process.kill(stopped, 0) } catch { break }
+          await Bun.sleep(20)
+        }
+      }
+      const afterExit = run(["post", payload, approval], { PATH: env.PATH, GH_STATE: state })
+      expect(afterExit.status, afterExit.stderr).toBe(1)
+      expect(afterExit.stderr).toContain("GitHub was not called again.")
+      expect(postsOf(state)).toBe(2)
+    } finally {
+      stopProcess(child)
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  }, 15000)
+
+  it("retries a post GitHub rejected and still posts one review when callers are sequential", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-rejected-"))
+    const payload = path.join(directory, "payload.json")
+    const approval = path.join(directory, "approval.json")
+    const bin = path.join(directory, "bin")
+    const state = path.join(directory, "state")
+    fs.mkdirSync(state)
+    fs.writeFileSync(path.join(state, "reviews.json"), "[]\n")
+    fs.writeFileSync(path.join(state, "head"), head + "\n")
+    writeGh(bin)
+    fs.writeFileSync(payload, draft([{ path: "scripts/review-publish.py", line: 43, side: "RIGHT", body: "P2. A rejected post can be sent again." }]))
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_REJECT: "1" }
+    try {
+      expect(run(["stamp", payload], env).status).toBe(0)
+      expect(approve(payload, approval, env).status).toBe(0)
+      const rejected = run(["post", payload, approval], env)
+      expect(rejected.status).toBe(1)
+      expect(rejected.stderr).toContain("HTTP 422")
+      expect(checkpointText(directory)).toContain('"state": "rejected"')
+      expect(postsOf(state)).toBe(1)
+      const sent = run(["post", payload, approval], { PATH: env.PATH, GH_STATE: state })
+      expect(sent.status, `${sent.stdout}\n${sent.stderr}`).toBe(0)
+      expect(sent.stdout).toContain("REVIEW_URL=")
+      expect(postsOf(state)).toBe(2)
+      const second = run(["post", payload, approval], { PATH: env.PATH, GH_STATE: state })
+      expect(second.status, second.stderr).toBe(0)
+      expect(second.stdout).toContain("REVIEW_ALREADY_POSTED=1")
+      expect(postsOf(state)).toBe(2)
+      expect(JSON.parse(fs.readFileSync(path.join(state, "reviews.json"), "utf8"))).toHaveLength(1)
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
     }

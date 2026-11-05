@@ -5,9 +5,11 @@ show prints the payload and does not call GitHub.
 approve records a local approval of those exact bytes and that head.
 deny records a local refusal. post with a denial, or with no approval,
 does not call GitHub.
-post re-reads the payload and the pull request head. A changed file or a
-moved head is refused. The posted event is COMMENT. A later post of the
-same payload returns the review that is already on GitHub.
+post re-reads the approval after it takes the publication lock, and again
+immediately before it sends. A denial or a replaced payload in either
+window is not sent. A request that was already sent is not cancelled.
+A send that does not confirm delivery is not repeated. A later post of
+the same payload returns the review that is already on GitHub.
 """
 
 from __future__ import annotations
@@ -31,15 +33,17 @@ SECRET = re.compile(
     r"sk-[A-Za-z0-9]{16,}|xox[baprs]-[A-Za-z0-9-]+",
     re.IGNORECASE,
 )
-# Home-relative paths and any absolute path. A public URL is not one: its
-# slashes follow a scheme colon or another slash, and the colon in https://
-# is not a drive-letter separator.
+# Home-relative paths and any absolute path, including a Markdown label, an
+# angle-bracket file URL, and a path written directly after a colon.
+# A public URL is not one: the slash in https:// is followed by another
+# slash, and later path segments follow a slash or a host character.
 ABSOLUTE = re.compile(
-    r"(?:^|[\s\"'`=(])~(?:/|[A-Za-z0-9_.-]+/)|"
-    r"(?:^|[\s\"'`=(])/(?!/)[^\s\"'`)]+|"
-    r"(?:^|[\s\"'`=(])[A-Za-z]:[\\/]|"
-    r"(?:^|[\s\"'`=(])file://"
+    r"(?:^|[\s\"'`=(\[:<])~(?:/|[A-Za-z0-9_.-]+/)|"
+    r"(?:^|[\s\"'`=(\[:<])/(?!/)[^\s\"'`<>|)\]}]+|"
+    r"(?:^|[\s\"'`=(\[<])[A-Za-z]:[\\/]|"
+    r"(?:^|[\s\"'`=(\[<])file://"
 )
+PROVEN_REJECTION = re.compile(r"\bHTTP\s+4\d\d\b|validation failed", re.IGNORECASE)
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 SESSION = re.compile(r"\bbc-[0-9a-f-]{8,}\b|\bses_[A-Za-z0-9]")
 BILLING = re.compile(r"credit balance|account balance", re.IGNORECASE)
@@ -298,22 +302,24 @@ def approve(payload_path: Path, approval_path: Path, preview_sha: str) -> None:
     if problems:
         print("Payload is incomplete: " + ", ".join(problems), file=sys.stderr)
         raise SystemExit(2)
-    record = {
-        "decision": "approve",
-        "payload_sha256": digest,
-        "preview_sha256": preview_sha,
-        "identity": identity_of(payload),
-        "head": payload["head"],
-        "owner": payload["owner"],
-        "repo": payload["repo"],
-        "pull": payload["pull"],
-    }
-    approval_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    print(f"Approved {record['payload_sha256']} at {payload['head']}. GitHub was not called.")
+    write_record(
+        approval_path,
+        {
+            "decision": "approve",
+            "payload_sha256": digest,
+            "preview_sha256": preview_sha,
+            "identity": identity_of(payload),
+            "head": payload["head"],
+            "owner": payload["owner"],
+            "repo": payload["repo"],
+            "pull": payload["pull"],
+        },
+    )
+    print(f"Approved {digest} at {payload['head']}. GitHub was not called.")
 
 
 def deny(approval_path: Path) -> None:
-    approval_path.write_text(json.dumps({"decision": "deny"}, indent=2) + "\n", encoding="utf-8")
+    write_record(approval_path, {"decision": "deny"})
     print("Denied. GitHub was not called.")
 
 
@@ -324,18 +330,51 @@ def publication_paths(approval_path: Path, owner: str, repo: str, pull: int, ide
     return directory / f"{key}.lock", directory / f"{key}.json"
 
 
+def read_json_object(path: Path) -> dict | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def write_record(path: Path, record: dict) -> None:
+    previous = read_json_object(path) if path.is_file() else None
+    generation = 0
+    if previous is not None and isinstance(previous.get("generation"), int) and not isinstance(previous.get("generation"), bool):
+        if previous["generation"] >= 0:
+            generation = previous["generation"]
+    record = {**record, "generation": generation + 1}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
 def write_checkpoint(path: Path, record: dict) -> None:
     temporary = Path(str(path) + ".tmp")
     temporary.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, path)
 
 
-def post(payload_path: Path, approval_path: Path) -> None:
+def checkpoint_state(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    value = read_json_object(path)
+    if value is None:
+        return "posting"
+    state = value.get("state")
+    if state in ("posting", "posted", "rejected"):
+        return state
+    return "posting"
+
+
+def authorized_post(payload_path: Path, approval_path: Path) -> tuple[bytes, dict, dict, str]:
     if not approval_path.is_file():
         print("No approval file. GitHub was not called.", file=sys.stderr)
         raise SystemExit(4)
-    approval = json.loads(approval_path.read_text(encoding="utf-8"))
-    if not isinstance(approval, dict) or approval.get("decision") != "approve":
+    approval = read_json_object(approval_path)
+    if approval is None or approval.get("decision") != "approve":
         print("Approval was not granted. GitHub was not called.", file=sys.stderr)
         raise SystemExit(4)
     raw, payload = load_payload(payload_path)
@@ -355,19 +394,53 @@ def post(payload_path: Path, approval_path: Path) -> None:
     if payload.get("head") != approval.get("head"):
         print("The approved head does not match the payload. GitHub was not called.", file=sys.stderr)
         raise SystemExit(6)
-    owner, repo, pull = payload["owner"], payload["repo"], payload["pull"]
-    identity = str(approval["identity"])
+    return raw, payload, approval, digest
+
+
+def review_body(payload: dict) -> dict:
+    return {
+        "commit_id": payload["head"],
+        "body": payload["body"],
+        "event": "COMMENT",
+        "comments": [
+            {"path": item["path"], "line": item["line"], "side": item["side"], "body": item["body"]}
+            for item in payload["comments"]
+        ],
+    }
+
+
+def post(payload_path: Path, approval_path: Path) -> None:
+    if not approval_path.is_file():
+        print("No approval file. GitHub was not called.", file=sys.stderr)
+        raise SystemExit(4)
+    # The peek only chooses the lock. It is not authorization.
+    peek = read_json_object(approval_path)
+    if peek is None or peek.get("decision") != "approve":
+        print("Approval was not granted. GitHub was not called.", file=sys.stderr)
+        raise SystemExit(4)
+    try:
+        owner, repo, pull = peek["owner"], peek["repo"], int(peek["pull"])
+        identity = str(peek["identity"])
+    except (KeyError, TypeError, ValueError):
+        print("Approval was not granted. GitHub was not called.", file=sys.stderr)
+        raise SystemExit(4)
     lock_path, checkpoint_path = publication_paths(approval_path, owner, repo, pull, identity)
     lock = lock_path.open("a+")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        post_locked(payload, approval, digest, checkpoint_path)
+        _raw, payload, approval, _digest = authorized_post(payload_path, approval_path)
+        if str(approval.get("identity")) != identity:
+            print("The approval record was replaced. GitHub was not called.", file=sys.stderr)
+            raise SystemExit(5)
+        post_locked(payload_path, approval_path, payload, approval, checkpoint_path)
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)
         lock.close()
 
 
-def post_locked(payload: dict, approval: dict, digest: str, checkpoint_path: Path) -> None:
+def post_locked(
+    payload_path: Path, approval_path: Path, payload: dict, approval: dict, checkpoint_path: Path
+) -> None:
     owner, repo, pull = payload["owner"], payload["repo"], payload["pull"]
     code, stdout, stderr = gh_api("GET", f"repos/{owner}/{repo}/pulls/{pull}")
     if code != 0:
@@ -375,6 +448,7 @@ def post_locked(payload: dict, approval: dict, digest: str, checkpoint_path: Pat
         raise SystemExit(1)
     current = json.loads(stdout.decode() or "{}")
     head = current.get("head", {}).get("sha") if isinstance(current, dict) else None
+    _raw, payload, approval, digest = authorized_post(payload_path, approval_path)
     if head != approval.get("head"):
         print(f"The pull request head is {head}, not the approved {approval.get('head')}.", file=sys.stderr)
         raise SystemExit(6)
@@ -385,17 +459,18 @@ def post_locked(payload: dict, approval: dict, digest: str, checkpoint_path: Pat
         print("REVIEW_ALREADY_POSTED=1")
         print_review(owner, repo, pull, existing)
         return
-    body = {
-        "commit_id": payload["head"],
-        "body": payload["body"],
-        "event": "COMMENT",
-        "comments": [
-            {"path": item["path"], "line": item["line"], "side": item["side"], "body": item["body"]}
-            for item in payload["comments"]
-        ],
-    }
+    if checkpoint_state(checkpoint_path) == "posting":
+        print("The previous post did not confirm delivery. GitHub was not called again.", file=sys.stderr)
+        raise SystemExit(1)
     write_checkpoint(checkpoint_path, {"state": "posting", "payload_sha256": digest, "head": payload["head"]})
-    code, stdout, stderr = gh_api("POST", f"repos/{owner}/{repo}/pulls/{pull}/reviews", body)
+    try:
+        _raw, payload, approval, digest = authorized_post(payload_path, approval_path)
+    except SystemExit:
+        # The request was not sent. Drop the checkpoint so it is not an unsettled delivery.
+        checkpoint_path.unlink(missing_ok=True)
+        raise
+    marker = f"<!-- cursor-review:{approval['identity']} -->"
+    code, stdout, stderr = gh_api("POST", f"repos/{owner}/{repo}/pulls/{pull}/reviews", review_body(payload))
     if code != 0:
         recovered = matching_review(reviews_of(owner, repo, pull), marker)
         if recovered is not None:
@@ -405,11 +480,19 @@ def post_locked(payload: dict, approval: dict, digest: str, checkpoint_path: Pat
             print("REVIEW_ALREADY_POSTED=1")
             print_review(owner, repo, pull, recovered)
             return
+        if PROVEN_REJECTION.search(stderr.decode("utf-8", errors="replace")):
+            write_checkpoint(checkpoint_path, {"state": "rejected", "payload_sha256": digest, "head": payload["head"]})
+            print(stderr.decode("utf-8", errors="replace"), file=sys.stderr)
+            raise SystemExit(1)
+        print("Delivery is unknown. GitHub was not called again.", file=sys.stderr)
         print(stderr.decode("utf-8", errors="replace"), file=sys.stderr)
         raise SystemExit(1)
-    created = json.loads(stdout.decode() or "{}")
-    if not isinstance(created, dict):
-        print("GitHub did not return a review.", file=sys.stderr)
+    try:
+        created = json.loads(stdout.decode() or "{}")
+    except json.JSONDecodeError:
+        created = None
+    if not isinstance(created, dict) or created.get("id") is None:
+        print("Delivery is unknown. GitHub was not called again.", file=sys.stderr)
         raise SystemExit(1)
     write_checkpoint(checkpoint_path, {"state": "posted", "payload_sha256": digest, "review_id": created.get("id")})
     print_review(owner, repo, pull, created)

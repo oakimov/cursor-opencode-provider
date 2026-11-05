@@ -4,8 +4,9 @@
 #
 #   scripts/isolated-check.sh <pr-number|https://github.com/owner/repo/pull/N> [--live]
 #
-# The pull request is fetched and copied with git archive. There is no linked
-# worktree and no parent git directory. scripts/isolate-run.sh runs the
+# The pull request is fetched and copied with git archive of that commit id,
+# not the moving FETCH_HEAD name. There is no linked worktree and no parent
+# git directory. scripts/isolate-run.sh runs the
 # commands. A URL whose owner or repository is not this checkout's origin is
 # refused before fetch.
 #
@@ -146,8 +147,8 @@ check_live_action() {
   printf 'run'
 }
 
-# Refuse to pass the key unless FETCH_HEAD is still the archived commit and
-# the trusted commit. Prints the commit on success.
+# Refuse to pass the key unless FETCH_HEAD is still the commit that was
+# archived and the trusted commit. Prints the commit on success.
 check_refuse_moved_commit() {
   local archived="$1" again
   again="$(git -C "$ROOT" rev-parse --verify FETCH_HEAD)"
@@ -162,6 +163,19 @@ check_refuse_moved_commit() {
 check_run_isolated() {
   "$ROOT/scripts/isolate-run.sh" --src "${ISOLATE_SRC:-$PWD}" \
     --tool bun --tool node --tool git --tool python3 -- "$@"
+}
+
+# Load the archived tree with this checkout's harness. Tests replace this.
+check_run_live() {
+  local worktree="$1"
+  "$ROOT/scripts/isolate-run.sh" --src "$worktree" \
+    --tool bun --tool node --tool git --tool python3 --tool opencode \
+    --ro-bind "$ROOT/scripts:/opt/harness/scripts" \
+    --env CURSOR_API_KEY \
+    --set OPENCODE_CONFIG_ROOT=/src \
+    --set OPENCODE_REVIEW_HOME=/tmp/review-opencode \
+    --set "OPENCODE_LIVE_MODEL=${OPENCODE_LIVE_MODEL:-}" \
+    -- bash /opt/harness/scripts/live-test.sh
 }
 
 check_step() {
@@ -217,7 +231,8 @@ check_main() {
     fi
   fi
   worktree="$(mktemp -d "${TMPDIR:-/tmp}/cursor-pr-check-${pr}.XXXXXX")"
-  git -C "$ROOT" archive FETCH_HEAD | tar -x -C "$worktree"
+  # Archive the recorded commit. FETCH_HEAD can move while git archive runs.
+  git -C "$ROOT" archive "$fetched" | tar -x -C "$worktree"
   if [[ -e "$worktree/.git" ]]; then
     echo "The fetched tree contains git metadata. Refusing to run it." >&2
     exit 2
@@ -266,14 +281,7 @@ check_main() {
       echo "CURSOR_REVIEW_TRUST=1 was set separately from the check result."
       check_refuse_moved_commit "$fetched"
       set +e
-      "$ROOT/scripts/isolate-run.sh" --src "$worktree" \
-        --tool bun --tool node --tool git --tool python3 --tool opencode \
-        --ro-bind "$ROOT/scripts:/opt/harness/scripts" \
-        --env CURSOR_API_KEY \
-        --set OPENCODE_CONFIG_ROOT=/src \
-        --set OPENCODE_REVIEW_HOME=/tmp/review-opencode \
-        --set "OPENCODE_LIVE_MODEL=${OPENCODE_LIVE_MODEL:-}" \
-        -- bash /opt/harness/scripts/live-test.sh
+      check_run_live "$worktree"
       live_code=$?
       set -e
       ;;
