@@ -696,7 +696,11 @@ These are failure lessons shared by both hosts, not a replacement for
   silently permit removal (`test/process-cleanup.test.ts`). Test log content
   separately from its path-bearing diagnostic header (`test/debug.test.ts`).
 - **Match CI environments.** Narrow PATH fixtures omitted mkdir; Linux shell
-  tests need an init reaper. Ubuntu 24.04 CI denies unprivileged user
+  tests need an init reaper. The review namespace's PID 1 has to be that
+  reaper. When `bun test` was PID 1, a killed grandchild stayed a zombie,
+  `kill -0` still succeeded, and the shell-supervision tests failed inside
+  `scripts/isolate-run.sh` while the same files passed outside
+  (`test/review-scripts.test.ts`). Ubuntu 24.04 CI denies unprivileged user
   namespaces until `kernel.apparmor_restrict_unprivileged_userns` is 0, and
   the isolation tests require that namespace rather than skipping. The
   coverage job checks out the pull request head, so that probe lives in the

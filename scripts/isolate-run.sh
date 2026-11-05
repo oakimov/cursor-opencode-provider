@@ -7,8 +7,10 @@
 # /workspace, agent sockets, and git metadata are not mounted. The environment
 # starts empty. --map-root-user grants mount capabilities inside the
 # namespace; those are dropped after the mounts exist and before the command
-# runs, so a read-only bind cannot be remounted writable. macOS uses
-# sandbox-exec. Virtual paths (/src, /tmp, /home/reviewer, /opt/tools, and
+# runs, so a read-only bind cannot be remounted writable. PID 1 then stays a
+# reaper: the command runs in its own session, orphaned zombies are collected,
+# and termination signals are forwarded to that session. The command is not
+# PID 1. macOS uses sandbox-exec. Virtual paths (/src, /tmp, /home/reviewer, /opt/tools, and
 # --ro-bind destinations) are translated to private directories. The profile
 # allows the dynamic linker, a read of the root directory itself, and the
 # selected tool files. It does not allow a tool's parent directory or every
@@ -415,7 +417,57 @@ libc.capset.argtypes = [ctypes.POINTER(Header), ctypes.POINTER(Data)]
 libc.capset.restype = ctypes.c_int
 if libc.capset(ctypes.byref(header), ctypes.cast(data, ctypes.POINTER(Data))) != 0:
     fail("capset failed: %s" % ctypes.get_errno())
-os.execv("/init", ["/init"])
+
+# Stay PID 1 and run the command as a child. A test runner left as PID 1 does
+# not reap grandchildren whose parents have exited, and kill(pid, 0) still
+# succeeds for those zombies.
+import signal
+
+try:
+    command = os.fork()
+except OSError as error:
+    fail("fork failed: %s" % error.errno)
+if command == 0:
+    try:
+        os.setsid()
+        os.execv("/init", ["/init"])
+    finally:
+        os._exit(127)
+
+
+def forward(signum, _frame):
+    try:
+        os.kill(-command, signum)
+    except OSError:
+        pass
+
+
+for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT):
+    signal.signal(signum, forward)
+
+exit_code = 1
+while True:
+    try:
+        pid, status = os.waitpid(-1, 0)
+    except InterruptedError:
+        continue
+    except ChildProcessError:
+        break
+    if pid != command:
+        continue
+    if os.WIFEXITED(status):
+        exit_code = os.WEXITSTATUS(status)
+    elif os.WIFSIGNALED(status):
+        exit_code = 128 + os.WTERMSIG(status)
+    break
+while True:
+    try:
+        pid, _status = os.waitpid(-1, os.WNOHANG)
+    except ChildProcessError:
+        break
+    if pid == 0:
+        break
+os._exit(exit_code)
 EOF
 }
 

@@ -1043,6 +1043,99 @@ print("SAW=" + str(found))
       fs.rmSync(src, { recursive: true, force: true })
     }
   })
+
+  it("reaps an orphaned grandchild and returns the command status", () => {
+    if (hostKernel() !== "Linux") return
+    const src = fs.mkdtempSync(path.join(os.tmpdir(), "review-reaper-"))
+    fs.writeFileSync(path.join(src, "probe.py"), [
+      "import os, sys, time",
+      "if os.getpid() == 1 or os.getppid() != 1:",
+      "    print('COMMAND_PID=%s PARENT=%s' % (os.getpid(), os.getppid()))",
+      "    sys.exit(2)",
+      "pid = os.fork()",
+      "if pid == 0:",
+      "    grand = os.fork()",
+      "    if grand == 0:",
+      "        os.execv('/bin/sleep', ['sleep', '30'])",
+      "    os.kill(grand, 9)",
+      "    open('/src/orphan', 'w').write(str(grand))",
+      "    os._exit(0)",
+      "os.waitpid(pid, 0)",
+      "orphan = int(open('/src/orphan').read())",
+      "deadline = time.time() + 2",
+      "while time.time() < deadline:",
+      "    try:",
+      "        os.kill(orphan, 0)",
+      "    except OSError:",
+      "        print('ORPHAN_GONE')",
+      "        sys.exit(0)",
+      "    time.sleep(0.05)",
+      "print('ORPHAN_ALIVE')",
+      "sys.exit(3)",
+      "",
+    ].join("\n"))
+    try {
+      const result = run("bash", ["scripts/isolate-run.sh", "--src", src, "--", "python3", "/src/probe.py"])
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)
+      expect(result.stdout).toContain("ORPHAN_GONE")
+      const status = run("bash", ["scripts/isolate-run.sh", "--src", src, "--", "python3", "-c", "import sys; sys.exit(7)"])
+      expect(status.status, `${status.stdout}\n${status.stderr}`).toBe(7)
+    } finally {
+      fs.rmSync(src, { recursive: true, force: true })
+    }
+  })
+
+  it("forwards termination to the command session", async () => {
+    if (hostKernel() !== "Linux") return
+    const src = fs.mkdtempSync(path.join(os.tmpdir(), "review-reaper-signal-"))
+    const ready = path.join(src, "ready")
+    const child = spawn(
+      "bash",
+      ["scripts/isolate-run.sh", "--src", src, "--", "sh", "-c", "echo $$ > /src/ready; exec sleep 30"],
+      { cwd: root, detached: true },
+    )
+    const started = Date.now()
+    const pause = () => new Promise((resolve) => setTimeout(resolve, 50))
+    const sleepAlive = (namespacePid: string) => {
+      for (const name of fs.readdirSync("/proc")) {
+        if (!/^\d+$/.test(name)) continue
+        try {
+          const status = fs.readFileSync(`/proc/${name}/status`, "utf8")
+          if (!status.startsWith("Name:\tsleep\n")) continue
+          const nspid = status.split("\n").find((line) => line.startsWith("NSpid:"))
+          if (nspid?.split(/\s+/).includes(namespacePid)) return true
+        } catch {
+          // The process exited while it was being read.
+        }
+      }
+      return false
+    }
+    try {
+      while (!fs.existsSync(ready)) {
+        if (child.exitCode !== null || Date.now() - started > 8000) {
+          throw new Error(`command did not start: exit=${child.exitCode}`)
+        }
+        await pause()
+      }
+      const namespacePid = fs.readFileSync(ready, "utf8").trim()
+      expect(sleepAlive(namespacePid)).toBe(true)
+      process.kill(-child.pid!, "SIGTERM")
+      const killed = Date.now()
+      while (sleepAlive(namespacePid)) {
+        if (Date.now() - killed > 5000) throw new Error("sleep survived SIGTERM to the boundary")
+        await pause()
+      }
+      while (child.exitCode === null && child.signalCode === null) {
+        if (Date.now() - killed > 5000) throw new Error("boundary did not exit after SIGTERM")
+        await pause()
+      }
+    } finally {
+      if (child.exitCode === null && child.signalCode === null && child.pid) {
+        try { process.kill(-child.pid, "SIGKILL") } catch { /* already gone */ }
+      }
+      fs.rmSync(src, { recursive: true, force: true })
+    }
+  }, 20000)
 })
 
 describe("effective opencode permissions", () => {
