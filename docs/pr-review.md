@@ -15,6 +15,7 @@ Review https://github.com/oakimov/cursor-opencode-provider/pull/N.
 Follow .cursor/skills/review/SKILL.md and docs/pr-review.md.
 Read the diff, the files it changes, their callers, docs/review-rules.md, and the existing review threads.
 Run scripts/isolated-check.sh on that pull request.
+Perform the skill's adversarial pass: inventory behaviors, reconstruct contracts, trace consumers, challenge failure/state/boundary paths, and retain a private evidence ledger.
 Record that revision, render one structured COMMENT review with scripts/review-publish.py, and show the payload.
 Stop. Do not post, approve, or merge. An incomplete result is not a finished review.
 ```
@@ -24,6 +25,27 @@ The payload is a JSON object: `owner`, `repo`, `pull`, `base`, `head`, `runtime`
 Write the review as a result, then render it. The result records the same repository, pull request, base, head, and `linux` runtime. `outcome` is `findings`, `clean`, or `incomplete`. Each check has a name, a status (`passed`, `failed`, `skipped`, or `unavailable`), and a detail. A finding has a stable id, a rule id from `.greptile/config.json` or `blocker` / `important` / `nit` from the review rules, that rule's severity, a title, an explanation, a trigger, a consequence, and `evidence` of `reproduced`, `source`, or `unverified`. `diff` lists the path, line, and side verified in the current diff. A comment is emitted only for a finding at one of those locations. Other findings stay in the summary. `prior` classifies an earlier finding as `still_present`, `fixed`, `regressed`, or `unverified`. A clean result cannot leave one unresolved, and a fixed id cannot reappear as a current finding. At most five `low` findings are included. `mutations` are proposed replies or resolutions. They are shown in the preview and are not sent.
 
 `bind` reads the pull request and records its base and head. When the result file already has a different revision, `bind` stops and leaves the file unchanged. `render` checks the result and writes the payload. `REVIEW_OUTCOME=incomplete` means the analysis did not reach a defensible review: the diff was unreadable, a tool was unavailable, or the result is malformed. That file can be read and cannot be stamped or posted. Rendering is not publication. Showing the preview is not approval. Approval is not a merge.
+
+Structured results require an `adversarial` check in addition to `diff` and test
+results. Follow the procedure in the review skill and retain its private
+evidence ledger. The check detail names the reviewed behaviors, relevant
+counterexamples, source/reproduction evidence and unresolved limits. Trace
+downstream consumers and later uses after partial effects or failures, rather
+than inferring correctness from the immediate return or a helper test.
+`passed` means that analysis completed; findings still belong in `findings`.
+Only docs/comment-only diffs may mark it `skipped`, with a reason. This is an
+explicit reviewer attestation, not a machine proof of semantic correctness.
+Successful tests alone do not establish a clean review, and a live `pong` does
+not exercise a changed image/tool/cancellation path.
+
+When changing the review harness, evaluate detection separately from publisher
+correctness. Use manually invoked buggy/fixed pairs from several defect
+classes, including held-out cases. Keep expected answers outside the reviewer's
+inputs, judge causal findings rather than exact wording, and check fixed cases
+for the same false finding. A parser test or a newly required check name does
+not measure reviewer quality. Record the actual agent/model/revision, detected
+defects, misses and false positives; if no agent evaluation ran, report that
+limit. Keep review comments concise and governed by the existing rubric.
 
 ```bash
 python3 scripts/review-publish.py bind owner repo 156 review.json
@@ -41,6 +63,15 @@ python3 scripts/review-publish.py approve payload.json approval.json "$PREVIEW_S
 python3 scripts/review-publish.py post payload.json approval.json
 ```
 
+Use that publisher for clean reviews too. Do not use a discussion-comment tool,
+`gh pr comment`, or an agent's final-response comment as a substitute. If the
+publisher cannot run, stop and report the failure. Publication completes only
+with a submitted review receipt (`#pullrequestreview-<id>`) and readback of its
+inline comment URLs when there are inline findings. A same-PR `#issuecomment-`
+URL is not accepted as a review receipt; the send remains unconfirmed and is
+not automatically repeated. Every publication still requires the approved
+preview. Readback checks do not authorize additional GitHub mutations.
+
 `approve` records the preview digest, base, head, and runtime locally, and only when the file and the frozen preview are still those bytes. `approve` and `post` take the rendered payload, the same file `stamp` and `show` froze. `post` takes the publication lock and then reads the approval and the payload again. It reads them again after each read-only GitHub lookup. Each read must be the same pull request, base, head, runtime, identity, preview digest, and approval generation as the approval that was current when the lock was acquired. A denial or a different approval is not sent, including a replacement that would be valid on its own. After the reviews lookup, and immediately before it sends, `post` reads the pull request again and then reads the pinned approval and payload again. It mints the GitHub App installation token and reads that approval once more. A different base or head stops the send and requires a refreshed review and a new approval. A push that lands after that read can still be published on the approved commit. A request that was already sent is not cancelled. Two posts of the same payload share one lock. When a send does not confirm delivery, a later `post` checks whether the review is visible and does not send a second request. A response that shows GitHub rejected the request can be retried. A returned review URL has to name the approved pull request; otherwise the send stays unconfirmed and is not repeated. A review id that was already confirmed is not posted again. A later `post` returns that review and its comment URLs, or stops when the id is no longer listed, even if the summary no longer contains the marker. The checkpoint keeps the review id and comment ids. The review is a `COMMENT` on the approved commit. Comment URLs come from the pull request's review-comments list. `deny` records a refusal and `post` then makes no GitHub call:
 
 ```bash
@@ -49,7 +80,29 @@ python3 scripts/review-publish.py deny approval.json
 
 ## Configure and live test
 
-Cloud agents install from the `install` string in `.cursor/environment.json`. That string is `scripts/cloud-agent-install.sh`, so a build of `main` does not need this branch's files. It installs Bun, zsh, and Python when they are missing, installs or upgrades OpenCode to the current release with the official installer (`https://opencode.ai/v2/install`, no version argument) and links `opencode` and `opencode2` on `PATH`, installs dependencies, and builds this package. It does not write an OpenCode config.
+### GitHub App publisher
+
+Keep the existing `REVIEW_APP_ID`, `REVIEW_APP_PRIVATE_KEY` (or owner-only
+`REVIEW_APP_PRIVATE_KEY_FILE`) and optional `REVIEW_APP_INSTALLATION_ID`
+configuration. Store the inline PEM as a Cloud Agent Runtime Secret. Install
+the App on this repository with **Pull requests: Read and write** and disable
+webhooks for this manually initiated workflow. A client secret or ambient
+user token is not a publishing credential.
+
+The publisher requests an installation token restricted to this repository
+and `pull_requests: write`, and checks the returned grant. App JWT requests use
+Bearer authentication; installation tokens are opaque and can use GitHub's
+legacy or stateless format. See [GitHub's token documentation](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app).
+`python3 scripts/review-publish.py auth-info` reports only configuration/source
+names and populated flags, without contacting GitHub or proving write access.
+Do not dump credential files or token values. A rejected HTTP 403 can be retried
+after correcting the App grant, using the same still-approved payload. Unknown
+delivery is never automatically resent, and there is no user-token or
+discussion-comment fallback. API calls target `github.com` explicitly.
+
+### OpenCode runtime
+
+Cloud agents install from the `install` string in `.cursor/environment.json`. That string is `scripts/cloud-agent-install.sh`, so a build of `main` does not need this branch's files. It installs Bun, zsh, Python, and OpenSSL when they are missing, installs or upgrades OpenCode to the current release with the official installer (`https://opencode.ai/v2/install`, no version argument) and links `opencode` and `opencode2` on `PATH`, installs dependencies, and builds this package. It does not write an OpenCode config.
 
 ```bash
 bun run build

@@ -434,6 +434,8 @@ Set `CURSOR_AGENT_TRANSCRIPTS_FOLDER` before starting OpenCode (or its daemon). 
 
 Changes listed under [Unreleased](CHANGELOG.md#unreleased) describe the development checkout; use a rebuilt local install to test them before a release. Maintainer guides and incident lessons are linked from the [documentation index](docs/README.md). The manual Cursor review, isolated pull-request checks, and OpenCode live test are in [docs/pr-review.md](docs/pr-review.md).
 
+Manual Cloud Agent reviews publish through the configured GitHub App after exact-preview approval. See the [App publisher setup](docs/pr-review.md#github-app-publisher) for `REVIEW_APP_ID`, the private key and optional installation ID. Tokens are restricted to this repository and review-write permission; `review-publish.py auth-info` reports configuration without printing secrets. Reviews use the App's bot identity, with no automatic review trigger.
+
 ```bash
 bun install          # install dependencies
 bun run build        # compile TypeScript → dist/

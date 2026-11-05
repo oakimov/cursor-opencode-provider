@@ -15,6 +15,8 @@
 
 ### Fixed
 
+- GitHub App review publication accepts stateless installation tokens, uses Bearer authentication for App JWT requests, and requests only this repository's review-write permission. Diagnostics redact complete tokens ([#156](https://github.com/oakimov/cursor-opencode-provider/pull/156)).
+- Manual Cursor reviews record independent contract, failure/state and consumer analysis before publication and verify review-specific receipts; a discussion comment does not count as a completed COMMENT review ([#156](https://github.com/oakimov/cursor-opencode-provider/pull/156)).
 - The Linux review boundary reaps orphaned processes. The checked command is no longer PID 1, so a killed shell grandchild does not stay visible to `kill -0` and fail shell-supervision tests inside the isolated check.
 - Tool steps with a known call count close promptly when an edit's write reuses its permission-read call ID, avoiding an unnecessary idle-guard wait before dependent commands ([#152](https://github.com/oakimov/cursor-opencode-provider/pull/152), [@nkoynov](https://github.com/nkoynov)).
 - Held tool calls no longer get stuck after a locally rejected read, run after a queued withdrawal, or escape an earlier edit denial when they arrive after a host step split ([#152](https://github.com/oakimov/cursor-opencode-provider/pull/152)).

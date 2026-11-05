@@ -31,6 +31,7 @@ import argparse
 import base64
 import fcntl
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -46,7 +47,7 @@ MARKER = re.compile(r"<!-- cursor-review:([0-9a-f]{64}) -->")
 # Values, not the public names of settings. A sentence that names
 # CURSOR_API_KEY or copilot.totalNanoAiu is a review comment, not a secret.
 SECRET = re.compile(
-    r"crsr_[A-Za-z0-9]|ghp_[A-Za-z0-9]|github_pat_[A-Za-z0-9]|x-access-token|"
+    r"crsr_[A-Za-z0-9]|gh[pousr]_[A-Za-z0-9]|github_pat_[A-Za-z0-9]|x-access-token|"
     r"AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY|"
     r"sk-[A-Za-z0-9]{16,}|xox[baprs]-[A-Za-z0-9-]+",
     re.IGNORECASE,
@@ -212,6 +213,7 @@ def validate_result(result: dict) -> list[str]:
         rules = {}
     checks = result.get("checks")
     diff_status = None
+    adversarial_status = None
     if not isinstance(checks, list) or not checks:
         problems.append("checks")
         checks = []
@@ -232,8 +234,14 @@ def validate_result(result: dict) -> list[str]:
                 problems.append(f"checks[{index}].detail")
             if name == "diff":
                 diff_status = check.get("status")
+            if name == "adversarial":
+                adversarial_status = check.get("status")
     if diff_status is None:
         problems.append("checks.diff")
+    # Passing tests is supporting evidence, not an independent review. Keep
+    # the reviewer's branch/state analysis explicit in publishable results.
+    if outcome in {"clean", "findings"} and adversarial_status not in {"passed", "skipped"}:
+        problems.append("checks.adversarial")
     limitations = result.get("limitations")
     if not isinstance(limitations, list):
         problems.append("limitations")
@@ -482,7 +490,14 @@ def target_url(url: object, owner: str, repo: str, pull: int) -> bool:
 
 
 def review_matches(review: dict, owner: str, repo: str, pull: int) -> bool:
-    return target_url(review.get("html_url"), owner, repo, pull) or target_url(review.get("url"), owner, repo, pull)
+    review_id = review.get("id")
+    if not isinstance(review_id, int) or isinstance(review_id, bool) or review_id <= 0:
+        return False
+    # A same-PR discussion comment is not a submitted COMMENT review.
+    return (
+        review.get("html_url") == f"https://github.com/{owner}/{repo}/pull/{pull}#pullrequestreview-{review_id}"
+        or review.get("url") == f"https://api.github.com/repos/{owner}/{repo}/pulls/{pull}/reviews/{review_id}"
+    )
 
 
 def validate(payload: dict) -> list[str]:
@@ -543,7 +558,7 @@ def b64url(data: bytes) -> str:
 
 
 def redact_secret(text: str) -> str:
-    text = re.sub(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]+", "[redacted]", text)
+    text = re.sub(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_.-]+", "[redacted]", text)
     text = re.sub(r"\bgithub_pat_[A-Za-z0-9_]+", "[redacted]", text)
     return re.sub(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}", "[redacted]", text)
 
@@ -656,10 +671,50 @@ def load_app_material() -> tuple[str, bytes]:
 
 def publisher_env(token: str | None) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if not key.startswith("REVIEW_APP_")}
+    env.pop("GH_DEBUG", None)
+    env["GH_HOST"] = "github.com"
+    env["GH_PROMPT_DISABLED"] = "1"
     if token is not None:
         env["GH_TOKEN"] = token
         env["GITHUB_TOKEN"] = token
     return env
+
+
+def app_api(method: str, endpoint: str, jwt: str, payload: dict | None = None) -> tuple[int, bytes, bytes]:
+    # GitHub App JWTs require Bearer, not gh's default token scheme. Keep the
+    # header in memory and never forward it through a redirect or an argv value.
+    connection = http.client.HTTPSConnection("api.github.com", timeout=30)
+    try:
+        connection.request(method, "/" + endpoint, body=json.dumps(payload) if payload is not None else None, headers={
+            "Authorization": "Bearer " + jwt,
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "User-Agent": "cursor-provider-review-publisher",
+            "X-GitHub-Api-Version": "2026-03-10",
+        })
+        response = connection.getresponse()
+        if response.status not in (200, 201):
+            return 1, b"", f"GitHub App request failed (HTTP {response.status}).".encode()
+        return 0, response.read(), b""
+    except (OSError, http.client.HTTPException):
+        return 1, b"", b"GitHub App request failed before authorization was confirmed."
+    finally:
+        connection.close()
+
+
+def auth_info() -> None:
+    source = next((name for name in ("GH_TOKEN", "GITHUB_TOKEN") if os.environ.get(name)), "gh stored credential/helper")
+    json.dump({
+        "host": "github.com", "read_source": source,
+        "publication_source": "GitHub App installation",
+        "environment": {name: bool(os.environ.get(name)) for name in (
+            "REVIEW_APP_ID", "REVIEW_APP_INSTALLATION_ID", "REVIEW_APP_PRIVATE_KEY",
+            "REVIEW_APP_PRIVATE_KEY_FILE", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST",
+        )},
+        "required_permissions": {"pull_requests": "write"},
+        "permission_verification": "not checked",
+    }, sys.stdout, indent=2)
+    sys.stdout.write("\n")
 
 
 def gh_api(
@@ -669,7 +724,7 @@ def gh_api(
     paginate: bool = False,
     token: str | None = None,
 ) -> tuple[int, bytes, bytes]:
-    command = ["gh", "api", "--method", method]
+    command = ["gh", "api", "--hostname", "github.com", "--method", method]
     if paginate:
         command.extend(["--paginate", "--slurp"])
     command.append(endpoint)
@@ -678,7 +733,11 @@ def gh_api(
         command.extend(["--input", "-"])
         data = json.dumps(payload).encode()
     completed = subprocess.run(command, input=data, capture_output=True, env=publisher_env(token))
-    return completed.returncode, completed.stdout, completed.stderr
+    detail = completed.stderr.decode("utf-8", errors="replace")
+    for value in (token, os.environ.get("GH_TOKEN"), os.environ.get("GITHUB_TOKEN")):
+        if value:
+            detail = detail.replace(value, "[redacted]")
+    return completed.returncode, completed.stdout, redact_secret(detail).encode()
 
 
 def json_object(raw: bytes) -> dict | None:
@@ -693,10 +752,10 @@ def installation_token(owner: str, repo: str, app_id: str, pem: bytes) -> str:
     jwt = sign_app_jwt(app_id, pem)
     installation = os.environ.get("REVIEW_APP_INSTALLATION_ID", "").strip()
     if not installation:
-        code, stdout, stderr = gh_api("GET", f"repos/{owner}/{repo}/installation", token=jwt)
+        code, stdout, stderr = app_api("GET", f"repos/{owner}/{repo}/installation", jwt)
         found = json_object(stdout)
         located = found.get("id") if found else None
-        if code != 0 or not isinstance(located, int) or isinstance(located, bool):
+        if code != 0 or not isinstance(located, int) or isinstance(located, bool) or located < 1:
             print(
                 "The GitHub App installation for this repository was not found. The review was not posted.",
                 file=sys.stderr,
@@ -706,7 +765,9 @@ def installation_token(owner: str, repo: str, app_id: str, pem: bytes) -> str:
                 print(detail, file=sys.stderr)
             raise SystemExit(4)
         installation = str(located)
-    code, stdout, stderr = gh_api("POST", f"app/installations/{installation}/access_tokens", token=jwt)
+    code, stdout, stderr = app_api("POST", f"app/installations/{installation}/access_tokens", jwt, {
+        "repositories": [repo], "permissions": {"pull_requests": "write"},
+    })
     if code != 0:
         print("The GitHub App did not authorize the review. The review was not posted.", file=sys.stderr)
         detail = redact_secret(stderr.decode("utf-8", errors="replace")).strip()
@@ -715,9 +776,12 @@ def installation_token(owner: str, repo: str, app_id: str, pem: bytes) -> str:
         raise SystemExit(4)
     issued = json_object(stdout)
     token = issued.get("token") if issued else None
-    if not isinstance(token, str) or re.fullmatch(r"ghs_[A-Za-z0-9]+", token) is None:
+    if not isinstance(token, str) or re.fullmatch(r"ghs_[A-Za-z0-9_.-]+", token) is None:
         print("GitHub did not return an app installation token. The review was not posted.", file=sys.stderr)
         raise SystemExit(4)
+    permissions = issued.get("permissions") if issued else None
+    if not isinstance(permissions, dict) or permissions.get("pull_requests") != "write":
+        refuse_publication("The installation token must grant Pull requests: write. The review was not posted.")
     return token
 
 
@@ -1149,6 +1213,12 @@ def post_locked(
         token=token,
     )
     if code != 0:
+        if re.search(rb"\bHTTP\s+403\b", stderr, re.IGNORECASE):
+            print(
+                "GitHub denied the App review request (HTTP 403). Check this installation's "
+                "Pull requests: write grant and repository access. No discussion comment was sent.",
+                file=sys.stderr,
+            )
         recovered = matching_review(reviews_of(owner, repo, pull), marker)
         if recovered is not None:
             record_visible_review(owner, repo, pull, recovered, digest, checkpoint_path, approved_head, True)
@@ -1254,13 +1324,15 @@ def render(source: Path, dest: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Show or post an approved COMMENT review.")
-    parser.add_argument("command", choices=("show", "stamp", "approve", "deny", "post", "render", "bind"))
+    parser.add_argument("command", choices=("show", "stamp", "approve", "deny", "post", "render", "bind", "auth-info"))
     parser.add_argument("payload", nargs="?", type=Path)
     parser.add_argument("approval", nargs="?", type=Path)
     parser.add_argument("preview", nargs="?")
     parser.add_argument("extra", nargs="?")
     args = parser.parse_args()
-    if args.command == "show":
+    if args.command == "auth-info":
+        auth_info()
+    elif args.command == "show":
         if args.payload is None:
             parser.error("show requires a payload file")
         show(args.payload)

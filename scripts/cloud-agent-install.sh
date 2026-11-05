@@ -60,6 +60,10 @@ install_main() {
     sudo apt-get update
     sudo apt-get install -y python3
   fi
+  if ! command -v openssl >/dev/null 2>&1; then
+    sudo apt-get update
+    sudo apt-get install -y openssl
+  fi
 
   installed="$(opencode_version_of "$HOME/.opencode/bin/opencode")"
   latest="$(latest_opencode_version)"

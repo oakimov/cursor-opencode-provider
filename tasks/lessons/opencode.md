@@ -707,6 +707,32 @@ These are failure lessons shared by both hosts, not a replacement for
   workflow rather than in a script the head might not contain. Strip
   temporary module copies from coverage and include Bun editor types
   (`scripts/strip-copied-coverage.ts`).
+- **A green suite is not a branch audit.** A review missed a generator whose
+  failed refresh retained the state that made the next invocation skip its
+  promised retry. Generalize the method: inventory changed behaviors, trace
+  contracts through callers and downstream consumers, challenge failure/state
+  and boundary paths, and retain counterexample evidence. An `adversarial`
+  label only attests to work; measure detection with buggy/fixed pairs across
+  defect classes, including held-out cases and false-positive controls. Repair
+  the review harness when that is the requested target, using the reviewed
+  defect as evaluation evidence rather than turning the repair into a patch
+  to the subject PR (`docs/pr-review.md`).
+- **Review text is not a publication receipt.** Publish through the approved
+  review publisher, including clean verdicts. A discussion comment can carry
+  the exact review marker without being a submitted review or creating inline
+  threads. Require a review-specific URL for the returned id and read back its
+  comments; do not fall back to a comment tool when publication is unavailable
+  (`test/review-publish.test.ts`).
+- **App permissions are not a VM token's effective permissions.** A repository
+  read succeeded while the COMMENT review endpoint rejected the sandbox
+  credential with HTTP 403. A declared App grant does not prove that token's
+  review-write access. The publisher supports a separately controlled App,
+  checks its installation grant, mints a repository-scoped token after local
+  approval, and reports credential sources without printing values
+  (`test/review-publish.test.ts`, `auth-info`). Treat installation tokens as
+  opaque: an alphanumeric-only check rejected the stateless token format.
+  Exercise the actual HTTP authorization scheme as well as JWT signatures;
+  GitHub App JWT requests require Bearer authentication.
 - **Keep one current policy across docs and prompts.** A rebase can add review
   rules; reviewer patches still need whole-path validation. A manual Cursor review posts only after the maintainer approves the preview digest `show` printed for that payload and head (`scripts/review-publish.py`). The review request uses a GitHub App installation token minted from `REVIEW_APP_ID` and the app private key after the final pull read; the approval is read again after the mint. The Cloud Agent login, a user token, and the app client secret are not that credential (`test/review-publish.test.ts`). `post` reads that approval after the publication lock, after each read-only lookup, and again immediately before the send. The pull request, head, identity, preview digest, and approval generation are the ones current when the lock was acquired, so a denial, a replaced payload, or another valid approval is not sent on that operation. A send that does not confirm delivery stays unsettled and is not repeated. A confirmed review id and its comment ids remain delivery evidence when the summary marker is edited or the review is no longer listed, and are not posted again. The review records the repository, pull request, base, head, and linux runtime; `render` turns that structured result into the COMMENT payload, refuses an incomplete or malformed result, and anchors a comment only at a listed diff location. Earlier findings stay classified. `approve` and `post` name the rendered payload, the same file `show` froze. After the reviews lookup, and immediately before the send, `post` fetches the pull request again and then re-reads the pinned local operation. A moved base or head stops the send for a refreshed review and a new approval (`test/review-publish.test.ts`). A push after that fetch is outside the check. A returned review URL has to name the approved pull request. A response that shows GitHub rejected the request can be retried. The public-text scan flags secret values and local paths, including `~/...`, Markdown labels, `file://` autolinks, and a path written directly after a colon, and still allows public URLs and public identifiers such as `CURSOR_API_KEY`. The procedure stays in `docs/pr-review.md`. Changelog fixes
   compare with the release, not an intermediate PR state. A versioned heading
