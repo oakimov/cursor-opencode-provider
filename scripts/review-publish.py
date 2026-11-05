@@ -6,10 +6,16 @@ approve records a local approval of those exact bytes and that head.
 deny records a local refusal. post with a denial, or with no approval,
 does not call GitHub.
 post re-reads the approval after it takes the publication lock, and again
-immediately before it sends. A denial or a replaced payload in either
-window is not sent. A request that was already sent is not cancelled.
-A send that does not confirm delivery is not repeated. A later post of
-the same payload returns the review that is already on GitHub.
+after each read-only lookup and immediately before it sends. That read
+must be the same pull request, head, identity, preview digest, and
+approval generation. A denial or a different approval is not sent, even
+when the replacement is valid by itself. A request that was already sent
+is not cancelled. A send that does not confirm delivery is not repeated.
+A confirmed review id is delivery. A later post returns that review, or
+stops when it is not visible, and does not send another.
+render checks a structured result and writes the COMMENT payload.
+bind records the pull request's base and head. An incomplete result is
+not published. post rechecks that revision and keeps the returned ids.
 """
 
 from __future__ import annotations
@@ -106,12 +112,365 @@ def identity_of(payload: dict) -> str:
         "pull": payload.get("pull"),
         "base": payload.get("base"),
         "head": payload.get("head"),
+        "runtime": payload.get("runtime"),
         "event": "COMMENT",
         "body": stripped,
         "comments": payload.get("comments", []),
+        "result": payload.get("result"),
     }
     encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+RESULT_KEYS = {
+    "owner", "repo", "pull", "base", "head", "runtime", "outcome",
+    "checks", "limitations", "diff", "prior", "findings", "mutations",
+}
+FINDING_KEYS = {
+    "id", "severity", "rule", "title", "explanation", "trigger",
+    "consequence", "evidence", "verification", "path", "line", "side",
+}
+OUTCOMES = {"findings", "clean", "incomplete"}
+CHECK_STATUS = {"passed", "failed", "skipped", "unavailable"}
+PRIOR_STATUS = {"still_present", "fixed", "regressed", "unverified"}
+EVIDENCE = {"reproduced", "source", "unverified"}
+SEVERITY_LABEL = {"high": "High", "medium": "Medium", "low": "Low"}
+TOKEN = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+RULES_PATH = Path(__file__).resolve().parent.parent / ".greptile" / "config.json"
+
+
+def relative_path(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and not value.startswith("/")
+        and "\\" not in value
+        and all(part not in ("", ".", "..") for part in value.split("/"))
+    )
+
+
+def rule_severity() -> dict[str, str] | None:
+    try:
+        data = json.loads(RULES_PATH.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    rules = data.get("rules") if isinstance(data, dict) else None
+    if not isinstance(rules, list):
+        return None
+    found: dict[str, str] = {"nit": "low", "important": "medium", "blocker": "high"}
+    for rule in rules:
+        if not isinstance(rule, dict):
+            return None
+        identifier = rule.get("id")
+        severity = rule.get("severity")
+        if not isinstance(identifier, str) or severity not in SEVERITY_LABEL:
+            return None
+        found[identifier] = severity
+    return found
+
+
+def text_field(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def validate_result(result: dict) -> list[str]:
+    problems: list[str] = []
+    extra = sorted(set(result) - RESULT_KEYS)
+    if extra:
+        problems.append("result.keys")
+    if not isinstance(result.get("owner"), str) or not NAME.fullmatch(result.get("owner", "")):
+        problems.append("owner")
+    if not isinstance(result.get("repo"), str) or not NAME.fullmatch(result.get("repo", "")):
+        problems.append("repo")
+    pull = result.get("pull")
+    if not isinstance(pull, int) or isinstance(pull, bool) or pull < 1:
+        problems.append("pull")
+    for field in ("base", "head"):
+        value = result.get(field)
+        if not isinstance(value, str) or not SHA.fullmatch(value):
+            problems.append(field)
+    if result.get("runtime") != "linux":
+        problems.append("runtime")
+    outcome = result.get("outcome")
+    if outcome not in OUTCOMES:
+        problems.append("outcome")
+    rules = rule_severity()
+    if rules is None:
+        problems.append("rules")
+        rules = {}
+    checks = result.get("checks")
+    diff_status = None
+    if not isinstance(checks, list) or not checks:
+        problems.append("checks")
+        checks = []
+    else:
+        seen: set[str] = set()
+        for index, check in enumerate(checks):
+            if not isinstance(check, dict) or set(check) != {"name", "status", "detail"}:
+                problems.append(f"checks[{index}]")
+                continue
+            name = check.get("name")
+            if not isinstance(name, str) or not TOKEN.fullmatch(name) or name in seen:
+                problems.append(f"checks[{index}].name")
+            else:
+                seen.add(name)
+            if check.get("status") not in CHECK_STATUS:
+                problems.append(f"checks[{index}].status")
+            if not text_field(check.get("detail")):
+                problems.append(f"checks[{index}].detail")
+            if name == "diff":
+                diff_status = check.get("status")
+    if diff_status is None:
+        problems.append("checks.diff")
+    limitations = result.get("limitations")
+    if not isinstance(limitations, list):
+        problems.append("limitations")
+    elif any(not text_field(item) for item in limitations):
+        problems.append("limitations")
+    anchors: set[tuple] = set()
+    diff = result.get("diff")
+    if not isinstance(diff, list):
+        problems.append("diff")
+        diff = []
+    else:
+        for index, anchor in enumerate(diff):
+            if not isinstance(anchor, dict) or set(anchor) != {"path", "line", "side"}:
+                problems.append(f"diff[{index}]")
+                continue
+            if not relative_path(anchor.get("path")):
+                problems.append(f"diff[{index}].path")
+            line = anchor.get("line")
+            if not isinstance(line, int) or isinstance(line, bool) or line < 1:
+                problems.append(f"diff[{index}].line")
+            if anchor.get("side") not in ("LEFT", "RIGHT"):
+                problems.append(f"diff[{index}].side")
+            key = (anchor.get("path"), anchor.get("line"), anchor.get("side"))
+            if key in anchors:
+                problems.append(f"diff[{index}]")
+            anchors.add(key)
+    findings = result.get("findings")
+    finding_ids: set[str] = set()
+    signatures: set[tuple] = set()
+    if not isinstance(findings, list):
+        problems.append("findings")
+        findings = []
+    else:
+        low = 0
+        for index, finding in enumerate(findings):
+            if not isinstance(finding, dict) or not set(finding) <= FINDING_KEYS:
+                problems.append(f"findings[{index}]")
+                continue
+            identifier = finding.get("id")
+            if not isinstance(identifier, str) or not TOKEN.fullmatch(identifier) or identifier in finding_ids:
+                problems.append(f"findings[{index}].id")
+            else:
+                finding_ids.add(identifier)
+            severity = finding.get("severity")
+            rule = finding.get("rule")
+            if not isinstance(rule, str) or rule not in rules:
+                problems.append(f"findings[{index}].rule")
+            elif severity != rules.get(rule):
+                problems.append(f"findings[{index}].severity")
+            if severity == "low":
+                low += 1
+            for field in ("title", "explanation", "trigger", "consequence"):
+                if not text_field(finding.get(field)):
+                    problems.append(f"findings[{index}].{field}")
+            if finding.get("evidence") not in EVIDENCE:
+                problems.append(f"findings[{index}].evidence")
+            if "verification" in finding and not text_field(finding.get("verification")):
+                problems.append(f"findings[{index}].verification")
+            located = "path" in finding or "line" in finding or "side" in finding
+            if located and ("path" not in finding or "line" not in finding or "side" not in finding):
+                problems.append(f"findings[{index}].path")
+            elif located:
+                if not relative_path(finding.get("path")):
+                    problems.append(f"findings[{index}].path")
+                line = finding.get("line")
+                if not isinstance(line, int) or isinstance(line, bool) or line < 1:
+                    problems.append(f"findings[{index}].line")
+                if finding.get("side") not in ("LEFT", "RIGHT"):
+                    problems.append(f"findings[{index}].side")
+                signature = ("anchored", rule, finding.get("path"), finding.get("line"), finding.get("side"))
+            else:
+                signature = ("summary", rule, finding.get("title"))
+            if signature in signatures:
+                problems.append(f"findings[{index}]")
+            signatures.add(signature)
+        if low > 5:
+            problems.append("nits")
+    prior = result.get("prior")
+    if not isinstance(prior, list):
+        problems.append("prior")
+        prior = []
+    else:
+        seen_prior: set[str] = set()
+        for index, item in enumerate(prior):
+            if not isinstance(item, dict) or set(item) != {"id", "status", "source", "note"}:
+                problems.append(f"prior[{index}]")
+                continue
+            identifier = item.get("id")
+            status = item.get("status")
+            if not isinstance(identifier, str) or not TOKEN.fullmatch(identifier) or identifier in seen_prior:
+                problems.append(f"prior[{index}].id")
+            else:
+                seen_prior.add(identifier)
+            if status not in PRIOR_STATUS:
+                problems.append(f"prior[{index}].status")
+            if not text_field(item.get("source")) or not text_field(item.get("note")):
+                problems.append(f"prior[{index}]")
+            present = isinstance(identifier, str) and identifier in finding_ids
+            if status in {"still_present", "regressed"} and not present:
+                problems.append(f"prior[{index}].status")
+            if status in {"fixed", "unverified"} and present:
+                problems.append(f"prior[{index}].status")
+    mutations = result.get("mutations")
+    if not isinstance(mutations, list):
+        problems.append("mutations")
+    else:
+        for index, item in enumerate(mutations):
+            if not isinstance(item, dict) or set(item) != {"action", "thread", "body", "evidence"}:
+                problems.append(f"mutations[{index}]")
+                continue
+            if item.get("action") not in {"reply", "resolve"}:
+                problems.append(f"mutations[{index}].action")
+            if not text_field(item.get("thread")) or not text_field(item.get("body")) or not text_field(item.get("evidence")):
+                problems.append(f"mutations[{index}]")
+    if outcome == "clean" and (
+        findings
+        or any(item.get("status") != "fixed" for item in prior if isinstance(item, dict))
+        or any(check.get("status") in {"failed", "unavailable"} for check in checks if isinstance(check, dict))
+        or diff_status != "passed"
+    ):
+        problems.append("outcome")
+    if outcome == "findings" and (
+        not findings
+        or any(check.get("status") == "unavailable" for check in checks if isinstance(check, dict))
+        or diff_status != "passed"
+    ):
+        problems.append("outcome")
+    if outcome == "incomplete" and diff_status is None:
+        problems.append("outcome")
+    return problems
+
+
+def finding_text(finding: dict, *, located: bool) -> str:
+    lines = [
+        f"{SEVERITY_LABEL[finding['severity']]}: {finding['title'].strip()}",
+        "",
+        finding["explanation"].strip(),
+        "",
+        f"Trigger: {finding['trigger'].strip()}",
+        f"Impact: {finding['consequence'].strip()}",
+        f"Evidence: {finding['evidence']}",
+    ]
+    verification = finding.get("verification")
+    if isinstance(verification, str) and verification.strip():
+        lines.extend(["", f"Verify: {verification.strip()}"])
+    lines.extend(["", f"Rule: {finding['rule']}"])
+    if not located and finding.get("path"):
+        lines.extend(["", f"Location: {finding['path']}:{finding['line']} {finding['side']}"])
+    return "\n".join(lines)
+
+
+def public_review(result: dict) -> tuple[str, list[dict]]:
+    anchors = {(item["path"], item["line"], item["side"]) for item in result["diff"]}
+    comments: list[dict] = []
+    outside: list[dict] = []
+    for finding in result["findings"]:
+        key = (finding.get("path"), finding.get("line"), finding.get("side"))
+        if finding.get("path") and key in anchors:
+            comments.append({
+                "path": finding["path"],
+                "line": finding["line"],
+                "side": finding["side"],
+                "body": finding_text(finding, located=True),
+            })
+        else:
+            outside.append(finding)
+    count = len(result["findings"])
+    if result["outcome"] == "clean":
+        opening = "No actionable findings."
+    elif result["outcome"] == "findings":
+        opening = "1 actionable finding." if count == 1 else f"{count} actionable findings."
+    else:
+        opening = "The review is incomplete."
+    lines = [opening, "", "Checks:"]
+    for check in result["checks"]:
+        lines.append(f"- {check['name']}: {check['status']}. {check['detail'].strip()}")
+    if result["limitations"]:
+        lines.extend(["", "Limitations:"])
+        lines.extend(f"- {item.strip()}" for item in result["limitations"])
+    if outside:
+        lines.extend(["", "Findings outside the current diff:"])
+        for finding in outside:
+            lines.extend(["", finding_text(finding, located=False)])
+    if result["prior"]:
+        lines.extend(["", "Earlier findings:"])
+        for item in result["prior"]:
+            lines.append(f"- {item['id']} ({item['source'].strip()}): {item['status']}. {item['note'].strip()}")
+    if result["mutations"]:
+        lines.extend(["", "Proposed GitHub actions, not performed:"])
+        for item in result["mutations"]:
+            lines.append(f"- {item['action']} {item['thread'].strip()}: {item['body'].strip()}")
+    lines.extend([
+        "",
+        f"Runtime: {result['runtime']}.",
+        f"Reviewed {result['owner']}/{result['repo']}#{result['pull']} at {result['head']}.",
+    ])
+    return "\n".join(lines) + "\n", comments
+
+
+def publication_matches(payload: dict) -> list[str]:
+    if "result" not in payload:
+        return []
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return ["result"]
+    problems = validate_result(result)
+    if problems:
+        return problems
+    if result.get("outcome") == "incomplete":
+        return ["incomplete"]
+    for field in ("owner", "repo", "pull", "base", "head", "runtime"):
+        if payload.get(field) != result.get(field):
+            problems.append(field)
+    body, comments = public_review(result)
+    current = payload.get("body")
+    if not isinstance(current, str) or MARKER.sub("", current).strip() != body.strip():
+        problems.append("body")
+    if payload.get("comments") != comments:
+        problems.append("comments")
+    return problems
+
+
+def interpret_pull(current: object, pull: int) -> tuple[object, object, bool]:
+    if not isinstance(current, dict):
+        return None, None, False
+    number = current.get("number")
+    if isinstance(number, bool) or not isinstance(number, int) or number != pull:
+        return None, None, False
+    head_obj = current.get("head")
+    base_obj = current.get("base")
+    head = head_obj.get("sha") if isinstance(head_obj, dict) else None
+    base = base_obj.get("sha") if isinstance(base_obj, dict) else None
+    if not isinstance(head, str) or not SHA.fullmatch(head):
+        return None, None, False
+    if not isinstance(base, str) or not SHA.fullmatch(base):
+        return None, None, False
+    return head, base, True
+
+
+def target_url(url: object, owner: str, repo: str, pull: int) -> bool:
+    if not isinstance(url, str) or not url:
+        return False
+    web = f"https://github.com/{owner}/{repo}/pull/{pull}"
+    api = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pull}/"
+    return url.startswith(web + "#") or url.startswith(web + "/") or url.startswith(api)
+
+
+def review_matches(review: dict, owner: str, repo: str, pull: int) -> bool:
+    return target_url(review.get("html_url"), owner, repo, pull) or target_url(review.get("url"), owner, repo, pull)
 
 
 def validate(payload: dict) -> list[str]:
@@ -127,8 +486,11 @@ def validate(payload: dict) -> list[str]:
         value = payload.get(field)
         if not isinstance(value, str) or not SHA.fullmatch(value):
             problems.append(field)
+    if payload.get("runtime") != "linux":
+        problems.append("runtime")
     if payload.get("event") != "COMMENT":
         problems.append("event")
+    problems.extend(publication_matches(payload))
     body = payload.get("body")
     if not isinstance(body, str) or not body.strip():
         problems.append("body")
@@ -144,14 +506,7 @@ def validate(payload: dict) -> list[str]:
             if not isinstance(comment, dict):
                 problems.append(f"comments[{index}]")
                 continue
-            path = comment.get("path")
-            if (
-                not isinstance(path, str)
-                or not path
-                or path.startswith("/")
-                or "\\" in path
-                or any(part in ("", ".", "..") for part in path.split("/"))
-            ):
+            if not relative_path(comment.get("path")):
                 problems.append(f"comments[{index}].path")
             line = comment.get("line")
             if not isinstance(line, int) or isinstance(line, bool) or line < 1:
@@ -217,17 +572,64 @@ def matching_review(reviews: list[dict], marker: str) -> dict | None:
     return None
 
 
-def print_review(owner: str, repo: str, pull: int, review: dict) -> None:
-    url = review.get("html_url") or review.get("url") or ""
-    print(f"REVIEW_URL={url}")
-    # Creating a review does not return its inline comments. The comments
-    # route does, keyed by pull_request_review_id.
-    review_id = review.get("id")
+def review_with_id(reviews: list[dict], review_id: object) -> dict | None:
     if not isinstance(review_id, int) or isinstance(review_id, bool):
-        return
-    for comment in comments_of(owner, repo, pull):
-        if comment.get("pull_request_review_id") != review_id:
-            continue
+        return None
+    for review in reviews:
+        if review.get("id") == review_id:
+            return review
+    return None
+
+
+def record_visible_review(
+    owner: str,
+    repo: str,
+    pull: int,
+    review: dict,
+    digest: str,
+    checkpoint_path: Path,
+    head: str,
+    already: bool,
+) -> None:
+    if not review_matches(review, owner, repo, pull):
+        print(
+            "The review on GitHub does not match the approved pull request. GitHub was not called again.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    review_id = review.get("id")
+    visible: list[dict] = []
+    if isinstance(review_id, int) and not isinstance(review_id, bool):
+        for comment in comments_of(owner, repo, pull):
+            if comment.get("pull_request_review_id") != review_id:
+                continue
+            url = comment.get("html_url") or comment.get("url") or ""
+            if target_url(url, owner, repo, pull):
+                visible.append(comment)
+    comment_ids = [
+        comment.get("id")
+        for comment in visible
+        if isinstance(comment.get("id"), int) and not isinstance(comment.get("id"), bool)
+    ]
+    write_checkpoint(
+        checkpoint_path,
+        {
+            "state": "posted",
+            "payload_sha256": digest,
+            "review_id": review_id,
+            "review_url": review.get("html_url") or review.get("url") or "",
+            "comment_ids": comment_ids,
+            "comment_urls": [comment.get("html_url") or comment.get("url") or "" for comment in visible],
+            "owner": owner,
+            "repo": repo,
+            "pull": pull,
+            "head": head,
+        },
+    )
+    if already:
+        print("REVIEW_ALREADY_POSTED=1")
+    print(f"REVIEW_URL={review.get('html_url') or review.get('url') or ''}")
+    for comment in visible:
         print(f"COMMENT_URL={comment.get('html_url') or comment.get('url') or ''}")
 
 
@@ -257,7 +659,14 @@ def show(path: Path) -> None:
 
 
 def stamp(path: Path) -> None:
-    raw, payload = load_payload(path)
+    _raw, payload = load_payload(path)
+    match_problems = publication_matches(payload)
+    if "incomplete" in match_problems:
+        print("The review is incomplete. GitHub was not called.", file=sys.stderr)
+        raise SystemExit(2)
+    if match_problems:
+        print("Review result is incomplete: " + ", ".join(match_problems), file=sys.stderr)
+        raise SystemExit(2)
     body = payload.get("body")
     if not isinstance(body, str):
         raise SystemExit("Payload body must be a string.")
@@ -310,6 +719,8 @@ def approve(payload_path: Path, approval_path: Path, preview_sha: str) -> None:
             "preview_sha256": preview_sha,
             "identity": identity_of(payload),
             "head": payload["head"],
+            "base": payload["base"],
+            "runtime": payload.get("runtime"),
             "owner": payload["owner"],
             "repo": payload["repo"],
             "pull": payload["pull"],
@@ -394,7 +805,31 @@ def authorized_post(payload_path: Path, approval_path: Path) -> tuple[bytes, dic
     if payload.get("head") != approval.get("head"):
         print("The approved head does not match the payload. GitHub was not called.", file=sys.stderr)
         raise SystemExit(6)
+    if payload.get("base") != approval.get("base") or payload.get("runtime") != approval.get("runtime"):
+        print("The payload differs from the approved target. GitHub was not called.", file=sys.stderr)
+        raise SystemExit(5)
     return raw, payload, approval, digest
+
+
+def operation_key(payload: dict, approval: dict, digest: str) -> tuple:
+    return (
+        payload.get("owner"),
+        payload.get("repo"),
+        payload.get("pull"),
+        payload.get("base"),
+        payload.get("head"),
+        payload.get("runtime"),
+        approval.get("identity"),
+        digest,
+        approval.get("generation"),
+    )
+
+
+def require_same_operation(payload_path: Path, approval_path: Path, pinned: tuple) -> None:
+    _raw, payload, approval, digest = authorized_post(payload_path, approval_path)
+    if operation_key(payload, approval, digest) != pinned:
+        print("The approval record was replaced. GitHub was not called.", file=sys.stderr)
+        raise SystemExit(5)
 
 
 def review_body(payload: dict) -> dict:
@@ -428,57 +863,82 @@ def post(payload_path: Path, approval_path: Path) -> None:
     lock = lock_path.open("a+")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        _raw, payload, approval, _digest = authorized_post(payload_path, approval_path)
-        if str(approval.get("identity")) != identity:
+        _raw, payload, approval, digest = authorized_post(payload_path, approval_path)
+        if (
+            payload.get("owner") != owner
+            or payload.get("repo") != repo
+            or payload.get("pull") != pull
+            or str(approval.get("identity")) != identity
+        ):
             print("The approval record was replaced. GitHub was not called.", file=sys.stderr)
             raise SystemExit(5)
-        post_locked(payload_path, approval_path, payload, approval, checkpoint_path)
+        pinned = operation_key(payload, approval, digest)
+        post_locked(payload_path, approval_path, payload, approval, digest, pinned, checkpoint_path)
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)
         lock.close()
 
 
 def post_locked(
-    payload_path: Path, approval_path: Path, payload: dict, approval: dict, checkpoint_path: Path
+    payload_path: Path,
+    approval_path: Path,
+    payload: dict,
+    approval: dict,
+    digest: str,
+    pinned: tuple,
+    checkpoint_path: Path,
 ) -> None:
     owner, repo, pull = payload["owner"], payload["repo"], payload["pull"]
+    approved_head = payload["head"]
+    approved_base = payload["base"]
+    marker = f"<!-- cursor-review:{approval['identity']} -->"
     code, stdout, stderr = gh_api("GET", f"repos/{owner}/{repo}/pulls/{pull}")
     if code != 0:
         print(stderr.decode("utf-8", errors="replace"), file=sys.stderr)
         raise SystemExit(1)
     current = json.loads(stdout.decode() or "{}")
-    head = current.get("head", {}).get("sha") if isinstance(current, dict) else None
-    _raw, payload, approval, digest = authorized_post(payload_path, approval_path)
-    if head != approval.get("head"):
-        print(f"The pull request head is {head}, not the approved {approval.get('head')}.", file=sys.stderr)
+    fetched_head, fetched_base, readable = interpret_pull(current, pull)
+    require_same_operation(payload_path, approval_path, pinned)
+    if not readable or fetched_head != approved_head or fetched_base != approved_base:
+        print(
+            "The pull request revision changed. Refresh the review and approve it again. GitHub was not called.",
+            file=sys.stderr,
+        )
         raise SystemExit(6)
-    marker = f"<!-- cursor-review:{approval['identity']} -->"
-    existing = matching_review(reviews_of(owner, repo, pull), marker)
+    reviews = reviews_of(owner, repo, pull)
+    require_same_operation(payload_path, approval_path, pinned)
+    existing = matching_review(reviews, marker)
     if existing is not None:
-        write_checkpoint(checkpoint_path, {"state": "posted", "payload_sha256": digest, "review_id": existing.get("id")})
-        print("REVIEW_ALREADY_POSTED=1")
-        print_review(owner, repo, pull, existing)
+        record_visible_review(owner, repo, pull, existing, digest, checkpoint_path, approved_head, True)
         return
+    journal = read_json_object(checkpoint_path)
+    if isinstance(journal, dict) and journal.get("state") == "posted":
+        prior = review_with_id(reviews, journal.get("review_id"))
+        if prior is not None:
+            record_visible_review(owner, repo, pull, prior, digest, checkpoint_path, approved_head, True)
+            return
+        label = journal.get("review_id")
+        shown = label if isinstance(label, int) and not isinstance(label, bool) else "unknown"
+        print(f"Confirmed review {shown} is not visible. GitHub was not called again.", file=sys.stderr)
+        raise SystemExit(1)
     if checkpoint_state(checkpoint_path) == "posting":
         print("The previous post did not confirm delivery. GitHub was not called again.", file=sys.stderr)
         raise SystemExit(1)
-    write_checkpoint(checkpoint_path, {"state": "posting", "payload_sha256": digest, "head": payload["head"]})
+    write_checkpoint(
+        checkpoint_path,
+        {"state": "posting", "payload_sha256": digest, "head": approved_head, "base": approved_base},
+    )
     try:
-        _raw, payload, approval, digest = authorized_post(payload_path, approval_path)
+        require_same_operation(payload_path, approval_path, pinned)
     except SystemExit:
         # The request was not sent. Drop the checkpoint so it is not an unsettled delivery.
         checkpoint_path.unlink(missing_ok=True)
         raise
-    marker = f"<!-- cursor-review:{approval['identity']} -->"
     code, stdout, stderr = gh_api("POST", f"repos/{owner}/{repo}/pulls/{pull}/reviews", review_body(payload))
     if code != 0:
         recovered = matching_review(reviews_of(owner, repo, pull), marker)
         if recovered is not None:
-            write_checkpoint(
-                checkpoint_path, {"state": "posted", "payload_sha256": digest, "review_id": recovered.get("id")}
-            )
-            print("REVIEW_ALREADY_POSTED=1")
-            print_review(owner, repo, pull, recovered)
+            record_visible_review(owner, repo, pull, recovered, digest, checkpoint_path, approved_head, True)
             return
         if PROVEN_REJECTION.search(stderr.decode("utf-8", errors="replace")):
             write_checkpoint(checkpoint_path, {"state": "rejected", "payload_sha256": digest, "head": payload["head"]})
@@ -491,19 +951,100 @@ def post_locked(
         created = json.loads(stdout.decode() or "{}")
     except json.JSONDecodeError:
         created = None
-    if not isinstance(created, dict) or created.get("id") is None:
+    if not isinstance(created, dict) or not isinstance(created.get("id"), int) or isinstance(created.get("id"), bool):
         print("Delivery is unknown. GitHub was not called again.", file=sys.stderr)
         raise SystemExit(1)
-    write_checkpoint(checkpoint_path, {"state": "posted", "payload_sha256": digest, "review_id": created.get("id")})
-    print_review(owner, repo, pull, created)
+    record_visible_review(owner, repo, pull, created, digest, checkpoint_path, approved_head, False)
+
+
+def bind(owner: str, repo: str, pull: int, out: Path | None) -> None:
+    if not NAME.fullmatch(owner) or not NAME.fullmatch(repo) or isinstance(pull, bool) or pull < 1:
+        print("The pull request target is invalid. GitHub was not called.", file=sys.stderr)
+        raise SystemExit(2)
+    code, stdout, stderr = gh_api("GET", f"repos/{owner}/{repo}/pulls/{pull}")
+    if code != 0:
+        print(stderr.decode("utf-8", errors="replace"), file=sys.stderr)
+        raise SystemExit(1)
+    try:
+        current = json.loads(stdout.decode() or "{}")
+    except json.JSONDecodeError:
+        current = None
+    head, base, readable = interpret_pull(current, pull)
+    if not readable:
+        print("The pull request revision is unreadable. GitHub was not called.", file=sys.stderr)
+        raise SystemExit(2)
+    revision = {"owner": owner, "repo": repo, "pull": pull, "base": base, "head": head, "runtime": "linux"}
+    if out is None:
+        json.dump(revision, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        print("Recorded the pull request revision. GitHub was not called.", file=sys.stderr)
+        return
+    if out.exists():
+        recorded = read_json_object(out)
+        if recorded is None:
+            print("The review file is not a JSON object. GitHub was not called.", file=sys.stderr)
+            raise SystemExit(2)
+        same = (
+            recorded.get("owner") == owner
+            and recorded.get("repo") == repo
+            and recorded.get("pull") == pull
+            and recorded.get("base") == base
+            and recorded.get("head") == head
+            and recorded.get("runtime") == "linux"
+        )
+        if not same:
+            print(
+                "The pull request revision changed. Refresh the review and approve it again. GitHub was not called.",
+                file=sys.stderr,
+            )
+            raise SystemExit(6)
+        print("Revision matches the recorded review. GitHub was not called.")
+        return
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(revision, indent=2) + "\n", encoding="utf-8")
+    print("Recorded the pull request revision. GitHub was not called.")
+
+
+def render(source: Path, dest: Path) -> None:
+    raw, result = load_payload(source)
+    refuse_scan(raw, result)
+    problems = validate_result(result)
+    if problems:
+        print("Review result is incomplete: " + ", ".join(problems), file=sys.stderr)
+        raise SystemExit(2)
+    body, comments = public_review(result)
+    payload = {
+        "owner": result["owner"],
+        "repo": result["repo"],
+        "pull": result["pull"],
+        "base": result["base"],
+        "head": result["head"],
+        "runtime": result["runtime"],
+        "event": "COMMENT",
+        "body": body,
+        "comments": comments,
+        "result": result,
+    }
+    text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+    refuse_scan(text.encode(), payload)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    temporary = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
+    temporary.write_text(text, encoding="utf-8")
+    os.replace(temporary, dest)
+    print(f"REVIEW_OUTCOME={result['outcome']}", file=sys.stderr)
+    if result["outcome"] == "incomplete":
+        print("The review is incomplete and cannot be published. GitHub was not called.", file=sys.stderr)
+    else:
+        print("Rendered the review. GitHub was not called.", file=sys.stderr)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Show or post an approved COMMENT review.")
-    parser.add_argument("command", choices=("show", "stamp", "approve", "deny", "post"))
+    parser.add_argument("command", choices=("show", "stamp", "approve", "deny", "post", "render", "bind"))
     parser.add_argument("payload", nargs="?", type=Path)
     parser.add_argument("approval", nargs="?", type=Path)
     parser.add_argument("preview", nargs="?")
+    parser.add_argument("extra", nargs="?")
     args = parser.parse_args()
     if args.command == "show":
         if args.payload is None:
@@ -521,6 +1062,18 @@ def main() -> None:
         if args.payload is None:
             parser.error("deny requires an approval file")
         deny(args.payload)
+    elif args.command == "render":
+        if args.payload is None or args.approval is None:
+            parser.error("render requires a result file and an output file")
+        render(args.payload, args.approval)
+    elif args.command == "bind":
+        if args.payload is None or args.approval is None or args.preview is None:
+            parser.error("bind requires owner, repo, and pull")
+        try:
+            pull = int(args.preview)
+        except ValueError:
+            parser.error("bind pull must be an integer")
+        bind(str(args.payload), str(args.approval), pull, Path(args.extra) if args.extra else None)
     else:
         if args.payload is None or args.approval is None:
             parser.error("post requires a payload file and an approval file")
