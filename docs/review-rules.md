@@ -39,6 +39,8 @@ a Greptile or Cursor review finding from the [contribution review requirements](
 
 Runtime, authentication, model selection, tools, transport, and session lifecycle changes need evidence from the affected behavior. Unit tests are separate from a live host check. For CreatePlan, SwitchMode, tool-catalog caching, and the host boundary, [docs/host-compat-acceptance.md](host-compat-acceptance.md) is the checklist. Docs-only, test-only, and comment-only changes do not need a live run.
 
+An observation is not yet a finding. Promote it only after the review procedure in [docs/pr-review.md](pr-review.md) can name the contract, a reachable trigger, the causal path, and the consequence that violates that contract. A test or a documented failure policy is evidence to challenge, not a substitute for that contract. The same procedure's omission pass is separate: a defended finding list does not show that later uses of the changed state were examined. The procedure itself stays in the review skill so this rubric is not a second copy.
+
 Required CI is `Typecheck, test, build`. A failing or pending required check is not ready.
 Before declaring a PR ready, also apply the [review and coverage requirements](../CONTRIBUTING.md#review-and-coverage-requirements). Greptile comments, Cursor review comments, and Codecov deficiencies all count.
 

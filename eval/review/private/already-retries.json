@@ -1,0 +1,21 @@
+{
+  "heldout": false,
+  "variants": {
+    "subject": {
+      "defects": [],
+      "nonDefects": [
+        {
+          "id": "retry-already-happens",
+          "paths": ["retry_due.py"],
+          "lines": [1, 30],
+          "symbols": ["def run"],
+          "causal": [
+            ["does not retry", "never retries", "no retry", "missing retry", "skips the retry"],
+            ["due", "later", "failed"]
+          ]
+        }
+      ],
+      "absentDefects": []
+    }
+  }
+}

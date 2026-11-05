@@ -719,14 +719,16 @@ These are failure lessons shared by both hosts, not a replacement for
   (`scripts/strip-copied-coverage.ts`).
 - **A green suite is not a branch audit.** A review missed a generator whose
   failed refresh retained the state that made the next invocation skip its
-  promised retry. Generalize the method: inventory changed behaviors, trace
-  contracts through callers and downstream consumers, challenge failure/state
-  and boundary paths, and retain counterexample evidence. An `adversarial`
-  label only attests to work; measure detection with buggy/fixed pairs across
-  defect classes, including held-out cases and false-positive controls. Repair
-  the review harness when that is the requested target, using the reviewed
-  defect as evaluation evidence rather than turning the repair into a patch
-  to the subject PR (`docs/pr-review.md`).
+  promised retry, and it also promoted observations and policy preferences
+  into actionable defects. The review procedure has to establish a contract,
+  a reachable trigger, a causal path, and a violation before publishing, then
+  make a separate pass over behaviors and later uses that were not examined.
+  An `adversarial` label and a well-formed private ledger only attest to that
+  work. Measure detection with the manual pairs in `eval/review/`, including
+  held-out cases and false-positive controls, and say so when no fresh
+  reviewer ran. Repair the review harness when that is the requested target,
+  using the reviewed defect as evaluation evidence rather than turning the
+  repair into a patch to the subject (`docs/pr-review.md`).
 - **Review text is not a publication receipt.** Publish through the approved
   review publisher, including clean verdicts. A discussion comment can carry
   the exact review marker without being a submitted review or creating inline

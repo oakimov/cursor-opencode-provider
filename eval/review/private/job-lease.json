@@ -1,0 +1,39 @@
+{
+  "heldout": false,
+  "variants": {
+    "buggy": {
+      "defects": [
+        {
+          "id": "cancel-records-success",
+          "paths": ["supervise.py"],
+          "lines": [1, 80],
+          "symbols": ["def serve"],
+          "causal": [
+            ["cancel"],
+            ["receipt", "success"],
+            ["worker", "child", "process"]
+          ]
+        }
+      ],
+      "nonDefects": [],
+      "absentDefects": []
+    },
+    "fixed": {
+      "defects": [],
+      "nonDefects": [],
+      "absentDefects": [
+        {
+          "id": "cancel-records-success",
+          "paths": ["supervise.py"],
+          "lines": [1, 90],
+          "symbols": ["def serve"],
+          "causal": [
+            ["cancel"],
+            ["receipt", "success"],
+            ["still", "after cancel", "even if"]
+          ]
+        }
+      ]
+    }
+  }
+}

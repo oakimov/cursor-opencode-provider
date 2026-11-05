@@ -1,0 +1,22 @@
+{
+  "heldout": false,
+  "variants": {
+    "subject": {
+      "defects": [],
+      "nonDefects": [
+        {
+          "id": "over-budget-rejection",
+          "paths": ["budget.py"],
+          "lines": [1, 20],
+          "symbols": ["def accept"],
+          "causal": [
+            ["budget", "limit", "20"],
+            ["reject", "raises", "valueerror", "fails"],
+            ["defect", "bug", "incorrect", "wrong", "should accept", "should succeed"]
+          ]
+        }
+      ],
+      "absentDefects": []
+    }
+  }
+}

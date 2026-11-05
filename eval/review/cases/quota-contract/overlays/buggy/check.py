@@ -1,0 +1,11 @@
+import sys
+
+
+def main(amount, limit):
+    del limit
+    sys.stdout.write(f"{amount}\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(int(sys.argv[1]), int(sys.argv[2])))

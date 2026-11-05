@@ -1,0 +1,22 @@
+{
+  "heldout": false,
+  "variants": {
+    "subject": {
+      "defects": [],
+      "nonDefects": [
+        {
+          "id": "untested-package-gate",
+          "paths": ["release_gate.py"],
+          "lines": [1, 20],
+          "symbols": ["def release"],
+          "causal": [
+            ["untested", "gate"],
+            ["exit 1", "blocks", "rejects"],
+            ["defect", "bug", "incorrect", "wrong", "should release"]
+          ]
+        }
+      ],
+      "absentDefects": []
+    }
+  }
+}

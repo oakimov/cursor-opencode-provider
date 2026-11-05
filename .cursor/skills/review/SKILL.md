@@ -20,55 +20,110 @@ Greptile comments and Cursor review comments have the same weight, and both may 
 
 Report logic and syntax. Style nits, at most five, as `docs/review-rules.md` describes. Cite a repository-relative `file:line`, the rule id, the severity, and the consequence. Say what you could not check. Absolute worktree and plugin paths stay in the private log.
 
-## Adversarial pass
+## Review procedure
 
 Build and tests support the review; they do not perform it. Use this procedure
-for any changed behavior, including scripts, setup, generated data and tests.
+for any changed behavior, including scripts, generators, setup, tests, durable
+state, and adjacent unchanged consumers. Do not exempt a file because it is
+outside `src/`.
 
-1. Inventory the changed files and group them by behavior. Reconstruct each
-   behavior's contract from callers, consumers, documentation and independent
-   definitions. Treat the PR description and the author's tests as claims to
-   check. Do not exempt executable files because they are outside `src/`.
-2. Trace each behavior from input and authorization through transformation,
-   validation, side effects and returned output to the code that consumes it.
-   Read adjacent unchanged code where that path depends on it. For durable
-   effects, follow the next use or invocation as well as the immediate return.
-3. Derive relevant counterexamples from that contract: absent/empty/invalid or
-   boundary inputs; fresh/existing/stale state; success/partial failure/error;
-   interruption, cancellation, retry, restart and repeated use; concurrent
-   actors, ordering, ownership, permissions and cleanup. Select meaningful
-   combinations for the behavior, with a reason when a category does not
-   apply. Do not repeat a fixed checklist without following the actual code.
-4. State a falsifiable failure hypothesis before relying on the suite. Trace
-   its reachable branch, inspect what existing assertions really exercise,
-   and reproduce a counterexample where feasible. Exercise the entrypoint or
-   orchestration that owns the suspected behavior; helper-only tests and
-   mocks that implement the expected state transition cannot validate it.
-   Keep external services fake where possible, without giving untrusted code
-   credentials or weakening the isolation boundary.
-5. Try to disprove each candidate: inspect guards, callers and the intended
-   contract, and compare with a known-correct case when available. A missing
-   test alone is not a demonstrated behavior defect. Report a concrete trigger,
-   causal path, consequence and evidence; do not manufacture findings.
+1. Inventory the changed files and group them into behaviors. Extract each
+   claim from the code, its callers, its consumers, the docs, and any
+   independent contract. Treat the pull-request description and the author's
+   tests as evidence to challenge, not as the specification.
+2. Trace input and authorization through transformation, validation, side
+   effects, and output to the code that actually consumes the result. Read
+   adjacent unchanged code where the path depends on it. Follow a durable
+   effect into the next use, invocation, or restart, not only the immediate
+   return.
+3. Derive counterexamples from that contract. Consider absent, empty, invalid,
+   and boundary inputs; fresh, existing, and stale state; success, partial
+   failure, and error; interruption, cancellation, retry, restart, and
+   repeated use; concurrent actors, ordering, ownership, permissions, and
+   cleanup. Select meaningful combinations and say why an inapplicable
+   category does not apply. Do not walk a fixed checklist, and do not demand
+   an indiscriminate matrix of tests.
+4. Form a falsifiable failure hypothesis. Trace the reachable branch and
+   compare the existing assertions with the claimed behavior. Where feasible,
+   exercise the entrypoint or orchestration that owns the transition.
+   Reproduce the initial state, the action, the expected and observed output,
+   and what a later consumer does. Mock an external service. Do not mock the
+   suspected state machine or hand it the expected result. A helper test, an
+   immediate exit status, or a mocked transition does not establish the
+   behavior the orchestration owns.
+5. Try to falsify each candidate before promoting it. Read the callers,
+   guards, documentation, relevant assertions, and the base revision. A
+   missing test is not by itself a behavior defect. Confirm a source-level
+   finding with a concrete causal path, and keep it distinct from a
+   reproduced finding and from an unresolved hypothesis. Do not invent
+   findings to fill a quota.
+6. After candidate validation, make a separate omission pass. Cover every
+   changed behavior, including scripts, and trace its state into the next
+   consumption. For stateful paths, inspect fresh and existing state, partial
+   effects, and failure, then the next retry, use, or restart. Passing
+   candidate validation does not mean the omission pass was done, and the
+   reverse is also true.
 
-Keep a private evidence ledger by behavior: contract and source locations,
-relevant scenarios, expected versus observed results, test gaps, reproduction
-or source-trace references, and unresolved limits. Include the downstream
-observation after a failure or partial side effect; an exit code alone need
-not establish what was saved, delivered, retried or consumed. Distinguish
-source analysis, fixtures, native-host checks and live service evidence.
+A counterexample becomes an actionable finding only after you establish the
+expected behavior and its source, a reachable trigger, the actual causal path
+and downstream consequence, and why that outcome violates the contract. An
+error return, a thrown exception, a conservative rejection, or a red check is
+an observation, not by itself a defect. Reproduction proves the behavior you
+exercised. It does not prove that a preferred alternative is correct.
 
-Keep the ledger's location in the private run log. Record a concise account of
-the analysis in a check named `adversarial`, separate from build/tests. Use
-`passed` for completed analysis even when it finds defects. If required analysis
-is blocked, report `unavailable` and an incomplete outcome. `skipped` is only for a justified
-docs/comment-only diff. This status is an attestation, not proof that the
-reviewer can detect bugs. Keep the detailed ledger out of public comments;
-do not put private paths in the result or payload.
+Tests are evidence of intent, not an infallible specification. If a test
+encodes a defect, name the independently supported contract it violates. An
+unchanged branch can contain a reportable pre-existing defect. Label that
+provenance and show that the change can reach it. Do not drop it only because
+it predates the pull request.
+
+Separate implementation defects from proposed policy changes, operational
+limitations, and unverified hypotheses. Do not replace documented semantics
+with a preferred reliability, availability, or failure policy. A documented
+policy can still be defective when it contradicts an established requirement:
+cite that requirement and the concrete conflict. Without that evidence, keep
+the proposal out of actionable inline findings.
+
+Check the exact semantics of a capability or guarantee. Observed support does
+not mean every later request succeeds. An availability failure does not by
+itself prove that the capability is absent. A fail-closed gate that behaves
+as specified is not a defect because it stops progress. Before recommending
+a change, verify that the requested behavior is not already implemented.
+
+Publish only defensible findings. The public comment states the contract, the
+trigger, the consequence, and the evidence, and it stays inside the existing
+rubric: logic and syntax, with at most five low-severity nits. Label
+synthetic, source-only, native, and live evidence accurately. Do not present
+an artificial reply or an injected service failure as a witnessed production
+incident. Record uncertain candidates only in the private ledger, with what
+would confirm or refute them. Analysis that was required and could not be
+performed makes the review incomplete. Missing optional live evidence is a
+stated limitation.
 
 A generic live `pong` exercises plugin loading and response plumbing. It does
-not establish that a changed image/tool/cancellation behavior worked. Missing
-optional live evidence is a limitation; it does not license a stronger claim.
+not establish that a changed image, tool, or cancellation behavior worked.
+
+## Private ledger
+
+Keep a private evidence ledger, one entry per behavior: contract and source
+locations, scenarios, expected versus observed results, supporting commands or
+source traces, uncovered branches, downstream observations, and limits. Write
+it so a later head can be re-reviewed from it. Keep private paths and working
+notes out of the public result and payload.
+
+`scripts/review-ledger.py check` must accept the ledger, and
+`scripts/review-ledger.py compare` must accept it against the result, before
+`render`. The ledger records two completion passes, `candidatesValidated` and
+`omissionsAnalyzed`. A pass that did not happen leaves the review incomplete.
+The ledger is not published, and a ledger that validates is not evidence that
+the findings are true or complete.
+
+Record a concise account in the result check named `adversarial`, separate
+from build and tests. Use `passed` when both passes finished, even if they
+produced findings. If required analysis is blocked, use `unavailable` and an
+incomplete outcome. `skipped` is only for a justified docs or comment-only
+diff, with a reason. That status attests that the passes were done. It is not
+machine proof of semantic correctness.
 
 ## Checks
 
@@ -106,7 +161,8 @@ values; it does not prove write permission. Never print a
 credential file or token. A 403 needs an authorized publisher credential, not
 a discussion-comment fallback or a claim that the review was posted.
 
-Use only `scripts/review-publish.py post` after exact-preview approval. Do not
+Check the private ledger and compare it to the result before `render`. Use only
+`scripts/review-publish.py post` after exact-preview approval. Do not
 substitute `gh pr comment`, a GitHub comment tool, or an agent final-response
 comment, including for a clean review. If the publisher is unavailable, stop
 with the approved payload intact. Confirm a submitted review URL and read back

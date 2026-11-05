@@ -15,7 +15,7 @@ Review https://github.com/oakimov/cursor-opencode-provider/pull/N.
 Follow .cursor/skills/review/SKILL.md and docs/pr-review.md.
 Read the diff, the files it changes, their callers, docs/review-rules.md, and the existing review threads.
 Run scripts/isolated-check.sh on that pull request.
-Perform the skill's adversarial pass: inventory behaviors, reconstruct contracts, trace consumers, challenge failure/state/boundary paths, and retain a private evidence ledger.
+Perform the review procedure in `.cursor/skills/review/SKILL.md`: inventory behaviors, trace consumers, falsify candidates, then run the omission pass as a separate check. Keep the private ledger out of the payload.
 Record that revision, render one structured COMMENT review with scripts/review-publish.py, and show the payload.
 Stop. Do not post, approve, or merge. An incomplete result is not a finished review.
 ```
@@ -27,28 +27,43 @@ Write the review as a result, then render it. The result records the same reposi
 `bind` reads the pull request and records its base and head. When the result file already has a different revision, `bind` stops and leaves the file unchanged. `render` checks the result and writes the payload. `REVIEW_OUTCOME=incomplete` means the analysis did not reach a defensible review: the diff was unreadable, a tool was unavailable, or the result is malformed. That file can be read and cannot be stamped or posted. Rendering is not publication. Showing the preview is not approval. Approval is not a merge.
 
 Structured results require an `adversarial` check in addition to `diff` and test
-results. Follow the procedure in the review skill and retain its private
-evidence ledger. The check detail names the reviewed behaviors, relevant
-counterexamples, source/reproduction evidence and unresolved limits. Trace
-downstream consumers and later uses after partial effects or failures, rather
-than inferring correctness from the immediate return or a helper test.
-`passed` means that analysis completed; findings still belong in `findings`.
-Only docs/comment-only diffs may mark it `skipped`, with a reason. This is an
-explicit reviewer attestation, not a machine proof of semantic correctness.
-Successful tests alone do not establish a clean review, and a live `pong` does
-not exercise a changed image/tool/cancellation path.
+results. That check attests that both completion passes in the review skill
+finished: candidate validation, and a separate omission pass. Neither pass
+establishes the other. `passed` means both finished; findings still belong in
+`findings`. Only a docs or comment-only diff may mark it `skipped`, with a
+reason. The attestation is not proof that defects were found.
+
+An actionable finding states the contract and where it comes from, a reachable
+trigger, the causal path, and the downstream consequence that violates the
+contract. An error, a rejection, or a red check is an observation until that
+case is made. Policy proposals, operational limits, and unverified hypotheses
+stay out of inline findings unless a documented policy contradicts an
+established requirement that the review cites. Public comments stay inside the
+existing rubric and do not include the ledger.
+
+The private ledger is `scripts/review-ledger.py`. `check` validates it.
+`compare` requires every public finding to be an actionable candidate that
+survived falsification, and it rejects a clean or findings result when either
+pass is unfinished. Run both before `render`. A ledger that validates is not
+a correct or complete review. Tests can pass, including helper tests, while
+the orchestration that owns a later retry or consumer is still wrong. A live
+`pong` covers plugin loading and the reply path only. Missing optional live
+evidence is a limitation. Required analysis that could not be performed is an
+incomplete review.
 
 When changing the review harness, evaluate detection separately from publisher
-correctness. Use manually invoked buggy/fixed pairs from several defect
-classes, including held-out cases. Keep expected answers outside the reviewer's
-inputs, judge causal findings rather than exact wording, and check fixed cases
-for the same false finding. A parser test or a newly required check name does
-not measure reviewer quality. Record the actual agent/model/revision, detected
-defects, misses and false positives; if no agent evaluation ran, report that
-limit. Keep review comments concise and governed by the existing rubric.
+correctness. `eval/review/` holds manually invoked pairs and the scorer. Keep
+the answer key outside the reviewer mount. Judge causal findings and their
+locations, and check a fixed case for the same defect claim. A parser test, a
+well-formed ledger, or a required check name does not measure detection.
+Record the harness revision, the case revision, the model, and whether the
+review actually finished, including misses and false positives. If no fresh
+reviewer ran, report that detection is unverified.
 
 ```bash
 python3 scripts/review-publish.py bind owner repo 156 review.json
+python3 scripts/review-ledger.py check ledger.json
+python3 scripts/review-ledger.py compare ledger.json review.json
 python3 scripts/review-publish.py render review.json payload.json
 python3 scripts/review-publish.py stamp payload.json
 python3 scripts/review-publish.py show payload.json
