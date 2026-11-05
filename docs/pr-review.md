@@ -37,9 +37,11 @@ scripts/review-pr.sh --local
 
 The script checks out the pull request in a temporary worktree (or uses the current checkout, including uncommitted files, with `--local`). It installs, builds, runs `bun test`, and lists the `.cursor/rules/` that apply to the diff. Install, build, and tests for a contributor pull request run without reviewer credentials. `--live` is a separate decision: it runs that revision's `scripts/live-test.sh` with `CURSOR_API_KEY` and no other secrets. The reviewer skill is `.cursor/skills/review`.
 
-The review's OpenCode model is `cursor/default` (Cursor Auto). The script prints `REVIEW_MODEL=`. Override with `CURSOR_REVIEW_MODEL` set to a `provider/model` id that `opencode run --model` accepts:
+The review's OpenCode model is `cursor/default` (Cursor Auto). The script prints `REVIEW_MODEL=`. Override with `CURSOR_REVIEW_MODEL` set to a `provider/model` id that `opencode run --model` accepts. From the repo root, after `scripts/configure-opencode.sh`, load this checkout's plugin before the run. Without `.opencode-local/env`, OpenCode uses its default config and `cursor/default` is not this provider:
 
 ```bash
+source .opencode-local/env
+export OPENCODE_CONFIG_DIR CURSOR_OPENCODE2_DEV_ENTRY
 opencode run --standalone --model "${CURSOR_REVIEW_MODEL:-cursor/default}"
 ```
 

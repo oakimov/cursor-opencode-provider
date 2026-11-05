@@ -99,14 +99,14 @@ describe("local review paths", () => {
       expect(quoted.stdout.startsWith("\"")).toBe(true)
       const result = spawnSync("bash", ["-c", `
         set -euo pipefail
-        source "${root}/scripts/review-pr.sh"
-        cd "${directory}"
+        source "$1"
+        cd "$2"
         diff_names=""
         diff_text=""
         review_add_untracked
         printf '%s' "$diff_names" > names-out
         printf '%s' "$diff_text" > text-out
-      `], { encoding: "utf8", env: gitEnv })
+      `, "bash", path.join(root, "scripts/review-pr.sh"), directory], { encoding: "utf8", env: gitEnv })
       expect(result.status, `${result.stdout}${result.stderr}`).toBe(0)
       expect(fs.readFileSync(path.join(directory, "names-out"), "utf8")).toBe(fileName)
       expect(fs.readFileSync(path.join(directory, "text-out"), "utf8")).toContain("quoted-untracked")
@@ -118,9 +118,9 @@ describe("local review paths", () => {
   it("decodes NUL-delimited names without quoting", () => {
     const result = spawnSync("bash", ["-c", `
       set -euo pipefail
-      source "${root}/scripts/review-pr.sh"
+      source "$1"
       python3 -c 'import os,sys; sys.stdout.buffer.write(os.environ["NAME"].encode() + b"\\0src/index.ts\\0")' | review_paths_from_nul
-    `], { encoding: "utf8", env: { ...process.env, NAME: "caf\u00e9.ts" } })
+    `, "bash", path.join(root, "scripts/review-pr.sh")], { encoding: "utf8", env: { ...process.env, NAME: "caf\u00e9.ts" } })
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toBe("caf\u00e9.ts\nsrc/index.ts\n")
   })
@@ -131,13 +131,13 @@ describe("local review paths", () => {
     try {
       const result = spawnSync("bash", ["-c", `
         set -euo pipefail
-        source "${root}/scripts/review-pr.sh"
+        source "$1"
         names_file=$(mktemp)
         echo pending > "$names_file"
-        printf '%s' "$names_file" > "${record}"
+        printf '%s' "$names_file" > "$2"
         trap review_cleanup EXIT
         exit 1
-      `], { encoding: "utf8" })
+      `, "bash", path.join(root, "scripts/review-pr.sh"), record], { encoding: "utf8" })
       expect(result.status).toBe(1)
       const namesFile = fs.readFileSync(record, "utf8")
       expect(fs.existsSync(namesFile)).toBe(false)

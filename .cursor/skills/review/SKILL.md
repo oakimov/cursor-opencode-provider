@@ -22,9 +22,11 @@ Read the script summary. `LIVE_TEST=skipped` means the key is unset, or `--live`
 
 ## Model
 
-The review's OpenCode model is `cursor/default` (Cursor Auto). Override it with `CURSOR_REVIEW_MODEL`, a `provider/model` id accepted by `opencode run --model`.
+The review's OpenCode model is `cursor/default` (Cursor Auto). Override it with `CURSOR_REVIEW_MODEL`, a `provider/model` id accepted by `opencode run --model`. From the repo root, after `scripts/configure-opencode.sh`, source `.opencode-local/env` first. That is the config the installer writes. Without it, OpenCode uses its default config and `cursor/default` is not this provider.
 
 ```bash
+source .opencode-local/env
+export OPENCODE_CONFIG_DIR CURSOR_OPENCODE2_DEV_ENTRY
 opencode run --standalone --model "${CURSOR_REVIEW_MODEL:-cursor/default}"
 ```
 

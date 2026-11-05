@@ -17,6 +17,7 @@
 ### Fixed
 
 - Local pull-request review includes untracked files whose names Git quotes, and deletes its temporary file list if reading a rule fails.
+- The documented OpenCode review command loads `.opencode-local/env` first, so `cursor/default` is this checkout's provider rather than OpenCode's default catalog.
 - Pull-request review runs a contributor's install and tests without reviewer credentials. `scripts/review-pr.sh --live` is required before that revision's live test receives `CURSOR_API_KEY`. The live check accepts only an assistant reply of exactly `pong`, and local OpenCode setup always writes `.opencode-local/` instead of replacing `OPENCODE_CONFIG_DIR`.
 - Tool steps with a known call count close promptly when an edit's write reuses its permission-read call ID, avoiding an unnecessary idle-guard wait before dependent commands ([#152](https://github.com/oakimov/cursor-opencode-provider/pull/152), [@nkoynov](https://github.com/nkoynov)).
 - Held tool calls no longer get stuck after a locally rejected read, run after a queued withdrawal, or escape an earlier edit denial when they arrive after a host step split ([#152](https://github.com/oakimov/cursor-opencode-provider/pull/152)).
