@@ -314,6 +314,9 @@ partial inputs renew that deadline, while client heartbeats do not. The 120 s
 transport read-idle watchdog remains a backstop. A drop immediately after
 completed tool results can rebuild from complete host history
 before new output; missing results or unrepresented activity remain final.
+An early steer or host note Cursor took into that Run does not block the
+rebuild when host history holds it: a steer once OpenCode has added its copy,
+a note while its text is still in history.
 A rebuild too large for the model's context is reported as a context overflow
 (413), so OpenCode compacts instead of retrying. Recovery retains the latest eligible checkpoint across token renewal, including
 a rejected credential on an untouched resumed attempt. Checkpoints received

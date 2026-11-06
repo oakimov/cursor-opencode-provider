@@ -246,7 +246,11 @@ The **1.18 v2** API and **OpenCode 2.x** are source-incompatible:
   after delivered host results may rebase from history only when every observed
   exec has a completed result and no opaque activity occurred. Include all
   completed tool steps; never resume their earlier checkpoint. Other barriers
-  stay final.
+  stay final. Cursor's `user_message_appended` echo of the Run's own delivered
+  steer or host note (its `message_id` and text, nothing else) stays a stateful
+  barrier but is not opaque: decide at rebuild time that the seeded prompt
+  holds each one (a promoted steer's copy at its boundary; a note's text, or a
+  note the Run still tracks and carries over).
   Missing-blob recovery is limited to the initial control-only checkpoint path
   (`isSoleControlFrame`); unknown/mixed frames keep the normal replay barrier.
 - A delivered result admits later checkpoints only after Cursor completes its

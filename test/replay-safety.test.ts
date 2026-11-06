@@ -5,7 +5,11 @@ import {
   announcedCallsClaimed,
   AttemptReplaySafety,
   describeFrameLayout,
+  markRunInjectionDelivered,
+  takeAppendedInjection,
+  trackRunInjection,
   type ReplaySafetyState,
+  type RunInjection,
 } from "../src/replay-safety.js"
 import { decodeMessage, encodeMessage } from "../src/protocol/messages.js"
 
@@ -182,6 +186,88 @@ describe("user-message-appended updates", () => {
     ])))
     expect(analyzeReplayFrame(mixed, { interactionUpdate: decoded.interaction_update }).barrier)
       .toBe("unknown-or-malformed-frame")
+  })
+})
+
+describe("echoes of the Run's own injections", () => {
+  const utf8 = (text: string) => new TextEncoder().encode(text)
+  // Independent bytes: UserMessage text #1, message_id #2, then the flag and two
+  // timestamps (#24–#26, varints) a recorded echo of an injection carries.
+  const metadata = [...varint(24 << 3), 1, ...varint(25 << 3), ...varint(1_791_275_000), ...varint(26 << 3), ...varint(1_791_275_001)]
+  const userMessage = (text = "steer", messageId = "m-1", extra: number[] = metadata) =>
+    [...lengthDelimited(1, utf8(text)), ...lengthDelimited(2, utf8(messageId)), ...extra]
+  const echo = (body: number[]) => updateFrame(6, lengthDelimited(1, Uint8Array.from(body)))
+  const analyze = (frame: Uint8Array) => analyzeReplayFrame(frame, {
+    interactionUpdate: decodeMessage<{ interaction_update: Record<string, unknown> }>("AgentServerMessage", frame).interaction_update,
+  })
+
+  it("reads the message id and text of an echo, with or without Cursor's metadata", () => {
+    expect(describeFrameLayout(echo(userMessage()), 4)).toBe("1:2{6:2{1:2{1:2,2:2,24:0,25:0,26:0}}}")
+    for (const body of [userMessage(), userMessage("steer", "m-1", [])]) {
+      expect(analyze(echo(body))).toEqual({
+        barrier: "stateful-interaction", appendedUserMessage: { messageId: "m-1", text: "steer" },
+      })
+    }
+  })
+
+  it("does not read a message carrying anything an injection does not send", () => {
+    for (const body of [
+      [...userMessage(), ...varint(4 << 3), 3], // mode
+      [...userMessage(), ...lengthDelimited(3)], // selected_context
+      [...userMessage(), ...lengthDelimited(1, utf8("again"))],
+      [...userMessage(), ...varint(24 << 3), 0],
+      [...lengthDelimited(1, utf8("steer")), ...lengthDelimited(2, utf8("m-1")), ...lengthDelimited(24)],
+      [...lengthDelimited(1, utf8("steer")), ...metadata],
+      [...lengthDelimited(2, utf8("m-1")), ...metadata],
+      [...lengthDelimited(1, Uint8Array.of(0xff)), ...lengthDelimited(2, utf8("m-1"))],
+    ]) {
+      const result = analyze(echo(body))
+      expect(result.barrier).toBe("stateful-interaction")
+      expect(result.appendedUserMessage).toBeUndefined()
+    }
+  })
+
+  it("matches a delivered injection once, by message id and text", () => {
+    const injections: RunInjection[] = []
+    trackRunInjection(injections, { kind: "note", injectionId: "i-1", messageId: "m-1", text: "note", notes: ["<system-update>note</system-update>"] })
+    trackRunInjection(injections, { kind: "steer", injectionId: "i-2", messageId: "m-2", text: "steer" })
+    expect(takeAppendedInjection(injections, { messageId: "m-2", text: "steer" })).toBeUndefined()
+    markRunInjectionDelivered(injections, "i-2")
+    expect(takeAppendedInjection(injections, { messageId: "m-2", text: "other" })).toBeUndefined()
+    expect(takeAppendedInjection(injections, { messageId: "m-3", text: "steer" })).toBeUndefined()
+    expect(takeAppendedInjection(injections, { messageId: "m-2", text: "steer" })).toEqual({ kind: "steer", injectionId: "i-2" })
+    expect(takeAppendedInjection(injections, { messageId: "m-2", text: "steer" })).toBeUndefined()
+    markRunInjectionDelivered(injections, "i-1")
+    expect(takeAppendedInjection(injections, { messageId: "m-1", text: "note" }))
+      .toEqual({ kind: "note", injectionId: "i-1", notes: ["<system-update>note</system-update>"] })
+  })
+
+  it("keeps a matched echo a stateful barrier that leaves the rebuild to its history check", () => {
+    const failure = () => new CursorTransportError("drop", { transient: true, replaySafe: true })
+    const state: ReplaySafetyState = {}
+    const safety = new AttemptReplaySafety("run-1", state)
+    safety.recordAppendedMessage({ kind: "steer", injectionId: "i-1" })
+    expect(safety.applyTo(failure())).toMatchObject({ replaySafe: false, replayBarrier: "stateful", replayBarrierEchoesOnly: true })
+    expect(state).toEqual({ statefulBarrier: "stateful-interaction", appendedInjections: [{ kind: "steer", injectionId: "i-1" }] })
+
+    safety.recordAppendedMessage(undefined)
+    expect(state.historyRebaseUnsafe).toBe(true)
+    expect(safety.applyTo(failure()).replayBarrierEchoesOnly).toBeUndefined()
+  })
+
+  it("leaves no echo-only exemption to an attempt with other activity", () => {
+    for (const other of [
+      (safety: AttemptReplaySafety) => safety.markBarrier("visible-text"),
+      (safety: AttemptReplaySafety) => safety.markBarrier("non-control-exec"),
+    ]) {
+      const safety = new AttemptReplaySafety("run-1", {})
+      safety.recordAppendedMessage({ kind: "note", injectionId: "i-1", notes: ["note"] })
+      other(safety)
+      expect(safety.applyTo(new CursorTransportError("drop", { transient: true, replaySafe: true })))
+        .toMatchObject({ replayBarrier: "stateful", replaySafe: false })
+      expect(safety.applyTo(new CursorTransportError("drop", { transient: true, replaySafe: true })).replayBarrierEchoesOnly)
+        .toBeUndefined()
+    }
   })
 })
 

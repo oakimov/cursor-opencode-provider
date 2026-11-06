@@ -79,7 +79,8 @@ These are failure lessons shared by both hosts, not a replacement for
   errors. Consult the shipped descriptors and canonical fixtures
   (`src/protocol/exec-variants.ts`, `test/exec-variants.test.ts`). Recognizing a
   member does not make it control traffic: `user_message_appended` after context
-  injection changes conversation state and must retain its replay barrier
+  injection changes conversation state and must retain its replay barrier, even
+  where history can represent it (#159)
   (`test/replay-safety.test.ts`, `test/run-interruption.test.ts`).
 - **Apply protobuf defaults deliberately.** Omitted scalars may mean zero, while
   protobufjs encodes explicitly owned zero values; omission assertions need raw
@@ -183,6 +184,21 @@ These are failure lessons shared by both hosts, not a replacement for
   decoded duplicate or unknown fields otherwise authorize a malformed completion
   ([#114](https://github.com/oakimov/cursor-opencode-provider/pull/114),
   `test/replay-safety.test.ts`, `test/run-error-host.test.ts`).
+  The same barrier refused rebuilds in Runs that had delivered a steer or a
+  background-shell notice minutes earlier: Cursor echoes every delivered
+  injection as `user_message_appended`, and that marked the whole Run opaque
+  ([#159](https://github.com/oakimov/cursor-opencode-provider/issues/159)).
+  The live cause was host notes, not the steers a fork's log label suggested;
+  read the frame's `message_id` before attributing it. Match the echo to the
+  Run's own injection and check at rebuild time that the seeded prompt holds
+  it; also exempt a failed attempt whose only barriers were such echoes
+  (`replayBarrierEchoesOnly`, `test/early-steer.test.ts`,
+  `test/run-error-host.test.ts`).
+  A failed replacement open moves a Run's injected notes into the deferred
+  store before retrying. The rebuild guard must recognize that retained copy
+  too: recomputing recovery from the emptied injection registry otherwise
+  downgrades the next seed and drops earlier completed tool results
+  (`carried-missing-retry` in `test/run-error-host.test.ts`).
   Seed all completed tool steps; retaining only the last result loses earlier work,
   and that full seed needs the same context-fit check as a foreign-history rebase.
   An `APICallError` 413 is already host-shaped: wrapping it as a setup failure made
