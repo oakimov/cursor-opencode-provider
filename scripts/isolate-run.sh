@@ -188,11 +188,36 @@ src="$2"
 shift 2
 mount --make-rprivate /
 mount --bind "$root" "$root"
+# A container can have locked submounts under /usr (its init) and /etc
+# (resolver/hosts files). A nonrecursive bind cannot strip those in a child
+# user namespace. Retain the tree, then make every member read-only while
+# preserving its locked VFS flags; protecting only the parent is insufficient.
+readonly_bind() {
+  local source="$1" target="$2" point options
+  mount --rbind "$source" "$target"
+  findmnt --json --submounts --target "$target" --output TARGET,VFS-OPTIONS >"$root/../mount-tree.json"
+  python3 - "$root/../mount-tree.json" "$target" >"$root/../readonly-mounts" <<'PY'
+import json, os, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    trees = json.load(handle)["filesystems"]
+if len(trees) != 1 or os.path.realpath(trees[0]["target"]) != os.path.realpath(sys.argv[2]):
+    raise SystemExit("Could not identify the read-only bind tree")
+def emit(node):
+    for child in node.get("children", []):
+        emit(child)
+    options = [flag for flag in node["vfs-options"].split(",") if flag not in ("rw", "ro")]
+    sys.stdout.buffer.write(os.fsencode(node["target"]) + b"\0")
+    sys.stdout.buffer.write(("remount,bind,ro," + ",".join(options)).encode() + b"\0")
+emit(trees[0])
+PY
+  while IFS= read -r -d '' point && IFS= read -r -d '' options; do
+    mount -o "$options" "$point"
+  done <"$root/../readonly-mounts"
+  rm -f "$root/../mount-tree.json" "$root/../readonly-mounts"
+}
 mkdir -p "$root/usr" "$root/etc" "$root/src" "$root/tmp" "$root/proc" "$root/dev" "$root/oldroot" "$root/opt/tools" "$root/home/reviewer"
-mount --bind /usr "$root/usr"
-mount -o remount,bind,ro "$root/usr"
-mount --bind /etc "$root/etc"
-mount -o remount,bind,ro "$root/etc"
+readonly_bind /usr "$root/usr"
+readonly_bind /etc "$root/etc"
 ln -sfn usr/bin "$root/bin"
 ln -sfn usr/lib "$root/lib"
 if [[ -d /usr/lib64 ]]; then
@@ -228,8 +253,7 @@ while [[ "$#" -gt 0 ]]; do
     exit 2
   fi
   mkdir -p "$root$dest"
-  mount --bind "$host" "$root$dest"
-  mount -o remount,bind,ro "$root$dest"
+  readonly_bind "$host" "$root$dest"
 done
 # Tool binaries are bound by the outer script's list, one host path per line.
 if [[ -f "$root/tool-binds" ]]; then
@@ -593,11 +617,18 @@ isolate_darwin_note_dependencies() {
 isolate_darwin_prepare() {
   local src="$1" i n spec host dest name real path
   [[ -n "$src" && -d "$src" ]] || return 2
+  # Seatbelt matches the resolved path. macOS's default TMPDIR (/var/folders)
+  # and /tmp are symlinks into /private, so a rule naming the logical path
+  # would deny every access to src, the home and the temp directory.
+  src="$(cd "$src" && pwd -P)" || return 2
   darwin_files=()
   darwin_home="$(mktemp -d "${TMPDIR:-/tmp}/cursor-isolate-home.XXXXXX")"
   darwin_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cursor-isolate-tmp.XXXXXX")"
   darwin_tools="$(mktemp -d "${TMPDIR:-/tmp}/cursor-isolate-tools.XXXXXX")"
   darwin_profile="$(mktemp "${TMPDIR:-/tmp}/cursor-isolate-profile.XXXXXX")"
+  darwin_home="$(cd "$darwin_home" && pwd -P)" || return 2
+  darwin_tmp="$(cd "$darwin_tmp" && pwd -P)" || return 2
+  darwin_tools="$(cd "$darwin_tools" && pwd -P)" || return 2
   virt_from=()
   virt_to=()
   darwin_command=()
@@ -617,6 +648,7 @@ isolate_darwin_prepare() {
       echo "Read-only source is missing: $host" >&2
       return 2
     }
+    host="$(cd "$host" && pwd -P)" || return 2
     isolate_map_add "$dest" "$host"
     isolate_darwin_allow "$host" || return 2
     i=$((i + 1))
@@ -684,6 +716,8 @@ isolate_darwin_prepare() {
     done
     echo ')'
     echo '(allow file-write*'
+    # Discarding output is ordinary shell use; the rest of /dev stays read-only.
+    echo '  (literal "/dev/null")'
     printf '  (subpath "%s")\n' "$(isolate_profile_quote "$src")"
     printf '  (subpath "%s")\n' "$(isolate_profile_quote "$darwin_home")"
     printf '  (subpath "%s")\n' "$(isolate_profile_quote "$darwin_tmp")"

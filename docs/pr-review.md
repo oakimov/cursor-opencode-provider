@@ -4,6 +4,50 @@ A review reads the diff, the code, and `.cursor/rules/`, then runs build, typech
 
 Nothing in this repository starts a review. There is no pull-request, push, schedule, or credit trigger. The maintainer starts one Cloud Agent and names the pull request.
 
+## Local checks on different operating systems
+
+Run `python3 -B scripts/test-harness.py` for trusted local changes (`python -B`
+on Windows). `--diagnose` reports the detected OS, selected backend and missing
+prerequisites without installing anything or running tests. Cursor agent is
+optional: a Cursor VM and another Linux VM select from the same capabilities.
+
+An ordinary Linux user runs native checks when Bun, Node, Bash, Git, Python,
+zsh, OpenSSL and working user/mount/PID namespaces are available. macOS also requires a working
+`sandbox-exec`. If the native prerequisites are unavailable, or the caller is
+root, the runner selects a local Docker engine running Linux containers. Native Windows uses that
+container backend; Git and Python are the only required host test tools.
+Remote Docker engines and Windows-container mode are refused.
+
+Build the container image once with
+`python -B scripts/test-harness.py --backend docker --build-image`. Subsequent
+runs reuse it without pulling an image. The build sends only the Dockerfile to
+the local engine and labels the image with its hash. A missing or mismatched
+label refuses the run and requires `--build-image`; a failed rebuild cannot
+make the next ordinary run silently accept an older environment.
+The test container receives a read-only disposable source
+snapshot, copies it internally and runs every check, including the Linux
+namespace tests. Tests run as an unprivileged user so filesystem-permission
+cases execute too. It receives no Docker socket or reviewer credentials, and
+every capability is dropped: the nested user namespace grants its own mount
+capability. Nested namespace tests require relaxed seccomp/AppArmor restrictions
+and disabled Docker system-path masking so the nested namespace can mount `/proc`;
+the runner probes that mount before installing dependencies or running tests.
+This local-checkout runner is not the boundary for reviewing untrusted PRs.
+
+The snapshot includes local edits and untracked, nonignored sources, retains
+deletions and hydrates sparse-checkout exclusions from the index. It contains
+neither Git metadata nor host dependencies. Dependency installation, typecheck,
+build, the full suite, built-output architecture checks, Node HTTP/2 checks and
+pricing fixture checks run in order. A failing check stops the run. Processes
+and containers are awaited before cleanup; cleanup failure cannot report a pass.
+Linux-only namespace assertions are explicit skips on macOS, whose native
+sandbox tests cover its own boundary. Windows runs those assertions in Linux.
+Archived evaluation tools leave `harnessHead` and `harnessDirty` null when Git
+provenance is unavailable; the instruction, support and checkout hashes remain.
+
+This command never performs a live Cursor request. Contributor PRs still use
+`scripts/isolated-check.sh` and its separate live-test trust gate below.
+
 ## Manual review
 
 GitHub authentication for posting is a GitHub App installation token. `post` reads `REVIEW_APP_ID` and `REVIEW_APP_PRIVATE_KEY`, or `REVIEW_APP_PRIVATE_KEY_FILE` instead of the inline key. It signs a short-lived JWT and exchanges it for that app's installation token. Set `REVIEW_APP_INSTALLATION_ID` to the installation, or leave it unset to use the installation on the pull request's repository. The review author is the app's bot account. A client secret, a personal access token, and the Cloud Agent `gh` login are not used for the review request. The private key stays out of the check boundary below. `CURSOR_API_KEY` is a Cursor user API key from [cursor.com/settings](https://cursor.com/settings). It is used only for a live plugin test, and only after a separate trust decision. Passing tests is not that decision.
@@ -262,7 +306,7 @@ bun run live-test
 
 OpenCode keeps the last matching permission rule. The broad read and edit allows come before the env denies, and `.env.example` is the last exception. External directories allow only this checkout and those private roots, by lexical path and by canonical path when those differ. Other temp directories are denied.
 
-`bun run live-test` refuses to prompt unless `opencode plugin list` logs that import once, then runs `opencode run --standalone` against `cursor/composer-2.5` (`OPENCODE_LIVE_MODEL` overrides it) and requires `setup` once. The assistant text must be exactly `pong`. The plugin-list and transcript files share one cleanup path, including when the script is cancelled. The deadline is GNU `timeout` or `gtimeout`. `LIVE_TEST_TIMEOUT` can name another executable that accepts `SECONDS COMMAND...`. When it is unset, the script exits 1 and says the deadline command is required. When `CURSOR_API_KEY` is unset the script prints `LIVE_TEST=skipped` and exits 0.
+`bun run live-test` refuses to prompt unless `opencode plugin list` logs that import once, then runs `opencode run --standalone` against `cursor/composer-2.5` (`OPENCODE_LIVE_MODEL` overrides it) and requires `setup` once. The assistant text must be exactly `pong`. The plugin-list files, transcripts and native runtime scratch files share a per-run temporary directory that is removed on exit, including cancellation. Pre-existing files in the configured temp root are preserved. The deadline is GNU `timeout` or `gtimeout`. `LIVE_TEST_TIMEOUT` can name another executable that accepts `SECONDS COMMAND...`. When it is unset, the script exits 1 and says the deadline command is required. When `CURSOR_API_KEY` is unset the script prints `LIVE_TEST=skipped` and exits 0.
 
 Run that live test when a change affects plugin behavior: the provider, protocol, transport, session, entrypoints, tools, auth, or anything the unit tests do not execute against a real OpenCode process. Skip it for docs, rules, or a refactor the unit tests already cover, and say why. Record the OpenCode version and the plugin path in the private log. They do not go in the public review.
 
@@ -275,7 +319,7 @@ scripts/isolated-check.sh <pr-number-or-url> --live
 
 A number uses this checkout's `origin`. A pull URL must name that same owner and repository; a different repository is refused before `git fetch`. The script fetches `pull/<n>/head`, records that commit, and extracts `git archive` of that commit id into a temporary directory. It does not archive the moving `FETCH_HEAD` name. That directory is not a linked worktree and has no `.git`.
 
-`scripts/isolate-run.sh` runs the install, build, typecheck, and unit tests. On Linux it requires user, mount, and pid namespaces (`unshare`) and `pivot_root`. `--map-root-user` makes the command root inside that namespace, mapped to the calling user, and that root starts with mount capabilities. The setup drops them, including `CAP_SYS_ADMIN`, before the command runs. PID 1 stays a reaper: it runs the command in its own session, collects orphaned zombies, and forwards termination signals to that session. The command is not PID 1, so a killed grandchild does not remain visible to `kill -0`. A read-only bind of a file the user owns cannot then be remounted writable. On macOS it requires `sandbox-exec`. The profile allows the dynamic linker, a read of the root directory itself, the source directory, the private home and temp, and the selected tool files. It does not allow a tool's parent directory or every file read. Linux paths such as `/src`, `/tmp`, `/home/reviewer`, `/opt/tools`, and `--ro-bind` destinations are translated to those private directories. If that mechanism is unavailable the script exits 2. It does not fall back to `env -i`. Ubuntu's AppArmor restriction on unprivileged user namespaces makes `unshare` fail. CI clears `kernel.apparmor_restrict_unprivileged_userns` from the workflow itself, because the coverage job checks out the pull request head and that head may not contain `scripts/ci-enable-userns.sh`. A developer machine with that restriction needs the same change, or the isolation tests fail closed. `scripts/ci-enable-userns.sh` is the local copy of that probe.
+`scripts/isolate-run.sh` runs the install, build, typecheck, and unit tests. On Linux it requires user, mount, and pid namespaces (`unshare`) and `pivot_root`. `--map-root-user` makes the command root inside that namespace, mapped to the calling user, and that root starts with mount capabilities. The setup drops them, including `CAP_SYS_ADMIN`, before the command runs. PID 1 stays a reaper: it runs the command in its own session, collects orphaned zombies, and forwards termination signals to that session. The command is not PID 1, so a killed grandchild does not remain visible to `kill -0`. A read-only bind of a file the user owns cannot then be remounted writable. On macOS it requires `sandbox-exec`. The profile allows the dynamic linker, a read of the root directory itself, the source directory, the private home and temp, and the selected tool files. It does not allow a tool's parent directory or every file read. Writes are limited to the source directory, the private home and temp, and `/dev/null`. Rules name resolved paths, because `sandbox-exec` matches those and macOS's default temp directory is a symlink into `/private`. Linux paths such as `/src`, `/tmp`, `/home/reviewer`, `/opt/tools`, and `--ro-bind` destinations are translated to those private directories. If that mechanism is unavailable the script exits 2. It does not fall back to `env -i`. Ubuntu's AppArmor restriction on unprivileged user namespaces makes `unshare` fail. CI clears `kernel.apparmor_restrict_unprivileged_userns` from the workflow itself, because the coverage job checks out the pull request head and that head may not contain `scripts/ci-enable-userns.sh`. A developer machine with that restriction needs the same change, or the isolation tests fail closed. `scripts/ci-enable-userns.sh` is the local copy of that probe.
 
 Inside the boundary the command can see read-only `/usr` and `/etc`, the named tool binaries, and the archive at `/src` (read-write). A fresh tmpfs is `/tmp` and `/home/reviewer`. Host home, host temp, the parent checkout, agent sockets, and git metadata are not mounted. The environment starts empty except `PATH`, `HOME`, `TMPDIR`, `USER`, `LOGNAME`, `LANG`, and `CI`. Network stays available because install needs it. Review-posting credentials, including `REVIEW_APP_PRIVATE_KEY` and `REVIEW_APP_PRIVATE_KEY_FILE`, are not in the environment and their files are not mounted. Exit 0 means those checks passed. Exit 1 is a check failure. `Check root:` and `Check commit:` are private and stay out of the public review.
 

@@ -28,6 +28,7 @@ fi
 
 owned_files=()
 owned_pids=()
+owned_tmp=""
 live_process_table=""
 
 # ${#name[@]} is safe for an empty array under set -u on bash 3.2.
@@ -118,6 +119,11 @@ cleanup_owned() {
   if [[ "$(live_count owned_files)" -gt 0 ]]; then
     rm -f "${owned_files[@]}"
   fi
+  if [[ -n "$owned_tmp" ]] && ! rm -rf -- "$owned_tmp"; then
+    echo "LIVE_TEST=failed" >&3
+    echo "Could not remove the live test's temporary directory." >&3
+    status=1
+  fi
   exit "$status"
 }
 
@@ -181,6 +187,10 @@ fi
 export OPENCODE_CONFIG_DIR CURSOR_OPENCODE2_DEV_ENTRY
 export XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME TMPDIR
 export CURSOR_REVIEW_PLUGIN_PATH CURSOR_REVIEW_PLUGIN_VERSION
+# The native runtime also extracts libraries and creates scratch directories.
+# Own their whole directory, without deleting anything from another run.
+owned_tmp="$(mktemp -d "$TMPDIR/cursor-live.XXXXXX")"
+export TMPDIR="$owned_tmp"
 
 echo "WORKTREE=$TREE"
 echo "PLUGIN_PATH=$CURSOR_REVIEW_PLUGIN_PATH"

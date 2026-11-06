@@ -1,9 +1,13 @@
-import { describe, expect, it } from "bun:test"
+import { describe, expect, it, setDefaultTimeout } from "bun:test"
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { createHash } from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+
+// Each case spawns Python, Bash or Git several times; Bun's 5 s default fails
+// under ordinary machine load, unevenly across cases.
+setDefaultTimeout(30_000)
 
 const root = path.resolve(import.meta.dir, "..")
 const head = "b".repeat(40)
@@ -21,8 +25,16 @@ const python = selectedPython()
 function publisherArgs(args: string[], script = path.join(root, "scripts/review-publish.py")): string[] {
   // Keep the real JWT/HTTP construction; route only the HTTPS boundary to fake gh.
   return ["-c", `
-import http.client, json, os, runpy, subprocess, sys
+import fcntl, http.client, json, os, runpy, subprocess, sys
 from pathlib import Path
+wait_marker = os.environ.get("REVIEW_TEST_LOCK_WAIT")
+if wait_marker:
+    real_flock = fcntl.flock
+    def observed_flock(fd, operation):
+        if operation == fcntl.LOCK_EX:
+            Path(wait_marker).write_text(str(os.getpid()), encoding="utf-8")
+        return real_flock(fd, operation)
+    fcntl.flock = observed_flock
 class Connection:
     def __init__(self, host, timeout):
         assert host == "api.github.com" and timeout == 30
@@ -514,7 +526,7 @@ function spawnPost(payload: string, approval: string, env: NodeJS.ProcessEnv): C
   return spawn(python, publisherArgs(["post", payload, approval]), {
     cwd: root,
     detached: true,
-    env: withApp({ ...processEnvWithoutReviewApp(), PYTHONDONTWRITEBYTECODE: "1", REVIEW_ARTIFACT_DIR: env.REVIEW_ARTIFACT_DIR || path.join(env.GH_STATE ? path.dirname(String(env.GH_STATE)) : path.dirname(payload), "retained"), ...env }),
+    env: withApp({ ...processEnvWithoutReviewApp(), PYTHONDONTWRITEBYTECODE: "1", REVIEW_TEST_LOCK_WAIT: path.join(String(env.GH_STATE), "lock-wait"), REVIEW_ARTIFACT_DIR: env.REVIEW_ARTIFACT_DIR || path.join(env.GH_STATE ? path.dirname(String(env.GH_STATE)) : path.dirname(payload), "retained"), ...env }),
   })
 }
 
@@ -551,9 +563,12 @@ function checkpointText(directory: string): string {
   return fs.readFileSync(path.join(directory, ".review-publish", names[0]!), "utf8")
 }
 
-function queuedOnLock(child: ChildProcess): boolean {
+function queuedOnLock(child: ChildProcess, state: string): boolean {
   if (child.exitCode !== null || child.pid === undefined) return false
-  return fs.readFileSync("/proc/locks", "utf8").split("\n").some((line) => line.includes("->") && line.includes(` ${child.pid} `))
+  // The holder owns the real lock before spawnPost. Observe the contender at
+  // flock, after its approval peek, without depending on Linux's procfs.
+  const marker = path.join(state, "lock-wait")
+  return fs.existsSync(marker) && fs.readFileSync(marker, "utf8") === String(child.pid)
 }
 
 describe("review publication", () => {
@@ -984,7 +999,7 @@ describe("review publication", () => {
       holder = holdLock(publicationLock(approval))
       child = spawnPost(payload, approval, env)
       const finished = collect(child)
-      waitFor("queued post", () => queuedOnLock(child!))
+      waitFor("queued post", () => queuedOnLock(child!, state))
       expect(child.exitCode).toBeNull()
       expect(postsOf(state)).toBe(0)
       const denied = run(["deny", approval], env)
@@ -1006,7 +1021,7 @@ describe("review publication", () => {
       holder = holdLock(publicationLock(approval))
       child = spawnPost(payload, approval, env)
       const replaced = collect(child)
-      waitFor("queued replacement", () => queuedOnLock(child!))
+      waitFor("queued replacement", () => queuedOnLock(child!, state))
       fs.writeFileSync(payload, `${original}\n`)
       await holder.release()
       holder = undefined
@@ -1167,7 +1182,7 @@ describe("review publication", () => {
       holder = holdLock(publicationLock(approval))
       child = spawnPost(payload, approval, env)
       const finished = collect(child)
-      waitFor("queued post", () => queuedOnLock(child!))
+      waitFor("queued post", () => queuedOnLock(child!, state))
       expect(postsOf(state)).toBe(0)
       installDraft(payload, approval, env, 157, "Summary for pull 157.\n", "P1. A queued replacement is a different operation.")
       await holder.release()
@@ -1998,7 +2013,7 @@ describe("review thread resolution", () => {
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
     }
-  }, 20000)
+  })
 
   it("requires a resolution for an addressed inline finding and refuses unresolved or mismatched actions", () => {
     const fixture = freshReview("review-resolution-schema-")
@@ -2063,7 +2078,7 @@ describe("review thread resolution", () => {
         fs.rmSync(directory, { recursive: true, force: true })
       }
     }
-  }, 20000)
+  })
 
   it("stops thread actions if the head, replies, denial, or approval changes after the review is submitted", () => {
     for (const after of ["reply", "head", "deny", "replacement"]) {
@@ -2081,7 +2096,7 @@ describe("review thread resolution", () => {
         fs.rmSync(directory, { recursive: true, force: true })
       }
     }
-  }, 20000)
+  })
 
   it("keeps the review receipt on a rejected resolution and safely retries the rejected action", () => {
     const fixture = freshReview("review-resolve-forbidden-")
@@ -2120,7 +2135,7 @@ describe("review thread resolution", () => {
         fs.rmSync(directory, { recursive: true, force: true })
       }
     }
-  }, 20000)
+  })
 
   it("requires both a matching mutation receipt and resolved readback", () => {
     for (const flag of ["GH_RESOLVE_WRONG_RECEIPT", "GH_RESOLVE_NOT_APPLIED"]) {
@@ -2136,7 +2151,7 @@ describe("review thread resolution", () => {
         fs.rmSync(directory, { recursive: true, force: true })
       }
     }
-  }, 20000)
+  })
 
   it("records an integration-forbidden rejection as proven and retries it after the grant is corrected", () => {
     const fixture = freshReview("review-resolve-integration-")
@@ -2252,7 +2267,7 @@ describe("review thread resolution", () => {
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
     }
-  }, 20000)
+  })
 
   it("complete-resolutions.py refuses a missing approval and a review without a confirmed receipt", () => {
     const fixture = freshReview("review-complete-refusals-")

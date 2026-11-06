@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Local test checks detect Linux, macOS and Windows capabilities; Windows can run the full suite through a local Linux-container engine without Cursor agent installed.
+
+### Fixed
+
+- Live OpenCode smoke tests remove native runtime scratch files on exit while preserving pre-existing files in the configured temp root.
+- Isolated checks on macOS can write their source, home and temp directories when those live under the default temp directory, instead of every write failing while the run exits 0.
+
 ## [0.8.6] - 2026-11-05
 
 ### Added

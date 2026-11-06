@@ -259,6 +259,33 @@ sys.stdout.write(f"{first}|{second}|{','.join(calls)}")
 })
 
 describe("review mount", () => {
+  test("reports unknown Git provenance for an archive inside another repository", () => {
+    const repository = outDir()
+    fs.mkdirSync(path.join(repository, "archive"), { recursive: true })
+    try {
+      fixtureGit(repository, "init", "-q")
+      fs.writeFileSync(path.join(repository, "source.txt"), "fixture\n")
+      fixtureGit(repository, "add", "source.txt")
+      fixtureGit(repository, "commit", "-qm", "fixture")
+      const result = python(["-c", `
+import importlib.util, json, pathlib, sys
+spec = importlib.util.spec_from_file_location("review_eval", "scripts/review-eval.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.ROOT = pathlib.Path(sys.argv[1]) / "archive"
+print(json.dumps(module.harness_metadata()))
+module.ROOT = pathlib.Path(sys.argv[1])
+print(json.dumps(module.harness_metadata()))
+`, repository])
+      expect(result.status, result.stderr).toBe(0)
+      const [archive, checkout] = result.stdout.trim().split("\n").map(line => JSON.parse(line))
+      expect(archive).toEqual({ harnessHead: null, harnessDirty: null })
+      expect(checkout).toEqual({ harnessHead: fixtureGit(repository, "rev-parse", "HEAD"), harnessDirty: false })
+    } finally {
+      removeOuts()
+    }
+  })
+
   test("the reviewer mount excludes the answer key and the other variant", () => {
     const prepared = prepare(["prepare", "--case", "index-sync", "--variant", "buggy", "--skill", "revised"])
     try {
