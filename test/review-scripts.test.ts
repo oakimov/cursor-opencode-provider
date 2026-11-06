@@ -1378,20 +1378,23 @@ describe("live test deadlines and cleanup", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "live-no-timeout-"))
     const bin = path.join(directory, "bin")
     const reviewHome = path.join(directory, "review-home")
-    fs.mkdirSync(bin)
-    fs.mkdirSync(path.join(directory, "dist"), { recursive: true })
-    fs.writeFileSync(path.join(directory, "dist/index.js"), "export {}\n")
-    fs.writeFileSync(path.join(directory, "dist/plugin-opencode2.js"), "export default {}\n")
-    for (const dir of ["/usr/bin", "/bin"]) {
-      for (const name of fs.readdirSync(dir)) {
-        if (name === "timeout" || name === "gtimeout") continue
-        const dest = path.join(bin, name)
-        if (!fs.existsSync(dest)) fs.symlinkSync(path.join(dir, name), dest)
-      }
-    }
-    fs.writeFileSync(path.join(bin, "opencode"), "#!/bin/sh\necho should-not-run > \"$HOME/ran\"\nexit 0\n")
-    fs.chmodSync(path.join(bin, "opencode"), 0o755)
     try {
+      fs.mkdirSync(bin)
+      fs.mkdirSync(path.join(directory, "dist"), { recursive: true })
+      fs.writeFileSync(path.join(directory, "dist/index.js"), "export {}\n")
+      fs.writeFileSync(path.join(directory, "dist/plugin-opencode2.js"), "export default {}\n")
+      // Dedupe by name: existsSync follows links, so a broken host link (an
+      // Ubuntu image ships one) read as missing and was linked twice.
+      const linked = new Set(["timeout", "gtimeout"])
+      for (const dir of ["/usr/bin", "/bin"]) {
+        for (const name of fs.readdirSync(dir)) {
+          if (linked.has(name)) continue
+          linked.add(name)
+          fs.symlinkSync(path.join(dir, name), path.join(bin, name))
+        }
+      }
+      fs.writeFileSync(path.join(bin, "opencode"), "#!/bin/sh\necho should-not-run > \"$HOME/ran\"\nexit 0\n")
+      fs.chmodSync(path.join(bin, "opencode"), 0o755)
       const result = run("bash", ["scripts/live-test.sh"], {
         env: {
           ...process.env,
