@@ -212,6 +212,7 @@ describe("echoes of the Run's own injections", () => {
 
   it("does not read a message carrying anything an injection does not send", () => {
     for (const body of [
+      [], // an empty user_message
       [...userMessage(), ...varint(4 << 3), 3], // mode
       [...userMessage(), ...lengthDelimited(3)], // selected_context
       [...userMessage(), ...lengthDelimited(1, utf8("again"))],

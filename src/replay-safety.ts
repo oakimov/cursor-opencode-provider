@@ -264,14 +264,13 @@ const APPENDED_ECHO_METADATA = [24, 25, 26]
  * `UserMessageAppendedUpdate.user_message` holding only what a client
  * `user_context` injection sends (text #1 and message_id #2, each once) plus
  * Cursor's echo metadata. Anything else (selected context, mode, another
- * field) is not an echo of this client's own message.
+ * field) is not an echo of this client's own message. Call only on a frame
+ * `validInteractionUpdateWire` accepted: update #6 then holds exactly one
+ * length-delimited `user_message` #1.
  */
 function appendedEcho(topLevel: StrictRawField | undefined): AppendedUserMessage | undefined {
-  const update = nestedFields(topLevel, 1).find((field) => field.fn === 6)
-  const appended = update?.bytes && readAllFieldsStrict(update.bytes)
-  const message = appended?.length === 1 && appended[0]!.fn === 1 && appended[0]!.wt === 2 && appended[0]!.bytes
-    ? readAllFieldsStrict(appended[0]!.bytes)
-    : undefined
+  const update = nestedFields(topLevel, 1).find((field) => field.fn === 6)!
+  const message = readAllFieldsStrict(readAllFieldsStrict(update.bytes!)![0]!.bytes!)
   if (!message
     || !message.every((field) => [1, 2].includes(field.fn) ? field.wt === 2 : APPENDED_ECHO_METADATA.includes(field.fn) && field.wt === 0)
     || ![1, 2, ...APPENDED_ECHO_METADATA].every((fn) => message.filter((field) => field.fn === fn).length <= 1)) return undefined
