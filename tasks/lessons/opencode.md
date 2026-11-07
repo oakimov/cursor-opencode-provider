@@ -813,6 +813,12 @@ These are failure lessons shared by both hosts, not a replacement for
   allowing a clean code verdict. Keep required analysis and the live credential
   gate intact (`rejects command statuses that contradict their exit codes`,
   `keeps attributed baseline and environment failures visible in a clean code review`).
+  A later report attributed archived subject self-test failures to the current
+  launcher even though the harness already fixed the Git fixtures and replaced
+  an installation-dependent tool test. Trace each subprocess to its owning
+  revision before assigning the failure. A read-only API lookup is still a
+  GitHub call: `bind` must report that it read the revision without making
+  GitHub changes (`records the pull request revision` regression).
 - **An approval wait outlives temporary cleanup.** A successful `show` froze a
   preview that the agent then removed with its temporary review directory.
   Review results, ledgers, previews, and publication state belong in a persistent

@@ -251,6 +251,15 @@ status. A nonzero command is `failed`, even when its changed tests passed or
 CI is green. Record those successes as separate checks. An unexecuted command
 is `skipped` with a reason and no exit code.
 
+Record the command and the revision that owns each result. The outer review
+launcher runs from the harness revision, but `isolated-check.sh` archives the
+subject revision, and its tests invoke scripts from that archive. Trace those
+callers before attributing an inner failure to the current harness. A failure
+from an older subject script does not establish that a fix is missing from the
+harness. Compare the relevant file and regression at both revisions. Keep
+source-revision attribution separate from the environment diagnosis. Distinguish
+read-only GitHub lookups from publication; `bind` reads the PR through the API.
+
 Investigate failures before deciding their effect on the review. Reproduce a
 suspected baseline failure on the base revision with the same prerequisites,
 or establish an environment failure with a capability probe and its causal

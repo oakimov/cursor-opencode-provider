@@ -82,6 +82,11 @@ pipeline or a later command. Keep a failed wrapper separate from passing
 subtests, targeted reruns, or CI. Existing retained results without this field
 keep their original validation and preview bytes.
 
+Name the command and its owning revision in the check detail. The launcher
+uses the harness revision; the archived suite and scripts its tests invoke
+use the subject revision. Compare both before reporting a current harness
+defect. `bind` makes a read-only GitHub API request; it does not publish a review.
+
 A completed code review may report no actionable findings while recording a
 failed command caused by the environment or the baseline. Keep that check
 `failed`, with its nonzero `exitCode`, and add, for example:

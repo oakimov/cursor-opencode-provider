@@ -1663,18 +1663,18 @@ def bind(owner: str, repo: str, pull: int, out: Path | None) -> None:
         current = None
     head, base, readable = interpret_pull(current, pull)
     if not readable:
-        print("The pull request revision is unreadable. GitHub was not called.", file=sys.stderr)
+        print("The pull request revision is unreadable. No GitHub changes were made.", file=sys.stderr)
         raise SystemExit(2)
     revision = {"owner": owner, "repo": repo, "pull": pull, "base": base, "head": head, "runtime": "linux"}
     if out is None:
         json.dump(revision, sys.stdout, indent=2)
         sys.stdout.write("\n")
-        print("Recorded the pull request revision. GitHub was not called.", file=sys.stderr)
+        print("Recorded the pull request revision from GitHub. No GitHub changes were made.", file=sys.stderr)
         return
     if out.exists():
         recorded = read_json_object(out)
         if recorded is None:
-            print("The review file is not a JSON object. GitHub was not called.", file=sys.stderr)
+            print("The review file is not a JSON object. No GitHub changes were made.", file=sys.stderr)
             raise SystemExit(2)
         same = (
             recorded.get("owner") == owner
@@ -1686,15 +1686,15 @@ def bind(owner: str, repo: str, pull: int, out: Path | None) -> None:
         )
         if not same:
             print(
-                "The pull request revision changed. Refresh the review and approve it again. GitHub was not called.",
+                "The pull request revision changed. Refresh the review and approve it again. No GitHub changes were made.",
                 file=sys.stderr,
             )
             raise SystemExit(6)
-        print("Revision matches the recorded review. GitHub was not called.")
+        print("The GitHub revision matches the recorded review. No GitHub changes were made.")
         return
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(revision, indent=2) + "\n", encoding="utf-8")
-    print("Recorded the pull request revision. GitHub was not called.")
+    print("Recorded the pull request revision from GitHub. No GitHub changes were made.")
 
 
 def render(source: Path, dest: Path) -> None:

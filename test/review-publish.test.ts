@@ -1633,6 +1633,9 @@ describe("review publication", () => {
     try {
       const bound = run(["bind", "oakimov", "cursor-opencode-provider", "156", target], env)
       expect(bound.status, bound.stderr).toBe(0)
+      expect(callsOf(state)).toEqual(["GET repos/oakimov/cursor-opencode-provider/pulls/156"])
+      expect(bound.stdout).toContain("from GitHub. No GitHub changes were made.")
+      expect(bound.stdout + bound.stderr).not.toContain("GitHub was not called.")
       const recorded = JSON.parse(fs.readFileSync(target, "utf8")) as {
         owner: string
         repo: string
@@ -1652,12 +1655,16 @@ describe("review publication", () => {
       })
       recorded.findings = "kept"
       fs.writeFileSync(target, JSON.stringify(recorded, null, 2) + "\n")
-      expect(run(["bind", "oakimov", "cursor-opencode-provider", "156", target], env).status).toBe(0)
+      const rebound = run(["bind", "oakimov", "cursor-opencode-provider", "156", target], env)
+      expect(rebound.status, rebound.stderr).toBe(0)
+      expect(rebound.stdout).toContain("The GitHub revision matches the recorded review. No GitHub changes were made.")
       expect(JSON.parse(fs.readFileSync(target, "utf8")).findings).toBe("kept")
       fs.writeFileSync(path.join(state, "head"), `${"c".repeat(40)}\n`)
       const moved = run(["bind", "oakimov", "cursor-opencode-provider", "156", target], env)
       expect(moved.status, moved.stderr).toBe(6)
       expect(moved.stderr).toContain("Refresh the review")
+      expect(moved.stderr).toContain("No GitHub changes were made.")
+      expect(moved.stderr).not.toContain("GitHub was not called.")
       expect(JSON.parse(fs.readFileSync(target, "utf8")).head).toBe(head)
       fs.writeFileSync(path.join(state, "head"), `${head}\n`)
 
