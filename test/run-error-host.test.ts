@@ -412,6 +412,7 @@ describe("checkpoint eligibility across host results", () => {
     "followup-before-result", "new-output", "final-error", "cursor-run-call", "unannounced-completion", "oversized",
     "malformed-completion", "repeated-completion-id",
     "inline-catalog", "spilled-catalog", "unfinished-catalog", "unacknowledged-checkpoint",
+    "terminal-poll", "terminal-poll-after-result",
   ] as const) {
     it(`recovers a post-result drop only from represented completed work (${scenario})`, async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-result-history-"))
@@ -471,10 +472,25 @@ describe("checkpoint eligibility across host results", () => {
           delivered.push(id)
           if (id === 1) {
             completed("first", "echo first")
+            // AwaitShell: Cursor polls the terminal record of a background shell; the provider answers each read.
+            if (scenario === "terminal-poll") {
+              const env = sessionManager.findOpenByOpenCodeSessionId(`ses_result_history_${scenario}`)!.requestContext.env as { project_folder: string }
+              const record = path.join(env.project_folder, "terminals", "7.txt")
+              fs.mkdirSync(path.dirname(record), { recursive: true })
+              fs.writeFileSync(record, "running\n")
+              for (const poll of [50, 51, 52]) {
+                send({ exec_server_message: { id: poll, read_args: { path: record, tool_call_id: `poll-${poll}` } } })
+              }
+            }
             started("second", "echo second")
             send({ exec_server_message: { id: 2, [shellVariant]: { command: "echo second", tool_call_id: "second" } } })
           } else {
             completed("second", "echo second")
+            // A poll after the last result belongs to the cut step itself, so the rebuild would lose it.
+            if (scenario === "terminal-poll-after-result") {
+              const env = sessionManager.findOpenByOpenCodeSessionId(`ses_result_history_${scenario}`)!.requestContext.env as { project_folder: string }
+              send({ exec_server_message: { id: 50, read_args: { path: path.join(env.project_folder, "terminals", "7.txt") } } })
+            }
             if (scenario === "malformed-completion" || scenario === "repeated-completion-id") {
               // Independent lifecycle wire: completion #3, call_id #1.
               // The decoder discards the unknown field or duplicate call id.
@@ -519,7 +535,8 @@ describe("checkpoint eligibility across host results", () => {
           prompt.push({ role: "tool", content: [{ type: "tool-result", toolCallId: call.toolCallId, toolName: call.toolName, output: { type: "text", value: output } }] })
         }
         if (scenario === "missing-history") prompt.splice(1, 2)
-        if (scenario === "complete" || scenario === "announced" || scenario === "announced-shell" || scenario === "inline-catalog" || scenario === "unacknowledged-checkpoint") {
+        if (scenario === "complete" || scenario === "announced" || scenario === "announced-shell" || scenario === "inline-catalog"
+          || scenario === "unacknowledged-checkpoint" || scenario === "terminal-poll") {
           const parts = await read()
           expect(parts.some(part => part.type === "finish" && part.finishReason.unified === "stop")).toBe(true)
           expect(parts.some(part => part.type === "tool-call")).toBe(false)

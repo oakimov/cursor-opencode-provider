@@ -314,6 +314,8 @@ partial inputs renew that deadline, while client heartbeats do not. The 120 s
 transport read-idle watchdog remains a backstop. A drop immediately after
 completed tool results can rebuild from complete host history
 before new output; missing results or unrepresented activity remain final.
+Earlier polls of a background shell's terminal record, which the provider
+answers itself, need no result in history.
 An early steer or host note Cursor took into that Run does not block the
 rebuild when host history holds it: a steer once OpenCode has added its copy,
 a note while its text is still in history.

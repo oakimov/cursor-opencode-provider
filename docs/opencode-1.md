@@ -227,6 +227,8 @@ partial inputs renew that deadline, while client heartbeats do not. The 120 s
 transport read-idle watchdog remains a backstop. A drop immediately after
 completed tool results can rebuild from complete host history
 before new output; missing results or unrepresented activity remain final.
+Earlier polls of a background shell's terminal record, which the provider
+answers itself, need no result in history.
 A host note Cursor took into that Run does not block the rebuild while its
 text is still in host history.
 A rebuild too large for the model's context is reported as a context overflow
