@@ -36,6 +36,20 @@ outside `src/`.
    adjacent unchanged code where the path depends on it. Follow a durable
    effect into the next use, invocation, or restart, not only the immediate
    return.
+   Where the change acquires, starts, delegates, or cleans up a resource (a
+   process and the work it starts, a worker, a lock, a file or directory, a
+   connection, a listener), state its ownership postconditions: the owner, all
+   subordinate work it is responsible for, every cancellation entrypoint
+   (ordinary return, error, each catchable signal, a caller's cancellation),
+   and the condition that permits releasing the files or state that work
+   uses. Ask what can still be alive, holding, or writing after the direct
+   call returns or after cleanup begins. A child's exit, a successful return,
+   a sent signal, a `finally` block, or a deleted directory alone does not
+   prove that owned work stopped. Check that the scope being awaited is the
+   scope actually owned. Work that the code explicitly hands to an
+   independent manager, under a stated contract, is no longer owned and is not
+   a leak. Nothing can clean up after the owner itself receives SIGKILL; do
+   not demand it.
 3. Derive counterexamples from that contract. Consider absent, empty, invalid,
    and boundary inputs; fresh, existing, and stale state; success, partial
    failure, and error; interruption, cancellation, retry, restart, and
@@ -51,6 +65,21 @@ outside `src/`.
    suspected state machine or hand it the expected result. A helper test, an
    immediate exit status, or a mocked transition does not establish the
    behavior the orchestration owns.
+   For an ownership postcondition, challenge the lifecycle paths that apply:
+   ordinary completion, nonzero completion, catchable termination of the
+   owner, and a leader that exits early (successfully or on TERM) while a
+   descendant keeps running or ignores TERM. Explain why a path does not
+   apply rather than running every combination. Order each experiment by
+   acknowledgement, not sleep: the subordinate writes a ready marker after it
+   has started (and installed any handler), and only then does the experiment
+   cancel or let the leader exit. After the owner returns or begins cleanup,
+   inspect what remains: each subordinate's liveness, whether the released
+   files or state still exist, and a controlled write attempt into them.
+   Substitute external tools and expensive check payloads when necessary, but
+   do not mock the cancellation, waiting, ownership tracking, or cleanup whose
+   correctness is in question. Bound every experiment, stop its writers
+   unconditionally before deleting disposable fixtures, and keep pending
+   review artifacts.
 5. Try to falsify each candidate before promoting it. Read the callers,
    guards, documentation, relevant assertions, and the base revision. A
    missing test is not by itself a behavior defect. Confirm a source-level
@@ -145,6 +174,21 @@ locations, scenarios, expected versus observed results, supporting commands or
 source traces, uncovered branches, downstream observations, and limits. Write
 it so a later head can be re-reviewed from it. Keep private paths and working
 notes out of the public result and payload.
+
+For a behavior with ownership postconditions, add its `ownership` record:
+the owner, the owned resources, the subordinate work, the cancellation
+entrypoints, the condition that permits release, and any explicit transfer
+with its contract. Give it one scenario per lifecycle path, using the
+categories `ownership-completion`, `ownership-nonzero`,
+`ownership-termination`, and `ownership-early-leader`; mark a path that does
+not apply as inapplicable with the reason. In `observed` and `downstream`,
+say what was alive, present, or writable after the owner returned or began
+cleanup. Label how each was established: a direct observation (`reproduced`,
+`synthetic`, `native`, or `live`), `source` tracing, `mocked` when an
+external result or the mechanism was mocked, or `unverified` when runtime
+evidence was unavailable. Name a path supported only by `source`, `mocked`,
+or `unverified` evidence in `uncovered`. The validator checks that this
+record is complete and consistent; it cannot certify that processes died.
 
 `scripts/review-ledger.py check` must accept the ledger, and
 `scripts/review-ledger.py compare` must accept it against the result, before

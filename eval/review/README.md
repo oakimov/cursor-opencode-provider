@@ -80,6 +80,17 @@ detection score. Both snapshots use this same completion format; the comparison
 measures their review instructions within the shared offline adapter, rather
 than an unmodified production workflow.
 
+Ownership cases check that a review follows owned work past the call that
+started it. One case has two defective variants and two controls: a correct
+implementation that settles what it owns, and one that explicitly hands work to
+an independent manager under its contract. A finding against either control
+scores as a false positive, but reproduce it before accepting that label: a
+control can itself leak, and the scorer cannot tell a reviewer's error from a
+broken control. Fix such a control and review it again with fresh reviewers.
+`bun test` runs each variant's real orchestration with
+acknowledged ordering and records liveness, existence, and writability after
+the owner returns; those fixture checks are not detection results.
+
 Held-out cases are marked in `list`. They were not used to choose the review
 skill's wording. Do not add their expected results to the skill, the prompt,
 or the scorer.

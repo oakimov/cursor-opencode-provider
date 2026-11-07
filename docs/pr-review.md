@@ -106,6 +106,19 @@ the orchestration that owns a later retry or consumer is still wrong. A live
 evidence is a limitation. Required analysis that could not be performed is an
 incomplete review.
 
+A behavior that acquires, starts, delegates, or cleans up a resource also
+records its ownership postconditions: an `ownership` entry naming the owner,
+the owned resources, the subordinate work, the cancellation entrypoints, the
+condition that permits release, and any explicit transfer. `check` requires a
+scenario for each lifecycle path (`ownership-completion`, `ownership-nonzero`,
+`ownership-termination`, `ownership-early-leader`), run or explained as
+inapplicable, and requires a path supported only by `source`, `mocked`, or
+`unverified` evidence to be named in `uncovered`. Those scenarios record what
+was alive, present, or writable after the owner returned or began cleanup.
+The check enforces the record's structure and consistency. It does not
+establish that processes stopped; only the experiments the record describes
+can, and their limits stay in the record.
+
 When changing the review harness, evaluate detection separately from publisher
 correctness. `eval/review/` holds manually invoked pairs and the scorer. Keep
 the answer key outside the reviewer mount. Judge causal findings and their

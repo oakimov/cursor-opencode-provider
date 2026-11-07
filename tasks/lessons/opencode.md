@@ -763,6 +763,19 @@ These are failure lessons shared by both hosts, not a replacement for
   reviewer ran. Repair the review harness when that is the requested target,
   using the reviewed defect as evaluation evidence rather than turning the
   repair into a patch to the subject (`docs/pr-review.md`).
+- **A returned call is not settled ownership.** A clean review of #161 passed
+  a process runner that waited for the check's leader only, sent KILL only
+  when that leader overran, and had no SIGTERM handler, while its contract
+  said processes are awaited before snapshot cleanup. Synthetic POSIX runs
+  showed a TERM-ignoring descendant alive after SIGINT and after a successful
+  leader, with the snapshot already deleted, and SIGTERM left everything
+  behind. Its mocked `run` tests could not show any of that. The review
+  procedure now states ownership postconditions for anything a change starts
+  or cleans up and challenges completion, nonzero exit, catchable termination,
+  and an early-exiting leader with acknowledged ordering, reading liveness,
+  existence, and a write attempt after the owner returns. The ledger's
+  `ownership` record keeps those paths, and `check-runner` with its settling
+  and explicit-transfer controls measures it (`test/review-eval.test.ts`).
 - **Exercise review tooling from the reviewer's actual inputs.** A calibration
   test passed with unrelated PR objects in the developer's Git database but
   failed in shallow CI. Test archive preparation with local commits and missing
