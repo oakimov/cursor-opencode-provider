@@ -16,7 +16,8 @@ from pathlib import Path
 
 TOKEN = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 REVISION = re.compile(r"^(?:local|[0-9a-f]{40})$")
-ABSOLUTE = re.compile(r"(?:^|[\s\"'`])(?:~)?/")
+# A path starts with a slash (or ~/) followed by a path character; " / 200" is arithmetic.
+ABSOLUTE = re.compile(r"(?:^|[\s\"'`])~?/(?![\s/])")
 LIVE_CLAIM = re.compile(r"production incident|\blive model\b|\bin production\b", re.IGNORECASE)
 
 LEDGER_KEYS = {"revision", "behaviors", "candidates", "omissions", "omissionsNone", "retries", "retriesNone", "passes"}
@@ -32,7 +33,15 @@ RETRY_KEYS = {"behavior", "operation", "forced", "promise", "persisted", "retrie
 RETRY_VERDICTS = {"satisfied", "violated"}
 PASS_KEYS = {"candidatesValidated", "omissionsAnalyzed", "failedWorkAnalyzed"}
 DISPOSITIONS = {"actionable", "refuted", "policy", "operational", "hypothesis"}
-SCENARIO_EVIDENCE = {"reproduced", "source", "synthetic", "native", "live", "unverified", "not-run"}
+SCENARIO_EVIDENCE = {"reproduced", "source", "synthetic", "native", "live", "mocked", "unverified", "not-run"}
+BEHAVIOR_KEYS = {"id", "summary", "contract", "scenarios", "uncovered"}
+# A behavior that acquires, starts, delegates, or cleans up a resource records
+# who owns what, how it is cancelled, and when its state may be released.
+OWNERSHIP_KEYS = {"owner", "resources", "subordinates", "cancellation", "release", "transfer"}
+# Each lifecycle path gets a scenario, run or explained as inapplicable.
+OWNERSHIP_PATHS = ("ownership-completion", "ownership-nonzero", "ownership-termination", "ownership-early-leader")
+# Evidence that did not observe the owned work after the owner returned.
+INDIRECT_EVIDENCE = {"source", "mocked", "unverified"}
 KINDS = {"synthetic", "source", "native", "live", "unverified"}
 SETUPS = {"synthetic", "source", "native", "live"}
 PROVENANCE = {"introduced", "preexisting", "unchanged-consumer", "not-applicable"}
@@ -71,6 +80,33 @@ def load_json(path: Path) -> tuple[object, list[str]]:
         return None, [f"unreadable: {error.__class__.__name__}"]
 
 
+def check_ownership(ownership: object, scenarios: list, uncovered: list, prefix: str) -> list[str]:
+    """Structure and consistency of an ownership record, not proof that owned work stopped."""
+    if not isinstance(ownership, dict) or set(ownership) != OWNERSHIP_KEYS:
+        return [f"{prefix}.ownership"]
+    problems: list[str] = []
+    for field in ("owner", "subordinates", "release"):
+        if not text_field(ownership.get(field)):
+            problems.append(f"{prefix}.ownership.{field}")
+    for field in ("resources", "cancellation"):
+        value = ownership.get(field)
+        if not isinstance(value, list) or not value or any(not text_field(item) for item in value):
+            problems.append(f"{prefix}.ownership.{field}")
+    if not isinstance(ownership.get("transfer"), str):
+        problems.append(f"{prefix}.ownership.transfer")
+    gaps = "\n".join(item for item in uncovered if isinstance(item, str))
+    for path in OWNERSHIP_PATHS:
+        matching = [item for item in scenarios if isinstance(item, dict) and item.get("category") == path]
+        if not matching:
+            problems.append(f"{prefix}.ownership.{path}")
+            continue
+        # A path no experiment observed is a recorded gap, not a covered path.
+        indirect = any(item.get("applicable") is True and item.get("evidence") in INDIRECT_EVIDENCE for item in matching)
+        if indirect and path not in gaps:
+            problems.append(f"{prefix}.ownership.{path}.uncovered")
+    return problems
+
+
 def check_ledger(ledger: object) -> list[str]:
     problems: list[str] = []
     if not isinstance(ledger, dict):
@@ -92,7 +128,7 @@ def check_ledger(ledger: object) -> list[str]:
         problems.append("behaviors")
         behaviors = []
     for index, behavior in enumerate(behaviors):
-        if not isinstance(behavior, dict) or set(behavior) != {"id", "summary", "contract", "scenarios", "uncovered"}:
+        if not isinstance(behavior, dict) or set(behavior) - {"ownership"} != BEHAVIOR_KEYS:
             problems.append(f"behaviors[{index}]")
             continue
         identifier = behavior.get("id")
@@ -156,6 +192,9 @@ def check_ledger(ledger: object) -> list[str]:
         uncovered = behavior.get("uncovered")
         if not isinstance(uncovered, list) or any(not text_field(item) for item in uncovered):
             problems.append(f"behaviors[{index}].uncovered")
+            uncovered = []
+        if "ownership" in behavior:
+            problems.extend(check_ownership(behavior["ownership"], scenarios, uncovered, f"behaviors[{index}]"))
         if isinstance(identifier, str) and not evidenced:
             unevidenced.add(identifier)
 

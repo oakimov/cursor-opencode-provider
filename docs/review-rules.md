@@ -25,7 +25,7 @@ or outdated anchor is not evidence that a defect is fixed.
 - `src/`, tests, package metadata, the lockfile, or published `dist/` import a compatibility package, detect another host, or alias another provider. Unknown advertised tool names may pass through. Recognizing another host's tool, schema, or result is a blocker.
 - Protocol encode or decode changes without an independent fixture or captured wire bytes. A test that only round-trips through the same schema is not evidence.
 - The change widens what the provider can execute or access without an explicit documented option.
-- A resource can leak: an HTTP/2 stream, a session, or a listener that is never disposed, or a call that ignores abort.
+- A resource can leak: an HTTP/2 stream, a session, or a listener that is never disposed, or a call that ignores abort. The same applies to a process, worker, or writer the change starts that can outlive its owner on completion, failure, or catchable cancellation, and to files or state released while owned work can still use them. Ownership explicitly transferred under a stated contract is not a leak, and nothing can clean up after the owner itself is killed with SIGKILL.
 - A test is deleted, skipped, or weakened so the change passes.
 
 ## Important

@@ -12,6 +12,20 @@ permissions:
   contents: read
 
 jobs:
+  harness-platform:
+    name: Harness platform (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test native harness selection and lifecycle
+        # Windows names the interpreter python; Linux and macOS images ship python3.
+        run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} -B test/test_harness_test.py
+
   # Required check. On a pull request it tests the merge with main (the
   # checkout default), so a PR that no longer works on current main fails here.
   test:

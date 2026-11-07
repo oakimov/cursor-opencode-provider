@@ -1,9 +1,13 @@
-import { describe, expect, it } from "bun:test"
+import { describe, expect, it, setDefaultTimeout } from "bun:test"
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { createHash } from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+
+// Each case spawns Python, Bash or Git several times; Bun's 5 s default fails
+// under ordinary machine load, unevenly across cases.
+setDefaultTimeout(30_000)
 
 const root = path.resolve(import.meta.dir, "..")
 const head = "b".repeat(40)
@@ -21,8 +25,16 @@ const python = selectedPython()
 function publisherArgs(args: string[], script = path.join(root, "scripts/review-publish.py")): string[] {
   // Keep the real JWT/HTTP construction; route only the HTTPS boundary to fake gh.
   return ["-c", `
-import http.client, json, os, runpy, subprocess, sys
+import fcntl, http.client, json, os, runpy, subprocess, sys
 from pathlib import Path
+wait_marker = os.environ.get("REVIEW_TEST_LOCK_WAIT")
+if wait_marker:
+    real_flock = fcntl.flock
+    def observed_flock(fd, operation):
+        if operation == fcntl.LOCK_EX:
+            Path(wait_marker).write_text(str(os.getpid()), encoding="utf-8")
+        return real_flock(fd, operation)
+    fcntl.flock = observed_flock
 class Connection:
     def __init__(self, host, timeout):
         assert host == "api.github.com" and timeout == 30
@@ -134,6 +146,9 @@ import base64, json, os, subprocess, sys, tempfile, time
 from pathlib import Path
 state = Path(os.environ["GH_STATE"])
 args = sys.argv[1:]
+if os.environ.get("GH_LEGACY_PAGES") == "1" and "--slurp" in args:
+    sys.stderr.write("unknown flag: --slurp\\n")
+    raise SystemExit(1)
 if args and args[0] == "api":
     args = args[1:]
 method = "GET"
@@ -352,6 +367,21 @@ if method == "POST":
     json.dump(review, sys.stdout)
     raise SystemExit(0)
 def dump(page):
+    if "--paginate" in args and os.environ.get("GH_LEGACY_PAGES") == "1":
+        # gh emits adjacent JSON documents; a match may be on a later page.
+        fault = os.environ.get("GH_PAGE_FAULT")
+        if fault == "empty": return
+        sys.stdout.write("[]\\n")
+        for item in page:
+            json.dump([item], sys.stdout)
+            sys.stdout.write("\\n")
+        if fault == "truncated": sys.stdout.write("[{\\\"id\\\":")
+        if fault == "object": sys.stdout.write("{}")
+        if fault == "scalar": sys.stdout.write("[1]")
+        if fault == "failed":
+            sys.stderr.write("later page failed\\n")
+            raise SystemExit(1)
+        return
     json.dump([page] if "--slurp" in args else page, sys.stdout)
 if endpoint.endswith("/comments"):
     dump(comments)
@@ -514,7 +544,7 @@ function spawnPost(payload: string, approval: string, env: NodeJS.ProcessEnv): C
   return spawn(python, publisherArgs(["post", payload, approval]), {
     cwd: root,
     detached: true,
-    env: withApp({ ...processEnvWithoutReviewApp(), PYTHONDONTWRITEBYTECODE: "1", REVIEW_ARTIFACT_DIR: env.REVIEW_ARTIFACT_DIR || path.join(env.GH_STATE ? path.dirname(String(env.GH_STATE)) : path.dirname(payload), "retained"), ...env }),
+    env: withApp({ ...processEnvWithoutReviewApp(), PYTHONDONTWRITEBYTECODE: "1", REVIEW_TEST_LOCK_WAIT: path.join(String(env.GH_STATE), "lock-wait"), REVIEW_ARTIFACT_DIR: env.REVIEW_ARTIFACT_DIR || path.join(env.GH_STATE ? path.dirname(String(env.GH_STATE)) : path.dirname(payload), "retained"), ...env }),
   })
 }
 
@@ -551,9 +581,12 @@ function checkpointText(directory: string): string {
   return fs.readFileSync(path.join(directory, ".review-publish", names[0]!), "utf8")
 }
 
-function queuedOnLock(child: ChildProcess): boolean {
+function queuedOnLock(child: ChildProcess, state: string): boolean {
   if (child.exitCode !== null || child.pid === undefined) return false
-  return fs.readFileSync("/proc/locks", "utf8").split("\n").some((line) => line.includes("->") && line.includes(` ${child.pid} `))
+  // The holder owns the real lock before spawnPost. Observe the contender at
+  // flock, after its approval peek, without depending on Linux's procfs.
+  const marker = path.join(state, "lock-wait")
+  return fs.existsSync(marker) && fs.readFileSync(marker, "utf8") === String(child.pid)
 }
 
 describe("review publication", () => {
@@ -631,6 +664,45 @@ describe("review publication", () => {
     }
   })
 
+  it("publishes and recovers later-page receipts with gh that has no slurp flag", () => {
+    const { directory, payload, approval, bin, state } = freshReview("review-legacy-pages-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_LEGACY_PAGES: "1" }
+    try {
+      installDraft(payload, approval, env, 156, "Summary of the checked diff.\n", "P2. Read every page before deciding whether to send.")
+      const delivered = run(["post", payload, approval], { ...env, GH_FAIL: "1", GH_COMMIT: "1" })
+      expect(delivered.status, delivered.stderr).toBe(0)
+      expect(delivered.stdout).toContain("#pullrequestreview-1")
+      expect(postsOf(state)).toBe(1)
+      const recovered = run(["post", payload, approval], env)
+      expect(recovered.status, recovered.stderr).toBe(0)
+      expect(recovered.stdout).toContain("REVIEW_ALREADY_POSTED=1")
+      expect(recovered.stdout).toContain("#pullrequestreview-1")
+      expect(recovered.stdout).toContain("#discussion_r10")
+      expect(postsOf(state)).toBe(1)
+      expect(checkpointText(directory)).toContain('"state": "posted"')
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("refuses partial, malformed, non-array or empty paginated lookups before posting", () => {
+    const { directory, payload, approval, bin, state } = freshReview("review-bad-pages-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_LEGACY_PAGES: "1" }
+    try {
+      installDraft(payload, approval, env, 156, "Summary of the checked diff.\n", "P2. Invalid lookup output cannot authorize a send.")
+      for (const fault of ["truncated", "object", "scalar", "empty", "failed"]) {
+        const refused = run(["post", payload, approval], { ...env, GH_PAGE_FAULT: fault })
+        expect(refused.status, `${fault}: ${refused.stderr}`).toBe(1)
+        expect(postsOf(state)).toBe(0)
+      }
+      const retry = run(["post", payload, approval], env)
+      expect(retry.status, retry.stderr).toBe(0)
+      expect(postsOf(state)).toBe(1)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
   it("does not accept a discussion comment as a submitted review receipt", () => {
     const { directory, payload, approval, bin, state } = freshReview("review-wrong-vehicle-")
     const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_ISSUE_COMMENT_URL: "1" }
@@ -667,6 +739,91 @@ describe("review publication", () => {
       const rendered = run(["render", source, payload], {})
       expect(rendered.status, rendered.stderr).toBe(0)
       expect(JSON.parse(fs.readFileSync(payload, "utf8")).body).toContain("adversarial: passed.")
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects command statuses that contradict their exit codes", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-exit-codes-"))
+    const source = path.join(directory, "result.json")
+    const payload = path.join(directory, "payload.json")
+    try {
+      for (const check of [
+        { status: "passed", exitCode: 1 },
+        { status: "failed", exitCode: 0 },
+        { status: "skipped", exitCode: 0 },
+        { status: "passed", exitCode: true },
+        { status: "passed", exitCode: 0.5 },
+      ]) {
+        const result = structuredResult()
+        const checks = [...result.checks, { name: "command", detail: "Recorded command result.", ...check }]
+        fs.writeFileSync(source, JSON.stringify({ ...result, checks }))
+        const refused = run(["render", source, payload], {})
+        expect(refused.status, refused.stderr).toBe(2)
+        expect(refused.stderr).toContain("checks[3].exitCode")
+        expect(fs.existsSync(payload)).toBe(false)
+      }
+      const result = structuredResult()
+      fs.writeFileSync(source, JSON.stringify({ ...result, checks: [...result.checks, {
+        name: "command", status: "passed", detail: "The command exited successfully.", exitCode: 0,
+      }] }))
+      const rendered = run(["render", source, payload], {})
+      expect(rendered.status, rendered.stderr).toBe(0)
+      expect(JSON.parse(fs.readFileSync(payload, "utf8")).body).toContain("command: passed (exit 0).")
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps attributed baseline and environment failures visible in a clean code review", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-failure-cause-"))
+    const source = path.join(directory, "result.json")
+    const payload = path.join(directory, "payload.json")
+    try {
+      for (const cause of ["baseline", "environment"]) {
+        const result = structuredResult({ outcome: "clean", findings: [] })
+        const command = {
+          name: "isolated-command", status: "failed", exitCode: 1,
+          detail: "Install and build passed; the wrapper failed in isolation self-tests.",
+          failure: { cause, evidence: "The same self-test fails on the base revision with the same namespace refusal; the changed recovery tests pass on both revisions." },
+        }
+        const checks = [...result.checks, command]
+        fs.writeFileSync(source, JSON.stringify({ ...result, checks }))
+        const rendered = run(["render", source, payload], {})
+        expect(rendered.status, rendered.stderr).toBe(0)
+        const body = JSON.parse(fs.readFileSync(payload, "utf8")).body as string
+        expect(body).toContain("No actionable findings.")
+        expect(body).toContain("isolated-command: failed (exit 1).")
+        expect(body).toContain(`Failure cause: ${cause}.`)
+        expect(body).toContain("same self-test fails on the base revision")
+        fs.rmSync(payload)
+
+        for (const invalid of [
+          { ...command, failure: { cause, evidence: "" } },
+          { ...command, failure: { cause: "unknown", evidence: "Not investigated." } },
+          { ...command, failure: { cause: [], evidence: "Invalid attribution." } },
+          { ...command, exitCode: undefined },
+          { ...command, status: "passed", exitCode: 0 },
+        ]) {
+          fs.writeFileSync(source, JSON.stringify({ ...result, checks: [...result.checks, invalid] }))
+          const refused = run(["render", source, payload], {})
+          expect(refused.status, refused.stderr).toBe(2)
+          expect(fs.existsSync(payload)).toBe(false)
+        }
+        // A failed command without established attribution still blocks clean.
+        for (const name of ["diff", "adversarial"]) {
+          fs.writeFileSync(source, JSON.stringify({ ...result, checks: [
+            ...result.checks.filter((check) => check.name !== name), { ...command, name },
+          ] }))
+          const refused = run(["render", source, payload], {})
+          expect(refused.status, refused.stderr).toBe(2)
+          expect(refused.stderr).toContain(".failure")
+        }
+        const { failure: _failure, ...unattributed } = command
+        fs.writeFileSync(source, JSON.stringify({ ...result, checks: [...result.checks, unattributed] }))
+        expect(run(["render", source, payload], {}).status).toBe(2)
+      }
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
     }
@@ -984,7 +1141,7 @@ describe("review publication", () => {
       holder = holdLock(publicationLock(approval))
       child = spawnPost(payload, approval, env)
       const finished = collect(child)
-      waitFor("queued post", () => queuedOnLock(child!))
+      waitFor("queued post", () => queuedOnLock(child!, state))
       expect(child.exitCode).toBeNull()
       expect(postsOf(state)).toBe(0)
       const denied = run(["deny", approval], env)
@@ -1006,7 +1163,7 @@ describe("review publication", () => {
       holder = holdLock(publicationLock(approval))
       child = spawnPost(payload, approval, env)
       const replaced = collect(child)
-      waitFor("queued replacement", () => queuedOnLock(child!))
+      waitFor("queued replacement", () => queuedOnLock(child!, state))
       fs.writeFileSync(payload, `${original}\n`)
       await holder.release()
       holder = undefined
@@ -1167,7 +1324,7 @@ describe("review publication", () => {
       holder = holdLock(publicationLock(approval))
       child = spawnPost(payload, approval, env)
       const finished = collect(child)
-      waitFor("queued post", () => queuedOnLock(child!))
+      waitFor("queued post", () => queuedOnLock(child!, state))
       expect(postsOf(state)).toBe(0)
       installDraft(payload, approval, env, 157, "Summary for pull 157.\n", "P1. A queued replacement is a different operation.")
       await holder.release()
@@ -1476,6 +1633,9 @@ describe("review publication", () => {
     try {
       const bound = run(["bind", "oakimov", "cursor-opencode-provider", "156", target], env)
       expect(bound.status, bound.stderr).toBe(0)
+      expect(callsOf(state)).toEqual(["GET repos/oakimov/cursor-opencode-provider/pulls/156"])
+      expect(bound.stdout).toContain("from GitHub. No GitHub changes were made.")
+      expect(bound.stdout + bound.stderr).not.toContain("GitHub was not called.")
       const recorded = JSON.parse(fs.readFileSync(target, "utf8")) as {
         owner: string
         repo: string
@@ -1495,12 +1655,16 @@ describe("review publication", () => {
       })
       recorded.findings = "kept"
       fs.writeFileSync(target, JSON.stringify(recorded, null, 2) + "\n")
-      expect(run(["bind", "oakimov", "cursor-opencode-provider", "156", target], env).status).toBe(0)
+      const rebound = run(["bind", "oakimov", "cursor-opencode-provider", "156", target], env)
+      expect(rebound.status, rebound.stderr).toBe(0)
+      expect(rebound.stdout).toContain("The GitHub revision matches the recorded review. No GitHub changes were made.")
       expect(JSON.parse(fs.readFileSync(target, "utf8")).findings).toBe("kept")
       fs.writeFileSync(path.join(state, "head"), `${"c".repeat(40)}\n`)
       const moved = run(["bind", "oakimov", "cursor-opencode-provider", "156", target], env)
       expect(moved.status, moved.stderr).toBe(6)
       expect(moved.stderr).toContain("Refresh the review")
+      expect(moved.stderr).toContain("No GitHub changes were made.")
+      expect(moved.stderr).not.toContain("GitHub was not called.")
       expect(JSON.parse(fs.readFileSync(target, "utf8")).head).toBe(head)
       fs.writeFileSync(path.join(state, "head"), `${head}\n`)
 
@@ -1998,7 +2162,7 @@ describe("review thread resolution", () => {
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
     }
-  }, 20000)
+  })
 
   it("requires a resolution for an addressed inline finding and refuses unresolved or mismatched actions", () => {
     const fixture = freshReview("review-resolution-schema-")
@@ -2063,7 +2227,7 @@ describe("review thread resolution", () => {
         fs.rmSync(directory, { recursive: true, force: true })
       }
     }
-  }, 20000)
+  })
 
   it("stops thread actions if the head, replies, denial, or approval changes after the review is submitted", () => {
     for (const after of ["reply", "head", "deny", "replacement"]) {
@@ -2081,7 +2245,7 @@ describe("review thread resolution", () => {
         fs.rmSync(directory, { recursive: true, force: true })
       }
     }
-  }, 20000)
+  })
 
   it("keeps the review receipt on a rejected resolution and safely retries the rejected action", () => {
     const fixture = freshReview("review-resolve-forbidden-")
@@ -2120,7 +2284,7 @@ describe("review thread resolution", () => {
         fs.rmSync(directory, { recursive: true, force: true })
       }
     }
-  }, 20000)
+  })
 
   it("requires both a matching mutation receipt and resolved readback", () => {
     for (const flag of ["GH_RESOLVE_WRONG_RECEIPT", "GH_RESOLVE_NOT_APPLIED"]) {
@@ -2136,7 +2300,7 @@ describe("review thread resolution", () => {
         fs.rmSync(directory, { recursive: true, force: true })
       }
     }
-  }, 20000)
+  })
 
   it("records an integration-forbidden rejection as proven and retries it after the grant is corrected", () => {
     const fixture = freshReview("review-resolve-integration-")
@@ -2252,7 +2416,7 @@ describe("review thread resolution", () => {
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
     }
-  }, 20000)
+  })
 
   it("complete-resolutions.py refuses a missing approval and a review without a confirmed receipt", () => {
     const fixture = freshReview("review-complete-refusals-")
