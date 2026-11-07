@@ -1010,7 +1010,7 @@ copied = subprocess.run(["mount", "--bind", "/opt/harness", "/src/copied"], capt
 print("REMOUNT_BIND=" + str(copied.returncode))
 attempt("REMOUNT_WRITE", lambda: pathlib.Path("/opt/harness/harness.txt").write_text("PWNED\\n") or "ok")
 for line in pathlib.Path("/proc/self/status").read_text().splitlines():
-    if line.startswith("CapEff:"):
+    if line.startswith(("CapInh:", "CapPrm:", "CapEff:", "CapBnd:", "CapAmb:", "NoNewPrivs:")):
         print(line.replace("\\t", " "))
 pathlib.Path("/src/owned.txt").write_text("ok\\n")
 print("OWNED=ok")
@@ -1052,7 +1052,10 @@ print("SOCKET=" + str(pathlib.Path(socket).exists()))
       expect(result.stdout).toMatch(/REMOUNT=[1-9]/)
       expect(result.stdout).toMatch(/REMOUNT_BIND=[1-9]/)
       expect(result.stdout).toContain("REMOUNT_WRITE_ERR=")
-      expect(result.stdout).toContain("CapEff: 0000000000000000")
+      for (const set of ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"]) {
+        expect(result.stdout).toContain(`${set}: 0000000000000000`)
+      }
+      expect(result.stdout).toContain("NoNewPrivs: 1")
       expect(result.stdout).toContain("OWNED=ok")
       expect(result.stdout).toContain("WORKSPACE=False")
       expect(result.stdout).toContain("GIT=False")
@@ -1177,6 +1180,58 @@ print("SAW=" + str(found))
       expect(fs.readFileSync(path.join(src, "written"), "utf8")).toBe("source\n")
     } finally {
       fs.rmSync(src, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform !== "linux")("runs nested isolation with no capabilities and keeps ancestor binds read-only", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-nested-isolation-"))
+    const src = path.join(directory, "src")
+    const trusted = path.join(directory, "trusted")
+    fs.mkdirSync(path.join(src, "inner"), { recursive: true })
+    fs.mkdirSync(trusted)
+    fs.writeFileSync(path.join(trusted, "canary"), "CANARY\n")
+    fs.copyFileSync(path.join(root, "scripts/isolate-run.sh"), path.join(src, "isolate-run.sh"))
+    const inner = `
+import json, os, pathlib
+status = dict(line.split(":", 1) for line in pathlib.Path("/proc/self/status").read_text().splitlines() if ":" in line)
+print(json.dumps({"uid":os.geteuid(), "gid":os.getegid(), "caps":{key:status[key].strip() for key in ("CapInh","CapPrm","CapEff","CapBnd","CapAmb")}, "nnp":status["NoNewPrivs"].strip()}))
+`
+    const attack = `
+import pathlib, subprocess, sys
+result = subprocess.run(["mount", "-o", "remount,bind,rw", "/opt/trusted"], capture_output=True)
+if result.returncode == 0: sys.exit("ancestor bind remounted writable")
+try:
+    pathlib.Path("/opt/trusted/canary").write_text("CHANGED")
+except OSError:
+    print("ANCESTOR_READONLY")
+else:
+    sys.exit("ancestor bind changed")
+`
+    fs.writeFileSync(path.join(src, "probe.py"), `
+import json, os, pathlib, subprocess, sys
+${inner}
+if "CURSOR_API_KEY" in os.environ: sys.exit("credential entered boundary")
+# This raw child gets capabilities in its own namespace, but inherited
+# read-only mounts must remain locked against remounting and writes.
+subprocess.run(["unshare","--user","--map-root-user","--mount","--pid","--fork","--mount-proc","python3","-c",${JSON.stringify(attack)}], check=True)
+subprocess.run(["bash","/src/isolate-run.sh","--src","/src/inner","--","python3","-c",${JSON.stringify(inner)}], check=True)
+`)
+    try {
+      const result = run("bash", ["scripts/isolate-run.sh", "--src", src, "--ro-bind", `${trusted}:/opt/trusted`, "--", "python3", "/src/probe.py"], {
+        env: { ...process.env, CURSOR_API_KEY: secret },
+      })
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)
+      const rows = result.stdout.split("\n").filter((line) => line.startsWith("{"))
+      expect(rows).toHaveLength(2)
+      for (const row of rows) {
+        expect(JSON.parse(row)).toEqual({ uid: 1000, gid: 1000,
+          caps: Object.fromEntries(["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"].map((key) => [key, "0000000000000000"])), nnp: "1" })
+      }
+      expect(result.stdout).toContain("ANCESTOR_READONLY")
+      expect(fs.readFileSync(path.join(trusted, "canary"), "utf8")).toBe("CANARY\n")
+      expect(result.stdout).not.toContain(secret)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
     }
   })
 

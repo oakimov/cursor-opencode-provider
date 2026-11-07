@@ -8,7 +8,7 @@
 # mounted as its real file under the requested name. The directory that
 # contains that file is not mounted. Host /tmp, /home,
 # /workspace, agent sockets, and git metadata are not mounted. The environment
-# starts empty. --map-root-user grants mount capabilities inside the
+# starts empty. A non-root mapped UID retains setup capabilities inside the
 # namespace; those are dropped after the mounts exist and before the command
 # runs, so a read-only bind cannot be remounted writable. PID 1 then stays a
 # reaper: the command runs in its own session, orphaned zombies are collected,
@@ -31,6 +31,15 @@ set -euo pipefail
 isolate_unshare_detail=""
 isolate_mechanism_name=""
 
+# Use a non-root namespace identity. After the capability drop, mapping a
+# parent UID 0 into another user namespace requires CAP_SETFCAP (Linux 5.12+).
+# --keep-caps retains setup capabilities across exec for this non-root UID;
+# drop-caps.py clears every set before the command runs.
+isolate_unshare() {
+  unshare --user --map-user=1000 --map-group=1000 --keep-caps \
+    --mount --pid --fork --mount-proc "$@"
+}
+
 # Sets isolate_mechanism_name. Also prints that name. A command substitution
 # would drop isolate_unshare_detail, so callers in this script invoke it
 # directly.
@@ -40,7 +49,7 @@ isolate_mechanism() {
   if [[ "$os" == "Linux" ]]; then
     local err
     # stderr is the command substitution; stdout from `true` is discarded.
-    if err="$(unshare --user --map-root-user --mount --pid --fork --mount-proc true 2>&1 >/dev/null)"; then
+    if err="$(isolate_unshare true 2>&1 >/dev/null)"; then
       isolate_mechanism_name="linux-unshare"
       printf '%s' "$isolate_mechanism_name"
       return 0
@@ -271,7 +280,7 @@ pivot_root . oldroot
 mount -t proc proc /proc
 umount -l /oldroot
 rmdir /oldroot 2>/dev/null || true
-# --map-root-user can remount a read-only bind of a user-owned file.
+# Setup capabilities can remount a read-only bind of a user-owned file.
 # Drop that capability in this process, then replace it with the command.
 if [[ ! -x /usr/bin/python3 || ! -f /drop-caps.py ]]; then
   echo "python3 is required to drop capabilities before the command." >&2
@@ -299,11 +308,9 @@ EOF
   # An empty bind list must not be expanded: bash 3.2 treats that as unset.
   set +e
   if [[ "$(isolate_count bind_args)" -gt 0 ]]; then
-    unshare --user --map-root-user --mount --pid --fork --mount-proc \
-      bash "$enter" "$root" "$src" "${bind_args[@]}"
+    isolate_unshare bash "$enter" "$root" "$src" "${bind_args[@]}"
   else
-    unshare --user --map-root-user --mount --pid --fork --mount-proc \
-      bash "$enter" "$root" "$src"
+    isolate_unshare bash "$enter" "$root" "$src"
   fi
   status=$?
   set -e
@@ -354,7 +361,7 @@ isolate_write_env() {
   : >"$root/isolate-env"
   chmod 0600 "$root/isolate-env"
   {
-    printf 'PATH=/opt/tools:/usr/bin:/bin\n'
+    printf 'PATH=/opt/tools:/usr/bin:/bin:/usr/sbin\n'
     printf 'HOME=/home/reviewer\n'
     printf 'TMPDIR=/tmp\n'
     printf 'USER=reviewer\n'

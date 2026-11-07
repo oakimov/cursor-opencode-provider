@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Linux isolated checks can run their nested sandbox tests after dropping privileges, allowing the full suite to pass before the separate live-test trust gate ([#161](https://github.com/oakimov/cursor-opencode-provider/pull/161)).
 - Review setup reports its read-only GitHub lookup accurately instead of claiming no GitHub call occurred ([#161](https://github.com/oakimov/cursor-opencode-provider/pull/161)).
 - Manual reviews preserve failed command statuses and exit codes alongside evidence of baseline or environment failures; publication supports bundled GitHub CLIs without `--slurp` ([#161](https://github.com/oakimov/cursor-opencode-provider/pull/161)).
 - Local test checks stop owned descendants before removing their source snapshot, including after a successful leader, SIGINT, SIGTERM, or repeated cancellation ([#161](https://github.com/oakimov/cursor-opencode-provider/pull/161)).

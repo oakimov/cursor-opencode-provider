@@ -439,6 +439,9 @@ Changes listed under [Unreleased](CHANGELOG.md#unreleased) describe the developm
 
 Manual Cloud Agent reviews publish through the configured GitHub App after exact-preview approval. See the [App publisher setup](docs/pr-review.md#github-app-publisher) for `REVIEW_APP_ID`, the private key and optional installation ID. Tokens are restricted to this repository and retain the installation's configured permissions; the returned grant must include review-write access. `review-publish.py auth-info` reports configuration without printing secrets. Reviews use the App's bot identity, with no automatic review trigger.
 
+Linux isolated checks include the nested sandbox tests. Live credentials require
+the full check to pass and a separate trust decision for that exact revision.
+
 Re-reviews verify earlier threads and replies, and resolve fixed or refuted
 findings through the App after approval of the listed actions. The publisher
 checks the discussion and revision again and confirms resolved readback; a
