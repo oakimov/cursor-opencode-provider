@@ -6,10 +6,13 @@ import csv
 import io
 import json
 import os
+import signal
+import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
@@ -155,12 +158,18 @@ class Execution(unittest.TestCase):
 
     def test_cleanup_failure_cannot_report_a_pass(self):
         report = {"os": "Windows", "backend": "docker", "ready": True}
+        snapshots = []
         def probe(argv):
             if argv[:3] == ["docker", "image", "inspect"]:
                 return result(argv, harness.image_stamp())
             return result(argv, status=1)
-        with patch.object(harness, "detect", return_value=report), patch.object(harness.shutil, "which", return_value="git"), patch.object(harness, "snapshot"), patch.object(harness, "run", return_value=0), patch.object(harness, "probe", side_effect=probe), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            self.assertEqual(harness.main([]), 2)
+        try:
+            with patch.object(harness, "detect", return_value=report), patch.object(harness.shutil, "which", return_value="git"), patch.object(harness, "snapshot", side_effect=lambda root, target: snapshots.append(target)), patch.object(harness, "run", return_value=0), patch.object(harness, "probe", side_effect=probe), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(harness.main([]), 2)
+            self.assertTrue(snapshots[0].exists(), "uncertain container ownership must retain the bind source")
+        finally:
+            for snapshot in snapshots:
+                shutil.rmtree(snapshot)
 
     def test_failed_image_refresh_cannot_make_the_next_default_run_serve_an_old_image(self):
         report = {"os": "Windows", "backend": "docker", "ready": True}
@@ -205,6 +214,71 @@ class Execution(unittest.TestCase):
             self.assertFalse((root / "sparse.json").exists())
             if os.name != "nt":
                 self.assertTrue((target / "sparse.sh").stat().st_mode & 0o111)
+
+
+@unittest.skipUnless(os.name == "posix", "Native checks use POSIX process groups; Windows owns containers.")
+class Lifecycles(unittest.TestCase):
+    def wait_for(self, predicate):
+        deadline = time.monotonic() + 10
+        while not predicate():
+            if time.monotonic() >= deadline:
+                self.fail("No lifecycle acknowledgement")
+            time.sleep(0.01)
+
+    def alive(self, pid):
+        status = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False)
+        return bool(status.stdout.strip()) and not status.stdout.strip().startswith("Z")
+
+    def scenario(self, mode, cancellation=None, again=None):
+        with tempfile.TemporaryDirectory(prefix="harness-lifecycle-") as temporary:
+            state = Path(temporary)
+            (state / "repo").mkdir()
+            (state / "snapshots").mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=state / "repo", check=True)
+            command = [sys.executable, "-B", str(ROOT / "test/fixtures/harness-process.py"), "adapter", str(state), mode, str(ROOT / "scripts/test-harness.py")]
+            env = dict(os.environ, TMPDIR=str(state / "snapshots"))
+            child = subprocess.Popen(command, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            try:
+                self.wait_for(lambda: (state / "leader.ready").exists())
+                if cancellation:
+                    child.send_signal(cancellation)
+                if again:
+                    self.wait_for(lambda: (state / "term-seen").exists())
+                    child.send_signal(again)
+                _, stderr = child.communicate(timeout=10)
+                self.assertEqual(child.returncode, 128 + cancellation if cancellation else (7 if mode == "failure" else 0), stderr)
+                self.assertFalse(self.alive(int((state / "descendant.pid").read_text())), "owned descendant survived")
+                workspace = Path((state / "workspace").read_text())
+                self.assertFalse(workspace.exists())
+                with self.assertRaises(FileNotFoundError):
+                    (workspace / "late-write").write_text("must not write")
+                self.assertEqual(list((state / "snapshots").iterdir()), [])
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                pids = [int(path.read_text()) for path in state.glob("*.pid")]
+                for pid in pids:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                child.communicate(timeout=5)
+                self.wait_for(lambda: not any(self.alive(pid) for pid in pids))
+
+    def test_successful_leader_settles_its_descendant(self):
+        self.scenario("success")
+
+    def test_failed_leader_settles_its_descendant(self):
+        self.scenario("failure")
+
+    def test_sigterm_stops_work_before_removing_snapshot(self):
+        self.scenario("hang", signal.SIGTERM)
+
+    def test_sigint_still_kills_a_descendant_after_the_leader_exits(self):
+        self.scenario("hang", signal.SIGINT)
+
+    def test_repeated_signals_do_not_interrupt_cleanup(self):
+        self.scenario("repeated", signal.SIGTERM, signal.SIGINT)
 
 
 if __name__ == "__main__":

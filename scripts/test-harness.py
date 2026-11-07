@@ -19,12 +19,15 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = "cursor-provider-tests:local"
 IMAGE_LABEL = "org.cursor-provider.test-harness.sha256"
+CLEANUP_GRACE_SECONDS = 5.0
+_received_signal: int | None = None
 CHECKS = [
     ["bun", "install", "--frozen-lockfile", "--ignore-scripts"],
     ["bun", "run", "typecheck"],
@@ -34,6 +37,29 @@ CHECKS = [
     ["bun", "run", "test:node-http2"],
     ["bun", "run", "check:pricing"],
 ]
+
+
+class Cancelled(Exception):
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+class CleanupFailed(OSError):
+    """Owned work could not be confirmed stopped; its snapshot must remain."""
+
+
+def record_signal(signum: int, _frame) -> None:
+    global _received_signal
+    # Defer cancellation to a safe checkpoint. Repeated signals must not
+    # interrupt process creation, kill escalation, or snapshot cleanup.
+    if _received_signal is None:
+        _received_signal = signum
+
+
+def checkpoint() -> None:
+    if _received_signal is not None:
+        raise Cancelled(_received_signal)
 
 
 def probe(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -104,6 +130,7 @@ def snapshot(root: Path, destination: Path) -> None:
             metadata, name = item.split(b"\t", 1)
             modes[os.fsdecode(name)] = metadata.split(b" ", 1)[0]
     for flag, name in entries:
+        checkpoint()
         relative = Path(name)
         if relative.is_absolute() or ".." in relative.parts or relative.parts[0] in (".git", "node_modules", "dist"):
             raise ValueError("Invalid source snapshot entry")
@@ -126,27 +153,89 @@ def snapshot(root: Path, destination: Path) -> None:
                     target.chmod(0o755)
 
 
-def run(argv: list[str], cwd: Path, *, env: dict | None = None, data: bytes | None = None) -> int:
-    """Await child exit before temporary cleanup, including cancellation."""
-    child = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE if data is not None else None,
-                             start_new_session=os.name != "nt")
+def group_alive(pgid: int) -> bool:
     try:
-        child.communicate(data)
-        return child.returncode
-    except BaseException:
-        if os.name == "nt":
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # macOS can report this for a group containing only zombies.
+    try:
+        listing = probe(["ps", "-A", "-o", "pgid=,stat="])
+        if listing.returncode != 0:
+            raise CleanupFailed("Could not inspect the check's process group")
+    except (OSError, subprocess.SubprocessError) as error:
+        raise CleanupFailed("Could not inspect the check's process group") from error
+    return any(fields[0] == str(pgid) and not fields[1].startswith("Z")
+               for fields in (line.split() for line in listing.stdout.splitlines()) if len(fields) == 2)
+
+
+def settle(child: subprocess.Popen) -> None:
+    """Stop the entire owned group, even when its leader already exited."""
+    if os.name == "nt":
+        # Windows runs the Docker client, not native checks. The caller also
+        # confirms removal of its named container before releasing the bind.
+        if child.poll() is None:
             child.terminate()
-        else:
-            os.killpg(child.pid, signal.SIGTERM)
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+        child.wait()
+        return
+    try:
+        os.killpg(child.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        child.wait()
+        return
+    except PermissionError:
+        pass
+    killed = False
+    deadline = time.monotonic() + CLEANUP_GRACE_SECONDS
+    try:
+        while True:
+            child.poll()  # reap the leader; a zombie cannot write the snapshot
+            if not group_alive(child.pid):
+                child.wait()
+                return
+            if time.monotonic() >= deadline:
+                if killed:
+                    raise CleanupFailed("The check's process group did not stop")
+                os.killpg(child.pid, signal.SIGKILL)
+                killed = True
+                deadline = time.monotonic() + 5
+            time.sleep(0.02)
+    except ProcessLookupError:
+        child.wait()
+    except BaseException as error:
+        # Inspection errors cannot let the direct child keep running. Preserve
+        # the snapshot when the rest of the group cannot be confirmed stopped.
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
         try:
             child.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            if os.name == "nt":
-                child.kill()
-            else:
-                os.killpg(child.pid, signal.SIGKILL)
-            child.wait()
-        raise
+            pass
+        raise CleanupFailed("Could not confirm process-group cleanup") from error
+
+
+def run(argv: list[str], cwd: Path, *, env: dict | None = None, data: bytes | None = None) -> int:
+    """Await owned work before cleanup on success, failure, or cancellation."""
+    checkpoint()
+    child = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE if data is not None else None,
+                             start_new_session=os.name != "nt")
+    try:
+        while True:
+            checkpoint()
+            try:
+                child.communicate(data, timeout=0.1)
+                return child.returncode
+            except subprocess.TimeoutExpired:
+                data = None  # communicate retains the partially written input
+    finally:
+        settle(child)
 
 
 def build_image(image: str) -> int:
@@ -184,7 +273,7 @@ def docker_command(source: Path, image: str, name: str) -> list[str]:
             "--env", "HOME=/home/test-runner", image, "bash", "-c", worker]
 
 
-def main(argv: list[str] | None = None) -> int:
+def checks_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--diagnose", action="store_true", help="report OS, backend and prerequisites without running checks")
     parser.add_argument("--backend", choices=("auto", "native", "docker"), default="auto")
@@ -193,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         report = detect(args.backend)
+        checkpoint()
         print(json.dumps(report), flush=True)
         if not report["ready"]:
             return 2
@@ -210,8 +300,9 @@ def main(argv: list[str] | None = None) -> int:
             if image.returncode != 0 or image.stdout.strip() != image_stamp():
                 print("Test image is missing or differs from the Dockerfile; run again with --build-image.", file=sys.stderr)
                 return 2
-        with tempfile.TemporaryDirectory(prefix="cursor-harness-") as temporary:
-            source = Path(temporary).resolve()
+        source = Path(tempfile.mkdtemp(prefix="cursor-harness-")).resolve()
+        releasable = True
+        try:
             snapshot(ROOT, source)
             if report["backend"] == "docker":
                 source.chmod(0o755)
@@ -225,22 +316,49 @@ def main(argv: list[str] | None = None) -> int:
                     if removed.returncode != 0:
                         remaining = probe(["docker", "ps", "--all", "--quiet", "--filter", f"name=^{name}$"])
                         if remaining.returncode != 0 or remaining.stdout.strip():
-                            raise OSError("Could not confirm test-container cleanup")
+                            raise CleanupFailed("Could not confirm test-container cleanup")
             # This runner executes trusted local changes. Contributor checks
             # keep their filesystem boundary in isolated-check.sh.
             env = {key: value for key, value in os.environ.items()
                    if key not in ("CURSOR_API_KEY", "GH_TOKEN", "GITHUB_TOKEN") and not key.startswith("REVIEW_APP_")}
             for check in CHECKS:
+                checkpoint()
                 print("CHECK=" + " ".join(check), flush=True)
                 status = run(check, source, env=env)
                 if status:
                     return status
+        except CleanupFailed:
+            releasable = False
+            print(f"HARNESS_SNAPSHOT_RETAINED={source}", file=sys.stderr)
+            raise
+        finally:
+            if releasable:
+                shutil.rmtree(source)
         return 0
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"HARNESS=unavailable {type(error).__name__}: {error}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         return 130
+
+
+def main(argv: list[str] | None = None) -> int:
+    global _received_signal
+    previous = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
+    saved = _received_signal
+    _received_signal = None
+    try:
+        for signum in previous:
+            signal.signal(signum, record_signal)
+        status = checks_main(argv)
+        checkpoint()  # cancellation during final cleanup still returns nonzero
+        return status
+    except Cancelled as cancelled:
+        return 128 + cancelled.signum
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+        _received_signal = saved
 
 
 if __name__ == "__main__":

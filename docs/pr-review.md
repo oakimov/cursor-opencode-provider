@@ -40,6 +40,12 @@ neither Git metadata nor host dependencies. Dependency installation, typecheck,
 build, the full suite, built-output architecture checks, Node HTTP/2 checks and
 pricing fixture checks run in order. A failing check stops the run. Processes
 and containers are awaited before cleanup; cleanup failure cannot report a pass.
+Native checks own their POSIX process group, including descendants left after
+the leader exits. Completion and cancellation stop that group before removing
+the snapshot. SIGINT and SIGTERM return 130 and 143; repeated signals cannot
+interrupt cleanup. If the runner cannot confirm that its work or container
+stopped, it exits nonzero and reports `HARNESS_SNAPSHOT_RETAINED` privately
+instead of deleting a source tree that may still be in use.
 Linux-only namespace assertions are explicit skips on macOS, whose native
 sandbox tests cover its own boundary. Windows runs those assertions in Linux.
 Archived evaluation tools leave `harnessHead` and `harnessDirty` null when Git

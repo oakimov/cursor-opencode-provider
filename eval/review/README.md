@@ -75,7 +75,7 @@ removed is a false positive. Any other finding is `unadjudicated`; it is not
 automatically a false positive. `overbroad` means the finding matched a real
 defect and also a non-defect, so the claim needs narrower wording.
 
-The ledger fields say whether the two passes were recorded. They are not a
+The ledger fields say whether the completion passes were recorded. They are not a
 detection score. Both snapshots use this same completion format; the comparison
 measures their review instructions within the shared offline adapter, rather
 than an unmodified production workflow.

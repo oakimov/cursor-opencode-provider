@@ -776,6 +776,10 @@ These are failure lessons shared by both hosts, not a replacement for
   existence, and a write attempt after the owner returns. The ledger's
   `ownership` record keeps those paths, and `check-runner` with its settling
   and explicit-transfer controls measures it (`test/review-eval.test.ts`).
+  The local runner itself must settle the group after every check, not just
+  on an exception. Record signals for safe checkpoints so a second cancellation
+  cannot bypass escalation; confirm no live group member remains before
+  releasing the snapshot (`Lifecycles` in `test/test_harness_test.py`).
 - **Exercise review tooling from the reviewer's actual inputs.** A calibration
   test passed with unrelated PR objects in the developer's Git database but
   failed in shallow CI. Test archive preparation with local commits and missing
