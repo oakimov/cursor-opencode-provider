@@ -248,6 +248,11 @@ History recovery keeps completed results from earlier resumed Runs too.
 Completed inline catalog lookups do not block it; unfinished, spilled, malformed,
 and unknown server-side work still do. For recovery metadata without prompts or
 tool payloads, set `CURSOR_PROVIDER_RECOVERY_DEBUG=1` before starting the host.
+By default, full and recovery-only logs follow the same [recycling policy](cache-log-runbook.md#log-recycling-design):
+on the first write and hourly thereafter, a file above 50 MiB is compacted in
+place to roughly its newest 25 MiB of complete lines.
+Set `CURSOR_PROVIDER_DEBUG_LOG_MODE=rotate` before startup for configurable
+[numbered archives](cache-log-runbook.md#numbered-rotation).
 
 The provider shares Cursor CLI's limits of 10 transport retries and 3 server
 retries across this turn, including OpenCode's retries. OpenCode can stop earlier.
