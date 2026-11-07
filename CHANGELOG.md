@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Manual reviews preserve failed command statuses and exit codes alongside evidence of baseline or environment failures; publication supports bundled GitHub CLIs without `--slurp` ([#161](https://github.com/oakimov/cursor-opencode-provider/pull/161)).
 - Local test checks stop owned descendants before removing their source snapshot, including after a successful leader, SIGINT, SIGTERM, or repeated cancellation ([#161](https://github.com/oakimov/cursor-opencode-provider/pull/161)).
 - Live OpenCode smoke tests remove native runtime scratch files on exit while preserving pre-existing files in the configured temp root.
 - Isolated checks on macOS can write their source, home and temp directories when those live under the default temp directory, instead of every write failing while the run exits 0.

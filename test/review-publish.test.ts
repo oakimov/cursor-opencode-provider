@@ -146,6 +146,9 @@ import base64, json, os, subprocess, sys, tempfile, time
 from pathlib import Path
 state = Path(os.environ["GH_STATE"])
 args = sys.argv[1:]
+if os.environ.get("GH_LEGACY_PAGES") == "1" and "--slurp" in args:
+    sys.stderr.write("unknown flag: --slurp\\n")
+    raise SystemExit(1)
 if args and args[0] == "api":
     args = args[1:]
 method = "GET"
@@ -364,6 +367,21 @@ if method == "POST":
     json.dump(review, sys.stdout)
     raise SystemExit(0)
 def dump(page):
+    if "--paginate" in args and os.environ.get("GH_LEGACY_PAGES") == "1":
+        # gh emits adjacent JSON documents; a match may be on a later page.
+        fault = os.environ.get("GH_PAGE_FAULT")
+        if fault == "empty": return
+        sys.stdout.write("[]\\n")
+        for item in page:
+            json.dump([item], sys.stdout)
+            sys.stdout.write("\\n")
+        if fault == "truncated": sys.stdout.write("[{\\\"id\\\":")
+        if fault == "object": sys.stdout.write("{}")
+        if fault == "scalar": sys.stdout.write("[1]")
+        if fault == "failed":
+            sys.stderr.write("later page failed\\n")
+            raise SystemExit(1)
+        return
     json.dump([page] if "--slurp" in args else page, sys.stdout)
 if endpoint.endswith("/comments"):
     dump(comments)
@@ -646,6 +664,45 @@ describe("review publication", () => {
     }
   })
 
+  it("publishes and recovers later-page receipts with gh that has no slurp flag", () => {
+    const { directory, payload, approval, bin, state } = freshReview("review-legacy-pages-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_LEGACY_PAGES: "1" }
+    try {
+      installDraft(payload, approval, env, 156, "Summary of the checked diff.\n", "P2. Read every page before deciding whether to send.")
+      const delivered = run(["post", payload, approval], { ...env, GH_FAIL: "1", GH_COMMIT: "1" })
+      expect(delivered.status, delivered.stderr).toBe(0)
+      expect(delivered.stdout).toContain("#pullrequestreview-1")
+      expect(postsOf(state)).toBe(1)
+      const recovered = run(["post", payload, approval], env)
+      expect(recovered.status, recovered.stderr).toBe(0)
+      expect(recovered.stdout).toContain("REVIEW_ALREADY_POSTED=1")
+      expect(recovered.stdout).toContain("#pullrequestreview-1")
+      expect(recovered.stdout).toContain("#discussion_r10")
+      expect(postsOf(state)).toBe(1)
+      expect(checkpointText(directory)).toContain('"state": "posted"')
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("refuses partial, malformed, non-array or empty paginated lookups before posting", () => {
+    const { directory, payload, approval, bin, state } = freshReview("review-bad-pages-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_LEGACY_PAGES: "1" }
+    try {
+      installDraft(payload, approval, env, 156, "Summary of the checked diff.\n", "P2. Invalid lookup output cannot authorize a send.")
+      for (const fault of ["truncated", "object", "scalar", "empty", "failed"]) {
+        const refused = run(["post", payload, approval], { ...env, GH_PAGE_FAULT: fault })
+        expect(refused.status, `${fault}: ${refused.stderr}`).toBe(1)
+        expect(postsOf(state)).toBe(0)
+      }
+      const retry = run(["post", payload, approval], env)
+      expect(retry.status, retry.stderr).toBe(0)
+      expect(postsOf(state)).toBe(1)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
   it("does not accept a discussion comment as a submitted review receipt", () => {
     const { directory, payload, approval, bin, state } = freshReview("review-wrong-vehicle-")
     const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_ISSUE_COMMENT_URL: "1" }
@@ -682,6 +739,91 @@ describe("review publication", () => {
       const rendered = run(["render", source, payload], {})
       expect(rendered.status, rendered.stderr).toBe(0)
       expect(JSON.parse(fs.readFileSync(payload, "utf8")).body).toContain("adversarial: passed.")
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects command statuses that contradict their exit codes", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-exit-codes-"))
+    const source = path.join(directory, "result.json")
+    const payload = path.join(directory, "payload.json")
+    try {
+      for (const check of [
+        { status: "passed", exitCode: 1 },
+        { status: "failed", exitCode: 0 },
+        { status: "skipped", exitCode: 0 },
+        { status: "passed", exitCode: true },
+        { status: "passed", exitCode: 0.5 },
+      ]) {
+        const result = structuredResult()
+        const checks = [...result.checks, { name: "command", detail: "Recorded command result.", ...check }]
+        fs.writeFileSync(source, JSON.stringify({ ...result, checks }))
+        const refused = run(["render", source, payload], {})
+        expect(refused.status, refused.stderr).toBe(2)
+        expect(refused.stderr).toContain("checks[3].exitCode")
+        expect(fs.existsSync(payload)).toBe(false)
+      }
+      const result = structuredResult()
+      fs.writeFileSync(source, JSON.stringify({ ...result, checks: [...result.checks, {
+        name: "command", status: "passed", detail: "The command exited successfully.", exitCode: 0,
+      }] }))
+      const rendered = run(["render", source, payload], {})
+      expect(rendered.status, rendered.stderr).toBe(0)
+      expect(JSON.parse(fs.readFileSync(payload, "utf8")).body).toContain("command: passed (exit 0).")
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps attributed baseline and environment failures visible in a clean code review", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-failure-cause-"))
+    const source = path.join(directory, "result.json")
+    const payload = path.join(directory, "payload.json")
+    try {
+      for (const cause of ["baseline", "environment"]) {
+        const result = structuredResult({ outcome: "clean", findings: [] })
+        const command = {
+          name: "isolated-command", status: "failed", exitCode: 1,
+          detail: "Install and build passed; the wrapper failed in isolation self-tests.",
+          failure: { cause, evidence: "The same self-test fails on the base revision with the same namespace refusal; the changed recovery tests pass on both revisions." },
+        }
+        const checks = [...result.checks, command]
+        fs.writeFileSync(source, JSON.stringify({ ...result, checks }))
+        const rendered = run(["render", source, payload], {})
+        expect(rendered.status, rendered.stderr).toBe(0)
+        const body = JSON.parse(fs.readFileSync(payload, "utf8")).body as string
+        expect(body).toContain("No actionable findings.")
+        expect(body).toContain("isolated-command: failed (exit 1).")
+        expect(body).toContain(`Failure cause: ${cause}.`)
+        expect(body).toContain("same self-test fails on the base revision")
+        fs.rmSync(payload)
+
+        for (const invalid of [
+          { ...command, failure: { cause, evidence: "" } },
+          { ...command, failure: { cause: "unknown", evidence: "Not investigated." } },
+          { ...command, failure: { cause: [], evidence: "Invalid attribution." } },
+          { ...command, exitCode: undefined },
+          { ...command, status: "passed", exitCode: 0 },
+        ]) {
+          fs.writeFileSync(source, JSON.stringify({ ...result, checks: [...result.checks, invalid] }))
+          const refused = run(["render", source, payload], {})
+          expect(refused.status, refused.stderr).toBe(2)
+          expect(fs.existsSync(payload)).toBe(false)
+        }
+        // A failed command without established attribution still blocks clean.
+        for (const name of ["diff", "adversarial"]) {
+          fs.writeFileSync(source, JSON.stringify({ ...result, checks: [
+            ...result.checks.filter((check) => check.name !== name), { ...command, name },
+          ] }))
+          const refused = run(["render", source, payload], {})
+          expect(refused.status, refused.stderr).toBe(2)
+          expect(refused.stderr).toContain(".failure")
+        }
+        const { failure: _failure, ...unattributed } = command
+        fs.writeFileSync(source, JSON.stringify({ ...result, checks: [...result.checks, unattributed] }))
+        expect(run(["render", source, payload], {}).status).toBe(2)
+      }
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
     }

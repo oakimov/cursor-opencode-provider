@@ -801,6 +801,18 @@ These are failure lessons shared by both hosts, not a replacement for
   Completing those actions through the recovery helper must also finalize the
   artifact receipt; otherwise guarded cleanup still treats the finished review
   as pending (`completes rejected resolutions idempotently` regression).
+  A bundled `gh` without `--slurp` stopped the review lookup before the send.
+  Parse the `--paginate` JSON stream locally, including later-page receipts,
+  and reject partial or malformed output before inferring no prior review
+  (`publishes and recovers later-page receipts with gh that has no slurp flag`).
+- **A code verdict is not a command exit status.** A review labelled an isolated
+  check passed while reporting its nonzero exit and failing self-tests. The
+  result model also rejected clean code verdicts with established baseline or
+  environment failures. Record command exits,
+  preserve the failed status, and establish attribution separately before
+  allowing a clean code verdict. Keep required analysis and the live credential
+  gate intact (`rejects command statuses that contradict their exit codes`,
+  `keeps attributed baseline and environment failures visible in a clean code review`).
 - **An approval wait outlives temporary cleanup.** A successful `show` froze a
   preview that the agent then removed with its temporary review directory.
   Review results, ledgers, previews, and publication state belong in a persistent

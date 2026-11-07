@@ -75,7 +75,33 @@ The payload is a JSON object: `owner`, `repo`, `pull`, `base`, `head`, `runtime`
 
 Write the review as a result, then render it. The result records the same repository, pull request, base, head, and `linux` runtime. `outcome` is `findings`, `clean`, or `incomplete`. Each check has a name, a status (`passed`, `failed`, `skipped`, or `unavailable`), and a detail. A finding has a stable id, a rule id from `.greptile/config.json` or `blocker` / `important` / `nit` from the review rules, that rule's severity, a title, an explanation, a trigger, a consequence, and `evidence` of `reproduced`, `source`, or `unverified`. `diff` lists the path, line, and side verified in the current diff. A comment is emitted only for a finding at one of those locations. Other findings stay in the summary. `prior` classifies an earlier finding as `still_present`, `fixed`, `refuted`, `regressed`, or `unverified`. A clean result cannot leave one unresolved, and fixed or refuted ids cannot reappear as current findings. At most five `low` findings are included. `mutations` are included in the approved preview: `resolve` actions are sent after the submitted review is confirmed; `reply` actions remain proposals and are not sent.
 
-`bind` reads the pull request and records its base and head. When the result file already has a different revision, `bind` stops and leaves the file unchanged. `render` checks the result and writes the payload. `REVIEW_OUTCOME=incomplete` means the analysis did not reach a defensible review: the diff was unreadable, a tool was unavailable, or the result is malformed. That file can be read and cannot be stamped or posted. Rendering is not publication. Showing the preview is not approval. Approval is not a merge.
+For new results, executed command checks also record integer `exitCode`.
+`passed` requires zero, `failed` requires nonzero, and an unexecuted `skipped`
+check has no exit code. Capture the command's own status, not that of a log
+pipeline or a later command. Keep a failed wrapper separate from passing
+subtests, targeted reruns, or CI. Existing retained results without this field
+keep their original validation and preview bytes.
+
+A completed code review may report no actionable findings while recording a
+failed command caused by the environment or the baseline. Keep that check
+`failed`, with its nonzero `exitCode`, and add, for example:
+
+```json
+"failure": {
+  "cause": "baseline",
+  "evidence": "The same test fails on the base revision under the same prerequisites; cite the test and comparison results."
+}
+```
+
+The other allowed cause is `environment`, supported by a capability probe and
+the causal link to the failure. Attribution cannot replace `diff` or
+`adversarial` analysis, cannot hide a reportable pre-existing bug, and cannot
+make an unknown or subject-caused failure support a clean outcome. The public
+review shows the failure, exit code, cause and evidence. A code verdict is not
+a passing test result or merge approval, and the live credential gate still
+requires the isolated check to exit zero.
+
+`bind` reads the pull request and records its base and head. When the result file already has a different revision, `bind` stops and leaves the file unchanged. `render` checks the result and writes the payload. `REVIEW_OUTCOME=incomplete` means the analysis did not reach a defensible review: the diff was unreadable, required analysis was unavailable, or the result is malformed. That file can be read and cannot be stamped or posted. Rendering is not publication. Showing the preview is not approval. Approval is not a merge.
 
 Structured results require an `adversarial` check in addition to `diff` and test
 results. That check attests that all three completion passes in the review skill
@@ -170,6 +196,12 @@ preview. Readback checks do not authorize additional GitHub mutations.
 ```bash
 python3 scripts/review-publish.py deny "$review_dir/approval.json"
 ```
+
+The publisher uses `gh api --paginate` and parses every returned JSON page
+locally, so it also works with bundled CLI versions that have no `--slurp`.
+A failed, empty, truncated, or malformed lookup stops publication; partial
+output cannot establish that an earlier review is absent. Later pages count
+for both duplicate detection and inline-comment readback.
 
 ## Artifact retention
 

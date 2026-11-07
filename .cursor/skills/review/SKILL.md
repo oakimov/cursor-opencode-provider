@@ -244,6 +244,24 @@ scripts/isolated-check.sh <pr-number-or-url>
 
 A pull URL must name this checkout's origin. The copy has no `.git` directory. Install, build, typecheck, and `bun test` run inside `scripts/isolate-run.sh`. Exit 0 means those checks passed. Exit 1 is a check failure. Exit 2 is a bad invocation or an unavailable isolation mechanism. The log line `Check root:` is private.
 
+Record an `exitCode` for every executed command check in a new result. Capture
+the reviewed command's status, including when saving its output through a
+pipeline; a successful `tee`, log reader, or later command is not its exit
+status. A nonzero command is `failed`, even when its changed tests passed or
+CI is green. Record those successes as separate checks. An unexecuted command
+is `skipped` with a reason and no exit code.
+
+Investigate failures before deciding their effect on the review. Reproduce a
+suspected baseline failure on the base revision with the same prerequisites,
+or establish an environment failure with a capability probe and its causal
+link to the failing check. A failed check may carry `failure` with `cause`
+`baseline` or `environment` and concrete `evidence`, as `docs/pr-review.md`
+describes. It still renders as failed. Attribution does not excuse an
+actionable pre-existing bug or substitute for required analysis. Unknown or
+subject-caused failures cannot support a clean outcome. Neither attribution
+nor a clean code verdict bypasses the live credential gate or establishes
+merge readiness. Never relabel the wrapper as passed to publish a review.
+
 On your own checkout, run `bun run build`, `bun run typecheck`, and `bun test` directly. That is not a review of someone else's pull request.
 
 ## Live test
