@@ -586,8 +586,14 @@ These are failure lessons shared by both hosts, not a replacement for
   write can erase a sibling writer's first messages after the rename. The
   concurrent-provider regression covers that transition. Permission and existing-byte
   checks must use the open descriptor too: the initialization-rename regression
-  reproduced a lost first message when those checks used the renamed path. See the
-  [log recycling design](../../docs/cache-log-runbook.md#log-recycling-design)
+  reproduced a lost first message when those checks used the renamed path.
+  Shifting old logs before detaching the active file discarded the archive
+  chain on repeated rename refusal (#163). Detach
+  first and preserve staged data on later failure. A stale lock's pathname is
+  not its identity; publish ownership before acquisition becomes visible and
+  remove only the observed owner's marker before attempting an empty removal.
+  The three-process regression forces replacement while a stale inspector waits.
+  See the [log recycling design](../../docs/cache-log-runbook.md#log-recycling-design)
   for the upstream policy and concurrency tradeoffs.
 - **A restart snapshot is more than a checkpoint.** Bindings, reachable blobs,
   context, provenance, deferred notes and steer receipts must agree. Preserve

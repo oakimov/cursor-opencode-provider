@@ -86,6 +86,163 @@ afterEach(() => {
 })
 
 describe("numbered debug log rotation", () => {
+  for (const siblingWrites of [false, true]) {
+    it(`preserves the detached active file after an archive move fails (sibling=${siblingWrites})`, () => {
+      withLog((file) => {
+        const original = "incident\n"
+        const sibling = "concurrent writer\n"
+        const staged = path.join(`${file}.trim`, "active")
+        fs.writeFileSync(file, original, { mode: 0o600 })
+        fs.writeFileSync(`${file}.1`, "archive-1\n")
+        fs.writeFileSync(`${file}.2`, "archive-2\n")
+        const rename = fs.renameSync.bind(fs)
+        const refused = spyOn(fs, "renameSync").mockImplementation((from, to) => {
+          if (String(from) === `${file}.2`) {
+            if (siblingWrites) fs.writeFileSync(file, sibling, { mode: 0o600 })
+            throw new Error("archive move refused")
+          }
+          return rename(from, to)
+        })
+        try {
+          expect(() => rotateDebugLogIfOversized(file, { maxBytes: 1, backups: 3 })).toThrow("archive move refused")
+        } finally {
+          refused.mockRestore()
+        }
+        expect(fs.readFileSync(file, "utf8")).toBe(siblingWrites ? sibling : original)
+        expect(fs.readFileSync(`${file}.1`, "utf8")).toBe("archive-1\n")
+        expect(fs.readFileSync(`${file}.2`, "utf8")).toBe("archive-2\n")
+        if (siblingWrites) {
+          expect(fs.readFileSync(staged, "utf8")).toBe(original)
+          const stale = new Date(Date.now() - DEBUG_LOG_TRIM_LOCK_STALE_MS - 1000)
+          fs.utimesSync(`${file}.trim`, stale, stale)
+          expect(rotateDebugLogIfOversized(file, { maxBytes: 1, backups: 3 })).toBe(false)
+          expect(fs.readFileSync(staged, "utf8")).toBe(original)
+          expect(fs.readFileSync(file, "utf8")).toBe(sibling)
+        } else {
+          expect(fs.existsSync(`${file}.trim`)).toBe(false)
+          expect(rotateDebugLogIfOversized(file, { maxBytes: 1, backups: 3 })).toBe(true)
+          expect(fs.readFileSync(`${file}.1`, "utf8")).toBe(original)
+        }
+      })
+    })
+  }
+
+  it("recovers an abandoned owner marker without deleting unrelated lock contents", () => {
+    withLog((file) => {
+      fs.writeFileSync(file, "incident\n")
+      const lock = `${file}.trim`
+      fs.mkdirSync(lock)
+      fs.writeFileSync(path.join(lock, "owner-00000000-0000-4000-8000-000000000000"), "")
+      const stale = new Date(Date.now() - DEBUG_LOG_TRIM_LOCK_STALE_MS - 1000)
+      fs.utimesSync(lock, stale, stale)
+      expect(rotateDebugLogIfOversized(file, { maxBytes: 1 })).toBe(false)
+      expect(fs.existsSync(lock)).toBe(false)
+      expect(rotateDebugLogIfOversized(file, { maxBytes: 1 })).toBe(true)
+      expect(fs.readFileSync(`${file}.1`, "utf8")).toBe("incident\n")
+    })
+  })
+
+  it("preserves all archives across repeated active-file rename failures", async () => {
+    const warnings = spyOn(console, "error").mockImplementation(() => {})
+    try {
+      await withTrace({ CURSOR_PROVIDER_DEBUG_LOG_MODE: "rotate", CURSOR_PROVIDER_DEBUG_ROTATE_MAX_BYTES: "1024",
+        CURSOR_PROVIDER_DEBUG_ROTATE_BACKUPS: "3" }, async (file, load) => {
+        const logger = await load()
+        fs.writeFileSync(file, "incident\n" + "x".repeat(2048), { mode: 0o600 })
+        for (let index = 1; index <= 4; index++) fs.writeFileSync(`${file}.${index}`, `archive-${index}\n`)
+        const rename = fs.renameSync.bind(fs)
+        const busy = spyOn(fs, "renameSync").mockImplementation((from, to) => {
+          if (String(from) === file) throw Object.assign(new Error("active log busy"), { code: "EBUSY" })
+          return rename(from, to)
+        })
+        try {
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            logger.trace(`rename-refused-${attempt}`)
+            for (let index = 1; index <= 4; index++) {
+              expect(fs.readFileSync(`${file}.${index}`, "utf8")).toBe(`archive-${index}\n`)
+            }
+            expect(fs.readFileSync(file, "utf8")).toContain(`rename-refused-${attempt}`)
+            expect(fs.existsSync(`${file}.trim`)).toBe(false)
+          }
+        } finally {
+          busy.mockRestore()
+        }
+        logger.trace("rotation-recovered")
+        const archived = fs.readFileSync(`${file}.1`, "utf8")
+        for (let attempt = 1; attempt <= 3; attempt++) expect(archived).toContain(`rename-refused-${attempt}`)
+        expect(fs.readFileSync(`${file}.2`, "utf8")).toBe("archive-1\n")
+        expect(fs.readFileSync(`${file}.3`, "utf8")).toBe("archive-2\n")
+        expect(fs.existsSync(`${file}.4`)).toBe(false)
+        expect(fs.readFileSync(file, "utf8")).toContain("rotation-recovered")
+      })
+    } finally {
+      warnings.mockRestore()
+    }
+  })
+
+  it("does not reap a replacement lock while its owner is rotating", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-debug-lock-race-"))
+    const file = path.join(root, "debug.log")
+    const lock = `${file}.trim`
+    const children: ReturnType<typeof Bun.spawn>[] = []
+    const errors: Array<Promise<string>> = []
+    const spawn = (role: "reaper" | "owner") => {
+      const child = Bun.spawn([process.execPath, "-e", `
+        import fs from "node:fs";
+        import { rotateDebugLogIfOversized } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/debug.ts"))};
+        const file = process.argv[1], lock = file + ".trim";
+        const lstat = fs.lstatSync.bind(fs);
+        let observations = 0;
+        fs.lstatSync = (target, ...args) => {
+          const result = lstat(target, ...args);
+          if (${JSON.stringify(role)} === "reaper" ? String(target) === lock && ++observations === 1
+              : String(target) === file && ++observations === 2) {
+            process.stdout.write("ready");
+            fs.readSync(0, Buffer.alloc(1), 0, 1, null);
+          }
+          return result;
+        };
+        rotateDebugLogIfOversized(file, { maxBytes: 1, backups: 3 });
+      `, file], { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
+      children.push(child)
+      errors.push(new Response(child.stderr).text())
+      return child
+    }
+    const ready = async (child: ReturnType<typeof spawn>) => {
+      const reader = child.stdout.getReader()
+      try {
+        expect(new TextDecoder().decode((await reader.read()).value)).toBe("ready")
+      } finally {
+        reader.releaseLock()
+      }
+    }
+    try {
+      fs.writeFileSync(file, "incident\n")
+      fs.mkdirSync(lock)
+      const stale = new Date(Date.now() - DEBUG_LOG_TRIM_LOCK_STALE_MS - 1000)
+      fs.utimesSync(lock, stale, stale)
+      const reaper = spawn("reaper")
+      await ready(reaper)
+      expect(rotateDebugLogIfOversized(file, { maxBytes: 1 })).toBe(false)
+      expect(fs.existsSync(lock)).toBe(false)
+      const owner = spawn("owner")
+      await ready(owner)
+      reaper.stdin.end()
+      expect(await reaper.exited).toBe(0)
+      expect(fs.existsSync(lock)).toBe(true)
+      expect(rotateDebugLogIfOversized(file, { maxBytes: 1 })).toBe(false)
+      owner.stdin.end()
+      expect(await owner.exited).toBe(0)
+      expect(fs.readFileSync(`${file}.1`, "utf8")).toBe("incident\n")
+      expect(fs.existsSync(lock)).toBe(false)
+    } finally {
+      for (const child of children) if (child.exitCode === null) child.kill()
+      await Promise.all(children.map(child => child.exited))
+      await Promise.all(errors)
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it("rejects invalid rotation limits before touching the active log", () => {
     withLog((file) => {
       fs.writeFileSync(file, "incident\n")
@@ -396,13 +553,14 @@ describe("debug log paths / modes (F9)", () => {
         }
         expect(body.match(/debug: size-cap trim/g)).toHaveLength(1)
         clock += DEBUG_LOG_TRIM_INTERVAL_MS
-        const mkdir = fs.mkdirSync.bind(fs)
-        const lock = spyOn(fs, "mkdirSync").mockImplementation((target, options) => {
-          if (String(target) === `${file}.trim`) throw new Error("lock creation refused")
-          return mkdir(target, options)
+        const rename = fs.renameSync.bind(fs)
+        const lock = spyOn(fs, "renameSync").mockImplementation((from, to) => {
+          if (String(to) === `${file}.trim`) throw new Error("lock creation refused")
+          return rename(from, to)
         })
         try {
           first.trace("maintenance-failed-but-appended")
+          expect(lock).toHaveBeenCalledTimes(1)
         } finally {
           lock.mockRestore()
         }
@@ -458,10 +616,10 @@ describe("debug log paths / modes (F9)", () => {
   it("still appends when maintenance fails", async () => {
     await traceInChild(`
       oversize();
-      const mkdir = fs.mkdirSync.bind(fs);
-      fs.mkdirSync = (target, ...args) => {
-        if (String(target).endsWith(".trim")) throw new Error("maintenance denied");
-        return mkdir(target, ...args);
+      const rename = fs.renameSync.bind(fs);
+      fs.renameSync = (from, to) => {
+        if (String(to).endsWith(".trim")) throw new Error("maintenance denied");
+        return rename(from, to);
       };
       trace("maintenance-failed-but-appended");
       assert(fs.readFileSync(file, "utf8").includes("maintenance-failed-but-appended"));
@@ -602,6 +760,32 @@ describe("debug log paths / modes (F9)", () => {
       expect(trimDebugLogIfOversized(file, { maxBytes: 16, keepBytes: 11 })).toBe(false)
       expect(fs.readFileSync(file, "utf8")).toBe("old\ncut\nretained\n")
       expect(fs.readFileSync(path.join(lock, "owner"), "utf8")).toBe("still owned")
+    })
+  })
+
+  it("preserves a populated replacement at the final stale-lock removal", () => {
+    withLog((file) => {
+      fs.writeFileSync(file, "incident\n")
+      const lock = `${file}.trim`
+      const marker = path.join(lock, "owner-00000000-0000-4000-8000-000000000001")
+      fs.mkdirSync(lock)
+      const stale = new Date(Date.now() - DEBUG_LOG_TRIM_LOCK_STALE_MS - 1000)
+      fs.utimesSync(lock, stale, stale)
+      const rmdir = fs.rmdirSync.bind(fs)
+      const remove = spyOn(fs, "rmdirSync").mockImplementationOnce((target) => {
+        expect(String(target)).toBe(lock)
+        rmdir(lock)
+        fs.mkdirSync(lock)
+        fs.writeFileSync(marker, "new owner")
+        return rmdir(lock)
+      })
+      try {
+        expect(rotateDebugLogIfOversized(file, { maxBytes: 1 })).toBe(false)
+      } finally {
+        remove.mockRestore()
+      }
+      expect(fs.readFileSync(marker, "utf8")).toBe("new owner")
+      expect(fs.readFileSync(file, "utf8")).toBe("incident\n")
     })
   })
 

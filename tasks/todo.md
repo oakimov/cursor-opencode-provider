@@ -14,6 +14,9 @@
   - [x] Document rotation settings and validate the updated build.
   - [x] Cover enabled logging in the instrumented test process and validate
     patch LCOV without changing coverage thresholds.
+  - [x] Reproduce and fix archive loss on repeated active-file rename failures.
+  - [x] Reproduce and fix stale cleanup removing a newly acquired lock.
+  - [x] Validate failure recovery, documentation and full coverage.
 
 - [x] Fix [#91](https://github.com/oakimov/cursor-opencode-provider/issues/91),
   OpenCode 2.x cold model readiness.

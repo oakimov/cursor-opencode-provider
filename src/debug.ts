@@ -1,6 +1,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { randomUUID } from "node:crypto"
 import { processShared } from "./process-shared.js"
 
 // Wire-level diagnostics. Opt in with CURSOR_PROVIDER_DEBUG=1 (or "true").
@@ -145,28 +146,56 @@ function copyTag(): string {
   return moduleCopies.count > 1 ? `#${MODULE_COPY} ` : ""
 }
 
-function withDebugLogLock(filePath: string, run: () => boolean): boolean {
-  const lock = `${filePath}.trim`
+function reapDebugLogLock(lock: string): void {
   try {
-    fs.mkdirSync(lock, { mode: 0o700 })
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error
-    // Match OpenCode: remove an abandoned lock, but yield this check. Do not
-    // follow a symlink or remove a nonempty directory owned by another actor.
-    try {
-      const stat = fs.lstatSync(lock)
-      if (stat.isDirectory() && Date.now() - stat.mtimeMs > DEBUG_LOG_TRIM_LOCK_STALE_MS) {
-        fs.rmdirSync(lock)
-      }
-    } catch {
-      /* another trimmer may already have released it */
-    }
+    const before = fs.lstatSync(lock)
+    if (!before.isDirectory() || Date.now() - before.mtimeMs <= DEBUG_LOG_TRIM_LOCK_STALE_MS) return
+    const entries = fs.readdirSync(lock)
+    const after = fs.lstatSync(lock)
+    if (before.dev !== after.dev || before.ino !== after.ino || before.mtimeMs !== after.mtimeMs) return
+    // Remove only the observed owner's unique marker. A replacement lock is
+    // published nonempty, so even a replacement after this check resists rmdir.
+    if (entries.length === 1 && /^owner-[\da-f-]{36}$/.test(entries[0]!)) {
+      fs.unlinkSync(path.join(lock, entries[0]!))
+    } else if (entries.length !== 0) return
+    fs.rmdirSync(lock)
+  } catch {
+    // Another owner/reaper won, or the lock contains retained rotation data.
+  }
+}
+
+function withDebugLogLock(filePath: string, run: (lock: string) => boolean): boolean {
+  const lock = `${filePath}.trim`
+  if (fs.existsSync(lock)) {
+    reapDebugLogLock(lock)
     return false
   }
+  const candidate = fs.mkdtempSync(`${lock}-`)
+  const owner = `owner-${randomUUID()}`
+  let acquired = false
   try {
-    return run()
+    fs.writeFileSync(path.join(candidate, owner), "", { mode: 0o600, flag: "wx" })
+    try {
+      fs.renameSync(candidate, lock)
+    } catch (error) {
+      if (fs.existsSync(lock)) return false
+      throw error
+    }
+    acquired = true
+    return run(lock)
   } finally {
-    fs.rmdirSync(lock)
+    if (!acquired) fs.rmSync(candidate, { recursive: true, force: true })
+    else {
+      try {
+        fs.unlinkSync(path.join(lock, owner))
+        fs.rmdirSync(lock)
+      } catch (error) {
+        // A new owner may have replaced the empty lock; a failed rotation may
+        // have left its active file here. Never remove either recursively.
+        if (!(error instanceof Error && "code" in error &&
+          ["ENOENT", "ENOTEMPTY", "EEXIST"].includes(String(error.code)))) throw error
+      }
+    }
   }
 }
 
@@ -241,7 +270,7 @@ export function rotateDebugLogIfOversized(
   const current = fs.lstatSync(filePath)
   if (!current.isFile()) throw new Error("Debug log rotation requires a regular file")
   if (current.size < maxBytes) return false
-  return withDebugLogLock(filePath, () => {
+  return withDebugLogLock(filePath, (lock) => {
     const stat = fs.lstatSync(filePath)
     if (!stat.isFile()) throw new Error("Debug log rotation requires a regular file")
     if (stat.size < maxBytes) return false
@@ -259,31 +288,47 @@ export function rotateDebugLogIfOversized(
         archives.push(undefined)
       }
     }
-    // A smaller configured count also retires archives made by an earlier run.
-    const prefix = `${path.basename(filePath)}.`
-    for (const entry of fs.readdirSync(path.dirname(filePath), { withFileTypes: true })) {
-      if (!entry.name.startsWith(prefix)) continue
-      const suffix = entry.name.slice(prefix.length)
-      if (!/^[1-9]\d*$/.test(suffix)) continue
-      const number = Number(suffix)
-      if (Number.isSafeInteger(number) && number > backups && (entry.isFile() || entry.isSymbolicLink())) {
-        fs.unlinkSync(path.join(path.dirname(filePath), entry.name))
+    // Detach the active file before retiring anything. A refused rename must
+    // leave every archive intact, even when the next message retries rotation.
+    const staged = path.join(lock, "active")
+    fs.renameSync(filePath, staged)
+    try {
+      // A smaller configured count also retires archives made by an earlier run.
+      const prefix = `${path.basename(filePath)}.`
+      for (const entry of fs.readdirSync(path.dirname(filePath), { withFileTypes: true })) {
+        if (!entry.name.startsWith(prefix)) continue
+        const suffix = entry.name.slice(prefix.length)
+        if (!/^[1-9]\d*$/.test(suffix)) continue
+        const number = Number(suffix)
+        if (Number.isSafeInteger(number) && number > backups && (entry.isFile() || entry.isSymbolicLink())) {
+          fs.unlinkSync(path.join(path.dirname(filePath), entry.name))
+        }
       }
+      const oldest = archives[backups - 1]
+      if (oldest) fs.unlinkSync(oldest.file)
+      for (let index = backups - 1; index >= 1; index--) {
+        const archive = archives[index - 1]
+        if (!archive) continue
+        if (archive.symlink) fs.unlinkSync(archive.file)
+        else fs.renameSync(archive.file, `${filePath}.${index + 1}`)
+      }
+      fs.renameSync(staged, `${filePath}.1`)
+      // A sibling may already have created the new active path; always append.
+      fs.appendFileSync(filePath, debugBannerLine() +
+        `[${new Date().toISOString()}] debug: size-cap rotate wasBytes=${stat.size} ` +
+        `maxBytes=${maxBytes} backups=${backups}\n`, { mode: 0o600 })
+      return true
+    } catch (error) {
+      try {
+        // Restore without replacing a new active file a sibling has opened.
+        fs.linkSync(staged, filePath)
+        fs.unlinkSync(staged)
+      } catch {
+        // Preserve staged data under the lock if restoration is unavailable.
+        // Its nonempty directory prevents further destructive maintenance.
+      }
+      throw error
     }
-    const oldest = archives[backups - 1]
-    if (oldest) fs.unlinkSync(oldest.file)
-    for (let index = backups - 1; index >= 1; index--) {
-      const archive = archives[index - 1]
-      if (!archive) continue
-      if (archive.symlink) fs.unlinkSync(archive.file)
-      else fs.renameSync(archive.file, `${filePath}.${index + 1}`)
-    }
-    fs.renameSync(filePath, `${filePath}.1`)
-    // A sibling may already have created the new active path; always append.
-    fs.appendFileSync(filePath, debugBannerLine() +
-      `[${new Date().toISOString()}] debug: size-cap rotate wasBytes=${stat.size} ` +
-      `maxBytes=${maxBytes} backups=${backups}\n`, { mode: 0o600 })
-    return true
   })
 }
 

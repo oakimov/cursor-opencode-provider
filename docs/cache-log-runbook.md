@@ -84,9 +84,12 @@ same retention policy on both host majors, without importing a host logger.
 The provider retains its existing default and override paths and 0700 managed
 directory / 0600 file modes. A 64 KiB buffer bounds compaction memory. In-place
 compaction keeps existing append handles attached to the active file. A sibling
-`.trim` directory serializes trimmers across processes; a lock older than five
-minutes is removed, with that check skipped and acquisition retried at the next
-interval. Module copies share the hourly check schedule for each resolved path.
+`.trim` directory serializes trimmers across processes. Acquisition publishes a
+directory already containing a unique owner marker. Cleanup of a lock older
+than five minutes removes only its observed marker and the empty directory;
+a replacement owner's marker prevents its directory from being removed.
+That check is skipped and acquisition retried at the next interval. Module
+copies share the hourly check schedule for each resolved path.
 Checks run on writes, with no background timer or idle process to clean up.
 
 As in OpenCode, appenders do not take the trim lock: another process's write
@@ -131,9 +134,18 @@ the same mode and settings. Each provider append opens the active path, so later
 writes follow the new file; an append already in progress can finish in the
 newest archive. Archive symlinks are removed or replaced without writing to
 their targets. New files are mode 0600; rotation retains the current file's
-permissions on its archive. A failed rotation keeps logging best-effort and
-never falls back to truncating the active file. Rotation is not transactional
-across crashes or I/O failures. Keep `trim` for external writers that hold a
+permissions on its archive. Rotation first detaches the active file inside the
+maintenance directory, before shifting or retiring any archives. A refused
+active-file rename leaves the archive chain unchanged on every retry.
+
+If a later archive operation fails, the detached file is restored only if the
+active path is still absent. If restoration fails or a sibling has created a
+new active file, the original is preserved at `<log>.trim/active`. Logging
+continues best-effort, but maintenance pauses while that file remains. Stop all
+writers, preserve the staged file and archives, and remove the maintenance
+directory only after its log data has been saved before restarting the writers.
+Rotation never falls back to truncation and is not transactional across crashes
+or I/O failures. Keep `trim` for external writers that hold a
 file descriptor open, since those writers remain attached to the renamed inode.
 
 ## Extract the useful lines
