@@ -19,6 +19,8 @@ credentials.json
 # Logs / debug
 *.log
 *.log.[0-9]*
+*.log.trim/
+*.log.trim-*/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
