@@ -17,6 +17,32 @@ import {
 
 const originalDebugFile = process.env.CURSOR_PROVIDER_DEBUG_FILE
 
+let traceModule = 0
+
+// Subprocess regressions exercise fresh hosts, but their coverage is not part
+// of Bun's parent LCOV. Load a fresh, instrumented module for policy coverage.
+async function withTrace(
+  env: Record<string, string>,
+  run: (file: string, load: () => Promise<typeof import("../src/debug.js")>) => Promise<void>,
+): Promise<void> {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-debug-instrumented-"))
+  const settings = { CURSOR_PROVIDER_DEBUG: "1", CURSOR_PROVIDER_RECOVERY_DEBUG: "0",
+    CURSOR_PROVIDER_DEBUG_LOG_MODE: "trim", CURSOR_PROVIDER_DEBUG_ROTATE_MAX_BYTES: "",
+    CURSOR_PROVIDER_DEBUG_ROTATE_BACKUPS: "", CURSOR_PROVIDER_DEBUG_FILE: path.join(root, "debug.log"), ...env }
+  const previous = Object.fromEntries(Object.keys(settings).map(key => [key, process.env[key]]))
+  try {
+    Object.assign(process.env, settings)
+    await run(settings.CURSOR_PROVIDER_DEBUG_FILE,
+      () => import(`../src/debug.ts?retention-test-${++traceModule}`))
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
+
 function withLog(run: (file: string) => void): void {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-debug-maintenance-"))
   try {
@@ -60,6 +86,61 @@ afterEach(() => {
 })
 
 describe("numbered debug log rotation", () => {
+  it("rejects invalid rotation limits before touching the active log", () => {
+    withLog((file) => {
+      fs.writeFileSync(file, "incident\n")
+      for (const options of [{ maxBytes: 0 }, { maxBytes: 1.5 }, { maxBytes: Infinity },
+        { backups: 0 }, { backups: 101 }, { backups: 1.5 }]) {
+        expect(() => rotateDebugLogIfOversized(file, options)).toThrow("Invalid debug log rotation")
+        expect(fs.readFileSync(file, "utf8")).toBe("incident\n")
+        expect(fs.readdirSync(path.dirname(file))).toEqual(["debug.log"])
+      }
+    })
+  })
+
+  for (const recoveryOnly of [false, true]) {
+    it(`covers enabled rotation, reloads and failure recovery in process (recovery=${recoveryOnly})`, async () => {
+      const warnings = spyOn(console, "error").mockImplementation(() => {})
+      try {
+        await withTrace({ CURSOR_PROVIDER_DEBUG_LOG_MODE: "rotate", CURSOR_PROVIDER_DEBUG_ROTATE_MAX_BYTES: "1024",
+          CURSOR_PROVIDER_DEBUG_ROTATE_BACKUPS: "invalid-backup-count", CURSOR_PROVIDER_DEBUG: recoveryOnly ? "0" : "1",
+          CURSOR_PROVIDER_RECOVERY_DEBUG: recoveryOnly ? "1" : "0" }, async (file, load) => {
+          const first = await load()
+          expect(first.isDebugEnabled()).toBe(!recoveryOnly)
+          const prefix = recoveryOnly ? "recovery: " : ""
+          fs.writeFileSync(file, "earlier incident\n" + "x".repeat(2048), { mode: 0o600 })
+          first.trace(prefix + "first")
+          expect(fs.readFileSync(`${file}.1`, "utf8").startsWith("earlier incident\n")).toBe(true)
+          expect(fs.readFileSync(file, "utf8")).toContain(prefix + "first")
+          const second = await load()
+          expect(second.trace).not.toBe(first.trace)
+          second.trace(prefix + "after-reload")
+          let body = fs.readFileSync(file, "utf8")
+          expect(body).toContain(prefix + "first")
+          expect(body).toContain(prefix + "after-reload")
+          expect(body).toContain("reinit=append")
+          fs.appendFileSync(file, "x".repeat(2048))
+          fs.mkdirSync(`${file}.1.blocked`)
+          fs.renameSync(`${file}.1`, `${file}.2`)
+          fs.renameSync(`${file}.1.blocked`, `${file}.1`)
+          first.trace(prefix + "rotation-failed-but-appended")
+          body = fs.readFileSync(file, "utf8")
+          expect(body).toContain(prefix + "rotation-failed-but-appended")
+          expect(fs.existsSync(`${file}.trim`)).toBe(false)
+          fs.rmdirSync(`${file}.1`)
+          second.trace(prefix + "retry-rotated")
+          expect(fs.readFileSync(`${file}.1`, "utf8")).toContain(prefix + "rotation-failed-but-appended")
+          expect(fs.readFileSync(file, "utf8")).toContain(prefix + "retry-rotated")
+          expect(fs.statSync(file).mode & 0o777).toBe(0o600)
+          expect(warnings.mock.calls.some(([message]) => String(message).includes("using 5"))).toBe(true)
+          expect(warnings.mock.calls.some(([message]) => String(message).includes("invalid-backup-count"))).toBe(false)
+        })
+      } finally {
+        warnings.mockRestore()
+      }
+    })
+  }
+
   it("defaults to trim and validates opt-in rotation settings", () => {
     expect(resolveDebugLogOptions({})).toEqual({ mode: "trim", maxBytes: DEBUG_LOG_MAX_BYTES, backups: 5, warnings: [] })
     expect(DEBUG_LOG_ROTATE_BACKUPS).toBe(5)
@@ -289,6 +370,51 @@ describe("numbered debug log rotation", () => {
 })
 
 describe("debug log paths / modes (F9)", () => {
+  it("covers the shared hourly trim schedule and a failed check in process", async () => {
+    let clock = Date.now()
+    const now = spyOn(Date, "now").mockImplementation(() => clock)
+    const warnings = spyOn(console, "error").mockImplementation(() => {})
+    try {
+      await withTrace({}, async (file, load) => {
+        const first = await load()
+        first.trace("initial")
+        fs.writeFileSync(file, "expired-record\n")
+        fs.truncateSync(file, DEBUG_LOG_MAX_BYTES + 1)
+        fs.appendFileSync(file, "\nrecent-record\n")
+        first.trace("before-hour")
+        const second = await load()
+        second.trace("after-reload")
+        clock += DEBUG_LOG_TRIM_INTERVAL_MS - 1
+        first.trace("still-before-hour")
+        expect(fs.statSync(file).size).toBeGreaterThan(DEBUG_LOG_MAX_BYTES)
+        clock += 1
+        second.trace("after-hour")
+        const body = fs.readFileSync(file, "utf8")
+        expect(body.startsWith("recent-record\n")).toBe(true)
+        for (const message of ["before-hour", "after-reload", "still-before-hour", "after-hour"]) {
+          expect(body).toContain(message)
+        }
+        expect(body.match(/debug: size-cap trim/g)).toHaveLength(1)
+        clock += DEBUG_LOG_TRIM_INTERVAL_MS
+        const mkdir = fs.mkdirSync.bind(fs)
+        const lock = spyOn(fs, "mkdirSync").mockImplementation((target, options) => {
+          if (String(target) === `${file}.trim`) throw new Error("lock creation refused")
+          return mkdir(target, options)
+        })
+        try {
+          first.trace("maintenance-failed-but-appended")
+        } finally {
+          lock.mockRestore()
+        }
+        expect(fs.readFileSync(file, "utf8")).toContain("maintenance-failed-but-appended")
+        expect(fs.existsSync(`${file}.trim`)).toBe(false)
+      })
+    } finally {
+      now.mockRestore()
+      warnings.mockRestore()
+    }
+  })
+
   it("keeps recent diagnostics when starting with an oversized override", async () => {
     await traceInChild(`
       oversize();
@@ -451,6 +577,32 @@ describe("debug log paths / modes (F9)", () => {
     expect(DEBUG_LOG_KEEP_BYTES).toBe(25 * 1024 * 1024)
     expect(DEBUG_LOG_TRIM_INTERVAL_MS).toBe(60 * 60 * 1000)
     expect(DEBUG_LOG_TRIM_LOCK_STALE_MS).toBe(5 * 60 * 1000)
+  })
+
+  it("rejects invalid trim limits without changing the log", () => {
+    withLog((file) => {
+      fs.writeFileSync(file, "incident\n")
+      for (const options of [{ maxBytes: 0 }, { maxBytes: Infinity }, { maxBytes: 1.5 },
+        { keepBytes: 0 }, { keepBytes: -1 }, { keepBytes: 1.5 }, { maxBytes: 10, keepBytes: 10 }]) {
+        expect(() => trimDebugLogIfOversized(file, options)).toThrow("0 < keepBytes < maxBytes")
+        expect(fs.readFileSync(file, "utf8")).toBe("incident\n")
+        expect(fs.readdirSync(path.dirname(file))).toEqual(["debug.log"])
+      }
+    })
+  })
+
+  it("preserves a nonempty abandoned lock and the active log", () => {
+    withLog((file) => {
+      fs.writeFileSync(file, "old\ncut\nretained\n")
+      const lock = `${file}.trim`
+      fs.mkdirSync(lock)
+      fs.writeFileSync(path.join(lock, "owner"), "still owned")
+      const stale = new Date(Date.now() - DEBUG_LOG_TRIM_LOCK_STALE_MS - 1000)
+      fs.utimesSync(lock, stale, stale)
+      expect(trimDebugLogIfOversized(file, { maxBytes: 16, keepBytes: 11 })).toBe(false)
+      expect(fs.readFileSync(file, "utf8")).toBe("old\ncut\nretained\n")
+      expect(fs.readFileSync(path.join(lock, "owner"), "utf8")).toBe("still owned")
+    })
   })
 
   it("leaves undersized logs alone", () => {

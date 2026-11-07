@@ -728,7 +728,11 @@ These are failure lessons shared by both hosts, not a replacement for
   patch showed 4 missing lines that were main's uncovered branch at the same
   line numbers; the PR's own lines were all hit. The required job keeps testing
   the merge; a separate PR job measures coverage on the head
-  (`.github/workflows/ci.yml`).
+  (`.github/workflows/ci.yml`). Subprocess assertions alone do not contribute
+  to the parent's Bun LCOV: #163's enabled logging paths passed those tests
+  but remained uncovered. Exercise environment-latched policies through fresh
+  instrumented module imports too, restoring environment and clock overrides
+  (`test/debug.test.ts`).
 - **Isolate fixture state.** Capture teardown paths before awaiting; restore
   host-agent callbacks and cache overrides. One leaked cache root broke later
   plugin tests (`test/host-interrupt.test.ts`).

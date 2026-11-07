@@ -12,6 +12,8 @@
   - [x] Implement rotation while retaining the default in-place trim policy.
   - [x] Cover archive ordering, startup/reload, concurrent writers and failures.
   - [x] Document rotation settings and validate the updated build.
+  - [x] Cover enabled logging in the instrumented test process and validate
+    patch LCOV without changing coverage thresholds.
 
 - [x] Fix [#91](https://github.com/oakimov/cursor-opencode-provider/issues/91),
   OpenCode 2.x cold model readiness.
