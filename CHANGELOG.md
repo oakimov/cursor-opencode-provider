@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Debug and recovery logs retain recent diagnostics with OpenCode-style in-place trimming by default, or configurable numbered archives with `CURSOR_PROVIDER_DEBUG_LOG_MODE=rotate` ([#160](https://github.com/oakimov/cursor-opencode-provider/issues/160), [@nkoynov](https://github.com/nkoynov)).
 - A Run Cursor cuts right after a tool result now rebuilds from host history when it earlier delivered an early steer or host note that history still holds, instead of ending the turn as "automatic retry unsafe" ([#159](https://github.com/oakimov/cursor-opencode-provider/issues/159), [@nkoynov](https://github.com/nkoynov)).
 
 ### Changed

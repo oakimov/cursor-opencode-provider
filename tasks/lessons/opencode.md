@@ -13,6 +13,9 @@ These are failure lessons shared by both hosts, not a replacement for
 - **Verify the active branch and loaded build.** Partial-read work targeted MCP
   while live traffic used native reads; a stale SDK survived plugin reload.
   Record the exact binary, entrypoint, rebuilt files and host log.
+  The #160 fix initially used an old main with dirty copies of already-merged
+  PR drafts. Fetch main and compare those copies with merged history before
+  classifying them; validate the carried-forward fix on the synchronized base.
 - **Measure behavior, not presence.** A truncation flag reached the wire but was
   ignored. Use an A/B fixture that cannot reveal the answer independently;
   model claims about its prompt are not evidence.
@@ -575,6 +578,17 @@ These are failure lessons shared by both hosts, not a replacement for
 
 ## Persistence and process lifetime
 
+- **A diagnostic cap must retain the incident.** Erasing the whole debug log
+  at its cap, including on restart, lost the preceding failure (#160).
+  Regression tests exercise retained line-aligned tails, startup/reload and
+  an already-open append handle (`test/debug.test.ts`). Numbered rotation also
+  needs append-only initialization: creating the new active file with a whole-file
+  write can erase a sibling writer's first messages after the rename. The
+  concurrent-provider regression covers that transition. Permission and existing-byte
+  checks must use the open descriptor too: the initialization-rename regression
+  reproduced a lost first message when those checks used the renamed path. See the
+  [log recycling design](../../docs/cache-log-runbook.md#log-recycling-design)
+  for the upstream policy and concurrency tradeoffs.
 - **A restart snapshot is more than a checkpoint.** Bindings, reachable blobs,
   context, provenance, deferred notes and steer receipts must agree. Preserve
   all blobs if reachability is uncertain (`test/conversation-persistence.test.ts`).
@@ -714,7 +728,11 @@ These are failure lessons shared by both hosts, not a replacement for
   patch showed 4 missing lines that were main's uncovered branch at the same
   line numbers; the PR's own lines were all hit. The required job keeps testing
   the merge; a separate PR job measures coverage on the head
-  (`.github/workflows/ci.yml`).
+  (`.github/workflows/ci.yml`). Subprocess assertions alone do not contribute
+  to the parent's Bun LCOV: #163's enabled logging paths passed those tests
+  but remained uncovered. Exercise environment-latched policies through fresh
+  instrumented module imports too, restoring environment and clock overrides
+  (`test/debug.test.ts`).
 - **Isolate fixture state.** Capture teardown paths before awaiting; restore
   host-agent callbacks and cache overrides. One leaked cache root broke later
   plugin tests (`test/host-interrupt.test.ts`).

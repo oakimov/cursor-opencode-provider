@@ -1,5 +1,20 @@
 # TODO
 
+- [x] Fix [#160](https://github.com/oakimov/cursor-opencode-provider/issues/160),
+  debug-log retention following OpenCode's append and in-place trim policy.
+  - [x] Verify OpenCode 1.18.31 and 2.2.5 writers and recycling behavior.
+  - [x] Design: preserve paths/modes, trim above 50 MiB to a line-aligned
+    25 MiB tail, check on first write and hourly, coordinate through a lock.
+  - [x] Implement bounded-memory compaction and shared maintenance cadence.
+  - [x] Test retention, startup/reload, append handles, locks and failures.
+  - [x] Update operator guides and changelog; typecheck, build and regressions.
+  - [x] Design opt-in numbered rotation with configurable size and archive count.
+  - [x] Implement rotation while retaining the default in-place trim policy.
+  - [x] Cover archive ordering, startup/reload, concurrent writers and failures.
+  - [x] Document rotation settings and validate the updated build.
+  - [x] Cover enabled logging in the instrumented test process and validate
+    patch LCOV without changing coverage thresholds.
+
 - [x] Fix [#91](https://github.com/oakimov/cursor-opencode-provider/issues/91),
   OpenCode 2.x cold model readiness.
   - [x] Trace OpenCode 2.1.4 activation and model resolution.

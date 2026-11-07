@@ -336,7 +336,12 @@ History recovery keeps completed results from earlier resumed Runs too.
 Completed inline catalog lookups do not block it; unfinished, spilled, malformed,
 and unknown server-side work still do. For sleep/wake diagnostics, set
 `CURSOR_PROVIDER_RECOVERY_DEBUG=1` before starting the daemon. This records recovery
-metadata without prompts or tool payloads, using the existing 10 MiB log cap.
+metadata without prompts or tool payloads. By default, full and recovery-only logs share the
+[recycling policy](cache-log-runbook.md#log-recycling-design): on the first write
+and hourly thereafter, a file above 50 MiB is compacted in place to roughly its
+newest 25 MiB of complete lines.
+Set `CURSOR_PROVIDER_DEBUG_LOG_MODE=rotate` before starting the daemon for
+configurable [numbered archives](cache-log-runbook.md#numbered-rotation).
 
 The provider shares Cursor CLI's limits of 10 transport retries and 3 server
 retries across this turn, including OpenCode's retries. OpenCode can stop earlier.
