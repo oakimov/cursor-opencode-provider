@@ -377,7 +377,8 @@ can override `continuation.semanticIdleMs` (or its `softHealthMs` alias).
 
 If a Run drops immediately after completed tool results, before new output,
 the provider can rebuild from host history containing every observed exec's
-result. It sends the completed results once and asks Cursor to continue. A
+result; Cursor's polls of a background shell's terminal record, which the
+provider answers itself, need none. It sends the completed results once and asks Cursor to continue. A
 checkpoint predating those results is never resumed. Missing results, unknown
 activity, a tool call Cursor ran itself or a new interaction keep the failure
 final. If the rebuilt history would fill more than 80% of the model's context,

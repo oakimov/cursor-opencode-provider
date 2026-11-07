@@ -768,11 +768,11 @@ describe("a steer sent while Cursor waits inside a step", () => {
     })
   }, 30_000)
 
-  for (const promoted of [true, false]) {
-    it(`rebuilds a drop after the step's result past the steer's echo only once OpenCode promoted it (promoted: ${promoted})`, async () => {
-      await withModel(`echo-rebuild-${promoted}`, async (model, cacheDir) => {
+  for (const [promoted, awaitPolls] of [[true, false], [false, false], [true, true]] as const) {
+    it(`rebuilds a drop after the step's result past the steer's echo only once OpenCode promoted it (promoted: ${promoted}, AwaitShell polls: ${awaitPolls})`, async () => {
+      await withModel(`echo-rebuild-${promoted}-${awaitPolls}`, async (model, cacheDir) => {
         const file = probeFile(cacheDir)
-        const sessionKey = `ses_early_echo_rebuild_${promoted}`
+        const sessionKey = `ses_early_echo_rebuild_${promoted}_${awaitPolls}`
         let ready = false
         onRun = (run, message) => {
           const injection = message.conversation_action?.inject_context_action
@@ -781,8 +781,16 @@ describe("a steer sent while Cursor waits inside a step", () => {
             run.send({ conversation_checkpoint_update: CHECKPOINT })
             ready = true
           } else if (injection) {
+            // The steer arrives while Cursor's AwaitShell polls a background shell's terminal record (#159).
+            if (awaitPolls) {
+              const env = sessionManager.findOpenByOpenCodeSessionId(sessionKey)!.requestContext.env as { project_folder: string }
+              const record = path.join(env.project_folder, "terminals", "7.txt")
+              fs.mkdirSync(path.dirname(record), { recursive: true })
+              fs.writeFileSync(record, "running\n")
+              for (const id of [50, 51, 52]) run.send({ exec_server_message: { id, read_args: { path: record } } })
+            }
             readOnSteer(file)(run, injection.injection_id)
-          } else if (message.exec_client_message?.read_result) {
+          } else if (message.exec_client_message?.read_result && message.exec_client_message.id === 1) {
             const injected = run.received.find((received) => received.conversation_action?.inject_context_action)!
             const { injection_id, user_context } = injected.conversation_action.inject_context_action
             injectionState(run, injection_id, "delivered")

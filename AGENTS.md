@@ -244,7 +244,9 @@ The **1.18 v2** API and **OpenCode 2.x** are source-incompatible:
   no checkpoint in the turn, a transient failure after only text or reasoning
   is `hostRetryable` (the CLI resends the action). A silent drop immediately
   after delivered host results may rebase from history only when every observed
-  exec has a completed result and no opaque activity occurred. Include all
+  exec has a completed result and no opaque activity occurred. A read the
+  provider answered from a host shell's terminal record (AwaitShell polls,
+  `recordTerminalRead`) needs none; one in the cut attempt stays a barrier. Include all
   completed tool steps; never resume their earlier checkpoint. Other barriers
   stay final. Cursor's `user_message_appended` echo of the Run's own delivered
   steer or host note (its `message_id` and text, nothing else) stays a stateful
