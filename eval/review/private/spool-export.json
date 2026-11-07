@@ -1,0 +1,40 @@
+{
+  "heldout": true,
+  "variants": {
+    "buggy": {
+      "defects": [
+        {
+          "id": "failed-export-leaves-writer",
+          "paths": ["exporter.py"],
+          "lines": [1, 40],
+          "symbols": ["def export_rows"],
+          "evidence": "synthetic",
+          "causal": [
+            ["valueerror", "nan", "error", "exception", "fail", "invalid row"],
+            ["writer", "thread", "worker"],
+            ["block", "never", "alive", "running", "leak", "not joined", "without join", "hang", "remain"]
+          ]
+        }
+      ],
+      "nonDefects": [],
+      "absentDefects": []
+    },
+    "fixed": {
+      "defects": [],
+      "nonDefects": [],
+      "absentDefects": [
+        {
+          "id": "failed-export-leaves-writer",
+          "paths": ["exporter.py"],
+          "lines": [1, 60],
+          "symbols": ["def export_rows"],
+          "causal": [
+            ["valueerror", "nan", "error", "exception", "fail"],
+            ["writer", "thread", "worker"],
+            ["block", "never", "alive", "running", "leak", "not joined", "hang", "remain"]
+          ]
+        }
+      ]
+    }
+  }
+}

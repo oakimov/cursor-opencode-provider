@@ -4,6 +4,56 @@ A review reads the diff, the code, and `.cursor/rules/`, then runs build, typech
 
 Nothing in this repository starts a review. There is no pull-request, push, schedule, or credit trigger. The maintainer starts one Cloud Agent and names the pull request.
 
+## Local checks on different operating systems
+
+Run `python3 -B scripts/test-harness.py` for trusted local changes (`python -B`
+on Windows). `--diagnose` reports the detected OS, selected backend and missing
+prerequisites without installing anything or running tests. Cursor agent is
+optional: a Cursor VM and another Linux VM select from the same capabilities.
+
+An ordinary Linux user runs native checks when Bun, Node, Bash, Git, Python,
+zsh, OpenSSL and working user/mount/PID namespaces are available. macOS also requires a working
+`sandbox-exec`. If the native prerequisites are unavailable, or the caller is
+root, the runner selects a local Docker engine running Linux containers. Native Windows uses that
+container backend; Git and Python are the only required host test tools.
+Remote Docker engines and Windows-container mode are refused.
+
+Build the container image once with
+`python -B scripts/test-harness.py --backend docker --build-image`. Subsequent
+runs reuse it without pulling an image. The build sends only the Dockerfile to
+the local engine and labels the image with its hash. A missing or mismatched
+label refuses the run and requires `--build-image`; a failed rebuild cannot
+make the next ordinary run silently accept an older environment.
+The test container receives a read-only disposable source
+snapshot, copies it internally and runs every check, including the Linux
+namespace tests. Tests run as an unprivileged user so filesystem-permission
+cases execute too. It receives no Docker socket or reviewer credentials, and
+every capability is dropped: the nested user namespace grants its own mount
+capability. Nested namespace tests require relaxed seccomp/AppArmor restrictions
+and disabled Docker system-path masking so the nested namespace can mount `/proc`;
+the runner probes that mount before installing dependencies or running tests.
+This local-checkout runner is not the boundary for reviewing untrusted PRs.
+
+The snapshot includes local edits and untracked, nonignored sources, retains
+deletions and hydrates sparse-checkout exclusions from the index. It contains
+neither Git metadata nor host dependencies. Dependency installation, typecheck,
+build, the full suite, built-output architecture checks, Node HTTP/2 checks and
+pricing fixture checks run in order. A failing check stops the run. Processes
+and containers are awaited before cleanup; cleanup failure cannot report a pass.
+Native checks own their POSIX process group, including descendants left after
+the leader exits. Completion and cancellation stop that group before removing
+the snapshot. SIGINT and SIGTERM return 130 and 143; repeated signals cannot
+interrupt cleanup. If the runner cannot confirm that its work or container
+stopped, it exits nonzero and reports `HARNESS_SNAPSHOT_RETAINED` privately
+instead of deleting a source tree that may still be in use.
+Linux-only namespace assertions are explicit skips on macOS, whose native
+sandbox tests cover its own boundary. Windows runs those assertions in Linux.
+Archived evaluation tools leave `harnessHead` and `harnessDirty` null when Git
+provenance is unavailable; the instruction, support and checkout hashes remain.
+
+This command never performs a live Cursor request. Contributor PRs still use
+`scripts/isolated-check.sh` and its separate live-test trust gate below.
+
 ## Manual review
 
 GitHub authentication for posting is a GitHub App installation token. `post` reads `REVIEW_APP_ID` and `REVIEW_APP_PRIVATE_KEY`, or `REVIEW_APP_PRIVATE_KEY_FILE` instead of the inline key. It signs a short-lived JWT and exchanges it for that app's installation token. Set `REVIEW_APP_INSTALLATION_ID` to the installation, or leave it unset to use the installation on the pull request's repository. The review author is the app's bot account. A client secret, a personal access token, and the Cloud Agent `gh` login are not used for the review request. The private key stays out of the check boundary below. `CURSOR_API_KEY` is a Cursor user API key from [cursor.com/settings](https://cursor.com/settings). It is used only for a live plugin test, and only after a separate trust decision. Passing tests is not that decision.
@@ -25,7 +75,38 @@ The payload is a JSON object: `owner`, `repo`, `pull`, `base`, `head`, `runtime`
 
 Write the review as a result, then render it. The result records the same repository, pull request, base, head, and `linux` runtime. `outcome` is `findings`, `clean`, or `incomplete`. Each check has a name, a status (`passed`, `failed`, `skipped`, or `unavailable`), and a detail. A finding has a stable id, a rule id from `.greptile/config.json` or `blocker` / `important` / `nit` from the review rules, that rule's severity, a title, an explanation, a trigger, a consequence, and `evidence` of `reproduced`, `source`, or `unverified`. `diff` lists the path, line, and side verified in the current diff. A comment is emitted only for a finding at one of those locations. Other findings stay in the summary. `prior` classifies an earlier finding as `still_present`, `fixed`, `refuted`, `regressed`, or `unverified`. A clean result cannot leave one unresolved, and fixed or refuted ids cannot reappear as current findings. At most five `low` findings are included. `mutations` are included in the approved preview: `resolve` actions are sent after the submitted review is confirmed; `reply` actions remain proposals and are not sent.
 
-`bind` reads the pull request and records its base and head. When the result file already has a different revision, `bind` stops and leaves the file unchanged. `render` checks the result and writes the payload. `REVIEW_OUTCOME=incomplete` means the analysis did not reach a defensible review: the diff was unreadable, a tool was unavailable, or the result is malformed. That file can be read and cannot be stamped or posted. Rendering is not publication. Showing the preview is not approval. Approval is not a merge.
+For new results, executed command checks also record integer `exitCode`.
+`passed` requires zero, `failed` requires nonzero, and an unexecuted `skipped`
+check has no exit code. Capture the command's own status, not that of a log
+pipeline or a later command. Keep a failed wrapper separate from passing
+subtests, targeted reruns, or CI. Existing retained results without this field
+keep their original validation and preview bytes.
+
+Name the command and its owning revision in the check detail. The launcher
+uses the harness revision; the archived suite and scripts its tests invoke
+use the subject revision. Compare both before reporting a current harness
+defect. `bind` makes a read-only GitHub API request; it does not publish a review.
+
+A completed code review may report no actionable findings while recording a
+failed command caused by the environment or the baseline. Keep that check
+`failed`, with its nonzero `exitCode`, and add, for example:
+
+```json
+"failure": {
+  "cause": "baseline",
+  "evidence": "The same test fails on the base revision under the same prerequisites; cite the test and comparison results."
+}
+```
+
+The other allowed cause is `environment`, supported by a capability probe and
+the causal link to the failure. Attribution cannot replace `diff` or
+`adversarial` analysis, cannot hide a reportable pre-existing bug, and cannot
+make an unknown or subject-caused failure support a clean outcome. The public
+review shows the failure, exit code, cause and evidence. A code verdict is not
+a passing test result or merge approval, and the live credential gate still
+requires the isolated check to exit zero.
+
+`bind` reads the pull request and records its base and head. When the result file already has a different revision, `bind` stops and leaves the file unchanged. `render` checks the result and writes the payload. `REVIEW_OUTCOME=incomplete` means the analysis did not reach a defensible review: the diff was unreadable, required analysis was unavailable, or the result is malformed. That file can be read and cannot be stamped or posted. Rendering is not publication. Showing the preview is not approval. Approval is not a merge.
 
 Structured results require an `adversarial` check in addition to `diff` and test
 results. That check attests that all three completion passes in the review skill
@@ -61,6 +142,19 @@ the orchestration that owns a later retry or consumer is still wrong. A live
 `pong` covers plugin loading and the reply path only. Missing optional live
 evidence is a limitation. Required analysis that could not be performed is an
 incomplete review.
+
+A behavior that acquires, starts, delegates, or cleans up a resource also
+records its ownership postconditions: an `ownership` entry naming the owner,
+the owned resources, the subordinate work, the cancellation entrypoints, the
+condition that permits release, and any explicit transfer. `check` requires a
+scenario for each lifecycle path (`ownership-completion`, `ownership-nonzero`,
+`ownership-termination`, `ownership-early-leader`), run or explained as
+inapplicable, and requires a path supported only by `source`, `mocked`, or
+`unverified` evidence to be named in `uncovered`. Those scenarios record what
+was alive, present, or writable after the owner returned or began cleanup.
+The check enforces the record's structure and consistency. It does not
+establish that processes stopped; only the experiments the record describes
+can, and their limits stay in the record.
 
 When changing the review harness, evaluate detection separately from publisher
 correctness. `eval/review/` holds manually invoked pairs and the scorer. Keep
@@ -107,6 +201,12 @@ preview. Readback checks do not authorize additional GitHub mutations.
 ```bash
 python3 scripts/review-publish.py deny "$review_dir/approval.json"
 ```
+
+The publisher uses `gh api --paginate` and parses every returned JSON page
+locally, so it also works with bundled CLI versions that have no `--slurp`.
+A failed, empty, truncated, or malformed lookup stops publication; partial
+output cannot establish that an earlier review is absent. Later pages count
+for both duplicate detection and inline-comment readback.
 
 ## Artifact retention
 
@@ -262,7 +362,7 @@ bun run live-test
 
 OpenCode keeps the last matching permission rule. The broad read and edit allows come before the env denies, and `.env.example` is the last exception. External directories allow only this checkout and those private roots, by lexical path and by canonical path when those differ. Other temp directories are denied.
 
-`bun run live-test` refuses to prompt unless `opencode plugin list` logs that import once, then runs `opencode run --standalone` against `cursor/composer-2.5` (`OPENCODE_LIVE_MODEL` overrides it) and requires `setup` once. The assistant text must be exactly `pong`. The plugin-list and transcript files share one cleanup path, including when the script is cancelled. The deadline is GNU `timeout` or `gtimeout`. `LIVE_TEST_TIMEOUT` can name another executable that accepts `SECONDS COMMAND...`. When it is unset, the script exits 1 and says the deadline command is required. When `CURSOR_API_KEY` is unset the script prints `LIVE_TEST=skipped` and exits 0.
+`bun run live-test` refuses to prompt unless `opencode plugin list` logs that import once, then runs `opencode run --standalone` against `cursor/composer-2.5` (`OPENCODE_LIVE_MODEL` overrides it) and requires `setup` once. The assistant text must be exactly `pong`. The plugin-list files, transcripts and native runtime scratch files share a per-run temporary directory that is removed on exit, including cancellation. Pre-existing files in the configured temp root are preserved. The deadline is GNU `timeout` or `gtimeout`. `LIVE_TEST_TIMEOUT` can name another executable that accepts `SECONDS COMMAND...`. When it is unset, the script exits 1 and says the deadline command is required. When `CURSOR_API_KEY` is unset the script prints `LIVE_TEST=skipped` and exits 0.
 
 Run that live test when a change affects plugin behavior: the provider, protocol, transport, session, entrypoints, tools, auth, or anything the unit tests do not execute against a real OpenCode process. Skip it for docs, rules, or a refactor the unit tests already cover, and say why. Record the OpenCode version and the plugin path in the private log. They do not go in the public review.
 
@@ -275,9 +375,9 @@ scripts/isolated-check.sh <pr-number-or-url> --live
 
 A number uses this checkout's `origin`. A pull URL must name that same owner and repository; a different repository is refused before `git fetch`. The script fetches `pull/<n>/head`, records that commit, and extracts `git archive` of that commit id into a temporary directory. It does not archive the moving `FETCH_HEAD` name. That directory is not a linked worktree and has no `.git`.
 
-`scripts/isolate-run.sh` runs the install, build, typecheck, and unit tests. On Linux it requires user, mount, and pid namespaces (`unshare`) and `pivot_root`. `--map-root-user` makes the command root inside that namespace, mapped to the calling user, and that root starts with mount capabilities. The setup drops them, including `CAP_SYS_ADMIN`, before the command runs. PID 1 stays a reaper: it runs the command in its own session, collects orphaned zombies, and forwards termination signals to that session. The command is not PID 1, so a killed grandchild does not remain visible to `kill -0`. A read-only bind of a file the user owns cannot then be remounted writable. On macOS it requires `sandbox-exec`. The profile allows the dynamic linker, a read of the root directory itself, the source directory, the private home and temp, and the selected tool files. It does not allow a tool's parent directory or every file read. Linux paths such as `/src`, `/tmp`, `/home/reviewer`, `/opt/tools`, and `--ro-bind` destinations are translated to those private directories. If that mechanism is unavailable the script exits 2. It does not fall back to `env -i`. Ubuntu's AppArmor restriction on unprivileged user namespaces makes `unshare` fail. CI clears `kernel.apparmor_restrict_unprivileged_userns` from the workflow itself, because the coverage job checks out the pull request head and that head may not contain `scripts/ci-enable-userns.sh`. A developer machine with that restriction needs the same change, or the isolation tests fail closed. `scripts/ci-enable-userns.sh` is the local copy of that probe.
+`scripts/isolate-run.sh` runs the install, build, typecheck, and unit tests. On Linux it requires user, mount, and pid namespaces (`unshare`) and `pivot_root`. The calling user is mapped to UID/GID 1000 inside the namespace. `--keep-caps` preserves capabilities for setup only; before the command runs, setup drops all effective, permitted, inheritable, bounding and ambient capabilities and sets `no_new_privs`. The non-root identity lets the archived suite create its own user namespaces without retaining privileges in its parent. Mapping parent UID 0 after its capability drop would require `CAP_SETFCAP` under [Linux UID mapping rules](https://man7.org/linux/man-pages/man7/user_namespaces.7.html). PID 1 stays a reaper: it runs the command in its own session, collects orphaned zombies, and forwards termination signals to that session. The command is not PID 1, so a killed grandchild does not remain visible to `kill -0`. A read-only bind of a file the user owns cannot then be remounted writable. On macOS it requires `sandbox-exec`. The profile allows the dynamic linker, a read of the root directory itself, the source directory, the private home and temp, and the selected tool files. It does not allow a tool's parent directory or every file read. Writes are limited to the source directory, the private home and temp, and `/dev/null`. Rules name resolved paths, because `sandbox-exec` matches those and macOS's default temp directory is a symlink into `/private`. Linux paths such as `/src`, `/tmp`, `/home/reviewer`, `/opt/tools`, and `--ro-bind` destinations are translated to those private directories. If that mechanism is unavailable the script exits 2. It does not fall back to `env -i`. Ubuntu's AppArmor restriction on unprivileged user namespaces makes `unshare` fail. CI clears `kernel.apparmor_restrict_unprivileged_userns` from the workflow itself, because the coverage job checks out the pull request head and that head may not contain `scripts/ci-enable-userns.sh`. A developer machine with that restriction needs the same change, or the isolation tests fail closed. `scripts/ci-enable-userns.sh` is the local copy of that probe.
 
-Inside the boundary the command can see read-only `/usr` and `/etc`, the named tool binaries, and the archive at `/src` (read-write). A fresh tmpfs is `/tmp` and `/home/reviewer`. Host home, host temp, the parent checkout, agent sockets, and git metadata are not mounted. The environment starts empty except `PATH`, `HOME`, `TMPDIR`, `USER`, `LOGNAME`, `LANG`, and `CI`. Network stays available because install needs it. Review-posting credentials, including `REVIEW_APP_PRIVATE_KEY` and `REVIEW_APP_PRIVATE_KEY_FILE`, are not in the environment and their files are not mounted. Exit 0 means those checks passed. Exit 1 is a check failure. `Check root:` and `Check commit:` are private and stay out of the public review.
+Inside the boundary the command can see read-only `/usr` and `/etc`, the named tool binaries, and the archive at `/src` (read-write). A fresh tmpfs is `/tmp` and `/home/reviewer`. Host home, host temp, the parent checkout, agent sockets, and git metadata are not mounted. The environment starts empty except `PATH`, `HOME`, `TMPDIR`, `USER`, `LOGNAME`, `LANG`, and `CI`. Its Linux `PATH` is `/opt/tools:/usr/bin:/bin:/usr/sbin`, including the system `pivot_root` needed by nested sandbox tests. Network stays available because install needs it. Review-posting credentials, including `REVIEW_APP_PRIVATE_KEY` and `REVIEW_APP_PRIVATE_KEY_FILE`, are not in the environment and their files are not mounted. Exit 0 means those checks passed. Exit 1 is a check failure. `Check root:` and `Check commit:` are private and stay out of the public review.
 
 `--live` runs only after those checks pass and only when `CURSOR_REVIEW_TRUST=1` and `CURSOR_REVIEW_TRUST_SHA` is the commit that was reviewed. The script fetches `pull/<n>/head`, prints that commit, and refuses to archive a different one. The archive uses that recorded commit id. It compares the commit again immediately before the key is passed. A new head needs a new trust decision. A failed check does not receive the key, and a passed check does not set the variables. The revision's shell is not run, including a `scripts/live-test.sh` in the pull request. This checkout's harness is mounted read-only and writes a private OpenCode config under the boundary's temp directory. The live `PATH` contains `opencode` and the tools the boundary mounted, not the reviewer's home `bin`. A tool linked from `/usr/local` is placed on that PATH as its real file. The directory holding the file stays outside the boundary.
 

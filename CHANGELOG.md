@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Local test checks detect Linux, macOS and Windows capabilities; Windows can run the full suite through a local Linux-container engine without Cursor agent installed.
+
+### Fixed
+
+- Linux isolated checks can run their nested sandbox tests after dropping privileges, allowing the full suite to pass before the separate live-test trust gate ([#161](https://github.com/oakimov/cursor-opencode-provider/pull/161)).
+- Review setup reports its read-only GitHub lookup accurately instead of claiming no GitHub call occurred ([#161](https://github.com/oakimov/cursor-opencode-provider/pull/161)).
+- Manual reviews preserve failed command statuses and exit codes alongside evidence of baseline or environment failures; publication supports bundled GitHub CLIs without `--slurp` ([#161](https://github.com/oakimov/cursor-opencode-provider/pull/161)).
+- Local test checks stop owned descendants before removing their source snapshot, including after a successful leader, SIGINT, SIGTERM, or repeated cancellation ([#161](https://github.com/oakimov/cursor-opencode-provider/pull/161)).
+- Live OpenCode smoke tests remove native runtime scratch files on exit while preserving pre-existing files in the configured temp root.
+- Isolated checks on macOS can write their source, home and temp directories when those live under the default temp directory, instead of every write failing while the run exits 0.
+
 ## [0.8.6] - 2026-11-05
 
 ### Added

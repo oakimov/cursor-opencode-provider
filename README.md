@@ -428,9 +428,19 @@ Set `CURSOR_AGENT_TRANSCRIPTS_FOLDER` before starting OpenCode (or its daemon). 
 
 ## Development
 
+For complete local checks across Linux, macOS and native Windows, use
+`python3 -B scripts/test-harness.py` (`python -B` on Windows). It detects native
+test capabilities and uses a local Linux-container engine on Windows or when
+native prerequisites are missing. Cursor agent is optional. Run with
+`--diagnose` to check prerequisites; see the [test harness guide](docs/pr-review.md#local-checks-on-different-operating-systems)
+for the image build and isolation requirements.
+
 Changes listed under [Unreleased](CHANGELOG.md#unreleased) describe the development checkout; use a rebuilt local install to test them before a release. Maintainer guides and incident lessons are linked from the [documentation index](docs/README.md). The manual Cursor review, isolated pull-request checks, and OpenCode live test are in [docs/pr-review.md](docs/pr-review.md).
 
 Manual Cloud Agent reviews publish through the configured GitHub App after exact-preview approval. See the [App publisher setup](docs/pr-review.md#github-app-publisher) for `REVIEW_APP_ID`, the private key and optional installation ID. Tokens are restricted to this repository and retain the installation's configured permissions; the returned grant must include review-write access. `review-publish.py auth-info` reports configuration without printing secrets. Reviews use the App's bot identity, with no automatic review trigger.
+
+Linux isolated checks include the nested sandbox tests. Live credentials require
+the full check to pass and a separate trust decision for that exact revision.
 
 Re-reviews verify earlier threads and replies, and resolve fixed or refuted
 findings through the App after approval of the listed actions. The publisher

@@ -1,0 +1,226 @@
+{
+  "heldout": false,
+  "variants": {
+    "buggy": {
+      "defects": [
+        {
+          "id": "finished-check-leaves-owned-work",
+          "paths": ["runner.py"],
+          "lines": [1, 60],
+          "symbols": ["def run", "def run_checks"],
+          "evidence": "synthetic",
+          "causal": [
+            ["finish", "complet", "succe", "exits 0", "exit 0", "exits normally", "normal exit", "nonzero", "passing", "passes"],
+            ["descendant", "grandchild", "background", "process group", "session", "child process"],
+            ["alive", "running", "surviv", "remain", "left behind", "outliv", "orphan"],
+            ["workspace", "temporary director", "removed", "deleted", "cleanup", "clean up"]
+          ]
+        },
+        {
+          "id": "sigterm-skips-cleanup",
+          "paths": ["runner.py"],
+          "lines": [1, 60],
+          "symbols": ["def main"],
+          "evidence": "synthetic",
+          "causal": [
+            ["sigterm", "terminat"],
+            ["handler", "unhandled", "not handled", "default action", "no cleanup", "kills the runner", "dies"],
+            ["workspace", "process group", "session", "check", "child"]
+          ]
+        },
+        {
+          "id": "cancel-awaits-only-the-leader",
+          "paths": ["runner.py"],
+          "lines": [1, 60],
+          "symbols": ["def run"],
+          "evidence": "synthetic",
+          "causal": [
+            ["leader", "direct child", "only the child", "child.wait", "the child exits"],
+            ["ignor", "still running", "surviv", "outliv", "remain"],
+            ["descendant", "grandchild", "process group", "session"]
+          ]
+        },
+        {
+          "id": "second-signal-abandons-settling",
+          "paths": ["runner.py"],
+          "lines": [1, 60],
+          "symbols": ["def run"],
+          "evidence": "synthetic",
+          "causal": [
+            ["second", "another", "further", "repeated", "during the grace", "during cleanup", "during the wait", "while waiting"],
+            ["sigint", "sigterm", "ctrl-c", "keyboardinterrupt", "terminated", "signal"],
+            ["sigkill", "kill escalation", "escalat", "never runs", "skip", "abandon", "abort"]
+          ]
+        }
+      ],
+      "nonDefects": [
+        {
+          "id": "cleanup-after-sigkill",
+          "paths": ["runner.py"],
+          "causal": [
+            ["sigkill", "kill -9"],
+            ["runner is killed", "runner killed", "kill the runner", "killing the runner", "sigkill the runner", "sigkill to the runner", "runner receives sigkill", "runner gets sigkill", "runner itself"],
+            ["clean", "workspace", "leak"]
+          ]
+        }
+      ],
+      "absentDefects": []
+    },
+    "term": {
+      "defects": [
+        {
+          "id": "cancel-awaits-only-the-leader",
+          "paths": ["runner.py"],
+          "lines": [1, 90],
+          "symbols": ["def run"],
+          "evidence": "synthetic",
+          "causal": [
+            ["leader", "direct child", "only the child", "child.wait", "the child exits"],
+            ["ignor", "still running", "surviv", "outliv", "remain"],
+            ["descendant", "grandchild", "process group", "session"]
+          ]
+        },
+        {
+          "id": "second-signal-abandons-settling",
+          "paths": ["runner.py"],
+          "lines": [1, 90],
+          "symbols": ["def run", "def _stop_group"],
+          "evidence": "synthetic",
+          "causal": [
+            ["second", "another", "further", "repeated", "during the grace", "during cleanup", "during the wait", "while waiting"],
+            ["sigint", "sigterm", "ctrl-c", "keyboardinterrupt", "terminated", "signal"],
+            ["sigkill", "kill escalation", "escalat", "never runs", "skip", "abandon", "abort"]
+          ]
+        }
+      ],
+      "nonDefects": [
+        {
+          "id": "cleanup-after-sigkill",
+          "paths": ["runner.py"],
+          "causal": [
+            ["sigkill", "kill -9"],
+            ["runner is killed", "runner killed", "kill the runner", "killing the runner", "sigkill the runner", "sigkill to the runner", "runner receives sigkill", "runner gets sigkill", "runner itself"],
+            ["clean", "workspace", "leak"]
+          ]
+        }
+      ],
+      "absentDefects": [
+        {
+          "id": "finished-check-leaves-owned-work",
+          "paths": ["runner.py"],
+          "lines": [1, 90],
+          "symbols": ["def run", "def _stop_group"],
+          "causal": [
+            ["finish", "complet", "succe", "exits 0", "normal", "nonzero"],
+            ["descendant", "grandchild", "background"],
+            ["alive", "running", "surviv", "remain", "left behind"]
+          ]
+        },
+        {
+          "id": "sigterm-skips-cleanup",
+          "paths": ["runner.py"],
+          "lines": [1, 100],
+          "symbols": ["def main"],
+          "causal": [
+            ["sigterm"],
+            ["no handler", "unhandled", "not handled", "default action"]
+          ]
+        }
+      ]
+    },
+    "fixed": {
+      "defects": [],
+      "nonDefects": [
+        {
+          "id": "cleanup-after-sigkill",
+          "paths": ["runner.py"],
+          "causal": [
+            ["sigkill", "kill -9"],
+            ["runner is killed", "runner killed", "kill the runner", "killing the runner", "sigkill the runner", "sigkill to the runner", "runner receives sigkill", "runner gets sigkill", "runner itself"],
+            ["clean", "workspace", "leak"]
+          ]
+        }
+      ],
+      "absentDefects": [
+        {
+          "id": "owned-work-outlives-runner",
+          "paths": ["runner.py"],
+          "lines": [1, 140],
+          "symbols": ["def run", "def _settle"],
+          "causal": [
+            ["descendant", "grandchild", "background", "process group", "leader"],
+            ["alive", "running", "surviv", "remain", "left behind", "outliv", "orphan"]
+          ]
+        },
+        {
+          "id": "sigterm-skips-cleanup",
+          "paths": ["runner.py"],
+          "lines": [1, 140],
+          "symbols": ["def main"],
+          "causal": [
+            ["sigterm"],
+            ["no handler", "unhandled", "not handled", "default action"]
+          ]
+        },
+        {
+          "id": "second-signal-abandons-settling",
+          "paths": ["runner.py"],
+          "lines": [1, 140],
+          "symbols": ["def run", "def _settle"],
+          "causal": [
+            ["second", "another", "further", "repeated", "during the grace", "during cleanup", "during the wait", "while waiting"],
+            ["sigint", "sigterm", "ctrl-c", "keyboardinterrupt", "terminated", "signal"],
+            ["sigkill", "kill escalation", "escalat", "never runs", "skip", "abandon", "abort"]
+          ]
+        }
+      ]
+    },
+    "transfer": {
+      "defects": [],
+      "nonDefects": [
+        {
+          "id": "transferred-service-left-running",
+          "paths": ["runner.py"],
+          "symbols": ["def hand_off", "def main"],
+          "causal": [
+            ["service"],
+            ["outlives the runner", "outlive the runner", "outliving the runner", "survives the runner", "after the runner exits", "after run_checks returns", "runner never stops", "never stops the service", "does not stop the service", "doesn't stop the service", "not stopped by the runner", "left running after"]
+          ]
+        },
+        {
+          "id": "cleanup-after-sigkill",
+          "paths": ["runner.py"],
+          "causal": [
+            ["sigkill", "kill -9"],
+            ["runner is killed", "runner killed", "kill the runner", "killing the runner", "sigkill the runner", "sigkill to the runner", "runner receives sigkill", "runner gets sigkill", "runner itself"],
+            ["clean", "workspace", "leak"]
+          ]
+        }
+      ],
+      "absentDefects": [
+        {
+          "id": "owned-work-outlives-runner",
+          "paths": ["runner.py"],
+          "lines": [1, 180],
+          "symbols": ["def run", "def _settle"],
+          "causal": [
+            ["descendant", "grandchild", "background", "process group", "leader"],
+            ["check"],
+            ["alive", "running", "surviv", "remain", "left behind", "outliv", "orphan"]
+          ]
+        },
+        {
+          "id": "second-signal-abandons-settling",
+          "paths": ["runner.py"],
+          "lines": [1, 180],
+          "symbols": ["def run", "def _settle"],
+          "causal": [
+            ["second", "another", "further", "repeated", "during the grace", "during cleanup", "during the wait", "while waiting"],
+            ["sigint", "sigterm", "ctrl-c", "keyboardinterrupt", "terminated", "signal"],
+            ["sigkill", "kill escalation", "escalat", "never runs", "skip", "abandon", "abort"]
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -135,6 +135,277 @@ print(f"{label} exit={code} receipt={os.path.exists(os.path.join(checkout, 'rece
     }
   })
 
+  // Drives the real runner: a leader starts a descendant in its own session,
+  // the experiment cancels or lets the leader exit only after both wrote a ready
+  // marker, and the postconditions are read after the runner returned. Every
+  // writer is stopped before the disposable directories are removed.
+  const ownershipProtocol = `
+import json, os, shutil, signal, subprocess, sys, tempfile, time
+from pathlib import Path
+
+checkout = Path(sys.argv[1])
+transfer = sys.argv[2] == "transfer"
+work = Path(tempfile.mkdtemp(prefix="ownership-probe-"))
+DESCENDANT = '''
+import os, signal, sys, time
+from pathlib import Path
+state, ignore = Path(sys.argv[1]), sys.argv[2] == "ignore"
+if ignore:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+(state / "descendant.pid").write_text(str(os.getpid()))
+(state / "workspace").write_text(os.getcwd())
+(state / "descendant.ready").write_text("1")
+deadline = time.monotonic() + 20
+while time.monotonic() < deadline and not (state / "stop").exists():
+    try:
+        with open("heartbeat", "a") as handle:
+            handle.write("x")
+    except OSError:
+        pass
+    time.sleep(0.05)
+'''
+LEADER = '''
+import os, subprocess, sys, time
+from pathlib import Path
+state, mode, script, ignore = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+(state / "leader.pid").write_text(str(os.getpid()))
+subprocess.Popen([sys.executable, script, str(state), ignore])
+deadline = time.monotonic() + 10
+while not (state / "descendant.ready").exists():
+    if time.monotonic() > deadline:
+        raise SystemExit(9)
+    time.sleep(0.02)
+if mode == "linger":
+    import signal
+    def acknowledge(signum, frame):
+        (state / "leader.term").write_text("1")  # and keep running
+    signal.signal(signal.SIGTERM, acknowledge)
+(state / "leader.ready").write_text("1")
+if mode == "done":
+    (state / "leader.done").write_text("1")
+if mode in ("hang", "linger"):
+    time.sleep(20)
+raise SystemExit(3 if mode == "fail" else 0)
+'''
+SERVICE = '''
+import os, sys, time
+from pathlib import Path
+state = Path(sys.argv[1])
+(state / "service.pid").write_text(str(os.getpid()))
+deadline = time.monotonic() + 20
+while time.monotonic() < deadline and not (state / "stop").exists():
+    time.sleep(0.05)
+'''
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return bool(stat) and not stat.startswith("Z")
+
+def wait_for(path, seconds=10):
+    deadline = time.monotonic() + seconds
+    while not path.exists():
+        if time.monotonic() > deadline:
+            raise SystemExit(f"no acknowledgement: {path.name}")
+        time.sleep(0.02)
+
+def pid_of(path):
+    return int(path.read_text()) if path.exists() else None
+
+def scenario(name, mode, cancel, ignore, then=None, filler=0, after="leader.ready"):
+    state = work / name
+    source = work / f"{name}-source"
+    state.mkdir()
+    source.mkdir()
+    for index in range(filler):
+        (source / f"filler-{index}").write_text("x")
+    (source / "leader.py").write_text(LEADER)
+    (state / "descendant.py").write_text(DESCENDANT)
+    (state / "service.py").write_text(SERVICE)
+    command = [sys.executable, "leader.py", str(state), mode, str(state / "descendant.py"), "ignore" if ignore else "default"]
+    argv = [sys.executable, str(checkout / "runner.py"), "--source", str(source), "--command", json.dumps(command)]
+    if transfer:
+        argv += ["--service", "svc=" + json.dumps([sys.executable, str(state / "service.py"), str(state)]), "--services", str(state / "services")]
+    runner = subprocess.Popen(argv, cwd=checkout, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if cancel:
+            wait_for(state / after)
+            runner.send_signal(cancel)
+        if then:
+            # A second signal while cleanup waits on a leader that acknowledged TERM and still runs.
+            wait_for(state / "leader.term")
+            runner.send_signal(then)
+        status = runner.wait(timeout=30)
+        # Postconditions once the owner has returned.
+        workspace = Path((state / "workspace").read_text())
+        try:
+            (workspace / "late-write").write_text("x")
+            writable = True
+        except OSError:
+            writable = False
+        result = {
+            "status": status,
+            "descendantAlive": alive(pid_of(state / "descendant.pid")),
+            "workspaceExists": workspace.exists(),
+            "workspaceWritable": writable,
+        }
+        if transfer:
+            result["serviceAlive"] = alive(pid_of(state / "service.pid") or 0)
+            result["serviceRegistered"] = (state / "services" / "svc.pid").exists()
+        return result
+    finally:
+        (state / "stop").write_text("1")
+        if runner.poll() is None:
+            runner.kill()
+            runner.wait()
+        for name in ("descendant.pid", "leader.pid", "service.pid"):
+            pid = pid_of(state / name)
+            if pid and alive(pid):
+                os.kill(pid, signal.SIGKILL)
+        deadline = time.monotonic() + 5
+        while any(alive(pid_of(state / name) or 0) for name in ("descendant.pid", "leader.pid", "service.pid") if (state / name).exists()):
+            if time.monotonic() > deadline:
+                break
+            time.sleep(0.05)
+        if (state / "workspace").exists():
+            shutil.rmtree((state / "workspace").read_text(), ignore_errors=True)
+
+try:
+    report = {
+        "completion": scenario("completion", "ok", None, False),
+        "nonzero": scenario("nonzero", "fail", None, False),
+        "termination": scenario("termination", "hang", signal.SIGTERM, True),
+        "interrupt": scenario("interrupt", "hang", signal.SIGINT, True),
+        "repeated": scenario("repeated", "linger", signal.SIGINT, True, signal.SIGTERM if sys.argv[2] != "buggy" else signal.SIGINT),
+        # SIGTERM once the check has finished: it lands while the runner settles or removes a large workspace.
+        "cleanup": scenario("cleanup", "done", signal.SIGTERM, False, filler=5000, after="leader.done"),
+    }
+    print(json.dumps(report))
+finally:
+    shutil.rmtree(work, ignore_errors=True)
+`
+
+  test("only the settling runners leave no owned process or workspace behind; the transfer keeps its service", () => {
+    const run = (variant: string) => {
+      const prepared = prepare(["prepare", "--case", "check-runner", "--variant", variant, "--skill", "revised"])
+      expect(prepared.result.status, prepared.result.stderr).toBe(0)
+      const result = python(["-c", ownershipProtocol, prepared.checkout, variant])
+      expect(result.status, result.stderr).toBe(0)
+      return JSON.parse(result.stdout) as Record<string, Record<string, unknown>>
+    }
+    const settled = (status: number) => ({ status, descendantAlive: false, workspaceExists: false, workspaceWritable: false })
+    try {
+      // A signal during cleanup races a defective runner's own exit, so only the controls assert it.
+      const { cleanup: _buggyCleanup, ...buggy } = run("buggy")
+      // A finished leader leaves owned work running while the workspace is removed under it.
+      expect(buggy.completion).toEqual({ status: 0, descendantAlive: true, workspaceExists: false, workspaceWritable: false })
+      expect(buggy.nonzero).toEqual({ status: 3, descendantAlive: true, workspaceExists: false, workspaceWritable: false })
+      // SIGTERM kills the runner by default: nothing is stopped or removed.
+      expect(buggy.termination).toEqual({ status: -15, descendantAlive: true, workspaceExists: true, workspaceWritable: true })
+      // SIGINT waits for the leader only; the TERM-ignoring descendant survives.
+      expect(buggy.interrupt).toEqual({ status: 130, descendantAlive: true, workspaceExists: false, workspaceWritable: false })
+      // A second SIGINT during the grace wait skips the KILL escalation.
+      expect(buggy.repeated).toEqual({ status: 130, descendantAlive: true, workspaceExists: false, workspaceWritable: false })
+
+      const { cleanup: _termCleanup, ...term } = run("term")
+      expect(term.completion).toEqual(settled(0))
+      expect(term.nonzero).toEqual(settled(3))
+      expect(term.termination).toEqual({ status: 143, descendantAlive: true, workspaceExists: false, workspaceWritable: false })
+      expect(term.interrupt).toEqual({ status: 130, descendantAlive: true, workspaceExists: false, workspaceWritable: false })
+      // SIGTERM during the interrupt's grace wait abandons it before KILL.
+      expect(term.repeated).toEqual({ status: 143, descendantAlive: true, workspaceExists: false, workspaceWritable: false })
+
+      // Negative control: the same experiments find nothing left by a runner that settles its session.
+      const fixed = run("fixed")
+      // A SIGTERM during the interrupt's cleanup waits for that cleanup, KILL included; the first signal sets the status.
+      // A SIGTERM after the check finished still lets settling and workspace removal finish.
+      expect(fixed).toEqual({ completion: settled(0), nonzero: settled(3), termination: settled(143), interrupt: settled(130), repeated: settled(130), cleanup: settled(143) })
+
+      // An explicit, documented handoff is not a leak: owned work stops, the service stays registered.
+      const transfer = run("transfer")
+      for (const [name, status] of [["completion", 0], ["nonzero", 3], ["termination", 143], ["interrupt", 130], ["repeated", 130], ["cleanup", 143]] as const) {
+        expect(transfer[name]).toEqual({ ...settled(status), serviceAlive: true, serviceRegistered: true })
+      }
+    } finally {
+      removeOuts()
+    }
+  }, 180_000)
+
+  test("a failed export leaves its writer blocked, and the fixed exporter stops it on every path", () => {
+    const protocol = `
+import json, math, os, sys, tempfile, threading
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import exporter
+made = []
+real = exporter.tempfile.mkdtemp
+def recording(*args, **kwargs):
+    made.append(real(*args, **kwargs))
+    return made[-1]
+exporter.tempfile.mkdtemp = recording  # observes the staging path only
+report = {}
+with tempfile.TemporaryDirectory() as directory:
+    dest = Path(directory) / "out.jsonl"
+    for name, rows in (("success", [{"n": index} for index in range(600)]), ("failure", [{"n": index} for index in range(600)] + [{"n": math.nan}])):
+        dest.write_text("previous\\n", encoding="utf-8")
+        before = set(threading.enumerate())
+        try:
+            exporter.export_rows(rows, dest)
+            raised = False
+        except ValueError:
+            raised = True
+        left = [thread for thread in threading.enumerate() if thread not in before and thread.is_alive()]
+        report[name] = {
+            "raised": raised,
+            "writerAlive": bool(left),
+            "stagingExists": os.path.exists(made[-1]),
+            "destChanged": dest.read_text(encoding="utf-8") != "previous\\n",
+        }
+    # A writer I/O error after a few lines: both variants must raise it, not publish a partial file.
+    real_open = open
+    class Full:
+        def __init__(self, handle):
+            self.handle, self.count = handle, 0
+        def write(self, text):
+            self.count += 1
+            if self.count > 10:
+                raise OSError(28, "No space left on device")
+            return self.handle.write(text)
+        def close(self):
+            self.handle.close()
+    exporter.open = lambda *args, **kwargs: Full(real_open(*args, **kwargs))
+    dest.write_text("previous\\n", encoding="utf-8")
+    try:
+        exporter.export_rows([{"n": index} for index in range(1000)], dest)
+        error = None
+    except OSError as caught:
+        error = caught.errno
+    report["ioError"] = {"errno": error, "destChanged": dest.read_text(encoding="utf-8") != "previous\\n"}
+print(json.dumps(report))
+`
+    const run = (variant: string) => {
+      const prepared = prepare(["prepare", "--case", "spool-export", "--variant", variant, "--skill", "revised"])
+      expect(prepared.result.status, prepared.result.stderr).toBe(0)
+      const result = python(["-c", protocol, prepared.checkout])
+      expect(result.status, result.stderr).toBe(0)
+      return JSON.parse(result.stdout)
+    }
+    try {
+      const success = { raised: false, writerAlive: false, stagingExists: false, destChanged: true }
+      const ioError = { errno: 28, destChanged: false }
+      expect(run("buggy")).toEqual({ success, failure: { raised: true, writerAlive: true, stagingExists: false, destChanged: false }, ioError })
+      // Negative control: the variants differ only in the failed export's writer.
+      expect(run("fixed")).toEqual({ success, failure: { raised: true, writerAlive: false, stagingExists: false, destChanged: false }, ioError })
+    } finally {
+      removeOuts()
+    }
+  }, 60_000)
+
   test("a rejected export is still published, and the helper test passes", () => {
     const buggy = prepare(["prepare", "--case", "export-path", "--variant", "buggy", "--skill", "revised"])
     const fixed = prepare(["prepare", "--case", "export-path", "--variant", "fixed", "--skill", "revised"])
@@ -142,7 +413,6 @@ print(f"{label} exit={code} receipt={os.path.exists(os.path.join(checkout, 'rece
       for (const [tree, status] of [[buggy.checkout, 0], [fixed.checkout, 1]] as const) {
         const workspace = path.join(tree, "workspace")
         const approved = path.join(tree, "approved.txt")
-        const published = path.join(tree, "published")
         fs.mkdirSync(workspace)
         const result = python(["export.py", workspace, "../secret", "hidden", approved], tree)
         expect(result.status).toBe(status)
@@ -259,6 +529,33 @@ sys.stdout.write(f"{first}|{second}|{','.join(calls)}")
 })
 
 describe("review mount", () => {
+  test("reports unknown Git provenance for an archive inside another repository", () => {
+    const repository = outDir()
+    fs.mkdirSync(path.join(repository, "archive"), { recursive: true })
+    try {
+      fixtureGit(repository, "init", "-q")
+      fs.writeFileSync(path.join(repository, "source.txt"), "fixture\n")
+      fixtureGit(repository, "add", "source.txt")
+      fixtureGit(repository, "commit", "-qm", "fixture")
+      const result = python(["-c", `
+import importlib.util, json, pathlib, sys
+spec = importlib.util.spec_from_file_location("review_eval", "scripts/review-eval.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.ROOT = pathlib.Path(sys.argv[1]) / "archive"
+print(json.dumps(module.harness_metadata()))
+module.ROOT = pathlib.Path(sys.argv[1])
+print(json.dumps(module.harness_metadata()))
+`, repository])
+      expect(result.status, result.stderr).toBe(0)
+      const [archive, checkout] = result.stdout.trim().split("\n").map(line => JSON.parse(line))
+      expect(archive).toEqual({ harnessHead: null, harnessDirty: null })
+      expect(checkout).toEqual({ harnessHead: fixtureGit(repository, "rev-parse", "HEAD"), harnessDirty: false })
+    } finally {
+      removeOuts()
+    }
+  })
+
   test("the reviewer mount excludes the answer key and the other variant", () => {
     const prepared = prepare(["prepare", "--case", "index-sync", "--variant", "buggy", "--skill", "revised"])
     try {
@@ -290,6 +587,10 @@ describe("review mount", () => {
       expect(revisedSkill).not.toContain("REVIEW_EVAL_ANSWER")
       expect(revisedSkill).not.toContain("fcf331e")
       expect(revisedSkill).not.toContain("imageProbeVerdict")
+      // The procedure names no evaluation case, file, or calibration subject.
+      for (const answer of ["check-runner", "spool-export", "runner.py", "exporter.py", "test-harness.py", "#161", "4f1843d"]) {
+        expect(revisedSkill).not.toContain(answer)
+      }
       expect(fs.readFileSync(path.join(baseline.mount, "PROMPT.txt"), "utf8"))
         .toBe(fs.readFileSync(path.join(revised.mount, "PROMPT.txt"), "utf8"))
       expect(JSON.parse(fs.readFileSync(path.join(baseline.out, "meta.json"), "utf8")).supportSha256)
@@ -499,6 +800,69 @@ describe("review ledger and score", () => {
     }
   })
 
+  test("an ownership record covers each lifecycle path and names indirect evidence as a gap", () => {
+    const dir = outDir()
+    fs.mkdirSync(dir)
+    try {
+      const scenario = (category: string, evidence: string) => ({
+        id: category, category, applicable: true, reason: "",
+        expected: "No owned process or write remains once the owner returns.",
+        observed: "The descendant's pid was gone and a write into the released directory failed.",
+        evidence, downstream: "The next run starts with no leftover writer.",
+      })
+      const paths = ["ownership-completion", "ownership-nonzero", "ownership-termination", "ownership-early-leader"]
+      const owned = (evidence: Record<string, string> = {}, extra: Record<string, unknown> = {}) => {
+        const value = structuredClone(ledger) as Record<string, any>
+        value.behaviors.push({
+          id: "runner",
+          summary: "Run a command in a private workspace and remove it afterward.",
+          contract: [{ path: "CONTRACT.md", line: 1, note: "Owned processes stop before the workspace is removed." }],
+          scenarios: paths.map((path) => scenario(path, evidence[path] ?? "synthetic")),
+          uncovered: [],
+          ownership: {
+            owner: "run_checks", resources: ["process group", "workspace directory"],
+            subordinates: "every process a command starts", cancellation: ["return", "SIGTERM", "SIGINT"],
+            release: "The workspace is removed after no owned process remains.", transfer: "",
+          },
+          ...extra,
+        })
+        return value
+      }
+      const check = (value: unknown) => {
+        writeJson(path.join(dir, "ledger.json"), value)
+        return python(["scripts/review-ledger.py", "check", path.join(dir, "ledger.json")])
+      }
+      expect(check(owned()).stdout).toContain("LEDGER_OK")
+
+      // Every lifecycle path is accounted for; an inapplicable one says why.
+      const missing = owned()
+      missing.behaviors[1].scenarios.pop()
+      expect(check(missing).stderr).toContain("behaviors[1].ownership.ownership-early-leader")
+      const inapplicable = owned()
+      inapplicable.behaviors[1].scenarios[3] = { ...scenario("ownership-early-leader", "not-run"), applicable: false,
+        reason: "The owner runs no subordinate process.", expected: "", observed: "", downstream: "" }
+      expect(check(inapplicable).stdout).toContain("LEDGER_OK")
+
+      // A path only traced, mocked, or unavailable at runtime is a recorded gap.
+      for (const kind of ["source", "mocked", "unverified"]) {
+        expect(check(owned({ "ownership-termination": kind })).stderr).toContain("ownership-termination.uncovered")
+        const named = owned({ "ownership-termination": kind })
+        named.behaviors[1].uncovered = ["ownership-termination: the signal path was not run."]
+        expect(check(named).stdout).toContain("LEDGER_OK")
+      }
+
+      const malformed = owned()
+      malformed.behaviors[1].ownership = { ...malformed.behaviors[1].ownership, resources: [], release: "" }
+      const refused = check(malformed).stderr
+      expect(refused).toContain("behaviors[1].ownership.resources")
+      expect(refused).toContain("behaviors[1].ownership.release")
+      // An unrelated behavior needs no ownership record.
+      expect(check(ledger).stdout).toContain("LEDGER_OK")
+    } finally {
+      removeOuts()
+    }
+  })
+
   test("a complete ledger matches its public finding and a misleading one does not", () => {
     const dir = outDir()
     fs.mkdirSync(dir)
@@ -538,10 +902,17 @@ describe("review ledger and score", () => {
       writeJson(reviewPath, review)
       expect(python(["scripts/review-ledger.py", "compare", ledgerPath, reviewPath]).status).not.toBe(0)
 
-      const absolute = structuredClone(ledger)
-      absolute.behaviors[0].contract[0].note = "see /tmp/review"
-      writeJson(ledgerPath, absolute)
-      expect(python(["scripts/review-ledger.py", "check", ledgerPath]).stderr).toContain("private-path")
+      for (const note of ["see /tmp/review", "see ~/work/review"]) {
+        const absolute = structuredClone(ledger)
+        absolute.behaviors[0].contract[0].note = note
+        writeJson(ledgerPath, absolute)
+        expect(python(["scripts/review-ledger.py", "check", ledgerPath]).stderr).toContain("private-path")
+      }
+      // A slash between numbers is not a path.
+      const ratio = structuredClone(ledger)
+      ratio.behaviors[0].contract[0].note = "65 / 200 lines arrived"
+      writeJson(ledgerPath, ratio)
+      expect(python(["scripts/review-ledger.py", "check", ledgerPath]).stderr).not.toContain("private-path")
 
       const skipped = structuredClone(ledger)
       skipped.behaviors[0].scenarios[0].evidence = "not-run"
@@ -558,6 +929,73 @@ describe("review ledger and score", () => {
       writeJson(ledgerPath, ledger)
       writeJson(reviewPath, incident)
       expect(python(["scripts/review-ledger.py", "compare", ledgerPath, reviewPath]).stderr).toContain("evidence")
+    } finally {
+      removeOuts()
+    }
+  })
+
+  test("ownership answer keys credit the causal claim and count it against the controls", () => {
+    const dir = outDir()
+    fs.mkdirSync(dir)
+    try {
+      const score = (testCase: string, variant: string, findings: unknown[]) => {
+        const file = path.join(dir, `${testCase}-${variant}.json`)
+        writeJson(file, { head: "local", outcome: findings.length ? "findings" : "clean", findings })
+        const result = python(["scripts/review-eval.py", "score", "--case", testCase, "--variant", variant, "--review", file])
+        expect(result.status, result.stderr).toBe(0)
+        return JSON.parse(result.stdout)
+      }
+      const leftAlive = {
+        id: "left-alive", path: "runner.py", line: 17, title: "A finished check leaves its background processes running",
+        explanation: "run() waits only for the leader; a descendant in the check's session stays alive.",
+        trigger: "The check starts a background process and exits 0.",
+        consequence: "The workspace is removed while that process is still running and writing.",
+        evidence: "synthetic",
+      }
+      const leaderOnly = {
+        id: "leader-only", path: "runner.py", line: 55, title: "Cancellation waits only for the leader",
+        explanation: "On SIGINT the runner sends TERM to the session and waits for the direct child only.",
+        trigger: "A descendant ignores TERM.", consequence: "It survives in the session after the runner exits.",
+        evidence: "synthetic",
+      }
+      const service = {
+        id: "service", path: "runner.py", line: 82, title: "The service is never stopped",
+        explanation: "hand_off starts a service the runner does not stop.", trigger: "Pass --service.",
+        consequence: "The service keeps running after the runner exits, an orphan.", evidence: "source",
+      }
+      expect(score("check-runner", "buggy", [leftAlive, leaderOnly]).detected).toEqual(["cancel-awaits-only-the-leader", "finished-check-leaves-owned-work"])
+      expect(score("check-runner", "buggy", []).missed).toHaveLength(4)
+      const secondSignal = {
+        id: "second-signal", path: "runner.py", line: 22, title: "A second Ctrl-C during the grace wait skips the SIGKILL escalation",
+        explanation: "The cleanup wait is interruptible; a KeyboardInterrupt there leaves the except block before killpg(SIGKILL).",
+        trigger: "Press Ctrl-C twice while a descendant ignores TERM.", consequence: "The descendant survives and the workspace is removed under it.",
+        evidence: "synthetic",
+      }
+      expect(score("check-runner", "buggy", [secondSignal]).detected).toEqual(["second-signal-abandons-settling"])
+      expect(score("check-runner", "term", [{ ...secondSignal, line: 45 }]).detected).toEqual(["second-signal-abandons-settling"])
+      const settledControl = score("check-runner", "fixed", [{ ...secondSignal, line: 44 }]).falsePositives
+      expect(settledControl).toHaveLength(1)
+      expect(settledControl[0].claims).toContain("second-signal-abandons-settling")
+      const killedRunner = {
+        id: "killed-runner", path: "runner.py", line: 100, title: "No cleanup when the runner is killed with SIGKILL",
+        explanation: "If the runner itself receives SIGKILL, its descendants and workspace leak.", trigger: "kill -9 the runner.",
+        consequence: "The workspace is never cleaned.", evidence: "source",
+      }
+      expect(score("check-runner", "fixed", [killedRunner]).falsePositives).toEqual([{ finding: "killed-runner", claims: ["cleanup-after-sigkill"] }])
+      expect(score("check-runner", "term", [leaderOnly]).detected).toEqual(["cancel-awaits-only-the-leader"])
+      expect(score("check-runner", "term", [{ ...leftAlive, line: 70, explanation: "After the check finishes normally a background descendant stays alive." }]).falsePositives).toHaveLength(1)
+      expect(score("check-runner", "fixed", [leftAlive]).falsePositives).toEqual([{ finding: "left-alive", claims: ["owned-work-outlives-runner"] }])
+      expect(score("check-runner", "transfer", [service]).falsePositives).toEqual([{ finding: "service", claims: ["transferred-service-left-running"] }])
+      expect(score("check-runner", "fixed", []).falsePositives).toEqual([])
+
+      const writer = {
+        id: "writer", path: "exporter.py", line: 26, title: "A failed export leaves its writer thread blocked",
+        explanation: "When a row raises ValueError, the sentinel is never queued and the writer is not joined.",
+        trigger: "Export a row with NaN.", consequence: "The writer thread stays alive, blocked forever; each failure leaks one.",
+        evidence: "synthetic",
+      }
+      expect(score("spool-export", "buggy", [writer]).detected).toEqual(["failed-export-leaves-writer"])
+      expect(score("spool-export", "fixed", [writer]).falsePositives).toHaveLength(1)
     } finally {
       removeOuts()
     }

@@ -183,6 +183,17 @@ def git_text(*args: str) -> str:
     return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
 
 
+def harness_metadata() -> dict:
+    # An archived check has no Git metadata. Do not borrow an enclosing
+    # repository's revision or invent a clean state; the content hashes remain.
+    if not (ROOT / ".git").exists():
+        return {"harnessHead": None, "harnessDirty": None}
+    return {
+        "harnessHead": git_text("rev-parse", "HEAD"),
+        "harnessDirty": bool(git_text("status", "--porcelain")),
+    }
+
+
 def write_meta(out: Path, payload: dict) -> None:
     (out / "meta.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
@@ -202,8 +213,7 @@ def prepare_case(case: str, variant: str, skill: str, out: Path) -> None:
         "case": case,
         "variant": variant,
         "skill": skill,
-        "harnessHead": git_text("rev-parse", "HEAD"),
-        "harnessDirty": bool(git_text("status", "--porcelain")),
+        **harness_metadata(),
         "skillSha256": skill_sha,
         "supportSha256": support_sha,
         "checkoutSha256": tree_hash(checkout),
@@ -248,8 +258,7 @@ def prepare_revision(skill: str, out: Path, repository: Path, revision: str, bas
         "skill": skill,
         "revision": revision,
         "base": base,
-        "harnessHead": git_text("rev-parse", "HEAD"),
-        "harnessDirty": bool(git_text("status", "--porcelain")),
+        **harness_metadata(),
         "skillSha256": skill_sha,
         "supportSha256": support_sha,
         "checkoutSha256": tree_hash(checkout),

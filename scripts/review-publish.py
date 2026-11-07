@@ -228,7 +228,11 @@ def validate_result(result: dict) -> list[str]:
     else:
         seen: set[str] = set()
         for index, check in enumerate(checks):
-            if not isinstance(check, dict) or set(check) != {"name", "status", "detail"}:
+            if (
+                not isinstance(check, dict)
+                or not {"name", "status", "detail"} <= set(check)
+                or set(check) - {"name", "status", "detail", "exitCode", "failure"}
+            ):
                 problems.append(f"checks[{index}]")
                 continue
             name = check.get("name")
@@ -240,6 +244,27 @@ def validate_result(result: dict) -> list[str]:
                 problems.append(f"checks[{index}].status")
             if not text_field(check.get("detail")):
                 problems.append(f"checks[{index}].detail")
+            if "exitCode" in check:
+                code = check["exitCode"]
+                if (
+                    not isinstance(code, int) or isinstance(code, bool)
+                    or check.get("status") == "skipped"
+                    or (check.get("status") == "passed" and code != 0)
+                    or (check.get("status") == "failed" and code == 0)
+                ):
+                    problems.append(f"checks[{index}].exitCode")
+            if "failure" in check:
+                failure = check["failure"]
+                if (
+                    not isinstance(failure, dict)
+                    or set(failure) != {"cause", "evidence"}
+                    or failure.get("cause") not in ("baseline", "environment")
+                    or not text_field(failure.get("evidence"))
+                    or check.get("status") != "failed"
+                    or "exitCode" not in check
+                    or name in {"diff", "adversarial"}
+                ):
+                    problems.append(f"checks[{index}].failure")
             if name == "diff":
                 diff_status = check.get("status")
             if name == "adversarial":
@@ -392,7 +417,11 @@ def validate_result(result: dict) -> list[str]:
     if outcome == "clean" and (
         findings
         or any(item.get("status") not in RESOLVED_STATUS for item in prior if isinstance(item, dict))
-        or any(check.get("status") in {"failed", "unavailable"} for check in checks if isinstance(check, dict))
+        or any(
+            check.get("status") == "unavailable"
+            or (check.get("status") == "failed" and "failure" not in check)
+            for check in checks if isinstance(check, dict)
+        )
         or diff_status != "passed"
     ):
         problems.append("outcome")
@@ -450,7 +479,11 @@ def public_review(result: dict) -> tuple[str, list[dict]]:
         opening = "The review is incomplete."
     lines = [opening, "", "Checks:"]
     for check in result["checks"]:
-        lines.append(f"- {check['name']}: {check['status']}. {check['detail'].strip()}")
+        exit_code = f" (exit {check['exitCode']})" if "exitCode" in check else ""
+        lines.append(f"- {check['name']}: {check['status']}{exit_code}. {check['detail'].strip()}")
+        if "failure" in check:
+            failure = check["failure"]
+            lines.append(f"  Failure cause: {failure['cause']}. {failure['evidence'].strip()}")
     if result["limitations"]:
         lines.extend(["", "Limitations:"])
         lines.extend(f"- {item.strip()}" for item in result["limitations"])
@@ -761,7 +794,7 @@ def gh_api(
 ) -> tuple[int, bytes, bytes]:
     command = ["gh", "api", "--hostname", "github.com", "--method", method]
     if paginate:
-        command.extend(["--paginate", "--slurp"])
+        command.append("--paginate")
     command.append(endpoint)
     data = None
     if payload is not None:
@@ -830,16 +863,25 @@ def gh_pages(endpoint: str) -> list[dict]:
     if code != 0:
         print(stderr.decode("utf-8", errors="replace"), file=sys.stderr)
         raise SystemExit(1)
-    pages = json.loads(stdout.decode() or "[]")
-    if isinstance(pages, dict):
-        pages = [pages]
-    items: list[dict] = []
-    for page in pages:
-        if isinstance(page, list):
-            items.extend(item for item in page if isinstance(item, dict))
-        elif isinstance(page, dict):
-            items.append(page)
-    return items
+    # --paginate is available on the Cloud VM's bundled gh. Parse its adjacent
+    # JSON page documents locally instead of depending on the newer --slurp.
+    # Every page must be complete before a missing receipt can permit a send.
+    try:
+        raw = stdout.decode("utf-8").strip()
+        if not raw:
+            raise ValueError("empty page stream")
+        decoder = json.JSONDecoder()
+        items: list[dict] = []
+        while raw:
+            page, end = decoder.raw_decode(raw)
+            if not isinstance(page, list) or any(not isinstance(item, dict) for item in page):
+                raise ValueError("expected an array of objects")
+            items.extend(page)
+            raw = raw[end:].lstrip()
+        return items
+    except (UnicodeError, ValueError):
+        print("GitHub returned an invalid paginated lookup. No missing receipt can be inferred.", file=sys.stderr)
+        raise SystemExit(1)
 
 
 def reviews_of(owner: str, repo: str, pull: int) -> list[dict]:
@@ -1621,18 +1663,18 @@ def bind(owner: str, repo: str, pull: int, out: Path | None) -> None:
         current = None
     head, base, readable = interpret_pull(current, pull)
     if not readable:
-        print("The pull request revision is unreadable. GitHub was not called.", file=sys.stderr)
+        print("The pull request revision is unreadable. No GitHub changes were made.", file=sys.stderr)
         raise SystemExit(2)
     revision = {"owner": owner, "repo": repo, "pull": pull, "base": base, "head": head, "runtime": "linux"}
     if out is None:
         json.dump(revision, sys.stdout, indent=2)
         sys.stdout.write("\n")
-        print("Recorded the pull request revision. GitHub was not called.", file=sys.stderr)
+        print("Recorded the pull request revision from GitHub. No GitHub changes were made.", file=sys.stderr)
         return
     if out.exists():
         recorded = read_json_object(out)
         if recorded is None:
-            print("The review file is not a JSON object. GitHub was not called.", file=sys.stderr)
+            print("The review file is not a JSON object. No GitHub changes were made.", file=sys.stderr)
             raise SystemExit(2)
         same = (
             recorded.get("owner") == owner
@@ -1644,15 +1686,15 @@ def bind(owner: str, repo: str, pull: int, out: Path | None) -> None:
         )
         if not same:
             print(
-                "The pull request revision changed. Refresh the review and approve it again. GitHub was not called.",
+                "The pull request revision changed. Refresh the review and approve it again. No GitHub changes were made.",
                 file=sys.stderr,
             )
             raise SystemExit(6)
-        print("Revision matches the recorded review. GitHub was not called.")
+        print("The GitHub revision matches the recorded review. No GitHub changes were made.")
         return
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(revision, indent=2) + "\n", encoding="utf-8")
-    print("Recorded the pull request revision. GitHub was not called.")
+    print("Recorded the pull request revision from GitHub. No GitHub changes were made.")
 
 
 def render(source: Path, dest: Path) -> None:
