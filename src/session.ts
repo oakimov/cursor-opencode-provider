@@ -18,7 +18,7 @@ import type { ParallelStepState } from "./parallel-step.js"
 import type { StepOrderState } from "./step-order.js"
 import type { OpenCodeModelCost } from "./pricing.js"
 import type { RunCostEstimate } from "./billing.js"
-import type { ReplaySafetyState } from "./replay-safety.js"
+import type { ReplaySafetyState, RunInjection } from "./replay-safety.js"
 
 export type Frame = { flags: number; payload: Uint8Array }
 
@@ -237,6 +237,8 @@ export type CursorSession = {
   unacknowledgedHostResults?: Array<{ callId?: string; afterFrame: number }>
   /** Stateful replay barriers survive host tool-step boundaries on this Run. */
   replaySafety?: ReplaySafetyState
+  /** Steers and host notes this Run injected whose echo has not arrived yet. */
+  injections?: RunInjection[]
   /** A delivered plan result refused execution; terminate this Run without continuing. */
   planReviewDeclined?: boolean
   /**

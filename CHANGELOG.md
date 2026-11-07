@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A Run Cursor cuts right after a tool result now rebuilds from host history when it earlier delivered an early steer or host note that history still holds, instead of ending the turn as "automatic retry unsafe" ([#159](https://github.com/oakimov/cursor-opencode-provider/issues/159), [@nkoynov](https://github.com/nkoynov)).
+
 ### Changed
 
 - Local test checks detect Linux, macOS and Windows capabilities; Windows can run the full suite through a local Linux-container engine without Cursor agent installed.

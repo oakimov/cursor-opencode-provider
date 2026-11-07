@@ -552,6 +552,143 @@ describe("checkpoint eligibility across host results", () => {
     }, 30_000)
   }
 
+  // Cursor answers a delivered injection with `user_message_appended` echoing its
+  // `message_id` (#159). Independent bytes: InteractionUpdate #6 → user_message #1 →
+  // text #1, message_id #2, then a flag and two timestamps (#24–#26).
+  const appendedEcho = (text: string, messageId: string, extra: number[] = []) => {
+    const field = (fn: number, bytes: Uint8Array) => {
+      const tag: number[] = []
+      for (let value = (fn << 3) | 2; ; value >>>= 7) {
+        if (value < 0x80) { tag.push(value); break }
+        tag.push((value & 0x7f) | 0x80)
+      }
+      const length: number[] = []
+      for (let value = bytes.length; ; value >>>= 7) {
+        if (value < 0x80) { length.push(value); break }
+        length.push((value & 0x7f) | 0x80)
+      }
+      return Uint8Array.from([...tag, ...length, ...bytes])
+    }
+    const message = Uint8Array.from([
+      ...field(1, Buffer.from(text)), ...field(2, Buffer.from(messageId)),
+      0xc0, 0x01, 0x01, 0xc8, 0x01, 0x05, 0xd0, 0x01, 0x06, ...extra,
+    ])
+    return field(1, field(6, field(1, message)))
+  }
+
+  for (const scenario of [
+    "echo", "checkpointed", "unmatched-id", "duplicate", "extra-field", "undelivered", "checkpointed-missing",
+    "carried-missing", "carried-missing-retry",
+  ] as const) {
+    it(`rebuilds a post-result drop past its own host note's echo only when history holds the note (${scenario})`, async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-note-echo-"))
+      const requests: Array<{ conversation_id: string; action: { resume_action?: unknown; user_message_action?: { user_message: { text: string } } } }> = []
+      const injections: Array<{ injection_id: string; user_context: { user_message: { text: string; message_id: string } } }> = []
+      const delivered: number[] = []
+      scripted = (stream, message) => {
+        const send = (value: Record<string, unknown>) => stream.write(frame(encodeMessage("AgentServerMessage", value)))
+        if (message.run_request) {
+          requests.push(message.run_request as typeof requests[number])
+          if (requests.length > 1) {
+            send({ interaction_update: { turn_ended: {} } })
+            stream.end()
+            return
+          }
+          send({ conversation_checkpoint_update: Uint8Array.of(10, 1, 7) })
+          send({ exec_server_message: { id: 1, shell_stream_args: { command: "echo first", tool_call_id: "first" } } })
+          return
+        }
+        const injection = (message.conversation_action as { inject_context_action?: typeof injections[number] } | undefined)?.inject_context_action
+        if (injection) {
+          injections.push(injection)
+          const { text, message_id } = injection.user_context.user_message
+          if (scenario !== "undelivered") {
+            send({ interaction_update: { context_injection_state: { injection_id: injection.injection_id, state: { delivered: {} } } } })
+          }
+          const echo = appendedEcho(text, scenario === "unmatched-id" ? "another-message" : message_id,
+            scenario === "extra-field" ? [0x20, 0x01] : [])
+          stream.write(frame(echo))
+          if (scenario === "duplicate") stream.write(frame(echo))
+          // Cursor stores the note; the result written next revokes this checkpoint.
+          if (scenario === "checkpointed" || scenario === "checkpointed-missing") {
+            send({ conversation_checkpoint_update: Uint8Array.of(10, 1, 8) })
+          }
+          send({ exec_server_message: { id: 2, shell_stream_args: { command: "echo second", tool_call_id: "second" } } })
+          return
+        }
+        const reply = message.exec_client_message as { id: number; shell_stream?: { exit?: unknown } } | undefined
+        if (!reply?.shell_stream?.exit || delivered.includes(reply.id)) return
+        delivered.push(reply.id)
+        // Cut right after the second result, before any later checkpoint.
+        if (reply.id === 2) stream.end()
+      }
+      cacheHttp2SessionForTests(ORIGIN, client)
+      try {
+        let tokenRequests = 0
+        const model = createCursor({ name: "cursor", getAccessToken: async () => {
+          if (++tokenRequests === 2 && scenario === "carried-missing-retry") {
+            throw new CursorTransportError("Credential service connection reset", { transient: true, replaySafe: true })
+          }
+          return "example-token"
+        }, agentBaseURL: ORIGIN,
+          workspaceRoot: root, cacheDir: root, retry: { baseDelayMs: 1, maxDelayMs: 1 } }).languageModel("composer-2.5")
+        const prompt: LanguageModelV3CallOptions["prompt"] = [{ role: "user", content: [{ type: "text", text: "Run both commands" }] }]
+        const options = { prompt, headers: { "x-opencode-session-id": `ses_note_echo_${scenario}` },
+          tools: [{ type: "function" as const, name: "bash", inputSchema: { type: "object", properties: { command: { type: "string" } } } }] }
+        const read = async () => {
+          const parts: LanguageModelV3StreamPart[] = []
+          const { stream } = await model.doStream(options)
+          const reader = stream.getReader()
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            parts.push(value)
+          }
+          return parts
+        }
+        // OpenCode 2.x's notice that a background shell finished, after the first result.
+        const notice = `<shell id="job-1" state="completed" command="sleep 1">\nbackground job finished\n</shell>`
+        for (const output of ["first completed", "second completed"]) {
+          const parts = await read()
+          const call = parts.find(part => part.type === "tool-call")
+          if (!call || call.type !== "tool-call") throw new Error("Expected a host command")
+          prompt.push({ role: "assistant", content: [{ type: "tool-call", toolCallId: call.toolCallId, toolName: call.toolName, input: JSON.parse(call.input) }] })
+          prompt.push({ role: "tool", content: [{ type: "tool-result", toolCallId: call.toolCallId, toolName: call.toolName, output: { type: "text", value: output } }] })
+          if (output === "first completed") prompt.push({ role: "user", content: [{ type: "text", text: notice }] })
+        }
+        expect(injections.map(injection => injection.user_context.user_message.text)).toEqual([notice])
+        // Host history no longer holds the note Cursor already stored.
+        if (scenario === "checkpointed-missing" || scenario === "carried-missing" || scenario === "carried-missing-retry") {
+          prompt.splice(prompt.findIndex(message => message.role === "user" && message.content.some(part => part.type === "text" && part.text === notice)), 1)
+        }
+        if (scenario === "echo" || scenario === "checkpointed" || scenario === "carried-missing" || scenario === "carried-missing-retry") {
+          const parts = await read()
+          expect(parts.some(part => part.type === "finish" && part.finishReason.unified === "stop")).toBe(true)
+          expect(requests).toHaveLength(2)
+          expect(requests[1]!.action.resume_action).toBeUndefined()
+          expect(requests[1]!.conversation_id).not.toBe(requests[0]!.conversation_id)
+          const text = requests[1]!.action.user_message_action!.user_message.text
+          expect(text.match(/first completed/g)).toHaveLength(1)
+          expect(text.match(/second completed/g)).toHaveLength(1)
+          expect(text.match(/background job finished/g)).toHaveLength(1)
+          expect(text).toContain("Do not repeat completed work")
+          expect(injections).toHaveLength(1)
+          expect(tokenRequests).toBe(scenario === "carried-missing-retry" ? 3 : 2)
+        } else {
+          expect(await read().catch((error: unknown) => error)).toMatchObject({ isRetryable: false,
+            responseHeaders: { "x-should-retry": "false" } })
+          expect(requests).toHaveLength(1)
+        }
+        expect(delivered).toEqual([1, 2])
+      } finally {
+        sessionManager.dispose()
+        await settleRunSavesForTests()
+        setHostCacheDirOverride(undefined)
+        fs.rmSync(root, { recursive: true, force: true })
+      }
+    }, 30_000)
+  }
+
   it("reports a foreign-history rebase that cannot fit as a context overflow, not a setup failure", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-rebase-overflow-"))
     let requests = 0

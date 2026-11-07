@@ -16,6 +16,57 @@ const OUTPUT_ONLY_BARRIERS: ReadonlySet<ReplayBarrierReason> = new Set([
   "visible-text", "visible-reasoning", "visible-tool-row",
 ])
 
+/**
+ * A mid-turn `inject_context_action.user_context` this Run wrote: an OpenCode 2.x early steer or
+ * host notes. Cursor answers a delivered one with `user_message_appended` echoing its `message_id`.
+ */
+export type RunInjection = {
+  kind: "steer" | "note"
+  injectionId: string
+  messageId: string
+  text: string
+  /** The raw host note bodies the text was built from. */
+  notes?: string[]
+  /** Cursor reported `context_injection_state` delivered. */
+  delivered?: boolean
+}
+
+/** One of the Run's own injections Cursor appended; a rebuild needs host history to hold it. */
+export type AppendedInjection = { kind: "steer"; injectionId: string } | { kind: "note"; injectionId: string; notes: string[] }
+
+/** Past this many tracked injections a Run's echoes are no longer matched (fail closed). */
+const MAX_RUN_INJECTIONS = 64
+const MAX_APPENDED_INJECTIONS = 128
+
+/** Remember an injection before writing it, so its echo can be recognized. */
+export function trackRunInjection(injections: RunInjection[], injection: RunInjection): void {
+  injections.push(injection)
+  if (injections.length > MAX_RUN_INJECTIONS) injections.splice(0, injections.length - MAX_RUN_INJECTIONS)
+}
+
+export function markRunInjectionDelivered(injections: RunInjection[] | undefined, injectionId: string | undefined): void {
+  const injection = injectionId ? injections?.find((candidate) => candidate.injectionId === injectionId) : undefined
+  if (injection) injection.delivered = true
+}
+
+/**
+ * The injection an appended message echoes: the same `message_id` and text, already delivered.
+ * A match is consumed, so a second echo of the same message stays unmatched.
+ */
+export function takeAppendedInjection(
+  injections: RunInjection[] | undefined,
+  message: AppendedUserMessage | undefined,
+): AppendedInjection | undefined {
+  if (!injections || !message) return undefined
+  const index = injections.findIndex((candidate) => candidate.messageId === message.messageId)
+  const injection = index === -1 ? undefined : injections[index]!
+  if (!injection?.delivered || injection.text !== message.text) return undefined
+  injections.splice(index, 1)
+  return injection.kind === "steer"
+    ? { kind: "steer", injectionId: injection.injectionId }
+    : { kind: "note", injectionId: injection.injectionId, notes: [...injection.notes ?? []] }
+}
+
 /** Plain Run-owned state retained across host tool-step pump calls. */
 export type ReplaySafetyState = {
   statefulBarrier?: ReplayBarrierReason
@@ -30,6 +81,11 @@ export type ReplaySafetyState = {
   catalogCalls?: Record<string, "started" | "completed">
   /** History cannot represent opaque interactions, unknown frames or unclaimed display work. */
   historyRebaseUnsafe?: boolean
+  /**
+   * Echoes of this Run's own steers and host notes. Each stays a stateful barrier, but a history
+   * rebuild may proceed when the prompt it seeds holds every one (checked at rebuild time).
+   */
+  appendedInjections?: AppendedInjection[]
 }
 
 /** Every display call must be represented by a host exec or a completed inline catalog lookup. */
@@ -42,6 +98,8 @@ export function announcedCallsClaimed(state: ReplaySafetyState | undefined): boo
 export class AttemptReplaySafety {
   private barrierReason: ReplayBarrierReason | undefined
   private stateful = false
+  /** A barrier of this attempt other than an echo of the Run's own injection. */
+  private otherBarrier = false
 
   constructor(
     private readonly sessionId: string,
@@ -94,17 +152,38 @@ export class AttemptReplaySafety {
     const execs = this.state.execs ??= []
     if (typeof id !== "number" || !Number.isSafeInteger(id)
       || execs.some(exec => exec.sessionId === this.sessionId && exec.id === id)) {
-      this.state.historyRebaseUnsafe = true
+      this.markHistoryUnsafe(`invalid-or-repeated-exec-id id=${String(id)}`)
       return
     }
     execs.push({ sessionId: this.sessionId, id, ...(callId ? { callId } : {}) })
   }
 
-  private mark(reason: ReplayBarrierReason, historyRepresentable: boolean): void {
+  /**
+   * A `user_message_appended` update, with the Run's own injection it echoes. A stateful barrier
+   * either way; only a matched echo leaves the history rebuild to the rebuild-time check.
+   */
+  recordAppendedMessage(injection: AppendedInjection | undefined): void {
+    const appended = this.state.appendedInjections ??= []
+    if (!injection || appended.length >= MAX_APPENDED_INJECTIONS) {
+      this.mark("stateful-interaction", false, injection ? "too-many-appended-injections" : "unmatched-appended-message")
+      return
+    }
+    appended.push(injection)
+    trace(`recovery: appended-echo kind=${injection.kind} injectionId=${injection.injectionId} sessionId=${this.sessionId}`)
+    this.mark("stateful-interaction", true, undefined, true)
+  }
+
+  private markHistoryUnsafe(cause: string): void {
+    this.state.historyRebaseUnsafe = true
+    trace(`recovery: history-unsafe cause=${cause} sessionId=${this.sessionId}`)
+  }
+
+  private mark(reason: ReplayBarrierReason, historyRepresentable: boolean, detail?: string, injectionEcho = false): void {
+    if (!injectionEcho) this.otherBarrier = true
     if (!OUTPUT_ONLY_BARRIERS.has(reason)) {
       this.stateful = true
       this.state.statefulBarrier ??= reason
-      if (!historyRepresentable) this.state.historyRebaseUnsafe = true
+      if (!historyRepresentable) this.markHistoryUnsafe(detail ? `${reason} ${detail}` : reason)
     }
     if (this.barrierReason) return
     this.barrierReason = reason
@@ -115,6 +194,7 @@ export class AttemptReplaySafety {
     failure.replaySafe = this.barrierReason === undefined && !this.stateful && failure.replaySafe
     if (this.barrierReason) {
       failure.replayBarrier = this.stateful ? "stateful" : "output-only"
+      if (!this.otherBarrier) failure.replayBarrierEchoesOnly = true
       trace(
         `replay suppressed: reason=${this.barrierReason} barrier=${failure.replayBarrier} ` +
           `sessionId=${this.sessionId}`,
@@ -163,10 +243,45 @@ function inlineCatalog(topLevel: StrictRawField | undefined, completed: boolean)
     && !success.some(field => field.fn === 2 && field.bytes?.length)
 }
 
+export type AppendedUserMessage = { messageId: string; text: string }
+
 export type ReplayFrameAnalysis = {
   barrier?: ReplayBarrierReason
   /** Set for a well-formed lifecycle frame with a call id. */
   toolLifecycle?: ReplayToolLifecycle
+  /** Set for an appended message shaped like the echo of a client injection. */
+  appendedUserMessage?: AppendedUserMessage
+}
+
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true })
+
+// Cursor's echo of an injection carries, besides text #1 and message_id #2, a
+// flag and two timestamps (#24–#26, varints) in a recorded 2026 frame; the
+// shipped CLI descriptors this client follows predate them.
+const APPENDED_ECHO_METADATA = [24, 25, 26]
+
+/**
+ * `UserMessageAppendedUpdate.user_message` holding only what a client
+ * `user_context` injection sends (text #1 and message_id #2, each once) plus
+ * Cursor's echo metadata. Anything else (selected context, mode, another
+ * field) is not an echo of this client's own message. Call only on a frame
+ * `validInteractionUpdateWire` accepted: update #6 then holds exactly one
+ * length-delimited `user_message` #1.
+ */
+function appendedEcho(topLevel: StrictRawField | undefined): AppendedUserMessage | undefined {
+  const update = nestedFields(topLevel, 1).find((field) => field.fn === 6)!
+  const message = readAllFieldsStrict(readAllFieldsStrict(update.bytes!)![0]!.bytes!)
+  if (!message
+    || !message.every((field) => [1, 2].includes(field.fn) ? field.wt === 2 : APPENDED_ECHO_METADATA.includes(field.fn) && field.wt === 0)
+    || ![1, 2, ...APPENDED_ECHO_METADATA].every((fn) => message.filter((field) => field.fn === fn).length <= 1)) return undefined
+  const text = message.find((field) => field.fn === 1)?.bytes
+  const id = message.find((field) => field.fn === 2)?.bytes
+  if (!text?.length || !id?.length) return undefined
+  try {
+    return { messageId: strictUtf8.decode(id), text: strictUtf8.decode(text) }
+  } catch {
+    return undefined
+  }
 }
 
 // Field numbers follow Cursor CLI 2026.09.28 `agent.v1`; the extracted
@@ -179,6 +294,7 @@ export type ReplayFrameAnalysis = {
 // `tool_requests_listed` #27 (count) carry no output and no state. Other
 // members stay barriers. `user_message_appended` #6 is recognized but stateful:
 // the shipped CLI commits its pending turn and starts one from the user message.
+// An echo of this client's own injection can still be rebuilt from host history.
 const INTERACTION_UPDATE_FIELDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 13, 14, 15, 16, 17, 23, 24, 27])
 /** `InteractionUpdate.message_started_at_ms` #25: a timestamp beside the oneof member. */
 const INTERACTION_UPDATE_STARTED_AT = 25
@@ -347,7 +463,8 @@ export function analyzeReplayFrame(
   if (malformed || (topLevel.fn === 4 && !validKv)) {
     barrier = "unknown-or-malformed-frame"
   } else if (topLevel.fn === 1 && decoded.interactionUpdate?.user_message_appended) {
-    barrier = "stateful-interaction"
+    const appendedUserMessage = appendedEcho(topLevel)
+    return { barrier: "stateful-interaction", ...(appendedUserMessage ? { appendedUserMessage } : {}) }
   } else if (topLevel.fn === 2 && !exec.exactRequestContext && !exec.exactMcpState) {
     barrier = "non-control-exec"
   }

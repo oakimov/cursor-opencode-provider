@@ -56,7 +56,9 @@ import {
   writeStreamMessage as writeWithBackpressure,
 } from "./stream-write.js"
 import {
+  carriesSteer,
   clearUnansweredEarlySteers,
+  findEarlySteer,
   forgetEarlySteerRecords,
   forgetUndeliveredEarlySteer,
   handOverEarlySteers,
@@ -375,7 +377,16 @@ import {
   hostNoteText,
   wrapHostNotesForCursor,
 } from "./protocol/host-notes.js"
-import { analyzeReplayFrame, announcedCallsClaimed, AttemptReplaySafety, describeFrameLayout, type ReplayToolLifecycle } from "./replay-safety.js"
+import {
+  analyzeReplayFrame,
+  announcedCallsClaimed,
+  AttemptReplaySafety,
+  describeFrameLayout,
+  markRunInjectionDelivered,
+  takeAppendedInjection,
+  trackRunInjection,
+  type ReplayToolLifecycle,
+} from "./replay-safety.js"
 import { readAllFieldsStrict } from "./protocol/struct.js"
 import {
   cursorUsageCountersFromTurnEnded,
@@ -1432,6 +1443,7 @@ async function doStreamImpl(
                   : !failed.checkpointRevokedByHostResult ? "checkpoint-not-revoked-by-result"
                   : failed.pending.size > 0 ? "pending-execs"
                   : failed.replaySafety?.historyRebaseUnsafe ? "opaque-activity"
+                  : !appendedInjectionsInRebuild(failed, prompt) ? "opaque-activity"
                   : !announcedCallsClaimed(failed.replaySafety) ? "unaccounted-display-calls"
                   : !execs?.length ? "no-host-execs"
                   : !execs.every(exec => completed.has(`${exec.sessionId}:${exec.id}`)) ? "missing-host-results"
@@ -1606,6 +1618,7 @@ export async function pumpWithRecovery(input: {
         execs: pumpedSession.replaySafety?.execs?.slice(),
         announcedCalls: pumpedSession.replaySafety?.announcedCalls?.slice(),
         catalogCalls: pumpedSession.replaySafety?.catalogCalls && { ...pumpedSession.replaySafety.catalogCalls },
+        appendedInjections: pumpedSession.replaySafety?.appendedInjections?.slice(),
       }
       next.userTurnHostNotes = pumpedSession.userTurnHostNotes
       next.usageEstimate = { ...pumpedSession.usageEstimate }
@@ -1776,7 +1789,10 @@ export async function pumpWithRecovery(input: {
           throw noProgressResumeError(failure, noProgressResumes)
         }
       }
-      const historyRecovery = failure.replayBarrier === undefined && input.canRebaseFromHistory?.(pumpedSession)
+      // Output or opaque activity in the failed attempt itself stays final; echoes of the
+      // Run's own steers and notes are left to the history check.
+      const historyRecovery = (failure.replayBarrier === undefined || failure.replayBarrierEchoesOnly)
+        && input.canRebaseFromHistory?.(pumpedSession)
       // A dropped network fails the reopen before any host answers. Wait it out
       // when we can still resume or replay safely. A stateful turn with no
       // checkpoint stays fail-closed: waiting does not make that replay safe.
@@ -4373,15 +4389,17 @@ async function injectHostNotes(
   const text = hostNoteText(notes)
   if (!text) return true
   const injectionId = crypto.randomUUID()
+  const messageId = crypto.randomUUID()
   const sessionKey = session.openCodeSessionId
   if (sessionKey) trackHostNoteInjection(sessionKey, injectionId, [...notes], session, order)
+  trackRunInjection(session.injections ??= [], { kind: "note", injectionId, messageId, text, notes: [...notes] })
   try {
     await writeWithBackpressure(session.stream, encodeMessage("AgentClientMessage", {
       conversation_action: {
         inject_context_action: {
           injection_id: injectionId,
           ...(session.runId ? { expected_run_id: session.runId } : {}),
-          user_context: { user_message: { text, message_id: crypto.randomUUID() } },
+          user_context: { user_message: { text, message_id: messageId } },
         },
       },
     }), "host note injection")
@@ -4435,6 +4453,7 @@ function applyContextInjectionState(session: CursorSession, value: unknown): boo
       (reason ? ` reason=${JSON.stringify(reason)}` : ""),
   )
   const sessionKey = session.openCodeSessionId
+  if (kind === "delivered") markRunInjectionDelivered(session.injections, update.injection_id)
   if (kind === "delivered" && markEarlySteerDelivered(sessionKey, update.injection_id)) return true
   const entries = sessionKey ? hostNoteInjectionsBySession.get(sessionKey) : undefined
   const entry = update.injection_id ? entries?.get(update.injection_id) : undefined
@@ -4665,13 +4684,15 @@ function injectHostSteer(session: CursorSession, steer: HostSteer): boolean {
     trace(`steer: too many early steers tracked for sessionID=${steer.sessionID}; left for the next step`)
     return false
   }
+  const messageId = crypto.randomUUID()
+  trackRunInjection(session.injections ??= [], { kind: "steer", injectionId, messageId, text: steer.text })
   // While it waits behind another write, the host may withdraw it, or its Run may end or be replaced.
   writeWithBackpressure(stream, encodeMessage("AgentClientMessage", {
     conversation_action: {
       inject_context_action: {
         injection_id: injectionId,
         expected_run_id: runId,
-        user_context: { user_message: { text: steer.text, message_id: crypto.randomUUID() } },
+        user_context: { user_message: { text: steer.text, message_id: messageId } },
       },
     },
   }), "steer injection", () => isEarlySteerTracked(steer.sessionID, injectionId) && takesSteers()).then((written) => {
@@ -4872,6 +4893,64 @@ function continuationAfterEarlySteers(
       `the held Run already has inboxIDs=${steers.map((steer) => steer.inboxID).join(",")}`,
   )
   return { results, session: held }
+}
+
+/**
+ * A history rebuild after completed tool results seeds `prompt` (every tool result and the trailing
+ * user messages) as a new conversation. Each of the failed Run's own injections Cursor appended must
+ * reach that conversation once:
+ * - an early steer through OpenCode's promoted copy at the boundary it was promoted at
+ *   (`handOverEarlySteers` then forgets the record, so nothing injects it again);
+ * - a host note through the seeded text, or as an injection the Run still tracks, which the rebuild
+ *   carries over unless the seed already holds it (`prepareUserTurnHostNotes`).
+ * A steer appended in the cut step before OpenCode promoted it, or a note history no longer holds,
+ * keeps the rebuild refused.
+ */
+function appendedInjectionsInRebuild(failed: CursorSession, prompt: LanguageModelV3CallOptions["prompt"]): boolean {
+  const appended = failed.replaySafety?.appendedInjections
+  if (!appended?.length) return true
+  const sessionKey = failed.openCodeSessionId
+  const copies = prompt.flatMap((message, index) => message.role === "user" && !message.content.some((part) => part.type !== "text")
+    ? [{ index, text: extractUserText(message as unknown as Record<string, unknown>) }]
+    : [])
+  const blockStart = (index: number) => {
+    while (index > 0 && (prompt[index - 1]!.role === "user" || prompt[index - 1]!.role === "system")) index--
+    return index
+  }
+  const tracked = sessionKey ? hostNoteInjectionsBySession.get(sessionKey) : undefined
+  // A failed replacement open leaves the notes `reopen` took from the Run in
+  // this store. They still reach the next seed even when host history lost them.
+  const deferred = sessionKey ? undeliveredHostNotes(sessionKey) : []
+  let seeded: string | undefined
+  for (const injection of appended) {
+    if (injection.kind === "steer") {
+      const record = findEarlySteer(sessionKey, injection.injectionId)
+      const copy = record?.delivered && record.promoted && record.hostTurn
+        ? copies.findIndex(({ index, text }) => carriesSteer(text, record.text)
+          && steerHostTurn(prompt, blockStart(index)) === record.hostTurn)
+        : -1
+      if (copy === -1) {
+        trace(`recovery: appended-not-in-history kind=steer injectionId=${injection.injectionId} ` +
+          `promoted=${!!record?.promoted} sessionId=${failed.sessionId}`)
+        return false
+      }
+      copies.splice(copy, 1)
+      continue
+    }
+    if (tracked?.get(injection.injectionId)?.session === failed) continue
+    if (injection.notes.every((note) => deferred.includes(note))) continue
+    // The seed `startSession` builds for a completed-tool-results rebase.
+    seeded ??= extractPromptHistory(prompt, { preserveTrailingUser: true, toolResults: "all" })
+      .filter((message) => message.role === "user")
+      .map((message) => message.content)
+      .join("\n\n")
+    if (!injection.notes.every((note) => seeded!.includes(note.trim()))) {
+      trace(`recovery: appended-not-in-history kind=note injectionId=${injection.injectionId} ` +
+        `sessionId=${failed.sessionId}`)
+      return false
+    }
+  }
+  return true
 }
 
 async function loadAvailableModels(): Promise<void> {
@@ -6098,6 +6177,14 @@ export async function pump(
     if (replayFrame?.barrier === "display-tool-lifecycle") {
       replaySafety.recordToolLifecycle(replayFrame.toolLifecycle)
       acknowledgeHostResults(session, replayFrame.toolLifecycle, frame)
+    } else if (iu?.user_message_appended && replayFrame?.barrier === "stateful-interaction") {
+      const injection = takeAppendedInjection(session.injections, replayFrame.appendedUserMessage)
+      // Field numbers and wire types only, so an unexpected echo shape can be compared.
+      if (!injection) {
+        trace(`recovery: appended-unmatched layout=${describeFrameLayout(payload, 4)} ` +
+          `parsed=${!!replayFrame.appendedUserMessage} sessionId=${session.sessionId}`)
+      }
+      replaySafety.recordAppendedMessage(injection)
     } else if (replayFrame?.barrier) replaySafety.markBarrier(replayFrame.barrier)
     if (replayFrame?.barrier === "non-control-exec") {
       replaySafety.recordExec(esm?.id, esm ? extractExecDisplayCallId(esm) : undefined)
