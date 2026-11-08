@@ -19,7 +19,11 @@ import {
   CURSOR_VARIANT_PARAMETERS_KEY,
   CURSOR_WIRE_MODEL_ID_KEY,
   resolveCursorWireModelId,
+  EFFORT_PARAMETER_IDS,
+  variantsSupportReasoning,
   type ModelCache,
+  type ModelInfo,
+  type ModelVariant,
 } from "../src/models.js"
 import { cursorModelFamily, modelInfoToConfig, modelsToConfig } from "../src/model-config.js"
 import { MODEL_CACHE_SCHEMA_VERSION } from "../src/shared.js"
@@ -1205,6 +1209,115 @@ function testCache(id = "cached"): ModelCache {
     }],
   }
 }
+
+describe("variantsSupportReasoning", () => {
+  function variant(parameterValues: ModelVariant["parameterValues"]): ModelVariant {
+    return {
+      key: "variant",
+      displayName: "Variant",
+      parameterValues,
+      isDefaultNonMax: true,
+      isDefaultMax: false,
+    }
+  }
+
+  const deepseek: ModelInfo = {
+    id: "deepseek-v41-flash-1017",
+    displayName: "DeepSeek V4.1 Flash 1017",
+    supportsThinking: false,
+    supportsAgent: true,
+    maxContext: 1_048_576,
+    variants: [variant([{ id: "reasoning_effort", value: "max" }])],
+  }
+
+  it("shares one effort vocabulary with variant resolution", () => {
+    expect([...EFFORT_PARAMETER_IDS]).toEqual(["effort", "reasoning", "reasoning_effort"])
+    for (const id of EFFORT_PARAMETER_IDS) {
+      const model: ModelInfo = { id: "effort-params", variants: [variant([{ id, value: "high" }])] }
+      expect(resolveVariantParameters(model, { reasoningEffort: "high" }), id)
+        .toEqual([{ id, value: "high" }])
+      expect(variantsSupportReasoning(model.variants), id).toBe(true)
+    }
+  })
+
+  it("infers reasoning from non-off effort variants", () => {
+    expect(variantsSupportReasoning(deepseek.variants)).toBe(true)
+    expect(modelInfoToConfig(deepseek).reasoning).toBe(true)
+    expect(modelsToConfig([deepseek])[deepseek.id].reasoning).toBe(true)
+  })
+
+  it("lets a published thinking parameter decide, even beside effort values", () => {
+    const allThinkingFalse: ModelInfo = {
+      ...deepseek,
+      variants: [
+        variant([{ id: "thinking", value: "false" }, { id: "reasoning_effort", value: "high" }]),
+        variant([{ id: "thinking", value: "false" }, { id: "effort", value: "max" }]),
+      ],
+    }
+    expect(variantsSupportReasoning(allThinkingFalse.variants)).toBe(false)
+    expect(modelInfoToConfig(allThinkingFalse).reasoning).toBe(false)
+    expect(modelsToConfig([allThinkingFalse])[allThinkingFalse.id].reasoning).toBe(false)
+
+    const thinkingTrue: ModelInfo = {
+      ...deepseek,
+      variants: [variant([{ id: "thinking", value: "true" }, { id: "effort", value: "high" }])],
+    }
+    expect(variantsSupportReasoning(thinkingTrue.variants)).toBe(true)
+    expect(modelInfoToConfig(thinkingTrue).reasoning).toBe(true)
+
+    for (const value of ["true", "enabled", "on"]) {
+      expect(variantsSupportReasoning([variant([{ id: "thinking", value }])]), value).toBe(true)
+    }
+    for (const value of ["false", "off", "disabled", "none", ""]) {
+      expect(variantsSupportReasoning([variant([{ id: "thinking", value }])]), value).toBe(false)
+    }
+  })
+
+  it("does not infer reasoning from off or false variants", () => {
+    const off = [
+      [{ id: "reasoning_effort", value: "none" }],
+      [{ id: "effort", value: "off" }],
+      [{ id: "reasoning", value: "FALSE" }],
+    ]
+    for (const parameterValues of off) {
+      const model: ModelInfo = { ...deepseek, variants: [variant(parameterValues)] }
+      expect(variantsSupportReasoning(model.variants), JSON.stringify(parameterValues)).toBe(false)
+      // Discovery still owns `supportsThinking`; the helper only adds a signal.
+      expect(modelInfoToConfig({ ...model, supportsThinking: true }).reasoning).toBe(true)
+    }
+  })
+
+  it("checks each entry against the variants it advertises", () => {
+    const tiered: ModelInfo = {
+      id: "claude-sonnet-5-5",
+      displayName: "Claude Sonnet 5.5",
+      supportsThinking: false,
+      maxContext: 200_000,
+      variants: [
+        {
+          key: "base",
+          displayName: "Claude Sonnet 5.5",
+          parameterValues: [{ id: "context", value: "300k" }, { id: "reasoning_effort", value: "high" }],
+          isDefaultNonMax: true,
+          isDefaultMax: false,
+          isMaxMode: true,
+        },
+        {
+          key: "long",
+          displayName: "Claude Sonnet 5.5 1M",
+          parameterValues: [{ id: "context", value: "1m" }],
+          isDefaultNonMax: false,
+          isDefaultMax: true,
+          isMaxMode: true,
+        },
+      ],
+    }
+    const config = modelsToConfig([tiered])
+    // The base entry advertises the effort variant; its 1M entry does not.
+    expect(config[tiered.id].reasoning).toBe(true)
+    expect(config[`${tiered.id}-1m`].reasoning).toBe(false)
+  })
+})
 
 describe("model cache integrity", () => {
   it("rejects an entire malformed cache rather than exposing a partial catalog", async () => {
