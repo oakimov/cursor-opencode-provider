@@ -75,7 +75,7 @@ import {
   type EarlySteer,
   type HostSteer,
 } from "./host-steer.js"
-import { isDebugEnabled, trace, traceRequestContextPaths } from "./debug.js"
+import { isDebugEnabled, trace, traceOncePerLog, traceRequestContextPaths, traceVerbose } from "./debug.js"
 import { toolResultFailure, type ToolRefusal } from "./opencode2/tool-results.js"
 import { isExchangeableApiKey } from "./auth.js"
 import { resolveBearerToken } from "./auth-renewal.js"
@@ -3167,7 +3167,11 @@ async function readHeldFrames(session: CursorSession, frames: CursorSession["fra
     if (kvReply) {
       try {
         await writeWithBackpressure(session.stream, kvReply.reply, `held KV ${kvReply.kind}_blob reply id=${kvReply.id}`)
-        trace(`held Run: answered KV ${kvReply.kind} id=${kvReply.id} sessionId=${session.sessionId}`)
+        const missed = kvReply.kind === "get" && !kvReply.found && !kvReply.echoed
+        ;(missed ? trace : traceVerbose)(
+          `held Run: answered KV ${kvReply.kind} id=${kvReply.id} found=${kvReply.found} ` +
+            `echoed=${!!kvReply.echoed} sessionId=${session.sessionId}`,
+        )
       } catch (error) {
         trace(`held Run: KV reply failed sessionId=${session.sessionId}: ${(error as Error).message}`)
         sessionManager.close(session, "reply-write-failed", toCursorProviderError(error, {
@@ -3188,7 +3192,7 @@ async function readHeldFrames(session: CursorSession, frames: CursorSession["fra
     // Everything else, a KV request this client cannot answer included (the
     // pump fails the Run on it), waits for the next pump in order.
     ;(session.heldFrames ??= []).push(frame)
-    trace(`held Run: queued a frame for the next pump queued=${session.heldFrames.length} sessionId=${session.sessionId}`)
+    traceVerbose(`held Run: queued a frame for the next pump queued=${session.heldFrames.length} sessionId=${session.sessionId}`)
     if (frame.flags & 0x02) return
   }
 }
@@ -6198,7 +6202,7 @@ export async function pump(
 
     {
       const iuKind = iu ? Object.keys(iu).find((k) => iu[k]) : undefined
-      trace(
+      traceVerbose(
         `pump frame: topField=${topField} interaction_update=${iuKind ?? "-"} ` +
           `exec=${esm ? "yes" : "no"} kv=${kv ? "yes" : "no"} ` +
           `interaction_query=${interactionQuery ? "yes" : "no"} ` +
@@ -7555,7 +7559,7 @@ export async function pump(
     } else if (kv) {
       // KV blob channel: ack set_blob / answer get_blob, then keep pumping.
       // Not replying hangs the turn — see protocol/kv.ts.
-      trace(
+      traceVerbose(
         `kv frame raw: gunzippedLen=${payload.length} id=${kv.id ?? "?"} ` +
           `get=${!!kv.get_blob_args} set=${!!kv.set_blob_args} ` +
           `getBlobIdLen=${(kv.get_blob_args as any)?.blob_id?.length ?? "-"} ` +
@@ -7565,7 +7569,8 @@ export async function pump(
       const handled = handleKvServerMessage(kv, session)
       // Content-as-id reads are answered by echoing the id back (`echoed`); only a
       // hash we cannot serve means the checkpoint references state we lost.
-      if (handled?.kind === "get" && !handled.found && !handled.echoed) blobMiss = true
+      const missed = handled?.kind === "get" && !handled.found && !handled.echoed
+      if (missed) blobMiss = true
       if (handled) {
         try {
           await writeWithBackpressure(
@@ -7573,7 +7578,7 @@ export async function pump(
             handled.reply,
             `KV ${handled.kind}_blob reply id=${handled.id}`,
           )
-          trace(
+          ;(missed ? trace : traceVerbose)(
             `kv replied: kind=${handled.kind} id=${handled.id} blobId=${handled.blobIdHex.slice(0, 16)}… ` +
               `found=${handled.found} echoed=${!!handled.echoed} ` +
               `replyBytes=${handled.reply.length} replyBlobBytes=${handled.replyBlobBytes} ` +
@@ -8650,7 +8655,8 @@ export async function refreshHeldSessionToolCatalog(
   }
 }
 
-function extractTools(callOptions: LanguageModelV3CallOptions): OpencodeToolDef[] {
+/** Exported for tests. */
+export function extractTools(callOptions: LanguageModelV3CallOptions): OpencodeToolDef[] {
   const tools = callOptions.tools
   if (!tools || tools.length === 0) {
     trace("extractTools: callOptions.tools empty/missing")
@@ -8674,7 +8680,12 @@ function extractTools(callOptions: LanguageModelV3CallOptions): OpencodeToolDef[
       out.push({ name: any.name, description: any.description, inputSchema: schema })
     }
   }
-  trace(`extractTools: ${tools.length} incoming → ${out.length} advertised [${out.map((t) => t.name).join(",")}]`)
+  if (isDebugEnabled()) {
+    const names = out.map((t) => t.name).join(",")
+    const hash = createHash("sha256").update(names).digest("hex").slice(0, 12)
+    const counts = `extractTools: ${tools.length} incoming → ${out.length} advertised tools=${hash}`
+    traceOncePerLog(`extractTools:${hash}`, `${counts} [${names}]`, counts)
+  }
   return out
 }
 

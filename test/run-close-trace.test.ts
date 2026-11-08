@@ -74,7 +74,10 @@ await serverStream
 await run.frames().next()
 `
 
-async function streamClosedTraces(script: string): Promise<string[]> {
+async function streamClosedTraces(
+  script: string,
+  { level = "1", match = /h2 stream (closed|error)/ }: { level?: string; match?: RegExp } = {},
+): Promise<string[]> {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-provider-close-trace-"))
   try {
     const file = path.join(directory, "run.ts")
@@ -84,7 +87,7 @@ async function streamClosedTraces(script: string): Promise<string[]> {
       env: {
         ...process.env,
         CURSOR_CLIENT_VERSION: "cli-close-trace-test",
-        CURSOR_PROVIDER_DEBUG: "1",
+        CURSOR_PROVIDER_DEBUG: level,
         CURSOR_PROVIDER_DEBUG_FILE: log,
       },
       stdout: "ignore",
@@ -98,13 +101,27 @@ async function streamClosedTraces(script: string): Promise<string[]> {
     expect({ code, stderr: (await stderr).replace(/^\[cursor-provider\].*\n/gm, "") })
       .toEqual({ code: 0, stderr: "" })
     const lines = (await fs.readFile(log, "utf8")).split("\n")
-    return lines.filter((line) => /h2 stream (closed|error)/.test(line)).map((line) => line.replace(/^\[[^\]]*\] /, ""))
+    return lines.filter((line) => match.test(line)).map((line) => line.replace(/^\[[^\]]*\] /, ""))
   } finally {
     await fs.rm(directory, { recursive: true, force: true })
   }
 }
 
 describe("Run stream close trace", () => {
+  it("writes a line per received frame only at CURSOR_PROVIDER_DEBUG=2", async () => {
+    const script = childScript("", `
+const controller = undefined
+${OPEN_REQUEST}
+run.destroy()
+`)
+    const frames = (level: string) => streamClosedTraces(script, { level, match: /frame yield|h2 stream closed/ })
+    expect(await frames("1")).toEqual(["h2 stream closed (status=200, local=true, err=none)"])
+    expect(await frames("2")).toEqual([
+      "frame yield: flags=0x0 payload=1B",
+      "h2 stream closed (status=200, local=true, err=none)",
+    ])
+  }, 30_000)
+
   it("does not record a destroyed Run as aborted by remote", async () => {
     const traces = await streamClosedTraces(childScript("", `
 const controller = undefined

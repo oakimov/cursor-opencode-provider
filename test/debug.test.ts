@@ -9,6 +9,7 @@ import {
   DEBUG_LOG_TRIM_LOCK_STALE_MS,
   DEBUG_LOG_ROTATE_BACKUPS,
   ensureSecureDebugLog,
+  resolveDebugLevel,
   resolveDebugLogOptions,
   resolveDebugLogPath,
   rotateDebugLogIfOversized,
@@ -917,5 +918,227 @@ describe("debug log paths / modes (F9)", () => {
       if (appender !== undefined) fs.closeSync(appender)
       fs.rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe("debug log levels", () => {
+  const debugModule = JSON.stringify(path.resolve(import.meta.dir, "../src/debug.ts"))
+  const traceAll = `
+    import { trace, traceOncePerLog, traceVerbose } from ${debugModule}
+    trace("plain line")
+    traceVerbose("pump frame: verbose only")
+    for (const list of ["a", "a", "b", "a"]) {
+      traceOncePerLog("tools:" + list, "tools=" + list + " [full " + list + "]", "tools=" + list)
+    }
+  `
+  const runLevel = (level: string, file: string, script = traceAll, env: Record<string, string> = {}) =>
+    Bun.spawnSync([process.execPath, "-e", script], {
+      env: {
+        ...process.env,
+        CURSOR_PROVIDER_DEBUG: level,
+        CURSOR_PROVIDER_RECOVERY_DEBUG: "0",
+        CURSOR_PROVIDER_DEBUG_FILE: file,
+        CURSOR_PROVIDER_DEBUG_LOG_MODE: "trim",
+        CURSOR_PROVIDER_DEBUG_ROTATE_MAX_BYTES: "",
+        CURSOR_PROVIDER_DEBUG_ROTATE_BACKUPS: "",
+        ...env,
+      },
+    })
+  const messages = (file: string) => fs.readFileSync(file, "utf8").split("\n")
+    .map((line) => line.match(/^\[[^\]]+\] (?!debug: )(.*)$/)?.[1])
+    .filter((line): line is string => line !== undefined)
+
+  it("reads CURSOR_PROVIDER_DEBUG as level 0, 1 or 2", () => {
+    expect(resolveDebugLevel("1")).toBe(1)
+    expect(resolveDebugLevel("true")).toBe(1)
+    expect(resolveDebugLevel("2")).toBe(2)
+    expect(resolveDebugLevel("verbose")).toBe(2)
+    for (const off of [undefined, "", "0", "false", "3", "TRUE"]) expect(resolveDebugLevel(off)).toBe(0)
+  })
+
+  it("keeps per-frame lines for level 2 and writes a repeated list in full once at level 1", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-provider-debug-levels-"))
+    try {
+      const one = path.join(root, "one.log")
+      expect(runLevel("1", one).exitCode).toBe(0)
+      expect(messages(one)).toEqual([
+        "plain line",
+        "tools=a [full a]",
+        "tools=a",
+        "tools=b [full b]",
+        "tools=a",
+      ])
+
+      const two = path.join(root, "two.log")
+      expect(runLevel("verbose", two).exitCode).toBe(0)
+      expect(messages(two)).toEqual([
+        "plain line",
+        "pump frame: verbose only",
+        "tools=a [full a]",
+        "tools=a [full a]",
+        "tools=b [full b]",
+        "tools=a [full a]",
+      ])
+
+      const off = path.join(root, "off.log")
+      expect(runLevel("0", off).exitCode).toBe(0)
+      expect(fs.existsSync(off)).toBe(false)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("evicts the least recently used key past 4096", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-provider-debug-once-cap-"))
+    const file = path.join(root, "debug.log")
+    const script = `
+      import { traceOncePerLog } from ${debugModule}
+      const once = (key) => traceOncePerLog(key, key + " full", key + " brief")
+      for (let i = 0; i < 4096; i++) once("k" + i)
+      once("k0")
+      once("k4096")
+      once("k0")
+      once("k1")
+    `
+    try {
+      expect(runLevel("1", file, script).exitCode).toBe(0)
+      expect(messages(file).slice(-4)).toEqual(["k0 brief", "k4096 full", "k0 brief", "k1 full"])
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("writes the full line again when the first one could not be written", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-provider-debug-once-fail-"))
+    const file = path.join(root, "debug.log")
+    const script = `
+      import fs from "node:fs"
+      import { trace, traceOncePerLog } from ${debugModule}
+      trace("start")
+      fs.chmodSync(${JSON.stringify(file)}, 0o400)
+      traceOncePerLog("tools:a", "tools=a [full]", "tools=a")
+      fs.chmodSync(${JSON.stringify(file)}, 0o600)
+      traceOncePerLog("tools:a", "tools=a [full]", "tools=a")
+      traceOncePerLog("tools:a", "tools=a [full]", "tools=a")
+    `
+    try {
+      expect(runLevel("1", file, script).exitCode).toBe(0)
+      // Root ignores the read-only mode, so the first line may get through there.
+      const expected = process.getuid?.() === 0
+        ? ["start", "tools=a [full]", "tools=a", "tools=a"]
+        : ["start", "tools=a [full]", "tools=a"]
+      expect(messages(file)).toEqual(expected)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("logs extractTools' name list once per list at level 1 and every time at level 2", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-provider-debug-extract-tools-"))
+    const script = `
+      import { extractTools } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/language-model.ts"))}
+      const tool = (name) => ({ type: "function", name, inputSchema: { type: "object" } })
+      const call = (...names) => extractTools({ tools: names.map(tool) })
+      call("read", "edit")
+      call("read", "edit")
+      call("read", "edit", "shell")
+      call("read", "edit")
+    `
+    try {
+      const tools = (level: string) => {
+        const file = path.join(root, `level-${level}.log`)
+        expect(runLevel(level, file, script).exitCode).toBe(0)
+        return messages(file).filter((line) => line.startsWith("extractTools:"))
+      }
+      const one = tools("1")
+      expect(one.map((line) => line.replace(/tools=[0-9a-f]{12}/, "tools=H"))).toEqual([
+        "extractTools: 2 incoming → 2 advertised tools=H [read,edit]",
+        "extractTools: 2 incoming → 2 advertised tools=H",
+        "extractTools: 3 incoming → 3 advertised tools=H [read,edit,shell]",
+        "extractTools: 2 incoming → 2 advertised tools=H",
+      ])
+      const hashes = one.map((line) => line.match(/tools=([0-9a-f]{12})/)![1])
+      expect(hashes[0]).toBe(hashes[1]!)
+      expect(hashes[0]).toBe(hashes[3]!)
+      expect(hashes[2]).not.toBe(hashes[0]!)
+      expect(tools("2").every((line) => line.endsWith("]"))).toBe(true)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("writes a list in full again in the file a rotation starts", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-provider-debug-once-rotate-"))
+    const file = path.join(root, "debug.log")
+    const script = `
+      import { traceOncePerLog } from ${debugModule}
+      for (let i = 0; i < 60; i++) traceOncePerLog("tools:a", "tools=a [full] " + i + " " + "z".repeat(60), "tools=a " + i + " " + "z".repeat(60))
+    `
+    try {
+      expect(runLevel("1", file, script, {
+        CURSOR_PROVIDER_DEBUG_LOG_MODE: "rotate",
+        CURSOR_PROVIDER_DEBUG_ROTATE_MAX_BYTES: "2000",
+        CURSOR_PROVIDER_DEBUG_ROTATE_BACKUPS: "1",
+      }).exitCode).toBe(0)
+      for (const part of [`${file}.1`, file]) {
+        const lines = messages(part)
+        expect(lines.length).toBeGreaterThan(1)
+        expect(lines[0]).toStartWith("tools=a [full] ")
+        expect(lines.slice(1).every((line) => !line.includes("[full]"))).toBe(true)
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("writes a list in full again after a trim", async () => {
+    await traceInChild(`
+      let clock = Date.now();
+      Date.now = () => clock;
+      const { traceOncePerLog } = await import(${debugModule});
+      const once = () => traceOncePerLog("tools:a", "tools=a [full]", "tools=a");
+      once();
+      once();
+      oversize();
+      clock += DEBUG_LOG_TRIM_INTERVAL_MS;
+      once();
+      once();
+      const log = fs.readFileSync(file, "utf8").split("\\n");
+      assert.equal(log[0], "recent-record");
+      assert.match(log[1], /debug: size-cap trim/);
+      assert.match(log[2], /^\\[[^\\]]+\\] tools=a \\[full\\]$/);
+      assert.match(log[3], /^\\[[^\\]]+\\] tools=a$/);
+    `)
+  })
+
+  it("writes a list in full again after another process rotates or trims the file, and every 10 minutes", async () => {
+    await traceInChild(`
+      let clock = Date.now();
+      Date.now = () => clock;
+      const { traceOncePerLog } = await import(${debugModule});
+      const once = () => traceOncePerLog("tools:a", "tools=a [full]", "tools=a");
+      const tools = () => fs.readFileSync(file, "utf8").split("\\n")
+        .filter((line) => line.includes("tools=a")).map((line) => line.replace(/^\\[[^\\]]+\\] /, ""));
+      once();
+      once();
+      assert.deepEqual(tools(), ["tools=a [full]", "tools=a"]);
+      fs.renameSync(file, file + ".1");
+      once();
+      once();
+      assert.deepEqual(tools(), ["tools=a [full]", "tools=a"]);
+      fs.truncateSync(file, 0);
+      once();
+      once();
+      assert.deepEqual(tools(), ["tools=a [full]", "tools=a"]);
+      // A trim in place that the file has grown back past since.
+      fs.writeFileSync(file, "[2026-01-01T00:00:00.000Z] kept tail\\n" + "x".repeat(fs.statSync(file).size) + "\\n");
+      once();
+      once();
+      assert.deepEqual(tools(), ["tools=a [full]", "tools=a"]);
+      clock += 10 * 60 * 1000;
+      once();
+      once();
+      assert.deepEqual(tools(), ["tools=a [full]", "tools=a", "tools=a [full]", "tools=a"]);
+    `)
   })
 })

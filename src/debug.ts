@@ -4,7 +4,9 @@ import path from "node:path"
 import { randomUUID } from "node:crypto"
 import { processShared } from "./process-shared.js"
 
-// Wire-level diagnostics. Opt in with CURSOR_PROVIDER_DEBUG=1 (or "true").
+// Wire-level diagnostics. Opt in with CURSOR_PROVIDER_DEBUG=1 (or "true"); =2 (or
+// "verbose") adds the per-frame lines (`pump frame`, `frame yield`, KV frames) and
+// the advertised tool list on every request, which level 1 writes once per list.
 // CURSOR_PROVIDER_RECOVERY_DEBUG=1 keeps only recovery metadata, without payload traces.
 // Default path mirrors Cursor CLI: $TMPDIR/cursor-provider-logs-<uid>/debug-<pid>.log
 // with directory mode 0o700 and file mode 0o600. Override with CURSOR_PROVIDER_DEBUG_FILE.
@@ -14,9 +16,16 @@ import { processShared } from "./process-shared.js"
 // the override path before starting the host. By default, periodically compact
 // oversized logs in place like OpenCode. CURSOR_PROVIDER_DEBUG_LOG_MODE=rotate
 // selects numbered archives instead. Tokens / checksums: redact in callers.
-const DEBUG_ENABLED =
-  process.env.CURSOR_PROVIDER_DEBUG === "1" ||
-  process.env.CURSOR_PROVIDER_DEBUG === "true"
+/** `CURSOR_PROVIDER_DEBUG` as a level: 0 off, 1 (`1`/`true`), 2 (`2`/`verbose`). */
+export function resolveDebugLevel(
+  value: string | undefined = process.env.CURSOR_PROVIDER_DEBUG,
+): 0 | 1 | 2 {
+  if (value === "2" || value === "verbose") return 2
+  return value === "1" || value === "true" ? 1 : 0
+}
+
+const DEBUG_LEVEL = resolveDebugLevel()
+const DEBUG_ENABLED = DEBUG_LEVEL > 0
 const RECOVERY_DEBUG_ENABLED = ["1", "true"].includes(process.env.CURSOR_PROVIDER_RECOVERY_DEBUG ?? "")
 
 // OpenCode v2.2.5 packages/util/src/observability/logging.ts retention policy.
@@ -64,6 +73,17 @@ const logOptions = resolveDebugLogOptions()
 const moduleCopies = processShared("debug.module-copies.v1", () => ({ count: 0 }))
 const MODULE_COPY = ++moduleCopies.count
 const maintenance = processShared("debug.maintenance.v1", () => new Map<string, number>())
+type DebugLogIdentity = { dev: number; ino: number; size: number; head: string }
+// Keys `traceOncePerLog` already wrote to the current file, shared by every copy
+// since they append to the same file, and the file as checked before the last such line.
+const writtenOnce = processShared("debug.written-once.v2", () => ({
+  keys: new Set<string>(),
+  file: undefined as (DebugLogIdentity & { at: number }) | undefined,
+}))
+const WRITTEN_ONCE_MAX_KEYS = 4096
+const WRITTEN_ONCE_MAX_AGE_MS = 10 * 60 * 1000
+// A trim moves the file's tail to its start, so another process's trim shows in its first bytes.
+const DEBUG_LOG_HEAD_BYTES = 64
 
 let _traceInitialized = false
 let _debugFile: string | undefined
@@ -332,29 +352,36 @@ export function rotateDebugLogIfOversized(
   })
 }
 
-function maintainDebugLog(filePath: string): void {
+/** True when this call trimmed or rotated the file. */
+function maintainDebugLog(filePath: string): boolean {
   if (logOptions.mode === "rotate") {
     try {
-      rotateDebugLogIfOversized(filePath, logOptions)
+      return rotateDebugLogIfOversized(filePath, logOptions)
     } catch {
       // Keep appending if rotation is unavailable; never erase the current log.
+      return false
     }
-    return
   }
   const key = path.resolve(filePath)
   const now = Date.now()
   const next = maintenance.get(key)
-  if (next !== undefined && now < next) return
+  if (next !== undefined && now < next) return false
   maintenance.set(key, now + DEBUG_LOG_TRIM_INTERVAL_MS)
   try {
-    trimDebugLogIfOversized(filePath)
+    return trimDebugLogIfOversized(filePath)
   } catch {
     // Maintenance is best-effort; still append the diagnostic that triggered it.
+    return false
   }
 }
 
 export function trace(msg: string): void {
   if (!DEBUG_ENABLED && !(RECOVERY_DEBUG_ENABLED && msg.startsWith("recovery:"))) return
+  appendTrace(() => msg)
+}
+
+/** `message` runs after maintenance, so it sees whether this line follows a trim or rotation. */
+function appendTrace(message: () => string): boolean {
   try {
     if (!_debugFile) {
       _debugFileUsesManagedDirectory = !process.env.CURSOR_PROVIDER_DEBUG_FILE
@@ -376,10 +403,73 @@ export function trace(msg: string): void {
         { mode: 0o600 },
       )
     }
-    maintainDebugLog(_debugFile)
-    fs.appendFileSync(_debugFile, `[${new Date().toISOString()}] ${copyTag()}${msg}\n`, { mode: 0o600 })
+    // A trimmed or rotated file may no longer hold the full lines `traceOncePerLog` wrote.
+    if (maintainDebugLog(_debugFile)) {
+      writtenOnce.keys.clear()
+      writtenOnce.file = undefined
+    }
+    fs.appendFileSync(_debugFile, `[${new Date().toISOString()}] ${copyTag()}${message()}\n`, { mode: 0o600 })
+    return true
   } catch {
-    /* ignore */
+    return false
+  }
+}
+
+/** `trace` only at `CURSOR_PROVIDER_DEBUG=2`: per-frame wire detail. */
+export function traceVerbose(msg: string): void {
+  if (DEBUG_LEVEL >= 2) trace(msg)
+}
+
+/**
+ * Write `full` the first time `key` appears in the current log file, `brief` after that
+ * (level 2: always `full`). A trim or rotation starts over, so the file still holds the
+ * full line for each key it mentions.
+ */
+export function traceOncePerLog(key: string, full: string, brief: string): void {
+  if (!DEBUG_ENABLED) return
+  const keys = writtenOnce.keys
+  let current: DebugLogIdentity | undefined
+  const written = appendTrace(() => {
+    current = debugLogIdentity()
+    if (onceLogReplaced(current)) keys.clear()
+    return DEBUG_LEVEL < 2 && keys.has(key) ? brief : full
+  })
+  if (!written) return
+  // Re-inserted on every use, so eviction drops the least recently used key.
+  keys.delete(key)
+  keys.add(key)
+  if (keys.size > WRITTEN_ONCE_MAX_KEYS) keys.delete(keys.values().next().value!)
+  // The file as checked, not as after the append: a rotation in between then shows on the next check.
+  writtenOnce.file = current && { ...current, at: writtenOnce.file?.at ?? Date.now() }
+}
+
+/**
+ * Whether the file may have lost the full lines written since the memory started: another process
+ * rotated, trimmed or replaced it, or the memory is 10 minutes old.
+ */
+function onceLogReplaced(current: DebugLogIdentity | undefined): boolean {
+  const seen = writtenOnce.file
+  if (!seen) return false
+  const replaced = !current || Date.now() - seen.at >= WRITTEN_ONCE_MAX_AGE_MS
+    || current.dev !== seen.dev || current.ino !== seen.ino || current.size < seen.size
+    || !current.head.startsWith(seen.head)
+  if (replaced) writtenOnce.file = undefined
+  return replaced
+}
+
+function debugLogIdentity(): DebugLogIdentity | undefined {
+  try {
+    const fd = fs.openSync(_debugFile!, "r")
+    try {
+      const stat = fs.fstatSync(fd)
+      const head = Buffer.alloc(DEBUG_LOG_HEAD_BYTES)
+      const read = fs.readSync(fd, head, 0, head.length, 0)
+      return { dev: stat.dev, ino: stat.ino, size: stat.size, head: head.subarray(0, read).toString("latin1") }
+    } finally {
+      fs.closeSync(fd)
+    }
+  } catch {
+    return undefined
   }
 }
 

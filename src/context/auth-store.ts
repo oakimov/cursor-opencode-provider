@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises"
 import path from "node:path"
+import { resolveDebugLevel } from "../debug.js"
 import { hostGlobalDataDir } from "./paths.js"
 
 /** Mirrors OpenCode / SDK OAuth + API auth used for Cursor. `wellknown` is not wired yet. */
@@ -18,12 +19,8 @@ export type StoredAuth =
       metadata?: Record<string, string>
     }
 
-function debugEnabled(): boolean {
-  return process.env.CURSOR_PROVIDER_DEBUG === "1" || process.env.CURSOR_PROVIDER_DEBUG === "true"
-}
-
 function debugAuthStore(message: string): void {
-  if (!debugEnabled()) return
+  if (resolveDebugLevel() === 0) return
   console.debug(`[cursor-opencode-provider] auth-store: ${message}`)
 }
 
