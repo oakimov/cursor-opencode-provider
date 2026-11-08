@@ -45,10 +45,13 @@ before startup. The provider announces the active path as
 `[cursor-provider] CURSOR_PROVIDER_DEBUG logging to …`. A fresh empty file gets
 a process header on first init. Re-init in the same override path (module
 reload, second isolate) **appends** another header (`reinit=append`) instead of
-wiping earlier lines. Independently, once the file reaches 10 MiB the next
-`trace` call truncates it and writes `debug: size-cap truncate` so growth stays
-bounded. Truncate the override path yourself before a clean run; save a copy
-before comparing two host processes.
+wiping earlier lines. By default, on the first write and then on the first write after each
+hour, the provider checks the size. Above 50 MiB it keeps roughly the newest
+25 MiB, starting after a newline, and appends `debug: size-cap trim`. The file
+can exceed 50 MiB between checks. Both full and recovery-only logging use this
+policy. Truncate the override path yourself before a clean run; save a copy
+before comparing two host processes. For complete numbered archives instead of
+in-place trimming, select [rotation](#numbered-rotation).
 
 For OpenCode 2, a plugin reload can append a new header without replacing the
 daemon's cached SDK or language model. Fully restart the daemon after a rebuild.
@@ -69,6 +72,81 @@ Record these facts with every reproduction:
 Debug logs contain no auth token by design, but may include local paths, tool
 names, model ids, session ids, and content hashes. Treat them as private
 diagnostic artifacts.
+
+## Log recycling design
+
+This follows [OpenCode 2.2.5's logger](https://github.com/anomalyco/opencode/blob/v2.2.5/packages/util/src/observability/logging.ts):
+append to the same file, compact its tail in place above 50 MiB to roughly
+25 MiB, and check hourly. OpenCode 1.18.31's [logger](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/core/src/observability/logging.ts)
+uses append mode but has no recycling in that module. The provider applies the
+same retention policy on both host majors, without importing a host logger.
+
+The provider retains its existing default and override paths and 0700 managed
+directory / 0600 file modes. A 64 KiB buffer bounds compaction memory. In-place
+compaction keeps existing append handles attached to the active file. A sibling
+`.trim` directory serializes trimmers across processes. Acquisition publishes a
+directory already containing a unique owner marker. Cleanup of a lock older
+than five minutes removes only its observed marker and the empty directory;
+a replacement owner's marker prevents its directory from being removed.
+That check is skipped and acquisition retried at the next interval. Module
+copies share the hourly check schedule for each resolved path.
+Checks run on writes, with no background timer or idle process to clean up.
+
+As in OpenCode, appenders do not take the trim lock: another process's write
+between the final read and truncate can be lost. This is best-effort diagnostic
+retention. It does not guarantee a time window, a hard size limit, or retention
+of a single line larger than the kept tail. Cleanup failures skip maintenance
+without suppressing the new log message; they never fall back to erasing the
+whole file. Regression coverage lives in [`test/debug.test.ts`](../test/debug.test.ts).
+
+### Numbered rotation
+
+Set the mode before starting the host or daemon:
+
+```bash
+CURSOR_PROVIDER_DEBUG=1 \
+CURSOR_PROVIDER_DEBUG_LOG_MODE=rotate \
+CURSOR_PROVIDER_DEBUG_ROTATE_MAX_BYTES=52428800 \
+CURSOR_PROVIDER_DEBUG_ROTATE_BACKUPS=5 \
+CURSOR_PROVIDER_DEBUG_FILE=./cursor-provider.log \
+opencode
+```
+
+`rotate` checks before each diagnostic message, including the first after a
+restart. At the threshold it moves the active file to `.1`, the previous `.1`
+to `.2`, and so on, retiring the oldest archive. The new active file receives a
+header and `debug: size-cap rotate`. A file can exceed the threshold by a message
+and initialization headers; messages are never split. The default is five
+archives of 50 MiB each, plus the active file. Both logging switches use this
+policy, and selecting the mode alone does not enable logging.
+
+The size must be a positive decimal integer; the archive count must be from
+1 to 100. Invalid values emit a warning and use the defaults. Settings are read
+when the module loads. Reducing the count removes excess numbered archives on
+the next successful rotation; changing back to `trim` leaves existing archives
+alone. Choose a stable override path to reuse the same archive chain across
+restarts: the default filename includes the process id. Collect the active file
+and all its numbered archives for a reproduction; larger suffixes are older.
+
+Rotation uses the same `.trim` maintenance lock, but retries on subsequent writes
+instead of waiting an hour. All provider processes sharing a path should use
+the same mode and settings. Each provider append opens the active path, so later
+writes follow the new file; an append already in progress can finish in the
+newest archive. Archive symlinks are removed or replaced without writing to
+their targets. New files are mode 0600; rotation retains the current file's
+permissions on its archive. Rotation first detaches the active file inside the
+maintenance directory, before shifting or retiring any archives. A refused
+active-file rename leaves the archive chain unchanged on every retry.
+
+If a later archive operation fails, the detached file is restored only if the
+active path is still absent. If restoration fails or a sibling has created a
+new active file, the original is preserved at `<log>.trim/active`. Logging
+continues best-effort, but maintenance pauses while that file remains. Stop all
+writers, preserve the staged file and archives, and remove the maintenance
+directory only after its log data has been saved before restarting the writers.
+Rotation never falls back to truncation and is not transactional across crashes
+or I/O failures. Keep `trim` for external writers that hold a
+file descriptor open, since those writers remain attached to the renamed inode.
 
 ## Extract the useful lines
 
