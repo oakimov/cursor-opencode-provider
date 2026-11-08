@@ -352,26 +352,24 @@ export function rotateDebugLogIfOversized(
   })
 }
 
-/** True when this call trimmed or rotated the file. */
-function maintainDebugLog(filePath: string): boolean {
+function maintainDebugLog(filePath: string): void {
   if (logOptions.mode === "rotate") {
     try {
-      return rotateDebugLogIfOversized(filePath, logOptions)
+      rotateDebugLogIfOversized(filePath, logOptions)
     } catch {
       // Keep appending if rotation is unavailable; never erase the current log.
-      return false
     }
+    return
   }
   const key = path.resolve(filePath)
   const now = Date.now()
   const next = maintenance.get(key)
-  if (next !== undefined && now < next) return false
+  if (next !== undefined && now < next) return
   maintenance.set(key, now + DEBUG_LOG_TRIM_INTERVAL_MS)
   try {
-    return trimDebugLogIfOversized(filePath)
+    trimDebugLogIfOversized(filePath)
   } catch {
     // Maintenance is best-effort; still append the diagnostic that triggered it.
-    return false
   }
 }
 
@@ -380,7 +378,7 @@ export function trace(msg: string): void {
   appendTrace(() => msg)
 }
 
-/** `message` runs after maintenance, so it sees whether this line follows a trim or rotation. */
+/** `message` runs after maintenance, so it sees the file this line goes to. */
 function appendTrace(message: () => string): boolean {
   try {
     if (!_debugFile) {
@@ -403,11 +401,7 @@ function appendTrace(message: () => string): boolean {
         { mode: 0o600 },
       )
     }
-    // A trimmed or rotated file may no longer hold the full lines `traceOncePerLog` wrote.
-    if (maintainDebugLog(_debugFile)) {
-      writtenOnce.keys.clear()
-      writtenOnce.file = undefined
-    }
+    maintainDebugLog(_debugFile)
     fs.appendFileSync(_debugFile, `[${new Date().toISOString()}] ${copyTag()}${message()}\n`, { mode: 0o600 })
     return true
   } catch {
@@ -422,8 +416,8 @@ export function traceVerbose(msg: string): void {
 
 /**
  * Write `full` the first time `key` appears in the current log file, `brief` after that
- * (level 2: always `full`). A trim or rotation starts over, so the file still holds the
- * full line for each key it mentions.
+ * (level 2: always `full`). A trim, rotation or replacement of the file, by this process or
+ * another, starts over, so the file still holds the full line for each key it mentions.
  */
 export function traceOncePerLog(key: string, full: string, brief: string): void {
   if (!DEBUG_ENABLED) return
@@ -431,7 +425,10 @@ export function traceOncePerLog(key: string, full: string, brief: string): void 
   let current: DebugLogIdentity | undefined
   const written = appendTrace(() => {
     current = debugLogIdentity()
-    if (onceLogReplaced(current)) keys.clear()
+    if (onceLogReplaced(current)) {
+      keys.clear()
+      writtenOnce.file = undefined
+    }
     return DEBUG_LEVEL < 2 && keys.has(key) ? brief : full
   })
   if (!written) return
@@ -444,17 +441,15 @@ export function traceOncePerLog(key: string, full: string, brief: string): void 
 }
 
 /**
- * Whether the file may have lost the full lines written since the memory started: another process
- * rotated, trimmed or replaced it, or the memory is 10 minutes old.
+ * Whether the file may not hold the full lines the memory names: it is not the file last checked
+ * (rotated, trimmed or replaced since), or the memory is 10 minutes old.
  */
 function onceLogReplaced(current: DebugLogIdentity | undefined): boolean {
   const seen = writtenOnce.file
   if (!seen) return false
-  const replaced = !current || Date.now() - seen.at >= WRITTEN_ONCE_MAX_AGE_MS
+  return !current || Date.now() - seen.at >= WRITTEN_ONCE_MAX_AGE_MS
     || current.dev !== seen.dev || current.ino !== seen.ino || current.size < seen.size
     || !current.head.startsWith(seen.head)
-  if (replaced) writtenOnce.file = undefined
-  return replaced
 }
 
 function debugLogIdentity(): DebugLogIdentity | undefined {

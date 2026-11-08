@@ -8680,12 +8680,10 @@ export function extractTools(callOptions: LanguageModelV3CallOptions): OpencodeT
       out.push({ name: any.name, description: any.description, inputSchema: schema })
     }
   }
-  if (isDebugEnabled()) {
-    const names = out.map((t) => t.name).join(",")
-    const hash = createHash("sha256").update(names).digest("hex").slice(0, 12)
-    const counts = `extractTools: ${tools.length} incoming → ${out.length} advertised tools=${hash}`
-    traceOncePerLog(`extractTools:${hash}`, `${counts} [${names}]`, counts)
-  }
+  const names = out.map((t) => t.name).join(",")
+  const hash = createHash("sha256").update(names).digest("hex").slice(0, 12)
+  const counts = `extractTools: ${tools.length} incoming → ${out.length} advertised tools=${hash}`
+  traceOncePerLog(`extractTools:${hash}`, `${counts} [${names}]`, counts)
   return out
 }
 
