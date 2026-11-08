@@ -133,7 +133,7 @@ import {
 } from "./protocol/tools.js"
 import { hostPatchTool, isHostPatchTool } from "./protocol/apply-patch.js"
 import { buildGitDiffUnavailableMessages } from "./protocol/git-diff.js"
-import { runtimeExecMessages, runtimeRootFromContext } from "./runtime-files.js"
+import { isTerminalRecordRead, runtimeExecMessages, runtimeRootFromContext } from "./runtime-files.js"
 import { createManagedTerminal } from "./terminal-runner.js"
 import { cursorExecVariantByRequestField, describeCursorExecVariant, isExecRequestWithoutNewCall } from "./protocol/exec-variants.js"
 import { appendCheckpointUserGrounding, appendWorkspaceRootGrounding } from "./protocol/workspace-grounding.js"
@@ -1437,7 +1437,9 @@ async function doStreamImpl(
               canRebaseFromHistory: (failed) => {
                 const completed = new Set(extractToolResults(prompt)
                   .map(result => `${result.sessionId}:${result.execId}`))
-                const execs = failed.replaySafety?.execs
+                // The provider's own answers from terminal records ran nothing on the host.
+                const terminalReads = failed.replaySafety?.execs?.filter(exec => exec.terminalRead).length ?? 0
+                const execs = failed.replaySafety?.execs?.filter(exec => !exec.terminalRead)
                 const reason = failed !== session ? "different-run"
                   : trailingToolResults.length === 0 ? "no-tool-result-tail"
                   : !failed.checkpointRevokedByHostResult ? "checkpoint-not-revoked-by-result"
@@ -1449,7 +1451,7 @@ async function doStreamImpl(
                   : !execs.every(exec => completed.has(`${exec.sessionId}:${exec.id}`)) ? "missing-host-results"
                   : "completed-tool-results"
                 trace(`recovery: history-check hostSessionId=${failed.openCodeSessionId} sessionId=${failed.sessionId} ` +
-                  `reason=${reason} execs=${execs?.length ?? 0} results=${completed.size} pending=${failed.pending.size}`)
+                  `reason=${reason} execs=${execs?.length ?? 0} terminalReads=${terminalReads} results=${completed.size} pending=${failed.pending.size}`)
                 return reason === "completed-tool-results"
               },
               recover: (recovery) => openSession({ recovery }),
@@ -6696,6 +6698,7 @@ export async function pump(
           for (const message of runtimeMessages) {
             await writeWithBackpressure(session.stream, message, `runtime metadata reply id=${esmId}`)
           }
+          if (isTerminalRecordRead(esm, session.requestContext)) replaySafety.recordTerminalRead(esmId)
           if (displayCallId) session.displayToolCalls.delete(displayCallId)
           disposeExecCall()
           if (closeIfParallelStepComplete()) return

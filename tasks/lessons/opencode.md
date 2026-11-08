@@ -197,6 +197,11 @@ These are failure lessons shared by both hosts, not a replacement for
   it; also exempt a failed attempt whose only barriers were such echoes
   (`replayBarrierEchoesOnly`, `test/early-steer.test.ts`,
   `test/run-error-host.test.ts`).
+  That fix's tests had no Cursor-side wait, so the live AwaitShell case still
+  failed (`missing-host-results`): the history check required a host result for
+  every exec, including the terminal-record polls the provider answers itself.
+  Reproduce a live refusal's full Run shape, not only the barrier it names; the
+  check's `execs` count exposed the polls (`recordTerminalRead`).
   A failed replacement open moves a Run's injected notes into the deferred
   store before retrying. The rebuild guard must recognize that retained copy
   too: recomputing recovery from the emptied injection registry otherwise

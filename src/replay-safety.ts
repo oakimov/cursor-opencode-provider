@@ -72,9 +72,10 @@ export type ReplaySafetyState = {
   statefulBarrier?: ReplayBarrierReason
   /**
    * Every exec needs its owner's host result; ids can restart on a resumed Run.
-   * `callId` is the display call the exec claims.
+   * `callId` is the display call the exec claims. `terminalRead` marks the provider's own answer
+   * from a host shell's terminal record (Cursor's AwaitShell polls): it ran nothing, so history needs no result.
    */
-  execs?: Array<{ sessionId: string; id: number; callId?: string }>
+  execs?: Array<{ sessionId: string; id: number; callId?: string; terminalRead?: true }>
   /** Display calls Cursor announced; history holds one only through the host exec that claims it. */
   announcedCalls?: string[]
   /** Only strict inline catalog lookups qualify; spilled catalogs remain barriers. */
@@ -156,6 +157,12 @@ export class AttemptReplaySafety {
       return
     }
     execs.push({ sessionId: this.sessionId, id, ...(callId ? { callId } : {}) })
+  }
+
+  /** The provider answered this exec itself by reading a host shell's terminal record. */
+  recordTerminalRead(id: number): void {
+    const exec = this.state.execs?.find(exec => exec.sessionId === this.sessionId && exec.id === id)
+    if (exec) exec.terminalRead = true
   }
 
   /**

@@ -385,6 +385,13 @@ export function maintainRuntimeFiles(layout: RuntimeLayout, now = Date.now()): v
   sweepRuntimeFiles(layout, now)
 }
 
+/** A read of a host shell's terminal record, which `runtimeExecMessages` answers without the host. */
+export function isTerminalRecordRead(message: Record<string, unknown>, context: Record<string, unknown> | undefined): boolean {
+  const root = runtimeRootFromContext(context)
+  const args = message.read_args as Record<string, unknown> | undefined
+  return !!root && typeof args?.path === "string" && metadataTarget(root, args.path)?.kind === "terminal"
+}
+
 /** Native internal filesystem requests never enter the host's workspace tools. */
 export async function runtimeExecMessages(
   message: Record<string, unknown>, context: Record<string, unknown> | undefined,

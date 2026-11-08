@@ -7,6 +7,7 @@
 - Debug and recovery logs retain recent diagnostics with OpenCode-style in-place trimming by default, or configurable numbered archives with `CURSOR_PROVIDER_DEBUG_LOG_MODE=rotate` ([#160](https://github.com/oakimov/cursor-opencode-provider/issues/160), [@nkoynov](https://github.com/nkoynov)).
 - Log rotation preserves archives when the active file cannot be renamed, and stale maintenance cleanup preserves replacement owners' locks ([#163](https://github.com/oakimov/cursor-opencode-provider/pull/163), [@nkoynov](https://github.com/nkoynov)).
 - A Run Cursor cuts right after a tool result now rebuilds from host history when it earlier delivered an early steer or host note that history still holds, instead of ending the turn as "automatic retry unsafe" ([#159](https://github.com/oakimov/cursor-opencode-provider/issues/159), [@nkoynov](https://github.com/nkoynov)).
+- That rebuild is no longer refused (`missing-host-results`) when Cursor earlier waited on a background shell: its polls of the shell's terminal record are answered by the provider, ran nothing on the host, and no longer count as tool calls without a result ([#159](https://github.com/oakimov/cursor-opencode-provider/issues/159), [@nkoynov](https://github.com/nkoynov)).
 
 ### Changed
 

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { runtimeExecMessages, runtimeLayout, sweepRuntimeFiles, RUNTIME_FILE_TTL_MS, MAX_RUNTIME_READ_BYTES, MAX_RUNTIME_WRITE_BYTES, MAX_RUNTIME_SPILL_BYTES, MAX_RUNTIME_SPILL_FILES } from "../src/runtime-files.js"
+import { isTerminalRecordRead, runtimeExecMessages, runtimeLayout, sweepRuntimeFiles, RUNTIME_FILE_TTL_MS, MAX_RUNTIME_READ_BYTES, MAX_RUNTIME_WRITE_BYTES, MAX_RUNTIME_SPILL_BYTES, MAX_RUNTIME_SPILL_FILES } from "../src/runtime-files.js"
 import { decodeMessageSparse } from "../src/protocol/messages.js"
 
 const name = "12345678-1234-1234-1234-123456789abc.txt"
@@ -227,6 +227,16 @@ describe("provider-owned runtime files", () => {
     fs.symlinkSync(root, path.join(root, "agent-tools"), "dir")
     expect(result(await runtimeExecMessages({ id: 9, write_args: { path: file, file_text: "bad" } }, ctx, true), "write_result").error).toBeDefined()
     expect(fs.readFileSync(outside, "utf8")).toBe("private")
+  })
+
+  it("tells a terminal record read, which history needs no result for, from every other runtime exec", () => {
+    const terminal = path.join(root, "terminals", "1234.txt")
+    expect(isTerminalRecordRead({ id: 1, read_args: { path: terminal } }, ctx)).toBe(true)
+    expect(isTerminalRecordRead({ id: 2, write_args: { path: terminal } }, ctx)).toBe(false)
+    expect(isTerminalRecordRead({ id: 3, read_args: { path: path.join(root, "agent-tools", name) } }, ctx)).toBe(false)
+    expect(isTerminalRecordRead({ id: 4, read_args: { path: path.join(root, "terminals", "notes.txt") } }, ctx)).toBe(false)
+    expect(isTerminalRecordRead({ id: 5, read_args: { path: path.join(root, "src.txt") } }, ctx)).toBe(false)
+    expect(isTerminalRecordRead({ id: 6, read_args: { path: terminal } }, { env: {} })).toBe(false)
   })
 
   it("returns missing metadata locally without a host permission call", async () => {
