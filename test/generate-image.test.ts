@@ -21,8 +21,14 @@ import {
 } from "../src/protocol/generate-image.js"
 import {
   clearPendingCursorImages,
+  discardPendingCursorImage,
+  distinctInputImagePath,
+  finishCursorImageSave,
+  MAX_RETAINED_IMAGE_BYTES,
+  MAX_STAGED_IMAGE_BYTES,
   pendingCursorImageCount,
   stageCursorImage,
+  StagedImageNoRoomError,
   takePendingCursorImage,
   STAGED_IMAGE_TTL_MS,
 } from "../src/image-staging.js"
@@ -195,14 +201,159 @@ describe("pending image staging", () => {
     expect(takePendingCursorImage(id, 1_000 + STAGED_IMAGE_TTL_MS + 1)).toBeUndefined()
   })
 
-  it("bounds how many uncommitted images accumulate", () => {
-    for (let i = 0; i < 20; i++) stage(`img-${i}.png`)
-    expect(pendingCursorImageCount()).toBeLessThanOrEqual(8)
+  it("drops an expired image when the next one is staged", () => {
+    stageCursorImage({ path: "old.png", projectDir, mime: "image/png", data: PNG, sessionId: "ses_a" }, 1_000)
+    const fresh = stageCursorImage(
+      { path: "new.png", projectDir, mime: "image/png", data: PNG, sessionId: "ses_a" },
+      1_000 + STAGED_IMAGE_TTL_MS + 1,
+    )
+    expect(pendingCursorImageCount()).toBe(1)
+    expect(takePendingCursorImage(fresh, 1_000 + STAGED_IMAGE_TTL_MS + 1)).toBeDefined()
   })
 
   it("refuses an image beyond the size ceiling", () => {
     expect(() => stage("huge.png", new Uint8Array(51 * 1024 * 1024))).toThrow(/above the/)
   })
+})
+
+describe("retained image budget", () => {
+  const fitting = MAX_RETAINED_IMAGE_BYTES / MAX_STAGED_IMAGE_BYTES
+  let largest: Uint8Array
+  beforeEach(() => { largest ??= new Uint8Array(MAX_STAGED_IMAGE_BYTES) })
+
+  function stageFor(sessionId: string | undefined, name: string, data: Uint8Array) {
+    return stageCursorImage({ path: path.join(projectDir, "assets", name), projectDir, mime: "image/png", data, sessionId })
+  }
+  const kept = (ids: string[]) => ids.map((id) => takePendingCursorImage(id) !== undefined)
+
+  it("never evicts accepted images to admit a later image", () => {
+    const ids = Array.from({ length: fitting }, (_, i) => stageFor("ses_a", `big-${i}.png`, largest))
+    expect(() => stageFor("ses_a", "later.png", PNG)).toThrow(StagedImageNoRoomError)
+    expect(kept(ids)).toEqual(Array(fitting).fill(true))
+  })
+
+  it("claiming an image keeps its bytes charged until the save finishes", () => {
+    const ids = Array.from({ length: fitting }, (_, i) => stageFor("ses_a", `big-${i}.png`, largest))
+    const claimed = ids.shift()!
+    expect(takePendingCursorImage(claimed)).toBeDefined()
+    expect(() => stageFor("ses_b", "later.png", PNG)).toThrow(StagedImageNoRoomError)
+    finishCursorImageSave(claimed)
+    const incoming = stageFor("ses_b", "later.png", largest)
+    expect(kept([...ids, incoming])).toEqual(Array(fitting).fill(true))
+  })
+
+  it("saves all 35 images a step stages before the host saves the first", async () => {
+    const copy = new Uint8Array(160 * 1024)
+    const ids = Array.from({ length: 35 }, (_, i) => stageFor("ses_a", `shot-${i}.png`, copy))
+    const { ctx } = askRecorder()
+    for (const id of ids) expect((await executeCursorImageSave({ image_id: id }, ctx)).bytes).toBe(copy.length)
+    expect(fs.readdirSync(path.join(projectDir, "assets"))).toHaveLength(35)
+  })
+
+  it.each(["ses_a", "ses_b", undefined])("refuses a new image from %s without evicting any session", sessionId => {
+    const other = stageFor("ses_b", "other.png", PNG)
+    const unnamed = stageFor(undefined, "unnamed.png", PNG)
+    const busy = Array.from({ length: fitting - 1 }, (_, i) => stageFor("ses_a", `big-${i}.png`, largest))
+    expect(() => stageFor(sessionId, "new.png", largest)).toThrow(StagedImageNoRoomError)
+    expect(pendingCursorImageCount()).toBe(fitting + 1)
+    expect(kept([other, unnamed, ...busy])).toEqual(Array(fitting + 1).fill(true))
+  })
+
+  it("reuses discarded capacity without evicting remaining images", () => {
+    const ids = Array.from({ length: fitting }, (_, i) => stageFor("ses_a", `big-${i}.png`, largest))
+    discardPendingCursorImage(ids.pop()!)
+    const incoming = stageFor("ses_b", "new.png", largest)
+    expect(kept([...ids, incoming])).toEqual(Array(fitting).fill(true))
+  })
+
+  it("shares budget and released capacity across separate module graphs", async () => {
+    const graphDir = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-image-budget-graph-"))
+    try {
+      const copy = path.join(graphDir, "image-staging.ts")
+      fs.copyFileSync(path.join(import.meta.dir, "../src/image-staging.ts"), copy)
+      const otherGraph: typeof import("../src/image-staging.js") = await import(pathToFileURL(copy).href)
+      expect(otherGraph.stageCursorImage).not.toBe(stageCursorImage)
+      const ids = Array.from({ length: fitting }, (_, i) => stageFor("ses_a", `big-${i}.png`, largest))
+      const input = {
+        path: path.join(projectDir, "assets", "other-graph.png"), mime: "image/png", data: largest, sessionId: "ses_b",
+      }
+      expect(() => otherGraph.stageCursorImage(input)).toThrow(/byte budget/)
+      const claimed = ids.shift()!
+      expect(otherGraph.takePendingCursorImage(claimed)).toBeDefined()
+      expect(() => stageFor("ses_c", "still-full.png", PNG)).toThrow(StagedImageNoRoomError)
+      otherGraph.finishCursorImageSave(claimed)
+      const incoming = otherGraph.stageCursorImage(input)
+      expect(otherGraph.pendingCursorImageCount()).toBe(fitting)
+      otherGraph.discardPendingCursorImage(incoming)
+      const replacement = stageFor("ses_c", "replacement.png", largest)
+      expect(kept([...ids, replacement])).toEqual(Array(fitting).fill(true))
+    } finally {
+      fs.rmSync(graphDir, { recursive: true, force: true })
+    }
+  })
+
+  it("expires unclaimed handoffs to free capacity, preserving a claimed image past that expiry", () => {
+    const input = { path: path.join(projectDir, "old.png"), mime: "image/png", data: largest }
+    const ids = Array.from({ length: fitting }, () => stageCursorImage(input, 1_000))
+    const claimed = ids.shift()!
+    expect(takePendingCursorImage(claimed, 1_000)).toBeDefined()
+    const later = 1_000 + STAGED_IMAGE_TTL_MS + 1
+    const fresh = Array.from({ length: fitting - 1 }, () => stageCursorImage(input, later))
+    expect(() => stageCursorImage(input, later)).toThrow(StagedImageNoRoomError)
+    expect(ids.map(id => takePendingCursorImage(id, later))).toEqual(Array(fitting - 1).fill(undefined))
+    expect(fresh.map(id => takePendingCursorImage(id, later)?.data)).toEqual(Array(fitting - 1).fill(largest))
+    expect(distinctInputImagePath(input.path, PNG, "0123456789abcdef")).not.toBe(input.path)
+    finishCursorImageSave(claimed)
+    for (const id of fresh) finishCursorImageSave(id)
+    expect(distinctInputImagePath(input.path, PNG, "0123456789abcdef")).toBe(input.path)
+    expect(stageCursorImage(input, later)).toBeString()
+  })
+
+  it.each(["approved", "denied", "write-failed"] as const)(
+    "retains bytes through permission and releases capacity after a save is %s", async outcome => {
+      const target = path.join(projectDir, "assets", "claimed.png")
+      const claimed = stageFor("ses_a", "claimed.png", PNG)
+      const queued = Array.from({ length: fitting - 1 }, (_, i) => stageFor("ses_a", `big-${i}.png`, largest))
+      queued.push(stageFor("ses_a", "tail.png", largest.subarray(0, largest.length - PNG.length)))
+      let approve!: () => void
+      let notifyAsked!: () => void
+      const approval = new Promise<void>(resolve => { approve = resolve })
+      const asked = new Promise<void>(resolve => { notifyAsked = resolve })
+      const result = executeCursorImageSave({ image_id: claimed }, {
+        worktree: projectDir, directory: projectDir,
+        ask: async () => {
+          notifyAsked()
+          await approval
+          if (outcome === "denied") throw new Error("rejected")
+          if (outcome === "write-failed") fs.writeFileSync(path.dirname(target), "blocked")
+        },
+      }).then(value => ({ value }), (error: unknown) => ({ error }))
+      try {
+        await asked
+        expect(fs.existsSync(target)).toBe(false)
+        expect(() => stageFor("ses_b", "later.png", PNG)).toThrow(StagedImageNoRoomError)
+        expect(distinctInputImagePath(target, Uint8Array.of(1), "0123456789abcdef")).not.toBe(target)
+        // Discard only applies to unclaimed handoffs; it must not free an active save.
+        discardPendingCursorImage(claimed)
+        expect(() => stageFor("ses_b", "later.png", PNG)).toThrow(StagedImageNoRoomError)
+      } finally {
+        approve()
+        await result
+      }
+      const saved = await result
+      if (outcome === "approved") {
+        expect(saved).toMatchObject({ value: { bytes: PNG.length } })
+        expect(fs.readFileSync(target)).toEqual(Buffer.from(PNG))
+      } else {
+        expect(saved).toMatchObject({ error: { message: expect.stringContaining(
+          outcome === "denied" ? IMAGE_PERMISSION_DENIED_PREFIX : "Could not save the generated image",
+        ) } })
+        expect(fs.existsSync(target)).toBe(false)
+      }
+      expect(stageFor("ses_b", "later.png", PNG)).toBeString()
+      expect(kept(queued)).toEqual(Array(fitting).fill(true))
+    },
+  )
 })
 
 // ── the tool is a handle, not a writer ───────────────────────────────────────

@@ -120,6 +120,9 @@ upgrading. Select the dedicated 500k entry for its full host context budget.
 
 The plugin supplies its own Cursor SDK even when the host's generic package loader already created one. Each new Run resolves the active integration credential and applies on-demand renewal; a token captured by the generic loader or its options cannot bypass that resolver.
 
+Image copies and generation use `cursor_image_save` with native permission
+assertions; see [image staging limits](../README.md#saving-cursor-images).
+
 ## From a local clone (`CURSOR_OPENCODE2_DEV_ENTRY`)
 
 ```bash

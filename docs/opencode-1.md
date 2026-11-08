@@ -100,6 +100,9 @@ without a variant retains Cursor's declared default effort for that tier.
 Saved 500k variants on the base/Fast entries remain valid after upgrading;
 reselect the dedicated 500k entry to use its full host context budget.
 
+Image copies and generation use the classic plugin's permission-gated
+`cursor_image_save`; see [image staging limits](../README.md#saving-cursor-images).
+
 ## Usage and cost
 
 Tool steps report estimates of streamed output and reasoning; the final step

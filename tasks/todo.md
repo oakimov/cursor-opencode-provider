@@ -1,5 +1,18 @@
 # TODO
 
+- [x] Fix [#165](https://github.com/oakimov/cursor-opencode-provider/issues/165),
+  staged images lost during bursts.
+  - [x] Reproduce the 35-image failure on current main and inspect the proposed fix.
+  - [x] Trace the decompiled CLI's direct binary write and permission ownership.
+  - [x] Preserve accepted bytes like the CLI; refuse new images at capacity
+    instead of evicting issued handles. Count pending and claimed saves together.
+  - [x] Cover burst saves, saturation, approval waits, release and module copies.
+  - [x] Update staging limits, changelog and the existing incident lesson.
+  - [x] Run final regressions, typecheck, build and the full test suite; review diff.
+  - Review: issued handles survive capacity pressure, claimed saves retain their
+    budget until settlement, and the 35-image burst saves byte-for-byte.
+    Validation uses local fixtures and host contracts, without a live Cursor Run.
+
 - [x] Enforce review evidence before rendering and publication.
   - [x] Reproduce clean rendering without a ledger and inspect later consumers.
   - [x] Validate a revision-bound ledger and mandatory command result at render.

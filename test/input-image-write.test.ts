@@ -8,8 +8,11 @@ import { executeCursorImageSave, IMAGE_PERMISSION_DENIED_PREFIX } from "../src/i
 import { imageContentHash } from "../src/image-input.js"
 import {
   clearPendingCursorImages,
+  discardPendingCursorImage,
   distinctInputImagePath,
   finishCursorImageSave,
+  MAX_RETAINED_IMAGE_BYTES,
+  MAX_STAGED_IMAGE_BYTES,
   stageCursorImage,
   takePendingCursorImage,
 } from "../src/image-staging.js"
@@ -331,6 +334,58 @@ describe("Cursor's input-image writes, which Cursor never waits for", () => {
       expect(reply.parts.find((part) => part.type === "finish")).toMatchObject({ finishReason: { unified: "stop" } })
     },
   )
+
+  it("are all saved when 35 are staged before the host saves the first", async () => {
+    const images = Array.from({ length: 35 }, (_, i) => Uint8Array.of(...PNG_A.subarray(0, 8), i))
+    const run = imageRun([
+      ...images.map((data, i) => imageWrite(i + 1, data, `/elsewhere/assets/shot-${i}.png`)),
+      ended(),
+    ], images)
+    const saves: LanguageModelV3StreamPart[] = []
+    for (let pass = 0; pass < 35 && saves.length < 35; pass++) {
+      const step = collect()
+      await pump(run.session, step.controller, ids)
+      saves.push(...step.parts.filter((part) => part.type === "tool-call"))
+    }
+    expect(saves).toHaveLength(35)
+    const ctx = { worktree: run.workspace, directory: run.workspace, ask: async () => {} }
+    for (const save of saves) {
+      if (save.type === "tool-call") await executeCursorImageSave(JSON.parse(save.input), ctx)
+    }
+    expect(fs.readdirSync(run.assets).sort()).toEqual(images.map((_, i) => `shot-${i}.png`).sort())
+    for (const [i, image] of images.entries()) {
+      expect(fs.readFileSync(path.join(run.assets, `shot-${i}.png`))).toEqual(Buffer.from(image))
+    }
+  })
+
+  it("refuse only the new write at capacity and save it after an earlier image is discarded", async () => {
+    const data = new Uint8Array(MAX_STAGED_IMAGE_BYTES)
+    const held = Array.from({ length: MAX_RETAINED_IMAGE_BYTES / data.length }, (_, i) => stageCursorImage({
+      path: `held-${i}.png`, mime: "image/png", data, sessionId: "ses_held",
+    }))
+    const run = imageRun([imageWrite(1, PNG_A), ended()], [PNG_A])
+    const refused = collect()
+    await pump(run.session, refused.controller, ids)
+    expect(refused.parts.filter(part => part.type === "tool-call")).toEqual([])
+    expect(writeResults(run.writes)).toMatchObject([{ error: { error: expect.stringContaining("byte budget") } }])
+    expect(fs.existsSync(run.assets)).toBe(false)
+
+    discardPendingCursorImage(held.pop()!)
+    const retry = imageRun([imageWrite(2, PNG_A), ended()], [PNG_A], "image-capacity-retry", run.workspace)
+    const accepted = collect()
+    await pump(retry.session, accepted.controller, ids)
+    const save = accepted.parts.find(part => part.type === "tool-call")
+    expect(save).toMatchObject({ toolName: CURSOR_IMAGE_SAVE_TOOL })
+    if (save?.type !== "tool-call") throw new Error("missing image save")
+    const permissions: string[] = []
+    await executeCursorImageSave(JSON.parse(save.input), {
+      worktree: retry.workspace, directory: retry.workspace,
+      ask: async request => { permissions.push(request.permission) },
+    })
+    expect(permissions).toEqual(["external_directory", "edit"])
+    expect(fs.readFileSync(path.join(retry.assets, "cvs.png"))).toEqual(Buffer.from(PNG_A))
+    for (const id of held) expect(takePendingCursorImage(id)?.data).toBe(data)
+  })
 
   it("tell the model a declined copy is not on disk, in the running turn", async () => {
     const run = imageRun([imageWrite(1, PNG_A), ended()], [PNG_A])

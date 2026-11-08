@@ -224,6 +224,18 @@ On a held-open Run, an image read returns bytes in `ReadSuccess.data` (including
 
 One 20 MiB decoded-byte budget covers all image-bearing pending results in a continuation, without Cursor CLI's resize/re-encode step. Unreadable or oversized tool images are reported without blocking other results; cancellation still stops decoding. Other result shapes have no image field, so their images reach Cursor as history on the next fresh Run. Direct PDF, audio, and video attachments are unsupported; tool-result delivery only forwards image media.
 
+#### Saving Cursor images
+
+Cursor's copies of attached images and generated images save through
+`cursor_image_save`, with the host's write permissions. Pending images and saves
+in progress share a 400 MiB payload-byte budget across the process, with a
+50 MiB per-image limit. A new image that does not fit is refused before issuing
+a save handle; it never evicts an existing unexpired image. There is no
+eight-image count limit. Unclaimed handles expire after 10 minutes. Once a save
+claims an image, it retains its bytes, budget and path reservation throughout
+permission approval until completion or failure. Saving or discarding an image
+frees capacity for another write.
+
 #### Max mode
 
 Cursor IDE has a separate **Max Mode** toggle that sets `requested_model.max_mode` and selects the default max variant. OpenCode has no equivalent custom toggle, so this provider approximates it:

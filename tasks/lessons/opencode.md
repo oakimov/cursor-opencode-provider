@@ -495,6 +495,15 @@ These are failure lessons shared by both hosts, not a replacement for
   a directory or target swapped to a symlink during approval otherwise redirects the
   authorized write, even to another path within an allowed root. Default
   project assets intentionally stay outside the git worktree (`test/generate-image.test.ts`, `src/image-save.ts`).
+- **Issued image handles own bytes; they are not cache entries.** In #165, the
+  ninth pending image evicted the first even when their total bytes were small.
+  Replacing count eviction with byte eviction only moves that failure to a
+  larger burst. Cursor CLI retains bytes in each write execution; OpenCode's
+  save-tool handoff needs the same ownership. Bound admission without evicting
+  unexpired handles, and charge claimed saves until they finish, including
+  approval waits and failures. Regress the binary-write-to-save path with 35
+  images, saturation, refusal/retry and separate module graphs
+  (`test/input-image-write.test.ts`, `test/generate-image.test.ts`).
 
 ## Context, caching and accounting
 
