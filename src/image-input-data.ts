@@ -8,6 +8,7 @@
 export const CURSOR_IMAGE_INPUT = {
   "claude-fable-5": true,
   "claude-fable-5-1": true,
+  "claude-fable-5-2": true,
   "claude-haiku-4-5": true,
   "claude-haiku-5-5": true,
   "claude-opus-4-5": true,
@@ -16,6 +17,7 @@ export const CURSOR_IMAGE_INPUT = {
   "claude-opus-4-8": true,
   "claude-opus-5": true,
   "claude-opus-5-5": true,
+  "claude-sonnet-4": true,
   "claude-sonnet-4-5": true,
   "claude-sonnet-4-6": true,
   "claude-sonnet-5": true,

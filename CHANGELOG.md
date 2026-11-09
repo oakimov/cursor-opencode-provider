@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-11-09
+
+### Added
+
+- Claude Fable 5.2 pricing, context, and capability metadata from Cursor's model docs
+
+### Changed
+
+- `CURSOR_PROVIDER_DEBUG=1` no longer writes a line per wire frame and KV message (`pump frame`, `frame yield`, `kv frame raw`, `kv replied` unless the blob was missing, a held Run's `answered KV` and `queued a frame`); `CURSOR_PROVIDER_DEBUG=2` (or `verbose`) still does. With `CURSOR_PROVIDER_DEBUG_LOG_MODE=rotate`, `extractTools:` lists each distinct tool list once per log file and names it by `tools=<hash>` afterwards, again at least every 10 minutes ([#160](https://github.com/oakimov/cursor-opencode-provider/issues/160), [@nkoynov](https://github.com/nkoynov)).
+- Local test checks detect Linux, macOS and Windows capabilities; Windows can run the full suite through a local Linux-container engine without Cursor agent installed.
+- Cloud Agent setup installs the current OpenCode 1.x (`opencode1`) and 2.x (`opencode`) at install time. The live test loads the classic plugin on 1.x and `plugin-opencode2` on 2.x, and a missing binary for either major fails the run.
+
 ### Fixed
 
 - Unwrapping host `<system-update>` notes now takes linear time, so a note with many unclosed `<system-update>` tags can no longer stall a turn (CodeQL `js/polynomial-redos`).
@@ -13,16 +25,7 @@
 - That rebuild is no longer refused (`missing-host-results`) when Cursor earlier waited on a background shell: its polls of the shell's terminal record are answered by the provider, ran nothing on the host, and no longer count as tool calls without a result ([#159](https://github.com/oakimov/cursor-opencode-provider/issues/159), [@nkoynov](https://github.com/nkoynov)).
 - The same rebuild also proceeds after the provider itself answered the empty read before a new file's edit or a Task attachment read, provided history holds that call's result, or a read of a missing file ([#172](https://github.com/oakimov/cursor-opencode-provider/issues/172), [@nkoynov](https://github.com/nkoynov)).
 - A failed OpenCode 1.x download no longer leaves the previous binary in place and reports a successful install.
-- OpenCode 1.x model metadata now sets `reasoning` from reasoning variants too, not only `supports_thinking`, covering `deepseek-v41-flash-1017`, `claude-sonnet-5-5`, `claude-haiku-5-5` and `muse-wonder-1.0` ([#168](https://github.com/oakimov/cursor-opencode-provider/issues/168)).
-
-### Changed
-
-- `CURSOR_PROVIDER_DEBUG=1` no longer writes a line per wire frame and KV message (`pump frame`, `frame yield`, `kv frame raw`, `kv replied` unless the blob was missing, a held Run's `answered KV` and `queued a frame`); `CURSOR_PROVIDER_DEBUG=2` (or `verbose`) still does. With `CURSOR_PROVIDER_DEBUG_LOG_MODE=rotate`, `extractTools:` lists each distinct tool list once per log file and names it by `tools=<hash>` afterwards, again at least every 10 minutes ([#160](https://github.com/oakimov/cursor-opencode-provider/issues/160), [@nkoynov](https://github.com/nkoynov))
-- Local test checks detect Linux, macOS and Windows capabilities; Windows can run the full suite through a local Linux-container engine without Cursor agent installed.
-- Cloud Agent setup installs the current OpenCode 1.x (`opencode1`) and 2.x (`opencode`) at install time. The live test loads the classic plugin on 1.x and `plugin-opencode2` on 2.x, and a missing binary for either major fails the run.
-
-### Fixed
-
+- OpenCode 1.x model metadata now sets `reasoning` from reasoning variants too, not only `supports_thinking`, covering `deepseek-v41-flash-1017`, `claude-sonnet-5-5`, `claude-haiku-5-5` and `muse-wonder-1.0` ([#168](https://github.com/oakimov/cursor-opencode-provider/issues/168), [#169](https://github.com/oakimov/cursor-opencode-provider/pull/169), [@adonm](https://github.com/adonm)).
 - Linux isolated checks can run their nested sandbox tests after dropping privileges, allowing the full suite to pass before the separate live-test trust gate ([#161](https://github.com/oakimov/cursor-opencode-provider/pull/161)).
 - Review setup reports its read-only GitHub lookup accurately instead of claiming no GitHub call occurred ([#161](https://github.com/oakimov/cursor-opencode-provider/pull/161)).
 - Manual reviews preserve failed command statuses and exit codes alongside evidence of baseline or environment failures; publication supports bundled GitHub CLIs without `--slurp` ([#161](https://github.com/oakimov/cursor-opencode-provider/pull/161)).

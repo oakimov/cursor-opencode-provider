@@ -725,8 +725,15 @@ These are failure lessons shared by both hosts, not a replacement for
   `supports_images` marked Grok 4.7, Composer 2.5 and Kimi K2.7 Code text-only
   though their Runs read images, Cursor CLI ignores it, and Cursor drops images
   for a text-only model without an error. Advertise images only from the live
-  probe record (`generate:images`), never the flag or a hardcoded id
+  probe record (`generate:images`), never Cursor's flag or a hardcoded guess
   (`test/image-input-probe.test.ts`, `test/model-selection-review.test.ts`).
+  When a first probe fails only on transient capacity (`capacity_limit`) and
+  blocks the release gate, models.dev may seed the record for that wire id if
+  its matching entry has `attachment: true` and `modalities.input` includes
+  `image` (0.8.7: `claude-sonnet-4` via models.dev `opencode`/`helicone`
+  Sonnet 4 rows). That is not Cursor Run evidence—Kimi K3-class mismatches
+  still exist—so retest with `generate:images -- --model <id>` once capacity
+  recovers, and never treat models.dev as stronger than a completed probe.
   PRs #84/#86/#95 showed that tier selection
   must precede speed preference, defaults must survive catalog partitioning,
   and unmatched hints must not rewrite an advertised tuple. Exercise marked

@@ -59,6 +59,7 @@ const DISPLAY_NAME_TO_MODEL_ID: Record<string, string> = {
   "Claude 4.7 Opus": "claude-opus-4-7",
   "Claude Fable 5": "claude-fable-5",
   "Claude Fable 5.1": "claude-fable-5-1",
+  "Claude Fable 5.2": "claude-fable-5-2",
   "Claude Haiku 5.5": "claude-haiku-5-5",
   "Claude Opus 4.8": "claude-opus-4-8",
   "Claude Opus 5": "claude-opus-5",
