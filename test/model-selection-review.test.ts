@@ -37,12 +37,20 @@ describe("adversarial model selection", () => {
     }] })
     const classic = modelsToConfig([model!])
     const modern = modelsToCatalogModelMap([model!])
-    for (const id of ["grok-4.7", "grok-4.7-fast", "grok-4.7-500k", "grok-4.7-500k-fast"]) {
-      expect(classic[id].attachment).toBe(true)
-      expect(classic[id].modalities.input).toEqual(["text", "image"])
-      expect(modern[id]?.capabilities.input).toEqual(["text", "image"])
-      expect(modern[id]?.modelID).toBe("grok-4.7")
-    }
+    const ids = ["grok-4.7", "grok-4.7-fast", "grok-4.7-500k", "grok-4.7-500k-fast"]
+    expect(ids.map(id => ({
+      id,
+      attachment: classic[id].attachment,
+      classicInput: classic[id].modalities.input,
+      modernInput: modern[id]?.capabilities.input ?? null,
+      modelID: modern[id]?.modelID ?? null,
+    }))).toEqual(ids.map(id => ({
+      id,
+      attachment: true,
+      classicInput: ["text", "image"],
+      modernInput: ["text", "image"],
+      modelID: "grok-4.7",
+    })))
   })
 
   it("derives context limits from marked tiers when default flags are absent", () => {
@@ -102,16 +110,28 @@ describe("adversarial model selection", () => {
     }
     const classic = modelsToConfig([model])
     const modern = modelsToCatalogModelMap([model])
-    for (const [id, saved] of [["grok-4.7", slow], ["grok-4.7-fast", fast]] as const) {
+    const savedEntries = [["grok-4.7", slow], ["grok-4.7-fast", fast]] as const
+    expect(savedEntries.map(([id, saved]) => {
       const originalParams = saved.parameterValues
       const picked = classic[id].variants[saved.displayName]?.[CURSOR_VARIANT_PARAMETERS_KEY]
-      expect(picked).toEqual(originalParams)
-      expect(modern[id]?.variants.find((v) => v.id === saved.displayName)?.settings)
-        .toEqual({ [CURSOR_VARIANT_PARAMETERS_KEY]: originalParams })
-      expect(resolveVariantParameters(model, { picked })).toEqual(originalParams)
-      expect(resolveVariantMaxMode(originalParams, { model, picked: originalParams })).toBe(true)
-      expect(classic[id].limit.context).toBe(256_000)
-    }
+      return {
+        id,
+        picked,
+        modern: modern[id]?.variants.find(v => v.id === saved.displayName)?.settings ?? null,
+        resolved: resolveVariantParameters(model, { picked }),
+        maxMode: resolveVariantMaxMode(originalParams, { model, picked: originalParams }),
+        context: classic[id].limit.context,
+        originalParams,
+      }
+    })).toEqual(savedEntries.map(([id, saved]) => ({
+      id,
+      picked: saved.parameterValues,
+      modern: { [CURSOR_VARIANT_PARAMETERS_KEY]: saved.parameterValues },
+      resolved: saved.parameterValues,
+      maxMode: true,
+      context: 256_000,
+      originalParams: saved.parameterValues,
+    })))
     expect(classic["grok-4.7-500k"].limit.context).toBe(500_000)
     expect(classic["grok-4.7-500k-fast"].limit.context).toBe(500_000)
     expect(classic["grok-4.7-fast"].options[CURSOR_VARIANT_PARAMETERS_KEY])

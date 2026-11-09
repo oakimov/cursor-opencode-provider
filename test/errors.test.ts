@@ -170,9 +170,9 @@ describe("Cursor provider errors", () => {
     }
     // Cursor CLI ends the request on usage/rate limits, login, pricing and API-key
     // errors and on cancellation, even when is_retryable says true.
-    for (const error of [51, 50, 10, 2, 44, 1, 30, 21, 35]) {
-      expect(errorFor("resource_exhausted", error, { retryable: true }).retryable).toBe(false)
-    }
+    const terminalCodes = [51, 50, 10, 2, 44, 1, 30, 21, 35]
+    expect(terminalCodes.filter(error => errorFor("resource_exhausted", error, { retryable: true }).retryable !== false))
+      .toEqual([])
     expect(errorFor("internal", 0, { retryable: true, action: "upgrade" }).retryable).toBe(false)
     expect(errorFor("internal", 29).retryable).toBe(false)
     expect(errorFor("internal", 29, { retryable: true })).toMatchObject({ retryable: true, transient: true })
@@ -276,21 +276,34 @@ describe("Cursor provider errors", () => {
 
   it("projects spent and unsafe retries as terminal even when their cause was an HTTP 503", () => {
     const last = cursorHttpError("Cursor request failed:", 503)
-    for (const failure of [
+    const failures = [
       new CursorRetryExhaustedError(3, last),
       retrySuppressedError(last, "after visible output", 1, 3),
-    ]) {
-      expect(failure).toMatchObject({ statusCode: 503, transient: false, retryable: false })
-      const host = hostFacingError(failure)
-      expect(APICallError.isInstance(host)).toBe(true)
-      expect(host).toMatchObject({
-        statusCode: 400,
-        isRetryable: false,
-        responseHeaders: { "x-should-retry": "false" },
-      })
-      expect((host as APICallError).cause).toBe(failure)
-      expect(host.message).not.toContain("503")
-    }
+    ]
+    expect(failures.map(failure => {
+      const host = hostFacingError(failure) as APICallError
+      return {
+        statusCode: failure.statusCode,
+        transient: failure.transient,
+        retryable: failure.retryable,
+        hostInstance: APICallError.isInstance(host),
+        hostStatus: host.statusCode ?? null,
+        hostRetryable: host.isRetryable ?? null,
+        hostShouldRetry: host.responseHeaders?.["x-should-retry"] ?? null,
+        sameCause: host.cause === failure,
+        mentions503: host.message.includes("503"),
+      }
+    })).toEqual(failures.map(() => ({
+      statusCode: 503,
+      transient: false,
+      retryable: false,
+      hostInstance: true,
+      hostStatus: 400,
+      hostRetryable: false,
+      hostShouldRetry: "false",
+      sameCause: true,
+      mentions503: false,
+    })))
   })
 
   it("lets the host retry a turn that only showed output, as Cursor CLI resends the action", () => {

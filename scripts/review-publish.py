@@ -11,10 +11,14 @@ head, identity, preview digest, and approval generation. A denial or a
 different approval is not sent, even when the replacement is valid by
 itself. After the reviews lookup, and immediately before it sends, post
 reads the pull request again and then re-reads that pinned operation.
-It mints a GitHub App installation token and reads the approval once
-more. The review author is that app's bot. A client secret, a user
-token, and the ambient gh login are not used. A
-moved base or head is not sent; refresh the review and approve it again.
+Without --token-env, it mints a GitHub App installation token and reads
+the approval once more. The review author is that app's bot. A client
+secret and the ambient gh login are not used.
+--token-env NAME instead reads a GitHub personal access token (ghp_ or
+github_pat_) from the environment variable NAME and uses that token for
+the review POST and resolveReviewThread. The token value is never taken
+from the command line. A moved base or head is not sent; refresh the
+review and approve it again.
 A push after that read can still land on the approved commit. A request
 that was already sent is not cancelled. A send that does not confirm
 delivery is not repeated. A confirmed review id is delivery. A later post
@@ -638,6 +642,40 @@ def redact_secret(text: str) -> str:
     return re.sub(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}", "[redacted]", text)
 
 
+# Names passed to --token-env. The named variable is removed from gh's
+# environment and its value is redacted from printed errors. A read that has
+# no other GitHub credential receives the value back as GH_TOKEN. The set is
+# process-local; post is a short-lived command.
+_hidden_env: set[str] = set()
+ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+PERSONAL_ACCESS_TOKEN = re.compile(r"^(?:ghp_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+)$")
+
+
+def env_label(name: str) -> str:
+    if SECRET.search(name) or re.search(r"(?:ghp|gho|ghu|ghs|ghr|github_pat)_", name, re.IGNORECASE):
+        return "The --token-env variable"
+    return name
+
+
+def personal_access_token(token_env: str) -> str:
+    """Read a PAT from the named environment variable. Never print the value."""
+    if not ENV_NAME.fullmatch(token_env or ""):
+        refuse_publication(
+            "--token-env needs the name of an environment variable, not the token. GitHub was not called."
+        )
+    value = os.environ.get(token_env)
+    label = env_label(token_env)
+    if value is None or not value.strip():
+        refuse_publication(f"{label} is missing or empty. GitHub was not called.")
+    token = value.strip()
+    if PERSONAL_ACCESS_TOKEN.fullmatch(token) is None:
+        refuse_publication(
+            f"{label} must be a GitHub personal access token (ghp_ or github_pat_). GitHub was not called."
+        )
+    _hidden_env.add(token_env)
+    return token
+
+
 def refuse_publication(message: str) -> None:
     print(message, file=sys.stderr)
     raise SystemExit(4)
@@ -745,13 +783,29 @@ def load_app_material() -> tuple[str, bytes]:
 
 
 def publisher_env(token: str | None) -> dict[str, str]:
-    env = {key: value for key, value in os.environ.items() if not key.startswith("REVIEW_APP_")}
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("REVIEW_APP_") and key not in _hidden_env
+    }
     env.pop("GH_DEBUG", None)
     env["GH_HOST"] = "github.com"
     env["GH_PROMPT_DISABLED"] = "1"
+    # Reads call gh without an explicit token and rely on GH_TOKEN / GITHUB_TOKEN.
+    # Hiding the selected PAT removes that credential when it is the only one,
+    # including when the named variable is GH_TOKEN or GITHUB_TOKEN itself.
+    if token is None and not any(env.get(name, "").strip() for name in ("GH_TOKEN", "GITHUB_TOKEN")):
+        for name in _hidden_env:
+            value = os.environ.get(name, "").strip()
+            if value:
+                token = value
+                break
     if token is not None:
         env["GH_TOKEN"] = token
         env["GITHUB_TOKEN"] = token
+        for key, value in list(env.items()):
+            if key not in {"GH_TOKEN", "GITHUB_TOKEN"} and value == token:
+                del env[key]
     return env
 
 
@@ -809,7 +863,9 @@ def gh_api(
         data = json.dumps(payload).encode()
     completed = subprocess.run(command, input=data, capture_output=True, env=publisher_env(token))
     detail = completed.stderr.decode("utf-8", errors="replace")
-    for value in (token, os.environ.get("GH_TOKEN"), os.environ.get("GITHUB_TOKEN")):
+    secrets = [token, os.environ.get("GH_TOKEN"), os.environ.get("GITHUB_TOKEN")]
+    secrets.extend(os.environ.get(name) for name in _hidden_env)
+    for value in secrets:
         if value:
             detail = detail.replace(value, "[redacted]")
     return completed.returncode, completed.stdout, redact_secret(detail).encode()
@@ -1007,14 +1063,27 @@ def checked_thread(payload: dict, action: dict, token: str | None = None) -> dic
     return thread
 
 
-def resolve_threads(payload_path: Path, approval_path: Path, payload: dict, pinned: tuple, checkpoint_path: Path) -> None:
+def publication_token(owner: str, repo: str, token_env: str | None) -> str:
+    if token_env is None:
+        app_id, pem = load_app_material()
+        return installation_token(owner, repo, app_id, pem)
+    return personal_access_token(token_env)
+
+
+def resolve_threads(
+    payload_path: Path,
+    approval_path: Path,
+    payload: dict,
+    pinned: tuple,
+    checkpoint_path: Path,
+    token_env: str | None = None,
+) -> None:
     actions = resolution_targets(payload)
     if not actions:
         return
     require_same_operation(payload_path, approval_path, pinned)
     owner, repo, pull = payload["owner"], payload["repo"], payload["pull"]
-    app_id, pem = load_app_material()
-    token = installation_token(owner, repo, app_id, pem)
+    token = publication_token(str(owner), str(repo), token_env)
     require_same_operation(payload_path, approval_path, pinned)
     for action in actions:
         thread = checked_thread(payload, action, token)
@@ -1607,7 +1676,7 @@ def review_body(payload: dict) -> dict:
     }
 
 
-def post(payload_path: Path, approval_path: Path) -> None:
+def post(payload_path: Path, approval_path: Path, token_env: str | None = None) -> None:
     if not approval_path.is_file():
         print("No approval file. GitHub was not called.", file=sys.stderr)
         raise SystemExit(4)
@@ -1636,6 +1705,8 @@ def post(payload_path: Path, approval_path: Path) -> None:
             print("The approval record was replaced. GitHub was not called.", file=sys.stderr)
             raise SystemExit(5)
         pinned = operation_key(payload, approval, digest)
+        if token_env is not None:
+            personal_access_token(token_env)
         if isinstance(payload.get("result"), dict):
             inventory = thread_inventory(owner, repo, pull)
             require_same_operation(payload_path, approval_path, pinned)
@@ -1657,8 +1728,8 @@ def post(payload_path: Path, approval_path: Path) -> None:
         for action in resolution_targets(payload):
             checked_thread(payload, action)
             require_same_operation(payload_path, approval_path, pinned)
-        post_locked(payload_path, approval_path, payload, approval, digest, pinned, checkpoint_path)
-        resolve_threads(payload_path, approval_path, payload, pinned, checkpoint_path)
+        post_locked(payload_path, approval_path, payload, approval, digest, pinned, checkpoint_path, token_env)
+        resolve_threads(payload_path, approval_path, payload, pinned, checkpoint_path, token_env)
         retain_receipt(payload_path, payload, checkpoint_path)
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)
@@ -1673,9 +1744,13 @@ def post_locked(
     digest: str,
     pinned: tuple,
     checkpoint_path: Path,
+    token_env: str | None = None,
 ) -> None:
     owner, repo, pull = payload["owner"], payload["repo"], payload["pull"]
-    app_id, pem = load_app_material()
+    if token_env is None:
+        app_id, pem = load_app_material()
+    else:
+        personal_access_token(token_env)
     approved_head = payload["head"]
     approved_base = payload["base"]
     marker = f"<!-- cursor-review:{approval['identity']} -->"
@@ -1707,13 +1782,17 @@ def post_locked(
     )
     try:
         # The reviews lookup is the last preparatory read. Fetch the remote
-        # revision, mint the installation token, and re-read the pinned
-        # approval. A push after this fetch is not covered. A changed
-        # revision or approval is not sent.
+        # revision, then take the publication credential and re-read the pinned
+        # approval. Without --token-env that credential is a new installation
+        # token. A push after this fetch is not covered. A changed revision or
+        # approval is not sent.
         fetched_head, fetched_base, readable = read_pull(owner, repo, pull)
         reject_moved_revision(fetched_head, fetched_base, readable, approved_head, approved_base)
         require_same_operation(payload_path, approval_path, pinned)
-        token = installation_token(str(owner), str(repo), app_id, pem)
+        if token_env is None:
+            token = installation_token(str(owner), str(repo), app_id, pem)
+        else:
+            token = personal_access_token(token_env)
         require_same_operation(payload_path, approval_path, pinned)
     except SystemExit:
         # The request was not sent. Drop the checkpoint so it is not an unsettled delivery.
@@ -1727,11 +1806,18 @@ def post_locked(
     )
     if code != 0:
         if re.search(rb"\bHTTP\s+403\b", stderr, re.IGNORECASE):
-            print(
-                "GitHub denied the App review request (HTTP 403). Check this installation's "
-                "Pull requests: write grant and repository access. No discussion comment was sent.",
-                file=sys.stderr,
-            )
+            if token_env is None:
+                print(
+                    "GitHub denied the App review request (HTTP 403). Check this installation's "
+                    "Pull requests: write grant and repository access. No discussion comment was sent.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "GitHub denied the personal access token review request (HTTP 403). "
+                    "The token needs pull request write access. No discussion comment was sent.",
+                    file=sys.stderr,
+                )
         recovered = matching_review(reviews_of(owner, repo, pull), marker)
         if recovered is not None:
             record_visible_review(owner, repo, pull, recovered, digest, checkpoint_path, approved_head, True)
@@ -1855,9 +1941,21 @@ def main() -> None:
     parser.add_argument("preview", nargs="?")
     parser.add_argument("extra", nargs="?")
     parser.add_argument("--discard-instruction")
+    parser.add_argument(
+        "--token-env",
+        metavar="NAME",
+        help=(
+            "post only: read a GitHub personal access token (ghp_ or github_pat_) from "
+            "environment variable NAME and use it for the review POST and resolveReviewThread. "
+            "NAME is the variable's name; do not pass the token on the command line. "
+            "Omit this option to mint a GitHub App installation token instead."
+        ),
+    )
     args = parser.parse_args()
     if args.discard_instruction is not None and args.command != "cleanup":
         parser.error("--discard-instruction is only valid with cleanup")
+    if args.token_env is not None and args.command != "post":
+        parser.error("--token-env is only valid with post")
     if args.command == "auth-info":
         auth_info()
     elif args.command == "cleanup":
@@ -1901,7 +1999,7 @@ def main() -> None:
     else:
         if args.payload is None or args.approval is None:
             parser.error("post requires a payload file and an approval file")
-        post(args.payload, args.approval)
+        post(args.payload, args.approval, args.token_env)
 
 
 if __name__ == "__main__":

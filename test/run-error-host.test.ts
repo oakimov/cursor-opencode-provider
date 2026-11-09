@@ -1052,11 +1052,20 @@ describe("retry limits across OpenCode calls", () => {
       } catch (error) { return error }
     }
     try {
+      const setupAttempts = []
       for (let i = 0; i < 10; i++) {
-        const error = await attempt()
-        expect(error).toMatchObject({ isRetryable: true })
-        expect(error).toHaveProperty("message", expect.not.stringContaining("after visible output"))
+        const error = await attempt() as { isRetryable?: boolean; message?: string }
+        setupAttempts.push({
+          i,
+          isRetryable: error?.isRetryable ?? null,
+          mentionsVisibleOutput: String(error?.message ?? "").includes("after visible output"),
+        })
       }
+      expect(setupAttempts).toEqual(Array.from({ length: 10 }, (_, i) => ({
+        i,
+        isRetryable: true,
+        mentionsVisibleOutput: false,
+      })))
       expect(await attempt()).toMatchObject({ isRetryable: false, responseHeaders: { "x-should-retry": "false" } })
       expect(renewals).toBe(11)
       await notifyHostInterrupt("ses_setup_retries", "test-stop")
@@ -1105,13 +1114,24 @@ describe("retry limits across OpenCode calls", () => {
         return undefined
       }
       try {
+        const continued = []
         for (let i = 0; i < retries; i++) {
-          expect(await attempt()).toMatchObject({ isRetryable: true, responseHeaders: { "x-should-retry": "true" } })
+          const error = await attempt() as { isRetryable?: boolean; responseHeaders?: Record<string, string> }
+          continued.push({
+            i,
+            isRetryable: error?.isRetryable ?? null,
+            retry: error?.responseHeaders?.["x-should-retry"] ?? null,
+          })
           // Canonical OpenCode 2 runner/llm.ts Continue outcome, lowered by
           // runner/to-llm-message.ts as a plain user message (no reminder wrapper).
           prompt.push({ role: "assistant", content: [{ type: "text", text: `partial ${i}` }] })
           prompt.push({ role: "user", content: [{ type: "text", text: "The previous response was interrupted. Continue from where you left off without repeating completed content." }] })
         }
+        expect(continued).toEqual(Array.from({ length: retries }, (_, i) => ({
+          i,
+          isRetryable: true,
+          retry: "true",
+        })))
         expect(runs).toBe(retries)
         if (endless) {
           trailer = { error: { code: "permission_denied" } }
@@ -1124,11 +1144,17 @@ describe("retry limits across OpenCode calls", () => {
           prompt.push({ role: "assistant", content: [{ type: "text", text: "final partial answer" }] })
           prompt.push({ role: "user", content: [{ type: "text", text: "The previous response was interrupted. Continue from where you left off without repeating completed content." }] })
           expect(await attempt()).toMatchObject({ isRetryable: true })
+          const literal = []
           for (let i = 1; i < retries; i++) {
             prompt.push({ role: "assistant", content: [{ type: "text", text: `literal request partial ${i}` }] })
             prompt.push({ role: "user", content: [{ type: "text", text: "The previous response was interrupted. Continue from where you left off without repeating completed content." }] })
-            expect(await attempt()).toMatchObject({ isRetryable: true })
+            const error = await attempt() as { isRetryable?: boolean }
+            literal.push({ i, isRetryable: error?.isRetryable ?? null })
           }
+          expect(literal).toEqual(Array.from({ length: Math.max(0, retries - 1) }, (_, offset) => ({
+            i: offset + 1,
+            isRetryable: true,
+          })))
           expect(await attempt()).toMatchObject({ isRetryable: false })
           // A later identical user message is a new turn, even in the same session.
           prompt.push({ role: "user", content: [{ type: "text", text: "Hello" }] })

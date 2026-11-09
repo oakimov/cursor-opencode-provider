@@ -72,18 +72,25 @@ describe("mapSwitchModeTarget", () => {
   })
 
   it("maps a read-only Ask target to no host tool, as Cursor CLI maps chat/ask/search to Ask", () => {
-    for (const id of ["chat", "ask", "SEARCH"]) {
-      expect(mapSwitchModeTarget(id)).toEqual({ ok: true })
-      expect(cursorModeRole(id)).toBe("read-only")
-      expect(hostAgentForCursorMode(id)).toBeUndefined()
-    }
+    const askTargets = ["chat", "ask", "SEARCH"]
+    expect(askTargets.map(id => ({
+      id,
+      target: mapSwitchModeTarget(id),
+      role: cursorModeRole(id),
+      host: hostAgentForCursorMode(id) ?? null,
+    }))).toEqual(askTargets.map(id => ({
+      id,
+      target: { ok: true },
+      role: "read-only",
+      host: null,
+    })))
     expect(hostAgentForCursorMode("spec")).toBe("plan")
     expect(hostAgentForCursorMode("debug")).toBe("build")
     expect(cursorModeRole(" ")).toBeUndefined()
   })
 
   it("maps every implementing target to plan_exit", () => {
-    for (const id of [
+    const implementing = [
       "agent",
       "build",
       "debug",
@@ -94,9 +101,10 @@ describe("mapSwitchModeTarget", () => {
       "project",
       "Agent",
       "unknown-mode",
-    ]) {
-      expect(mapSwitchModeTarget(id)).toEqual({ ok: true, toolName: "plan_exit" })
-    }
+    ]
+    expect(implementing.map(id => [id, mapSwitchModeTarget(id)])).toEqual(
+      implementing.map(id => [id, { ok: true, toolName: "plan_exit" }]),
+    )
   })
 
   it("rejects an empty target", () => {
@@ -133,11 +141,9 @@ describe("resolveSwitchModeBridge", () => {
     // Cursor replays the whole turn on it. A hard reject landed in the transcript
     // and the real turn narrated "mode switches are blocked". Soft-ack with
     // approved{} on the wire (no session mutation) — same pattern as CreatePlan.
-    for (const target of ["plan", "spec", "agent"]) {
-      expect(resolveSwitchModeBridge(target, { allowTools: false, advertised: [] })).toEqual({
-        kind: "ack",
-      })
-    }
+    const lifecycle = ["plan", "spec", "agent"]
+    expect(lifecycle.map(target => [target, resolveSwitchModeBridge(target, { allowTools: false, advertised: [] })]))
+      .toEqual(lifecycle.map(target => [target, { kind: "ack" }]))
   })
 
   it("auto-approves when the requested mode is already active", () => {
@@ -311,20 +317,20 @@ describe("session edit deny reminders and switch delivery", () => {
 
 describe("decodeSwitchModeQuery", () => {
   it("blocks only implementing switches when session permission evidence is unavailable", () => {
-    for (const target of ["plan", "spec", "ask", "chat", "agent", "build", "debug", "edit", "unknown"]) {
+    const targets = ["plan", "spec", "ask", "chat", "agent", "build", "debug", "edit", "unknown"]
+    const readOnly = new Set(["plan", "spec", "ask", "chat"])
+    expect(targets.map(target => {
       const payload = switchModePayload(switchModeArgs({ target_mode_id: target }))
       const query = decodeMessage<{ interaction_query: Record<string, unknown> }>("AgentServerMessage", payload).interaction_query
       const handled = handleInteractionQuery(query, payload, {
         allowTools: true, advertisedTools: [], sessionPermissionsUnavailable: true,
       })
-      if (["plan", "spec", "ask", "chat"].includes(target)) {
-        expect(handled.outcome).toBe("approved")
-        expect(handled.endTurn).toBeUndefined()
-      } else {
-        expect(handled.outcome).toBe("rejected")
-        expect(handled.endTurn).toBe(true)
-      }
-    }
+      return { target, outcome: handled.outcome, endTurn: handled.endTurn ?? null }
+    })).toEqual(targets.map(target => ({
+      target,
+      outcome: readOnly.has(target) ? "approved" : "rejected",
+      endTurn: readOnly.has(target) ? null : true,
+    })))
   })
 
   it("decodes target, explanation, and tool call id", () => {

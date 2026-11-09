@@ -101,8 +101,14 @@ describe("mapAvailableModelsResponse", () => {
         { name: "malformed", supports_images: "yes", variants: [] },
       ],
     })
-    expect(models.map((model) => model.id)).toEqual(["vision", "text", "malformed"])
-    for (const model of models) expect(Object.keys(model)).not.toContain("supportsImages")
+    expect(models.map(model => ({
+      id: model.id,
+      supportsImages: Object.prototype.hasOwnProperty.call(model, "supportsImages"),
+    }))).toEqual([
+      { id: "vision", supportsImages: false },
+      { id: "text", supportsImages: false },
+      { id: "malformed", supportsImages: false },
+    ])
   })
 
   it("maps multiple model entries with multiple variants", () => {
@@ -297,14 +303,15 @@ describe("cursorModelFamily", () => {
   })
 
   it("keeps context and speed suffixes out of the family", () => {
-    for (const [id, family] of [
+    const suffixed = [
       ["claude-sonnet-4-1m", "claude-sonnet"],
       ["gpt-5.4-1m", "gpt"],
       ["gpt-5.6-sol-1m", "gpt-sol"],
       ["composer-2.5-fast", "composer"],
       ["grok-4.7-fast", "grok"],
       ["claude-opus-5-5-1m-fast", "claude-opus"],
-    ] as const) expect(cursorModelFamily(id)).toBe(family)
+    ] as const
+    expect(suffixed.map(([id]) => [id, cursorModelFamily(id)])).toEqual(suffixed.map(([id, family]) => [id, family]))
   })
 
   it("groups Kimi minor versions and code speeds within their major family", () => {
@@ -344,8 +351,9 @@ describe("modelInfoToConfig family", () => {
         { key: "b", displayName: "High 1M", isDefaultNonMax: false, isDefaultMax: true, parameterValues: [{ id: "effort", value: "high" }, { id: "context", value: "1m" }] },
       ],
     }])
-    expect(Object.keys(config).length).toBeGreaterThan(1)
-    for (const entry of Object.values(config)) expect(entry.family).toBe("claude-opus")
+    const families = Object.values(config).map(entry => entry.family)
+    expect(families.length).toBeGreaterThan(1)
+    expect(families.filter(family => family !== "claude-opus")).toEqual([])
   })
 
   it("maps pricing-fixture ids onto OpenCode small-model families", async () => {
@@ -360,9 +368,7 @@ describe("modelInfoToConfig family", () => {
       .map((line) => line.trim())
       .filter((line) => line && !line.startsWith("#"))
     const families = new Set(ids.map((id) => cursorModelFamily(id)).filter((f): f is string => !!f))
-    for (const family of required) {
-      expect(families.has(family), `fixture must include a model that maps to ${family}`).toBe(true)
-    }
+    expect(required.filter(family => !families.has(family))).toEqual([])
   })
 })
 
@@ -1230,8 +1236,9 @@ describe("variantsSupportReasoning", () => {
   }
 
   it("shares one effort vocabulary with variant resolution", () => {
-    for (const id of ["effort", "reasoning", "reasoning_effort"]) {
-      // The default is `low`, so only a recognised effort id can select `high`.
+    const effortIds = ["effort", "reasoning", "reasoning_effort"]
+    // The default is `low`, so only a recognised effort id can select `high`.
+    expect(effortIds.map(id => {
       const model: ModelInfo = {
         id: "effort-params",
         variants: [
@@ -1239,10 +1246,16 @@ describe("variantsSupportReasoning", () => {
           { ...variant([{ id, value: "high" }]), isDefaultNonMax: false },
         ],
       }
-      expect(resolveVariantParameters(model, { reasoningEffort: "high" }), id)
-        .toEqual([{ id, value: "high" }])
-      expect(variantsSupportReasoning(model.variants), id).toBe(true)
-    }
+      return {
+        id,
+        selected: resolveVariantParameters(model, { reasoningEffort: "high" }),
+        reasoning: variantsSupportReasoning(model.variants),
+      }
+    })).toEqual(effortIds.map(id => ({
+      id,
+      selected: [{ id, value: "high" }],
+      reasoning: true,
+    })))
     const unknown: ModelInfo = {
       id: "effort-params",
       variants: [
