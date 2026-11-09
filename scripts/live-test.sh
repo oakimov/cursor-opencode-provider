@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Non-interactive OpenCode run against one checkout's built Cursor plugin.
-# OPENCODE_CONFIG_ROOT selects the checkout (default: this repo).
+# OpenCode 2.x (opencode) loads dist/plugin-opencode2.js. OpenCode 1.x
+# (opencode1) loads dist/plugin.js. A missing binary for either major fails
+# the run. OPENCODE_CONFIG_ROOT selects the checkout (default: this repo).
 # OPENCODE_REVIEW_HOME is the private OpenCode config/cache/data root.
 # Required secret: CURSOR_API_KEY. No other secrets are read.
 # Optional: OPENCODE_LIVE_MODEL (default cursor/composer-2.5).
@@ -176,65 +178,110 @@ run_deadline() {
   return "$code"
 }
 
+missing=()
+if ! command -v opencode >/dev/null 2>&1; then
+  missing+=("opencode (OpenCode 2.x)")
+fi
+if ! command -v opencode1 >/dev/null 2>&1; then
+  missing+=("opencode1 (OpenCode 1.x)")
+fi
+if [[ "$(live_count missing)" -gt 0 ]]; then
+  echo "LIVE_TEST=failed" >&2
+  echo "Missing OpenCode binary: ${missing[*]}. Run scripts/cloud-agent-install.sh." >&2
+  exit 1
+fi
+
 OPENCODE_CONFIG_ROOT="$TREE" bash "$SCRIPT_ROOT/scripts/configure-opencode.sh"
 if [[ -n "${OPENCODE_REVIEW_HOME:-}" ]]; then
-  # shellcheck disable=SC1091
-  source "$OPENCODE_REVIEW_HOME/env"
+  env_opencode2="$OPENCODE_REVIEW_HOME/env"
+  env_opencode1="$OPENCODE_REVIEW_HOME/env-opencode1"
 else
-  # shellcheck disable=SC1091
-  source "$TREE/.opencode-local/env"
+  env_opencode2="$TREE/.opencode-local/env"
+  env_opencode1="$TREE/.opencode-local-1/env"
 fi
-export OPENCODE_CONFIG_DIR CURSOR_OPENCODE2_DEV_ENTRY
-export XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME TMPDIR
-export CURSOR_REVIEW_PLUGIN_PATH CURSOR_REVIEW_PLUGIN_VERSION
+# shellcheck disable=SC1090
+source "$env_opencode2"
 # The native runtime also extracts libraries and creates scratch directories.
 # Own their whole directory, without deleting anything from another run.
 owned_tmp="$(mktemp -d "$TMPDIR/cursor-live.XXXXXX")"
 export TMPDIR="$owned_tmp"
 
-echo "WORKTREE=$TREE"
-echo "PLUGIN_PATH=$CURSOR_REVIEW_PLUGIN_PATH"
-echo "PLUGIN_VERSION=$CURSOR_REVIEW_PLUGIN_VERSION"
-echo "OPENCODE_CONFIG_DIR=$OPENCODE_CONFIG_DIR"
-
-if ! command -v opencode >/dev/null 2>&1; then
-  echo "LIVE_TEST=failed" >&2
-  echo "opencode is not on PATH. Run scripts/cloud-agent-install.sh." >&2
-  exit 1
-fi
-
 if ! DEADLINE_BIN="$(live_deadline_bin)"; then
   exit 1
 fi
 
-marker="CURSOR_REVIEW_PLUGIN=${CURSOR_REVIEW_PLUGIN_PATH} version=${CURSOR_REVIEW_PLUGIN_VERSION}"
-init_line="CURSOR_REVIEW_PLUGIN_INIT count=1 path=${CURSOR_REVIEW_PLUGIN_PATH}"
-list_out="$(mktemp)"
-list_err="$(mktemp)"
-owned_files+=("$list_out" "$list_err")
-marker_count=0
-list_init=0
-list_code=0
-# Plugin discovery can exit before the import log is flushed. Retry only
-# while that log is absent. More than one import or setup fails immediately.
-for _attempt in 1 2 3 4 5; do
-  set +e
-  run_deadline 60 opencode plugin list --standalone --print-logs --log-level info >"$list_out" 2>"$list_err"
-  list_code=$?
-  set -e
-  marker_count=$(grep -c -F "$marker" "$list_err" || true)
-  list_init=$(grep -c -F "CURSOR_REVIEW_PLUGIN_INIT " "$list_err" || true)
-  if [[ "$list_code" -ne 0 || "$marker_count" -gt 1 || "$list_init" -gt 1 || "$marker_count" -eq 1 ]]; then
-    break
+# A failing major sets major_failed and returns success so the other major
+# still runs. set -e would stop the script at the first expected failure.
+major_failed=0
+
+run_major() {
+  local major="$1" bin="$2" env_file="$3"
+  local version version_out marker init_line list_out list_err marker_count list_init list_code
+  local model prompt stdout_file stderr_file code init_count init_any status
+  unset OPENCODE_CONFIG_DIR CURSOR_OPENCODE2_DEV_ENTRY OPENCODE_AUTH_CONTENT
+  unset OPENCODE_DISABLE_PROJECT_CONFIG OPENCODE_DISABLE_LSP_DOWNLOAD
+  unset XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME
+  unset CURSOR_REVIEW_PLUGIN_PATH CURSOR_REVIEW_PLUGIN_VERSION
+  # shellcheck disable=SC1090
+  source "$env_file"
+  export OPENCODE_CONFIG_DIR CURSOR_REVIEW_PLUGIN_PATH CURSOR_REVIEW_PLUGIN_VERSION
+  export XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME
+  if [[ "$major" == "2" ]]; then
+    export CURSOR_OPENCODE2_DEV_ENTRY
   fi
-  sleep 0.2
-done
-if [[ "$list_code" -ne 0 || "$marker_count" -ne 1 || "$list_init" -gt 1 ]]; then
-  echo "LIVE_TEST=failed"
-  echo "OpenCode did not load the worktree plugin once."
-  echo "expected=$marker"
-  echo "marker_count=$marker_count list_init=$list_init"
-  "$(live_python)" - "$list_err" "$list_code" <<'PY'
+  if [[ "$major" == "1" ]]; then
+    export OPENCODE_DISABLE_PROJECT_CONFIG OPENCODE_DISABLE_LSP_DOWNLOAD
+    # The classic plugin reads OpenCode's auth store, not CURSOR_API_KEY.
+    OPENCODE_AUTH_CONTENT="$("$(live_python)" -c 'import json,os; key=os.environ["CURSOR_API_KEY"]; print(json.dumps({"cursor":{"type":"api","key":key,"metadata":{"apiKey":key}}}))')"
+    export OPENCODE_AUTH_CONTENT
+  fi
+  export TMPDIR="$owned_tmp"
+
+  # Own the version process. A fake that ignores the signal is still in this
+  # deadline's session, so cancellation can reap it with the other children.
+  version_out="$(mktemp)"
+  owned_files+=("$version_out")
+  set +e
+  run_deadline 30 "$bin" --version >"$version_out" 2>/dev/null
+  set -e
+  version="$(tail -n 1 "$version_out" 2>/dev/null || true)"
+  echo "OPENCODE_MAJOR=$major"
+  echo "OPENCODE_BIN=$bin"
+  echo "OPENCODE_VERSION=${version:-unknown}"
+  echo "WORKTREE=$TREE"
+  echo "PLUGIN_PATH=$CURSOR_REVIEW_PLUGIN_PATH"
+  echo "PLUGIN_VERSION=$CURSOR_REVIEW_PLUGIN_VERSION"
+  echo "OPENCODE_CONFIG_DIR=$OPENCODE_CONFIG_DIR"
+
+  marker="CURSOR_REVIEW_PLUGIN=${CURSOR_REVIEW_PLUGIN_PATH} version=${CURSOR_REVIEW_PLUGIN_VERSION}"
+  init_line="CURSOR_REVIEW_PLUGIN_INIT count=1 path=${CURSOR_REVIEW_PLUGIN_PATH}"
+  if [[ "$major" == "2" ]]; then
+    list_out="$(mktemp)"
+    list_err="$(mktemp)"
+    owned_files+=("$list_out" "$list_err")
+    marker_count=0
+    list_init=0
+    list_code=0
+    # Plugin discovery can exit before the import log is flushed. Retry only
+    # while that log is absent. More than one import or setup fails immediately.
+    for _attempt in 1 2 3 4 5; do
+      set +e
+      run_deadline 60 opencode plugin list --standalone --print-logs --log-level info >"$list_out" 2>"$list_err"
+      list_code=$?
+      set -e
+      marker_count=$(grep -c -F "$marker" "$list_err" || true)
+      list_init=$(grep -c -F "CURSOR_REVIEW_PLUGIN_INIT " "$list_err" || true)
+      if [[ "$list_code" -ne 0 || "$marker_count" -gt 1 || "$list_init" -gt 1 || "$marker_count" -eq 1 ]]; then
+        break
+      fi
+      sleep 0.2
+    done
+    if [[ "$list_code" -ne 0 || "$marker_count" -ne 1 || "$list_init" -gt 1 ]]; then
+      echo "LIVE_TEST=failed"
+      echo "OpenCode did not load the worktree plugin once."
+      echo "expected=$marker"
+      echo "marker_count=$marker_count list_init=$list_init"
+      "$(live_python)" - "$list_err" "$list_code" <<'PY'
 import os, sys
 path, code = sys.argv[1], sys.argv[2]
 key = os.environ.get("CURSOR_API_KEY", "")
@@ -244,52 +291,104 @@ if key:
 print(f"plugin_list_exit={code}")
 print(text[-2000:])
 PY
-  exit 1
-fi
-echo "PLUGIN_LOADED=$marker"
-echo "OPENCODE_CONFIG_BEGIN"
-cat "$OPENCODE_CONFIG_DIR/opencode.json"
-echo "OPENCODE_CONFIG_END"
+      major_failed=1
+      return 0
+    fi
+    echo "PLUGIN_LOADED=$marker"
+  fi
 
-cd "$TREE"
-model="${OPENCODE_LIVE_MODEL:-cursor/composer-2.5}"
-prompt='Reply with exactly the word pong and nothing else.'
-stdout_file="$(mktemp)"
-stderr_file="$(mktemp)"
-owned_files+=("$stdout_file" "$stderr_file")
+  echo "OPENCODE_CONFIG_BEGIN"
+  cat "$OPENCODE_CONFIG_DIR/opencode.json"
+  echo "OPENCODE_CONFIG_END"
 
-set +e
-# info plus --print-logs, so the wrapper's setup log reaches stderr. The reply stays on stdout.
-run_deadline 180 opencode run --standalone --print-logs --auto --format json --log-level info \
-  --model "$model" "$prompt" >"$stdout_file" 2>"$stderr_file"
-code=$?
-set -e
+  cd "$TREE"
+  model="${OPENCODE_LIVE_MODEL:-cursor/composer-2.5}"
+  prompt='Reply with exactly the word pong and nothing else.'
+  stdout_file="$(mktemp)"
+  stderr_file="$(mktemp)"
+  owned_files+=("$stdout_file" "$stderr_file")
 
-init_count=$(grep -c -F "$init_line" "$stdout_file" "$stderr_file" || true)
-init_any=$(grep -c -F "CURSOR_REVIEW_PLUGIN_INIT " "$stdout_file" "$stderr_file" || true)
-# grep -c with two files prints "file:count" lines. Sum them.
-init_count=$(printf '%s\n' "$init_count" | awk -F: '{ s += $NF } END { print s + 0 }')
-init_any=$(printf '%s\n' "$init_any" | awk -F: '{ s += $NF } END { print s + 0 }')
-if [[ "$init_count" -ne 1 || "$init_any" -ne 1 ]]; then
-  echo "LIVE_TEST=failed"
-  echo "OpenCode initialized the provider ${init_any} times."
-  echo "expected=$init_line"
-  "$(live_python)" - "$stderr_file" "$code" <<'PY'
+  set +e
+  if [[ "$major" == "2" ]]; then
+    # info plus --print-logs, so the wrapper's setup log reaches stderr. The reply stays on stdout.
+    run_deadline 180 opencode run --standalone --print-logs --auto --format json --log-level info \
+      --model "$model" "$prompt" >"$stdout_file" 2>"$stderr_file"
+  else
+    # 1.x has no --standalone. INFO is the log level its CLI accepts.
+    # The classic wrapper logs the import and the one CursorPlugin call here.
+    run_deadline 180 opencode1 run --print-logs --auto --format json --log-level INFO \
+      --model "$model" "$prompt" >"$stdout_file" 2>"$stderr_file"
+  fi
+  code=$?
+  set -e
+
+  if [[ "$major" == "1" ]]; then
+    marker_count=$(grep -c -F "$marker" "$stdout_file" "$stderr_file" || true)
+    marker_count=$(printf '%s\n' "$marker_count" | awk -F: '{ s += $NF } END { print s + 0 }')
+    if [[ "$marker_count" -ne 1 ]]; then
+      echo "LIVE_TEST=failed"
+      echo "OpenCode did not load the worktree plugin once."
+      echo "expected=$marker"
+      echo "marker_count=$marker_count"
+      "$(live_python)" - "$stderr_file" "$code" <<'PY'
 import os, sys
 path, code = sys.argv[1], sys.argv[2]
 key = os.environ.get("CURSOR_API_KEY", "")
+auth = os.environ.get("OPENCODE_AUTH_CONTENT", "")
 text = open(path, encoding="utf-8", errors="replace").read()
 if key:
     text = text.replace(key, "[REDACTED]")
+if auth:
+    text = text.replace(auth, "[REDACTED]")
 print(f"opencode_exit={code}")
 print(text[-2000:])
 PY
+      major_failed=1
+      return 0
+    fi
+    echo "PLUGIN_LOADED=$marker"
+  fi
+
+  init_count=$(grep -c -F "$init_line" "$stdout_file" "$stderr_file" || true)
+  init_any=$(grep -c -F "CURSOR_REVIEW_PLUGIN_INIT " "$stdout_file" "$stderr_file" || true)
+  # grep -c with two files prints "file:count" lines. Sum them.
+  init_count=$(printf '%s\n' "$init_count" | awk -F: '{ s += $NF } END { print s + 0 }')
+  init_any=$(printf '%s\n' "$init_any" | awk -F: '{ s += $NF } END { print s + 0 }')
+  if [[ "$init_count" -ne 1 || "$init_any" -ne 1 ]]; then
+    echo "LIVE_TEST=failed"
+    echo "OpenCode initialized the provider ${init_any} times."
+    echo "expected=$init_line"
+    "$(live_python)" - "$stderr_file" "$code" <<'PY'
+import os, sys
+path, code = sys.argv[1], sys.argv[2]
+key = os.environ.get("CURSOR_API_KEY", "")
+auth = os.environ.get("OPENCODE_AUTH_CONTENT", "")
+text = open(path, encoding="utf-8", errors="replace").read()
+if key:
+    text = text.replace(key, "[REDACTED]")
+if auth:
+    text = text.replace(auth, "[REDACTED]")
+print(f"opencode_exit={code}")
+print(text[-2000:])
+PY
+    major_failed=1
+    return 0
+  fi
+  echo "PLUGIN_INIT_COUNT=1"
+
+  set +e
+  "$(live_python)" "$SCRIPT_ROOT/scripts/live-reply.py" "$stdout_file" "$stderr_file" "$code" "$model"
+  status=$?
+  set -e
+  if [[ "$status" -ne 0 ]]; then
+    major_failed=1
+  fi
+  return 0
+}
+
+run_major 2 opencode "$env_opencode2"
+run_major 1 opencode1 "$env_opencode1"
+if [[ "$major_failed" -ne 0 ]]; then
   exit 1
 fi
-echo "PLUGIN_INIT_COUNT=1"
-
-set +e
-"$(live_python)" "$SCRIPT_ROOT/scripts/live-reply.py" "$stdout_file" "$stderr_file" "$code" "$model"
-status=$?
-set -e
-exit "$status"
+exit 0

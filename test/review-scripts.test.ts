@@ -153,6 +153,7 @@ describe("configure opencode", () => {
     const sentinel = path.join(parent, "sentinel.json")
     fs.mkdirSync(path.join(directory, "dist"), { recursive: true })
     fs.writeFileSync(path.join(directory, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(directory, "dist/plugin.js"), "export async function CursorPlugin() { return {} }\n")
     fs.writeFileSync(path.join(directory, "dist/plugin-opencode2.js"), "export default {}\n")
     fs.mkdirSync(path.join(directory, "scripts"))
     fs.copyFileSync(path.join(root, "scripts/configure-opencode.sh"), path.join(directory, "scripts/configure-opencode.sh"))
@@ -183,6 +184,19 @@ describe("configure opencode", () => {
       expect(plugin).toContain("CURSOR_REVIEW_PLUGIN=")
       expect(plugin).toContain("CURSOR_REVIEW_PLUGIN_INIT count=")
       expect(plugin.match(/export default/g)).toHaveLength(1)
+      const classicConfig = JSON.parse(fs.readFileSync(path.join(directory, ".opencode-local-1/opencode.json"), "utf8"))
+      expect(classicConfig.plugins).toBeUndefined()
+      expect(classicConfig.plugin).toHaveLength(1)
+      expect(classicConfig.plugin[0]).toContain("cursor-review.mjs")
+      expect(classicConfig.provider.cursor.npm).toContain("index.js")
+      expect(classicConfig.permission.bash["*"]).toBe("deny")
+      const classic = fs.readFileSync(path.join(directory, ".opencode-local-1/cursor-review.mjs"), "utf8")
+      expect(classic).toContain("dist/plugin.js")
+      expect(classic).toContain("export async function CursorPlugin")
+      expect(classic).not.toContain("export default")
+      const classicEnv = fs.readFileSync(path.join(directory, ".opencode-local-1/env"), "utf8")
+      expect(classicEnv).toContain("OPENCODE_DISABLE_PROJECT_CONFIG=1")
+      expect(classicEnv).not.toContain("CURSOR_OPENCODE2_DEV_ENTRY=")
     } finally {
       fs.rmSync(parent, { recursive: true, force: true })
     }
@@ -192,6 +206,7 @@ describe("configure opencode", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "configure-root-"))
     fs.mkdirSync(path.join(directory, "dist"))
     fs.writeFileSync(path.join(directory, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(directory, "dist/plugin.js"), "export async function CursorPlugin() { return {} }\n")
     fs.writeFileSync(path.join(directory, "dist/plugin-opencode2.js"), "export default {}\n")
     try {
       const result = run("bash", ["scripts/configure-opencode.sh"], {
@@ -219,6 +234,7 @@ describe("live test script", () => {
     fs.mkdirSync(path.join(directory, "dist"), { recursive: true })
     fs.mkdirSync(path.join(directory, "scripts"), { recursive: true })
     fs.writeFileSync(path.join(directory, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(directory, "dist/plugin.js"), "export async function CursorPlugin() { return {} }\n")
     fs.writeFileSync(path.join(directory, "dist/plugin-opencode2.js"), "export default {}\n")
     fs.copyFileSync(path.join(root, "scripts/live-test.sh"), path.join(directory, "scripts/live-test.sh"))
     fs.copyFileSync(path.join(root, "scripts/configure-opencode.sh"), path.join(directory, "scripts/configure-opencode.sh"))
@@ -228,6 +244,29 @@ describe("live test script", () => {
       })
       expect(result.status).toBe(1)
       expect(`${result.stdout}${result.stderr}`).toContain("LIVE_TEST=failed")
+      expect(`${result.stdout}${result.stderr}`).toContain("opencode1 (OpenCode 1.x)")
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("fails when OpenCode 1.x is missing and does not skip", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "live-no-opencode1-"))
+    const bin = path.join(directory, "bin")
+    fs.mkdirSync(bin)
+    fs.writeFileSync(path.join(bin, "opencode"), "#!/bin/sh\necho should-not-run > \"$HOME/ran\"\nexit 0\n")
+    fs.chmodSync(path.join(bin, "opencode"), 0o755)
+    try {
+      const result = run("bash", ["scripts/live-test.sh"], {
+        env: without([], { CURSOR_API_KEY: "not-a-real-key", HOME: directory, PATH: `${bin}:/usr/bin:/bin` }),
+      })
+      expect(result.status).toBe(1)
+      const output = `${result.stdout}${result.stderr}`
+      expect(output).toContain("LIVE_TEST=failed")
+      expect(output).toContain("opencode1 (OpenCode 1.x)")
+      expect(output).not.toContain("LIVE_TEST=skipped")
+      expect(output).not.toContain("LIVE_TEST=passed")
+      expect(fs.existsSync(path.join(directory, "ran"))).toBe(false)
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
     }
@@ -252,14 +291,21 @@ describe("cloud agent install", () => {
     expect(environment.install).not.toContain("2.2.5")
     expect(environment.install).not.toContain("bash -s -- --version")
     expect(environment.install).toContain("https://opencode.ai/v2/install | bash -s -- --no-modify-path")
+    expect(environment.install).toContain("https://opencode.ai/install | bash -s -- --no-modify-path")
+    expect(environment.install).toContain("bash -o pipefail -c")
     expect(environment.install).toContain("https://opencode.ai/update/api/latest/cli/npm")
+    expect(environment.install).toContain("https://registry.npmjs.org/opencode-ai/latest")
+    expect(environment.install).toContain('HOME="$opencode1_home"')
+    expect(environment.install).not.toContain("1.19.5")
+    expect(environment.install).not.toContain("2.2.6")
     expect(environment.install).not.toContain("scripts/configure-opencode.sh")
     expect(environment.install).not.toContain("scripts/cloud-agent-install.sh")
     expect(environment.install).not.toContain("opencode.json")
     expect(environment.install).not.toContain("CURSOR_REVIEW_PLUGIN")
     expect(script).not.toContain("<<'PY'")
     expect(configure).toContain("CURSOR_REVIEW_PLUGIN_INIT")
-    expect(configure).not.toContain('"plugin":')
+    expect(configure).toContain("dist/plugin.js")
+    expect(configure).toContain("cursor-review.mjs")
   })
 
   it("does not install when sourced, and reads a reported version", () => {
@@ -278,13 +324,64 @@ describe("cloud agent install", () => {
         printf 'parsed %s\\n' "$(opencode_version_from_metadata '{"version":"v9.9.9","package":"@opencode/cli"}')"
         printf 'match %s\\n' "$(opencode_version_of "$BIN/opencode")"
         printf 'missing %s\\n' "$(opencode_version_of "$BIN/missing")"
+        printf 'one %s\\n' "$(opencode1_release_version '{"version":"1.2.3"}')"
+        if opencode1_release_version '{"version":"2.2.6"}' >/dev/null; then printf 'accepted\\n'; else printf 'rejected\\n'; fi
         printf 'sourced\\n'
         `,
         { HOME: directory, PATH: `${bin}:/usr/bin:/bin`, BIN: bin },
       )
       expect(result.status, result.stderr).toBe(0)
-      expect(result.stdout).toBe("parsed 9.9.9\nmatch 9.9.9\nmissing \nsourced\n")
+      expect(result.stdout).toBe("parsed 9.9.9\nmatch 9.9.9\nmissing \none 1.2.3\nrejected\nsourced\n")
       expect(fs.existsSync(path.join(directory, "curl-called"))).toBe(false)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("stops when an older OpenCode 1.x download fails", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "install-old1-"))
+    const bin = path.join(directory, "bin")
+    const older = path.join(directory, ".opencode1", ".opencode", "bin", "opencode")
+    const current2 = path.join(directory, ".opencode", "bin", "opencode")
+    fs.mkdirSync(bin)
+    fs.mkdirSync(path.dirname(older), { recursive: true })
+    fs.mkdirSync(path.dirname(current2), { recursive: true })
+    fs.mkdirSync(path.join(directory, ".bun", "bin"), { recursive: true })
+    fs.writeFileSync(path.join(directory, ".bun", "bin", "bun"), "#!/bin/sh\nexit 0\n")
+    fs.chmodSync(path.join(directory, ".bun", "bin", "bun"), 0o755)
+    fs.writeFileSync(current2, "#!/bin/sh\necho 'opencode v9.9.9'\n")
+    fs.chmodSync(current2, 0o755)
+    fs.writeFileSync(older, "#!/bin/sh\necho '1.0.1'\n")
+    fs.chmodSync(older, 0o755)
+    fs.writeFileSync(path.join(bin, "sudo"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/sudo.log\"\nexit 0\n")
+    fs.chmodSync(path.join(bin, "sudo"), 0o755)
+    fs.writeFileSync(
+      path.join(bin, "curl"),
+      `#!/bin/sh
+printf '%s\\n' "$*" >> "$HOME/curl.log"
+url=""
+for arg in "$@"; do
+  case "$arg" in
+    http*) url="$arg" ;;
+  esac
+done
+case "$url" in
+  *update/api/latest/cli/npm*) printf '%s\\n' '{"version":"9.9.9"}' ;;
+  *opencode-ai/latest*) printf '%s\\n' '{"version":"1.2.3"}' ;;
+  *) exit 1 ;;
+esac
+`,
+    )
+    fs.chmodSync(path.join(bin, "curl"), 0o755)
+    try {
+      const result = run("bash", ["scripts/cloud-agent-install.sh"], {
+        env: without([], { HOME: directory, PATH: `${bin}:/usr/bin:/bin` }),
+      })
+      expect(result.status).not.toBe(0)
+      expect(result.stdout).not.toContain("OpenCode 1.x")
+      // The installer runs with the private prefix as HOME, so its curl log is there.
+      expect(fs.readFileSync(path.join(directory, ".opencode1", "curl.log"), "utf8")).toContain("https://opencode.ai/install")
+      expect(fs.readFileSync(older, "utf8")).toContain("echo '1.0.1'")
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
     }
@@ -536,6 +633,7 @@ describe("isolated check", () => {
     fs.mkdirSync(bin)
     fs.writeFileSync(path.join(tree, "package.json"), JSON.stringify({ version: "9.9.9" }) + "\n")
     fs.writeFileSync(path.join(tree, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(tree, "dist/plugin.js"), "export async function CursorPlugin() { return {} }\n")
     fs.writeFileSync(path.join(tree, "dist/plugin-opencode2.js"), "export default {}\n")
     const python = selectedPython()
     const timeoutLog = path.join(tree, "timeout.log")
@@ -551,8 +649,22 @@ sys.stderr.write((match.group(0) if match else "no-marker") + "\\n")
     )
     fs.chmodSync(path.join(bin, "read-marker.py"), 0o755)
     fs.writeFileSync(
+      path.join(bin, "read-classic.py"),
+      `#!${python}
+import os, pathlib, re, sys
+text = pathlib.Path(os.environ["OPENCODE_CONFIG_DIR"], "cursor-review.mjs").read_text()
+match = re.search(r"CURSOR_REVIEW_PLUGIN=\\S+ version=\\S+", text)
+sys.stderr.write((match.group(0) if match else "no-marker") + "\\n")
+`,
+    )
+    fs.chmodSync(path.join(bin, "read-classic.py"), 0o755)
+    fs.writeFileSync(
       path.join(bin, "opencode"),
       `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "opencode v2.2.6"
+  exit 0
+fi
 mkdir -p "$TMPDIR/runtime-created"
 printf native-library > "$TMPDIR/runtime-created/library.bin"
 if [ "$1" = plugin ]; then
@@ -568,6 +680,26 @@ exit 1
 `,
     )
     fs.chmodSync(path.join(bin, "opencode"), 0o755)
+    fs.writeFileSync(
+      path.join(bin, "opencode1"),
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "1.19.5"
+  exit 0
+fi
+mkdir -p "$TMPDIR/runtime-created"
+printf native-library > "$TMPDIR/runtime-created/library.bin"
+if [ "$1" = run ]; then
+  ${JSON.stringify(python)} ${JSON.stringify(path.join(bin, "read-classic.py"))}
+  printf '%s\\n' "CURSOR_REVIEW_PLUGIN_INIT count=1 path=$CURSOR_REVIEW_PLUGIN_PATH" >&2
+  printf '%s\\n' '{"type":"text","part":{"type":"text","text":"pong"}}'
+  exit 0
+fi
+echo "unexpected $*" >&2
+exit 1
+`,
+    )
+    fs.chmodSync(path.join(bin, "opencode1"), 0o755)
     const env = {
       HOME: tree,
       PATH: `${bin}:/usr/bin:/bin`,
@@ -591,15 +723,28 @@ exit 1
       expect(passed.stdout).toContain(`WORKTREE=${tree}`)
       expect(passed.stdout).toContain(`PLUGIN_PATH=${pluginPath}`)
       expect(passed.stdout).toContain("PLUGIN_VERSION=9.9.9")
+      expect(passed.stdout).toContain("OPENCODE_MAJOR=2")
+      expect(passed.stdout).toContain("OPENCODE_MAJOR=1")
+      expect(passed.stdout).toContain("OPENCODE_VERSION=opencode v2.2.6")
+      expect(passed.stdout).toContain("OPENCODE_VERSION=1.19.5")
       expect(passed.stdout).toContain(`PLUGIN_LOADED=CURSOR_REVIEW_PLUGIN=${pluginPath} version=9.9.9`)
-      expect(passed.stdout).toContain("LIVE_TEST=passed")
+      const classicPath = fs.realpathSync(path.join(tree, "dist/plugin.js"))
+      expect(passed.stdout).toContain(`PLUGIN_LOADED=CURSOR_REVIEW_PLUGIN=${classicPath} version=9.9.9`)
+      expect(passed.stdout.match(/LIVE_TEST=passed/g)).toEqual(["LIVE_TEST=passed", "LIVE_TEST=passed"])
       expect(passed.stdout).not.toContain(secret)
       expect(passed.stdout).toContain(fs.realpathSync(path.join(reviewHome, "config", "opencode2")))
+      expect(passed.stdout).toContain(fs.realpathSync(path.join(reviewHome, "config", "opencode1")))
       const config = JSON.parse(fs.readFileSync(path.join(reviewHome, "config", "opencode2", "opencode.json"), "utf8"))
       expect(config.plugins).toHaveLength(1)
       expect(config.plugin).toBeUndefined()
       expect(config.permission.bash["*"]).toBe("deny")
-      expect(passed.stdout).toContain("PLUGIN_INIT_COUNT=1")
+      const classicConfig = JSON.parse(fs.readFileSync(path.join(reviewHome, "config", "opencode1", "opencode.json"), "utf8"))
+      expect(classicConfig.plugins).toBeUndefined()
+      expect(classicConfig.plugin).toHaveLength(1)
+      expect(classicConfig.plugin[0]).toContain("cursor-review.mjs")
+      expect(classicConfig.provider.cursor.npm).not.toContain("plugin.js")
+      expect(classicConfig.provider.cursor.npm).toContain("index.js")
+      expect(passed.stdout.match(/PLUGIN_INIT_COUNT=1/g)).toEqual(["PLUGIN_INIT_COUNT=1", "PLUGIN_INIT_COUNT=1"])
       expect(fs.existsSync(path.join(tree, ".opencode-local"))).toBe(false)
       const deadlines = fs.readFileSync(timeoutLog, "utf8")
       expect(deadlines).toContain("60 ")
@@ -626,10 +771,12 @@ exit 0
       expect(alias).not.toBe(fs.realpathSync(tree))
       const twice = run("bash", ["scripts/live-test.sh"], { env: { ...env, OPENCODE_CONFIG_ROOT: alias } })
       expect(twice.status, `${twice.stdout}\n${twice.stderr}`).toBe(1)
-      expect(twice.stdout).toContain("initialized the provider 2 times")
-      expect(twice.stdout).toContain(`path=${pluginPath}`)
+      const opener = twice.stdout.split("OPENCODE_MAJOR=1")[0] ?? ""
+      expect(opener).toContain("initialized the provider 2 times")
+      expect(opener).toContain(`path=${pluginPath}`)
+      expect(opener).not.toContain("LIVE_TEST=passed")
       expect(twice.stdout).not.toContain(`${alias}/dist/plugin-opencode2.js`)
-      expect(twice.stdout).not.toContain("LIVE_TEST=passed")
+      expect(twice.stdout).toContain("LIVE_TEST=passed")
 
       fs.writeFileSync(path.join(bin, "opencode"), "#!/bin/sh\nmkdir -p \"$TMPDIR/runtime-created\"\nprintf native-library > \"$TMPDIR/runtime-created/library.bin\"\nif [ \"$1\" = run ]; then echo ran > \"$HOME/ran-model\"; fi\nexit 0\n")
       const failed = run("bash", ["scripts/live-test.sh"], { env: { ...env, HOME: tree } })
@@ -1367,6 +1514,7 @@ describe("effective opencode permissions", () => {
     fs.mkdirSync(path.join(directory, "dist"), { recursive: true })
     fs.mkdirSync(sibling)
     fs.writeFileSync(path.join(directory, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(directory, "dist/plugin.js"), "export async function CursorPlugin() { return {} }\n")
     fs.writeFileSync(path.join(directory, "dist/plugin-opencode2.js"), "export default {}\n")
     fs.writeFileSync(path.join(sibling, "secret.env"), "nope\n")
     try {
@@ -1382,7 +1530,7 @@ describe("effective opencode permissions", () => {
       expect(Object.keys(config.permission.edit).at(-1)).toBe("*.env.example")
       const decide = (action: string, resource: string) => {
         const decided = run("bun", ["scripts/opencode-permission.mjs", configPath, action, resource])
-        expect(decided.status, `${action} ${resource}\n${decided.stderr}`).toBe(0)
+        if (decided.status !== 0) throw new Error(`${action} ${resource}\n${decided.stderr}`)
         return decided.stdout.trim()
       }
       for (const action of ["read", "edit"]) {
@@ -1415,6 +1563,7 @@ describe("effective opencode permissions", () => {
     fs.mkdirSync(path.join(directory, "dist"), { recursive: true })
     fs.mkdirSync(path.join(directory, "scripts"))
     fs.writeFileSync(path.join(directory, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(directory, "dist/plugin.js"), "export async function CursorPlugin() { return {} }\n")
     fs.writeFileSync(path.join(directory, "dist/plugin-opencode2.js"), "export default {}\n")
     fs.copyFileSync(path.join(root, "scripts/configure-opencode.sh"), path.join(directory, "scripts/configure-opencode.sh"))
     try {
@@ -1437,6 +1586,7 @@ describe("live test deadlines and cleanup", () => {
       fs.mkdirSync(bin)
       fs.mkdirSync(path.join(directory, "dist"), { recursive: true })
       fs.writeFileSync(path.join(directory, "dist/index.js"), "export {}\n")
+      fs.writeFileSync(path.join(directory, "dist/plugin.js"), "export async function CursorPlugin() { return {} }\n")
       fs.writeFileSync(path.join(directory, "dist/plugin-opencode2.js"), "export default {}\n")
       // Dedupe by name: existsSync follows links, so a broken host link (an
       // Ubuntu image ships one) read as missing and was linked twice.
@@ -1449,7 +1599,9 @@ describe("live test deadlines and cleanup", () => {
         }
       }
       fs.writeFileSync(path.join(bin, "opencode"), "#!/bin/sh\necho should-not-run > \"$HOME/ran\"\nexit 0\n")
+      fs.writeFileSync(path.join(bin, "opencode1"), "#!/bin/sh\necho should-not-run > \"$HOME/ran\"\nexit 0\n")
       fs.chmodSync(path.join(bin, "opencode"), 0o755)
+      fs.chmodSync(path.join(bin, "opencode1"), 0o755)
       const result = run("bash", ["scripts/live-test.sh"], {
         env: {
           ...process.env,
@@ -1496,10 +1648,13 @@ describe("live test deadlines and cleanup", () => {
     fs.mkdirSync(bin)
     fs.mkdirSync(path.join(directory, "dist"), { recursive: true })
     fs.writeFileSync(path.join(directory, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(directory, "dist/plugin.js"), "export async function CursorPlugin() { return {} }\n")
     fs.writeFileSync(path.join(directory, "dist/plugin-opencode2.js"), "export default {}\n")
     writeTimeoutAdapter(path.join(bin, "review-timeout"), python)
     fs.writeFileSync(path.join(bin, "opencode"), `#!/bin/sh\nmkdir -p "$TMPDIR/runtime-created"\nprintf native-library > "$TMPDIR/runtime-created/library.bin"\necho $$ > ${JSON.stringify(pidFile)}\nsleep 60\n`)
+    fs.writeFileSync(path.join(bin, "opencode1"), "#!/bin/sh\nexit 0\n")
     fs.chmodSync(path.join(bin, "opencode"), 0o755)
+    fs.chmodSync(path.join(bin, "opencode1"), 0o755)
     const child = spawn("bash", ["scripts/live-test.sh"], {
       cwd: root,
       env: {
@@ -1546,6 +1701,7 @@ describe("live test deadlines and cleanup", () => {
     fs.mkdirSync(path.join(directory, "dist"), { recursive: true })
     fs.writeFileSync(path.join(directory, "package.json"), JSON.stringify({ version: "9.9.9" }) + "\n")
     fs.writeFileSync(path.join(directory, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(directory, "dist/plugin.js"), "export async function CursorPlugin() { return {} }\n")
     fs.writeFileSync(path.join(directory, "dist/plugin-opencode2.js"), "export default {}\n")
     writeTimeoutAdapter(path.join(bin, "review-timeout"), python)
     const env = {
@@ -1559,7 +1715,9 @@ describe("live test deadlines and cleanup", () => {
     }
     try {
       fs.writeFileSync(path.join(bin, "opencode"), "#!/bin/sh\necho deliberate-failure >&2\nexit 23\n")
+      fs.writeFileSync(path.join(bin, "opencode1"), "#!/bin/sh\nexit 0\n")
       fs.chmodSync(path.join(bin, "opencode"), 0o755)
+      fs.chmodSync(path.join(bin, "opencode1"), 0o755)
       const discovery = run("bash", ["scripts/live-test.sh"], { env })
       expect(discovery.status, `${discovery.stdout}\n${discovery.stderr}`).toBe(1)
       expect(discovery.stdout).toContain("LIVE_TEST=failed")
@@ -1607,6 +1765,7 @@ exit 23
     fs.mkdirSync(bin)
     fs.mkdirSync(path.join(directory, "dist"), { recursive: true })
     fs.writeFileSync(path.join(directory, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(directory, "dist/plugin.js"), "export async function CursorPlugin() { return {} }\n")
     fs.writeFileSync(path.join(directory, "dist/plugin-opencode2.js"), "export default {}\n")
     writeTimeoutAdapter(path.join(bin, "review-timeout"), python)
     fs.writeFileSync(
@@ -1622,7 +1781,9 @@ while True:
 wait
 `,
     )
+    fs.writeFileSync(path.join(bin, "opencode1"), "#!/bin/sh\nexit 0\n")
     fs.chmodSync(path.join(bin, "opencode"), 0o755)
+    fs.chmodSync(path.join(bin, "opencode1"), 0o755)
     const child = spawn("bash", ["scripts/live-test.sh"], {
       cwd: root,
       env: {
@@ -1666,12 +1827,15 @@ wait
     fs.mkdirSync(hiddenBin)
     fs.mkdirSync(path.join(hidden, "dist"), { recursive: true })
     fs.writeFileSync(path.join(hidden, "dist/index.js"), "export {}\n")
+    fs.writeFileSync(path.join(hidden, "dist/plugin.js"), "export async function CursorPlugin() { return {} }\n")
     fs.writeFileSync(path.join(hidden, "dist/plugin-opencode2.js"), "export default {}\n")
     writeTimeoutAdapter(path.join(hiddenBin, "review-timeout"), python)
     fs.writeFileSync(path.join(hiddenBin, "ps"), "#!/bin/sh\nexit 1\n")
     fs.chmodSync(path.join(hiddenBin, "ps"), 0o755)
     fs.writeFileSync(path.join(hiddenBin, "opencode"), `#!/bin/sh\necho $$ > ${JSON.stringify(hiddenPid)}\nsleep 60\n`)
+    fs.writeFileSync(path.join(hiddenBin, "opencode1"), "#!/bin/sh\nexit 0\n")
     fs.chmodSync(path.join(hiddenBin, "opencode"), 0o755)
+    fs.chmodSync(path.join(hiddenBin, "opencode1"), 0o755)
     const listed = spawn("bash", ["scripts/live-test.sh"], {
       cwd: root,
       env: {

@@ -313,7 +313,7 @@ describe("provider-owned runtime files", () => {
     const now = Date.now()
     for (const file of [...stale, unrelated]) fs.utimesSync(file, new Date(0), new Date(0))
     sweepRuntimeFiles(layout, now + RUNTIME_FILE_TTL_MS - 60_000)
-    for (const file of stale) expect(fs.existsSync(file)).toBe(false)
+    expect(stale.filter((file) => fs.existsSync(file))).toEqual([])
     expect(fs.existsSync(active)).toBe(true)
     expect(fs.existsSync(unrelated)).toBe(true)
   })
@@ -329,7 +329,7 @@ describe("provider-owned runtime files", () => {
     const now = Date.now()
     sweepRuntimeFiles(layout, now)
     sweepRuntimeFiles(layout, now)
-    for (const file of old) expect(fs.existsSync(file)).toBe(false)
+    expect(old.filter((file) => fs.existsSync(file))).toEqual([])
     expect(fs.readdirSync(layout.terminals).filter(file => file.endsWith(".txt"))).toHaveLength(200)
   })
 
