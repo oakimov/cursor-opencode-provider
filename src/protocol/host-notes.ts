@@ -7,7 +7,8 @@
  * - provider notices about one exec result, as postToolUse hook context.
  */
 
-const SYSTEM_UPDATE_BLOCK = /<system-update>([\s\S]*?)<\/system-update>/g
+const SYSTEM_UPDATE_OPEN = "<system-update>"
+const SYSTEM_UPDATE_CLOSE = "</system-update>"
 const SYSTEM_REMINDER_OPEN = "<system_reminder>"
 const SYSTEM_REMINDER_CLOSE = "</system_reminder>"
 
@@ -71,15 +72,26 @@ export function decodePersistedHostNotes(blob: string | undefined): string[] {
 /**
  * Unwrap OpenCode `<system-update>` blocks. One host message may hold several
  * (joined by `hostTailNote`); text that is not only such blocks stays as is.
+ * Each block ends at the first closing tag after its opening tag. The scan is
+ * linear: host text is untrusted, and a lazy regex rescans from every unclosed
+ * opening tag.
  */
 function hostNoteBody(text: string): string {
   const trimmed = text.trim()
   const bodies: string[] = []
-  let rest = trimmed
-  for (const match of trimmed.matchAll(SYSTEM_UPDATE_BLOCK)) {
-    bodies.push(unescapeSystemUpdateText(match[1]!.trim()))
-    rest = rest.replace(match[0], "")
+  let rest = ""
+  let index = 0
+  for (;;) {
+    const open = trimmed.indexOf(SYSTEM_UPDATE_OPEN, index)
+    if (open < 0) break
+    const bodyStart = open + SYSTEM_UPDATE_OPEN.length
+    const close = trimmed.indexOf(SYSTEM_UPDATE_CLOSE, bodyStart)
+    if (close < 0) break
+    bodies.push(unescapeSystemUpdateText(trimmed.slice(bodyStart, close).trim()))
+    rest += trimmed.slice(index, open)
+    index = close + SYSTEM_UPDATE_CLOSE.length
   }
+  rest += trimmed.slice(index)
   return bodies.length > 0 && rest.trim() === ""
     ? bodies.filter(Boolean).join("\n\n")
     : trimmed

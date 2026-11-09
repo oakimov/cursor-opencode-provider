@@ -184,6 +184,17 @@ describe("host note shapes", () => {
     expect(hostNoteText([NOTE, "Read instruction"])).toBe(`${NOTE_TEXT}\n\nRead instruction`)
   })
 
+  it("ends each system-update block at its first closing tag and keeps unclosed text", () => {
+    expect(hostNoteText(["<system-update>a<system-update>b</system-update>"])).toBe("a<system-update>b")
+    expect(hostNoteText(["<system-update>a</system-update> <system-update>b"]))
+      .toBe("<system-update>a</system-update> <system-update>b")
+  })
+
+  it("scans unclosed system-update openers in linear time", () => {
+    const hostile = `<system-update>${"<system-update>a".repeat(200_000)}`
+    expect(hostNoteText([hostile])).toBe(hostile)
+  })
+
   it("undoes OpenCode's XML escaping inside system-update only", () => {
     expect(hostNoteText(["<system-update>\nUse &lt;T&gt; &amp;&amp; keep &amp;lt; literal\n</system-update>"]))
       .toBe("Use <T> && keep &lt; literal")
