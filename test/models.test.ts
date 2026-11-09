@@ -547,11 +547,11 @@ describe("modelsToConfig (context-tier materialization)", () => {
     // variants. Keeping the synthetic id avoids inheriting the base variants;
     // the real Cursor id travels in options instead.
     expect(config["claude-opus-4-8-1m"]).not.toHaveProperty("id")
-    expect(Object.keys(config["claude-opus-4-8"].variants)).toEqual(["Opus 4.8 High"])
-    expect(Object.keys(config["claude-opus-4-8-1m"].variants)).toEqual(["Opus 4.8 1M High"])
+    expect(Object.keys(config["claude-opus-4-8"].variants)).toEqual(["High"])
+    expect(Object.keys(config["claude-opus-4-8-1m"].variants)).toEqual(["High"])
     expect(materializeVariantKeysLikeOpenCode(config)).toEqual({
-      "claude-opus-4-8": ["Opus 4.8 High"],
-      "claude-opus-4-8-1m": ["Opus 4.8 1M High"],
+      "claude-opus-4-8": ["High"],
+      "claude-opus-4-8-1m": ["High"],
     })
 
     const picked = extractCursorVariantParameters(config["claude-opus-4-8-1m"].options)
@@ -575,7 +575,7 @@ describe("modelsToConfig (context-tier materialization)", () => {
 
     const config = modelsToConfig([equivalent])
     expect(Object.keys(config)).toEqual(["claude-opus-4-8", "claude-opus-4-8-1m"])
-    expect(Object.keys(config["claude-opus-4-8-1m"].variants)).toEqual(["Opus 4.8 1M High"])
+    expect(Object.keys(config["claude-opus-4-8-1m"].variants)).toEqual(["High"])
   })
 
   it("avoids collisions with a real model id ending in -1m", () => {
@@ -630,8 +630,8 @@ describe("modelsToConfig (context-tier materialization)", () => {
       output: 15,
       cache_read: 0.5,
     })
-    expect(Object.keys(config["composer-2.5"].variants)).toEqual(["Composer 2.5 default"])
-    expect(Object.keys(config["composer-2.5-fast"].variants)).toEqual(["Composer 2.5 Fast"])
+    expect(Object.keys(config["composer-2.5"].variants)).toEqual(["Standard"])
+    expect(Object.keys(config["composer-2.5-fast"].variants)).toEqual(["Standard"])
   })
 
   it("keeps a Fast-only Composer catalog id on the wire model id", () => {
@@ -681,8 +681,8 @@ describe("modelsToConfig (context-tier materialization)", () => {
     const config = modelsToConfig([opus])
     expect(Object.keys(config)).toEqual(["claude-opus-4-8", "claude-opus-4-8-1m"])
     expect(Object.keys(config["claude-opus-4-8"].variants)).toEqual([
-      "Opus 4.8 High",
-      "Opus 4.8 Fast",
+      "Fast",
+      "High",
     ])
   })
 

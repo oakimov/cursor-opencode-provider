@@ -117,11 +117,11 @@ const THINKING_PARAMETER_ID = "thinking"
 const DISABLED_REASONING_VALUES = new Set(["", "none", "false", "off", "disabled"])
 
 /** Shared by variant resolution and the reasoning capability check. */
-function isEffortParameter(id: string): boolean {
+export function isEffortParameter(id: string): boolean {
   return (EFFORT_PARAMETER_IDS as readonly string[]).includes(id)
 }
 
-function isEnabledReasoningValue(value: string): boolean {
+export function isEnabledReasoningValue(value: string): boolean {
   return !DISABLED_REASONING_VALUES.has(value.trim().toLowerCase())
 }
 

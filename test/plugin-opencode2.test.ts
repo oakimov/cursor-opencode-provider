@@ -343,7 +343,7 @@ describe("opencode2 provider inventory", () => {
     const model = models.get("cursor/claude-4.5-sonnet")!
     expect(Array.isArray(model.variants)).toBe(true)
     expect(model.variants).toHaveLength(1)
-    expect(model.variants[0].id).toBe("Sonnet 4.5 Thinking")
+    expect(model.variants[0].id).toBe("Thinking")
     expect(model.variants[0].settings).toBeDefined()
   })
 

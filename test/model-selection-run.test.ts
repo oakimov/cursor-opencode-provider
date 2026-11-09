@@ -163,7 +163,9 @@ for (const host of ["classic", "modern"] as const) {
     ]
     const label = (context: string, speed: boolean) => `Grok 4.7 High ${speed ? "Fast " : ""}${context}`
     try {
-      const models = mapAvailableModelsResponse({ models: [{ name: "grok-4.7", variants:
+      const models = mapAvailableModelsResponse({ models: [{ name: "grok-4.7",
+        client_display_name: "Grok 4.7",
+        variants:
         ["256k", "500k"].flatMap((context) => [false, true].map((speed) => ({
           displayName: label(context, speed), parameterValues: parameters(context, speed),
           isMaxMode: context === "500k", isDefaultNonMaxConfig: context === "256k",
@@ -171,7 +173,8 @@ for (const host of ["classic", "modern"] as const) {
         }))),
       }] })
       const id = `grok-4.7${fast ? "-fast" : ""}`
-      const savedLabel = label("500k", fast)
+      // Catalog keys are the delta after the model name; Fast entries drop Fast.
+      const savedLabel = "High 500k"
       const classic = modelsToConfig(models)[id]
       const modern = modelsToCatalogModelMap(models)[id]!
       const settings = host === "classic"
