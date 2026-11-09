@@ -1,5 +1,16 @@
 # TODO
 
+- [x] Enforce review evidence before rendering and publication.
+  - [x] Reproduce clean rendering without a ledger and inspect later consumers.
+  - [x] Validate a revision-bound ledger and mandatory command result at render.
+  - [x] Retain digest-bound evidence and recheck it through approval/publication.
+  - [x] Preserve existing frozen pending previews and reject new bypasses.
+  - [x] Regress missing, stale, incomplete, changed and recovered evidence.
+  - [x] Update review instructions and incident lessons; validate and review.
+  - Review: rendering, preview, approval and publication enforce the retained
+    evidence binding; existing pending bytes remain recoverable. These checks
+    validate the evidence gate, not a reviewer's defect-detection rate.
+
 - [x] Fix [#160](https://github.com/oakimov/cursor-opencode-provider/issues/160),
   debug-log retention following OpenCode's append and in-place trim policy.
   - [x] Verify OpenCode 1.18.31 and 2.2.5 writers and recycling behavior.

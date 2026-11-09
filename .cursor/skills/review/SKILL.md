@@ -196,6 +196,10 @@ record is complete and consistent; it cannot certify that processes died.
 `omissionsAnalyzed`, and `failedWorkAnalyzed` (the failed-work retry check),
 plus the `retries` two-invocation sequences with their operation counts and
 persisted state. A pass that did not happen leaves the review incomplete.
+`render` enforces that comparison and, for completed results, the mandatory
+`isolated-check` exit record. Keep its digest-named ledger copy beside the payload throughout
+preview and publication; the publisher rechecks it as described in
+`docs/pr-review.md`. Existing retained legacy previews remain recoverable.
 The ledger is not published, and a ledger that validates is not evidence that
 the findings are true or complete.
 

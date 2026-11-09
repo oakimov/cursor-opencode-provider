@@ -443,6 +443,63 @@ function draft(
   ) + "\n"
 }
 
+/** Existing publication races also exercise recovery of pre-gate retained bytes. */
+function writeLegacyPayload(payload: string, text: string): void {
+  const value = JSON.parse(text)
+  const body = value.body.trim()
+  const material = { ...value, event: "COMMENT", body, result: value.result ?? null }
+  const keys = new Set<string>()
+  JSON.stringify(material, (key, item) => { keys.add(key); return item })
+  const identity = createHash("sha256").update(JSON.stringify(material, [...keys].sort())).digest("hex")
+  value.body = `${body}\n\n<!-- cursor-review:${identity} -->\n`
+  const raw = JSON.stringify(value, null, 2) + "\n"
+  fs.writeFileSync(payload, raw)
+  const retained = path.join(path.dirname(payload), "retained", `preview-${createHash("sha256").update(raw).digest("hex")}`)
+  fs.mkdirSync(retained, { recursive: true })
+  fs.writeFileSync(path.join(retained, "payload.json"), raw)
+  fs.writeFileSync(path.join(retained, "payload.json.preview"), raw)
+  fs.writeFileSync(path.join(retained, ".retention.json"), JSON.stringify({
+    kind: "cursor-review-artifacts-v1", identities: [identity], posted: {}, state: "pending",
+  }))
+}
+
+function evidenceLedger(result: ReturnType<typeof structuredResult>) {
+  return {
+    revision: result.head,
+    behaviors: [{
+      id: "publication", summary: "Synthetic publication fixture",
+      contract: [{ path: "scripts/review-publish.py", line: 1, note: "Only the approved review is sent." }],
+      scenarios: [{
+        id: "fixture", category: "publication", applicable: true, reason: "",
+        expected: "The pinned operation is sent once.", observed: "Fixture observation.",
+        evidence: "synthetic", downstream: "Fixture receipt is checked.",
+      }], uncovered: [],
+    }],
+    candidates: result.findings.map(finding => ({
+      id: finding.id, behavior: "publication", disposition: "actionable",
+      observation: finding.explanation, contract: "The approved operation is pinned.",
+      trigger: finding.trigger, causalPath: finding.explanation,
+      consequence: finding.consequence, violation: "A replacement is sent.",
+      evidenceKind: "synthetic", setup: "synthetic", provenance: "introduced",
+      policyConflict: false, citedRequirement: "",
+    })),
+    omissions: [], omissionsNone: "Fixture omission pass completed.",
+    retries: [], retriesNone: "No refresh operation in this fixture.",
+    passes: {
+      candidatesValidated: result.outcome !== "incomplete",
+      omissionsAnalyzed: result.outcome !== "incomplete",
+      failedWorkAnalyzed: result.outcome !== "incomplete",
+    },
+  }
+}
+
+/** Supply explicit valid evidence for tests whose subject is another publication guard. */
+function renderReview(source: string, payload: string, env: NodeJS.ProcessEnv) {
+  const result = JSON.parse(fs.readFileSync(source, "utf8"))
+  fs.writeFileSync(path.join(path.dirname(source), "ledger.json"), JSON.stringify(evidenceLedger(result)))
+  return run(["render", source, payload], env)
+}
+
 function postBodies(state: string): string {
   const file = path.join(state, "post-bodies")
   return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : ""
@@ -469,7 +526,7 @@ function installDraft(
   summary: string,
   comment: string,
 ) {
-  fs.writeFileSync(
+  writeLegacyPayload(
     payload,
     draft([{ path: "scripts/review-publish.py", line: 44, side: "RIGHT", body: comment }], summary, pull),
   )
@@ -613,7 +670,7 @@ describe("review publication", () => {
     const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
     try {
       for (const prefix of ["ghs_", "ghu_", "gho_", "ghr_"]) {
-        fs.writeFileSync(payload, draft([], prefix + "synthetic_token\n"))
+        writeLegacyPayload(payload, draft([], prefix + "synthetic_token\n"))
         expect(run(["stamp", payload], env).status).toBe(3)
       }
       expect(callsOf(state)).toEqual([])
@@ -726,17 +783,18 @@ describe("review publication", () => {
     const payload = path.join(directory, "payload.json")
     const checks = [
       { name: "diff", status: "passed", detail: "The description matches the diff." },
-      { name: "unit-tests", status: "passed", detail: "The full suite passed." },
+      { name: "unit-tests", status: "passed", detail: "The full suite passed.", exitCode: 0 },
+      { name: "isolated-check", status: "passed", detail: "The fixture isolated command passed.", exitCode: 0 },
     ]
     try {
       fs.writeFileSync(source, JSON.stringify(structuredResult({ outcome: "clean", findings: [], checks })) + "\n")
-      const refused = run(["render", source, payload], {})
+      const refused = renderReview(source, payload, {})
       expect(refused.status, refused.stderr).toBe(2)
       expect(refused.stderr).toContain("checks.adversarial")
       expect(fs.existsSync(payload)).toBe(false)
       checks.push({ name: "adversarial", status: "passed", detail: "Traced validation, partial updates, recovery and downstream consumption against the contract, with source checks and a fake-service reproduction." })
       fs.writeFileSync(source, JSON.stringify(structuredResult({ outcome: "clean", findings: [], checks })) + "\n")
-      const rendered = run(["render", source, payload], {})
+      const rendered = renderReview(source, payload, {})
       expect(rendered.status, rendered.stderr).toBe(0)
       expect(JSON.parse(fs.readFileSync(payload, "utf8")).body).toContain("adversarial: passed.")
     } finally {
@@ -759,7 +817,7 @@ describe("review publication", () => {
         const result = structuredResult()
         const checks = [...result.checks, { name: "command", detail: "Recorded command result.", ...check }]
         fs.writeFileSync(source, JSON.stringify({ ...result, checks }))
-        const refused = run(["render", source, payload], {})
+        const refused = renderReview(source, payload, {})
         expect(refused.status, refused.stderr).toBe(2)
         expect(refused.stderr).toContain("checks[3].exitCode")
         expect(fs.existsSync(payload)).toBe(false)
@@ -768,7 +826,7 @@ describe("review publication", () => {
       fs.writeFileSync(source, JSON.stringify({ ...result, checks: [...result.checks, {
         name: "command", status: "passed", detail: "The command exited successfully.", exitCode: 0,
       }] }))
-      const rendered = run(["render", source, payload], {})
+      const rendered = renderReview(source, payload, {})
       expect(rendered.status, rendered.stderr).toBe(0)
       expect(JSON.parse(fs.readFileSync(payload, "utf8")).body).toContain("command: passed (exit 0).")
     } finally {
@@ -790,7 +848,7 @@ describe("review publication", () => {
         }
         const checks = [...result.checks, command]
         fs.writeFileSync(source, JSON.stringify({ ...result, checks }))
-        const rendered = run(["render", source, payload], {})
+        const rendered = renderReview(source, payload, {})
         expect(rendered.status, rendered.stderr).toBe(0)
         const body = JSON.parse(fs.readFileSync(payload, "utf8")).body as string
         expect(body).toContain("No actionable findings.")
@@ -807,7 +865,7 @@ describe("review publication", () => {
           { ...command, status: "passed", exitCode: 0 },
         ]) {
           fs.writeFileSync(source, JSON.stringify({ ...result, checks: [...result.checks, invalid] }))
-          const refused = run(["render", source, payload], {})
+          const refused = renderReview(source, payload, {})
           expect(refused.status, refused.stderr).toBe(2)
           expect(fs.existsSync(payload)).toBe(false)
         }
@@ -816,13 +874,13 @@ describe("review publication", () => {
           fs.writeFileSync(source, JSON.stringify({ ...result, checks: [
             ...result.checks.filter((check) => check.name !== name), { ...command, name },
           ] }))
-          const refused = run(["render", source, payload], {})
+          const refused = renderReview(source, payload, {})
           expect(refused.status, refused.stderr).toBe(2)
           expect(refused.stderr).toContain(".failure")
         }
         const { failure: _failure, ...unattributed } = command
         fs.writeFileSync(source, JSON.stringify({ ...result, checks: [...result.checks, unattributed] }))
-        expect(run(["render", source, payload], {}).status).toBe(2)
+        expect(renderReview(source, payload, {}).status).toBe(2)
       }
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
@@ -838,7 +896,7 @@ describe("review publication", () => {
     fs.writeFileSync(path.join(state, "reviews.json"), "[]\n")
     fs.writeFileSync(path.join(state, "head"), head + "\n")
     writeGh(bin)
-    fs.writeFileSync(payload, draft([{ path: "scripts/configure-opencode.sh", line: 102, side: "RIGHT", body: "P1. A trailing allow lets env files through." }]))
+    writeLegacyPayload(payload, draft([{ path: "scripts/configure-opencode.sh", line: 102, side: "RIGHT", body: "P1. A trailing allow lets env files through." }]))
     const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
     try {
       const stamped = run(["stamp", payload], env)
@@ -876,7 +934,7 @@ describe("review publication", () => {
     fs.writeFileSync(path.join(state, "reviews.json"), "[]\n")
     fs.writeFileSync(path.join(state, "head"), head + "\n")
     writeGh(bin)
-    fs.writeFileSync(
+    writeLegacyPayload(
       payload,
       draft([{ path: "scripts/configure-opencode.sh", line: 102, side: "RIGHT", body: "P1. A trailing allow lets env files through." }]),
     )
@@ -917,7 +975,7 @@ describe("review publication", () => {
     fs.writeFileSync(path.join(state, "reviews.json"), "[]\n")
     fs.writeFileSync(path.join(state, "head"), otherHead + "\n")
     writeGh(bin)
-    fs.writeFileSync(payload, draft([] , "No findings.\nThe checked diff does not show a defect in the files read.\n"))
+    writeLegacyPayload(payload, draft([] , "No findings.\nThe checked diff does not show a defect in the files read.\n"))
     const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
     try {
       expect(run(["stamp", payload], env).status).toBe(0)
@@ -950,7 +1008,7 @@ describe("review publication", () => {
     fs.writeFileSync(path.join(state, "reviews.json"), "[]\n")
     fs.writeFileSync(path.join(state, "head"), head + "\n")
     writeGh(bin)
-    fs.writeFileSync(payload, draft([{ path: "scripts/isolated-check.sh", line: 4, side: "RIGHT", body: "P1. The check can read files outside its home." }]))
+    writeLegacyPayload(payload, draft([{ path: "scripts/isolated-check.sh", line: 4, side: "RIGHT", body: "P1. The check can read files outside its home." }]))
     const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_FAIL: "1" }
     try {
       expect(run(["stamp", payload], env).status).toBe(0)
@@ -979,7 +1037,7 @@ describe("review publication", () => {
     fs.writeFileSync(path.join(state, "reviews.json"), "[]\n")
     fs.writeFileSync(path.join(state, "head"), head + "\n")
     writeGh(bin)
-    fs.writeFileSync(
+    writeLegacyPayload(
       payload,
       draft([{ path: "scripts/live-test.sh", line: 12, side: "RIGHT", body: "See /home/ubuntu/src/plugin.js and crsr_secret." }]),
     )
@@ -1007,14 +1065,14 @@ describe("review publication", () => {
     writeGh(bin)
     const first = draft([{ path: "scripts/review-publish.py", line: 40, side: "RIGHT", body: "P1. Approval must name the shown preview." }])
     const second = draft([{ path: "scripts/review-publish.py", line: 41, side: "RIGHT", body: "P1. A later draft is a different preview." }])
-    fs.writeFileSync(payload, first)
+    writeLegacyPayload(payload, first)
     const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
     try {
       expect(run(["stamp", payload], env).status).toBe(0)
       const shown = run(["show", payload], env)
       expect(shown.status, shown.stderr).toBe(0)
       const digest = previewDigest(shown.stderr)
-      fs.writeFileSync(payload, second)
+      writeLegacyPayload(payload, second)
       expect(run(["stamp", payload], env).status).toBe(0)
       const replaced = run(["approve", payload, approval, digest], env)
       expect(replaced.status).toBe(5)
@@ -1027,7 +1085,7 @@ describe("review publication", () => {
       expect(edited.status).toBe(5)
       expect(edited.stderr).toContain("not the preview")
       expect(postsOf(state)).toBe(0)
-      fs.writeFileSync(payload, second)
+      writeLegacyPayload(payload, second)
       expect(run(["stamp", payload], env).status).toBe(0)
       const approved = approve(payload, approval, env)
       expect(approved.status, approved.stderr).toBe(0)
@@ -1052,7 +1110,7 @@ describe("review publication", () => {
     fs.writeFileSync(path.join(state, "reviews.json"), "[]\n")
     fs.writeFileSync(path.join(state, "head"), head + "\n")
     writeGh(bin)
-    fs.writeFileSync(payload, draft([{ path: "scripts/review-publish.py", line: 50, side: "RIGHT", body: "P2. Concurrent posts must not both create a review." }]))
+    writeLegacyPayload(payload, draft([{ path: "scripts/review-publish.py", line: 50, side: "RIGHT", body: "P2. Concurrent posts must not both create a review." }]))
     const env = withApp({ ...processEnvWithoutReviewApp(), PYTHONDONTWRITEBYTECODE: "1", REVIEW_ARTIFACT_DIR: path.join(directory, "retained"), PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_SLOW_POST: "1" })
     const runPost = () => new Promise<{ status: number; stdout: string; stderr: string }>((resolve) => {
       const child = spawn(python, publisherArgs(["post", payload, approval]), {
@@ -1110,7 +1168,7 @@ describe("review publication", () => {
     ]
     try {
       for (const sample of samples) {
-        fs.writeFileSync(payload, draft([{ path: "scripts/review-publish.py", line: 12, side: "RIGHT", body: sample.body }]))
+        writeLegacyPayload(payload, draft([{ path: "scripts/review-publish.py", line: 12, side: "RIGHT", body: sample.body }]))
         const stamped = run(["stamp", payload], env)
         expect(stamped.status, sample.body + stamped.stderr).toBe(sample.status)
         if (sample.problem) expect(stamped.stderr).toContain(sample.problem)
@@ -1131,7 +1189,7 @@ describe("review publication", () => {
     fs.writeFileSync(path.join(state, "reviews.json"), "[]\n")
     fs.writeFileSync(path.join(state, "head"), head + "\n")
     writeGh(bin)
-    fs.writeFileSync(payload, draft([{ path: "scripts/review-publish.py", line: 40, side: "RIGHT", body: "P1. A queued denial must not be published." }]))
+    writeLegacyPayload(payload, draft([{ path: "scripts/review-publish.py", line: 40, side: "RIGHT", body: "P1. A queued denial must not be published." }]))
     const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
     let holder: { release: () => void } | undefined
     let child: ChildProcess | undefined
@@ -1156,7 +1214,7 @@ describe("review publication", () => {
       expect(result.stderr).toContain("GitHub was not called.")
       expect(postsOf(state)).toBe(0)
 
-      fs.writeFileSync(payload, draft([{ path: "scripts/review-publish.py", line: 40, side: "RIGHT", body: "P1. A replaced payload must not be published." }]))
+      writeLegacyPayload(payload, draft([{ path: "scripts/review-publish.py", line: 40, side: "RIGHT", body: "P1. A replaced payload must not be published." }]))
       expect(run(["stamp", payload], env).status).toBe(0)
       expect(approve(payload, approval, env).status).toBe(0)
       const original = fs.readFileSync(payload, "utf8")
@@ -1187,7 +1245,7 @@ describe("review publication", () => {
     fs.writeFileSync(path.join(state, "reviews.json"), "[]\n")
     fs.writeFileSync(path.join(state, "head"), head + "\n")
     writeGh(bin)
-    fs.writeFileSync(payload, draft([{ path: "scripts/review-publish.py", line: 41, side: "RIGHT", body: "P1. A denial during lookup must not be published." }]))
+    writeLegacyPayload(payload, draft([{ path: "scripts/review-publish.py", line: 41, side: "RIGHT", body: "P1. A denial during lookup must not be published." }]))
     const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_HOLD_GET: "1" }
     let child: ChildProcess | undefined
     try {
@@ -1204,7 +1262,7 @@ describe("review publication", () => {
       expect(postsOf(state)).toBe(0)
       fs.rmSync(path.join(state, "release"))
 
-      fs.writeFileSync(payload, draft([{ path: "scripts/review-publish.py", line: 41, side: "RIGHT", body: "P1. A payload edit during lookup must not be published." }]))
+      writeLegacyPayload(payload, draft([{ path: "scripts/review-publish.py", line: 41, side: "RIGHT", body: "P1. A payload edit during lookup must not be published." }]))
       expect(run(["stamp", payload], env).status).toBe(0)
       expect(approve(payload, approval, env).status).toBe(0)
       const original = fs.readFileSync(payload, "utf8")
@@ -1402,7 +1460,7 @@ describe("review publication", () => {
     fs.writeFileSync(path.join(state, "reviews.json"), "[]\n")
     fs.writeFileSync(path.join(state, "head"), head + "\n")
     writeGh(bin)
-    fs.writeFileSync(payload, draft([{ path: "scripts/review-publish.py", line: 42, side: "RIGHT", body: "P2. An unsettled post must not be repeated." }]))
+    writeLegacyPayload(payload, draft([{ path: "scripts/review-publish.py", line: 42, side: "RIGHT", body: "P2. An unsettled post must not be repeated." }]))
     const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_FAIL: "1" }
     let child: ChildProcess | undefined
     try {
@@ -1473,7 +1531,7 @@ describe("review publication", () => {
     fs.writeFileSync(path.join(state, "reviews.json"), "[]\n")
     fs.writeFileSync(path.join(state, "head"), head + "\n")
     writeGh(bin)
-    fs.writeFileSync(payload, draft([{ path: "scripts/review-publish.py", line: 43, side: "RIGHT", body: "P2. A rejected post can be sent again." }]))
+    writeLegacyPayload(payload, draft([{ path: "scripts/review-publish.py", line: 43, side: "RIGHT", body: "P2. A rejected post can be sent again." }]))
     const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_REJECT: "1" }
     try {
       expect(run(["stamp", payload], env).status).toBe(0)
@@ -1535,7 +1593,7 @@ describe("review publication", () => {
         body: "The lock now keeps the approved pull request.",
         evidence: "test/review-publish.test.ts",
       }] }), null, 2) + "\n")
-      const rendered = run(["render", source, payload], env)
+      const rendered = renderReview(source, payload, env)
       expect(rendered.status, rendered.stderr).toBe(0)
       expect(rendered.stderr).toContain("REVIEW_OUTCOME=findings")
       const body = JSON.parse(fs.readFileSync(payload, "utf8")) as { body: string; comments: Array<{ path: string; body: string }> }
@@ -1551,7 +1609,7 @@ describe("review publication", () => {
       expect(body.body).toContain("old-lock (discussion_r10): fixed.")
       expect(body.body).toContain("GitHub actions after approval (replies remain proposals):")
       expect(callsOf(state)).toEqual([])
-      const again = run(["render", source, path.join(directory, "second.json")], env)
+      const again = renderReview(source, path.join(directory, "second.json"), env)
       expect(fs.readFileSync(payload, "utf8")).toBe(fs.readFileSync(path.join(directory, "second.json"), "utf8"))
       expect(run(["stamp", payload], env).status).toBe(0)
       expect(approve(payload, approval, env).status).toBe(0)
@@ -1582,7 +1640,7 @@ describe("review publication", () => {
           { name: "isolated-check", status: "unavailable", detail: "The isolation command was not available." },
         ],
       }), null, 2) + "\n")
-      const incomplete = run(["render", source, path.join(directory, "incomplete.json")], env)
+      const incomplete = renderReview(source, path.join(directory, "incomplete.json"), env)
       expect(incomplete.status, incomplete.stderr).toBe(0)
       expect(incomplete.stderr).toContain("REVIEW_OUTCOME=incomplete")
       expect(incomplete.stderr).toContain("cannot be published")
@@ -1615,7 +1673,7 @@ describe("review publication", () => {
     try {
       for (const sample of cases) {
         fs.writeFileSync(source, JSON.stringify(sample.value, null, 2) + "\n")
-        const result = run(["render", source, payload], {})
+        const result = renderReview(source, payload, {})
         expect(result.status, sample.name + result.stderr).toBe(2)
         expect(result.stderr, sample.name).toContain(sample.problem)
         expect(fs.existsSync(payload)).toBe(false)
@@ -1668,7 +1726,7 @@ describe("review publication", () => {
       expect(JSON.parse(fs.readFileSync(target, "utf8")).head).toBe(head)
       fs.writeFileSync(path.join(state, "head"), `${head}\n`)
 
-      fs.writeFileSync(payload, draft([{ path: "scripts/review-publish.py", line: 44, side: "RIGHT", body: "P1. A stale base must not be published." }]))
+      writeLegacyPayload(payload, draft([{ path: "scripts/review-publish.py", line: 44, side: "RIGHT", body: "P1. A stale base must not be published." }]))
       expect(run(["stamp", payload], env).status).toBe(0)
       expect(approve(payload, approval, env).status).toBe(0)
       fs.writeFileSync(path.join(state, "base"), `${"d".repeat(40)}\n`)
@@ -1714,6 +1772,7 @@ describe("review publication", () => {
     const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
     try {
       fs.writeFileSync(review, JSON.stringify(structuredResult(), null, 2) + "\n")
+      fs.writeFileSync(path.join(directory, "ledger.json"), JSON.stringify(evidenceLedger(structuredResult())))
       const bound = run(["bind", "oakimov", "cursor-opencode-provider", "156", "review.json"], env, directory)
       expect(bound.status, bound.stderr).toBe(0)
       expect(JSON.parse(fs.readFileSync(review, "utf8")).findings).toHaveLength(1)
@@ -1951,7 +2010,7 @@ function structuredResult(overrides: Record<string, unknown> = {}) {
     checks: [
       { name: "diff", status: "passed", detail: "Read the changed files and their callers." },
       { name: "adversarial", status: "passed", detail: "Traced the operation through denial, replacement, partial delivery and retry." },
-      { name: "isolated-check", status: "passed", detail: "Install, build, typecheck, and unit tests passed." },
+      { name: "isolated-check", status: "passed", detail: "Install, build, typecheck, and unit tests passed.", exitCode: 0 },
     ],
     limitations: ["Live OpenCode was not required for this diff."],
     diff: [{ path: "scripts/review-publish.py", line: 44, side: "RIGHT" }],
@@ -1992,7 +2051,7 @@ function resolutionDraft(fixture: ReturnType<typeof freshReview>, statuses = ["f
   })
   const source = path.join(directory, "result.json")
   fs.writeFileSync(source, JSON.stringify(result))
-  const rendered = run(["render", source, payload], env)
+  const rendered = renderReview(source, payload, env)
   expect(rendered.status, rendered.stderr).toBe(0)
   expect(run(["stamp", payload], env).status).toBe(0)
   return { env, result, source, threads }
@@ -2047,11 +2106,11 @@ describe("review artifact retention", () => {
       const payload = path.join(temporary, "preview.json")
       const original = JSON.stringify(structuredResult(), null, 2) + "\n"
       fs.writeFileSync(source, original)
-      const rendered = run(["render", source, payload], env)
+      const rendered = renderReview(source, payload, env)
       expect(rendered.status).toBe(0)
       const draftStore = rendered.stderr.match(/REVIEW_RETAINED=(.+)/)![1]!
       fs.writeFileSync(source, JSON.stringify(structuredResult()))
-      expect(run(["render", source, payload], env).status).toBe(0)
+      expect(renderReview(source, payload, env).status).toBe(0)
       expect(fs.readFileSync(path.join(draftStore, "review.json"), "utf8")).toBe(original)
       expect(fs.readdirSync(draftStore).filter((name) => name.startsWith("source-")).length).toBe(2)
       expect(run(["stamp", payload], env).status).toBe(0)
@@ -2081,7 +2140,7 @@ describe("review artifact retention", () => {
     const { directory, payload, approval, bin, state } = freshReview("review-retention-posted-")
     const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
     try {
-      fs.writeFileSync(payload, draft([]))
+      writeLegacyPayload(payload, draft([]))
       expect(run(["stamp", payload], env).status).toBe(0)
       const shown = run(["show", payload], env)
       const retained = shown.stderr.match(/REVIEW_RETAINED=(.+)/)![1]!
@@ -2109,7 +2168,7 @@ describe("review artifact retention", () => {
       const payload = path.join(workspace, "payload.json")
       const approval = path.join(workspace, "approval.json")
       fs.writeFileSync(source, JSON.stringify(structuredResult()))
-      expect(run(["render", source, payload], env).status).toBe(0)
+      expect(renderReview(source, payload, env).status).toBe(0)
       expect(run(["stamp", payload], env).status).toBe(0)
       const shown = run(["show", payload], env)
       const retained = shown.stderr.match(/REVIEW_RETAINED=(.+)/)![1]!
@@ -2181,7 +2240,7 @@ describe("review thread resolution", () => {
         { mutations: [action, action] },
       ]) {
         fs.writeFileSync(source, JSON.stringify({ ...original, ...change }))
-        expect(run(["render", source, payload], env).status).toBe(2)
+        expect(renderReview(source, payload, env).status).toBe(2)
       }
       expect(postsOf(state)).toBe(0)
       expect(resolutionsOf(state)).toEqual([])
@@ -2196,7 +2255,7 @@ describe("review thread resolution", () => {
     try {
       const { env, source } = resolutionDraft(fixture)
       fs.writeFileSync(source, JSON.stringify(structuredResult({ outcome: "clean", findings: [], prior: [], mutations: [] })))
-      expect(run(["render", source, payload], env).status).toBe(0)
+      expect(renderReview(source, payload, env).status).toBe(0)
       expect(run(["stamp", payload], env).status).toBe(0)
       expect(approve(payload, approval, env).status).toBe(0)
       const posted = run(["post", payload, approval], env)
@@ -2350,7 +2409,7 @@ describe("review thread resolution", () => {
         prior: [{ id: "earlier-0", status: "fixed", source: earlier.comments[0]!.url, note: "Verified the current branch against its regression test." }],
         mutations: [{ action: "resolve", thread: "PRRT_earlier", finding: "earlier-0", snapshot, body: "The earlier finding is addressed at the reviewed head.", evidence: "scripts/review-publish.py:1; test/review-publish.test.ts:1" }],
       })))
-      expect(run(["render", source, payload], env).status).toBe(0)
+      expect(renderReview(source, payload, env).status).toBe(0)
       expect(run(["stamp", payload], env).status).toBe(0)
       expect(approve(payload, approval, env).status).toBe(0)
       // The review posts with one inline finding; its first resolution is rejected.
@@ -2434,6 +2493,178 @@ describe("review thread resolution", () => {
       expect(unreceived.stderr).toContain("No confirmed review receipt")
       expect(postsOf(state)).toBe(0)
       expect(resolutionsOf(state)).toEqual([])
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("review evidence gate", () => {
+  it("requires a matching completed ledger and an isolated command result before rendering", () => {
+    const { directory, payload, bin, state } = freshReview("review-evidence-render-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    const source = path.join(directory, "result.json")
+    const ledgerPath = path.join(directory, "ledger.json")
+    const result = structuredResult({ outcome: "clean", findings: [] })
+    try {
+      fs.writeFileSync(source, JSON.stringify(result))
+      const missing = run(["render", source, payload], env)
+      expect(missing.status, missing.stderr).toBe(2)
+      expect(missing.stderr).toContain("ledger is missing")
+      const ledger = evidenceLedger(result)
+      for (const [change, diagnostic] of [
+        [{ revision: otherHead }, "revision.head"],
+        [{ passes: { ...ledger.passes, omissionsAnalyzed: false } }, "passes"],
+        [{ candidates: evidenceLedger(structuredResult()).candidates }, "findings.candidates"],
+      ] as const) {
+        fs.writeFileSync(ledgerPath, JSON.stringify({ ...ledger, ...change }))
+        const refused = run(["render", source, payload], env)
+        expect(refused.status, refused.stderr).toBe(2)
+        expect(refused.stderr).toContain(diagnostic)
+        expect(fs.existsSync(payload)).toBe(false)
+      }
+      fs.writeFileSync(ledgerPath, JSON.stringify(ledger))
+      fs.writeFileSync(source, JSON.stringify({ ...result, checks: result.checks.filter(check => check.name !== "isolated-check") }))
+      const noCommand = run(["render", source, payload], env)
+      expect(noCommand.status, noCommand.stderr).toBe(2)
+      expect(noCommand.stderr).toContain("checks.isolated-check.exitCode")
+      fs.writeFileSync(source, JSON.stringify(result))
+      expect(run(["render", source, payload], env).status).toBe(0)
+      const value = JSON.parse(fs.readFileSync(payload, "utf8"))
+      expect(value.evidence.ledgerSha256).toBe(createHash("sha256").update(fs.readFileSync(ledgerPath)).digest("hex"))
+      expect(value).not.toHaveProperty("ledger")
+      expect(value.body).not.toContain("Fixture omission")
+      expect(callsOf(state)).toEqual([])
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects fresh hand-built payloads and rechecks bound evidence before preview, approval and post", () => {
+    const { directory, payload, approval, bin, state } = freshReview("review-evidence-stages-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    const source = path.join(directory, "result.json")
+    try {
+      // This is deliberately not the retained-legacy fixture helper.
+      fs.writeFileSync(payload, draft([]))
+      const bypass = run(["stamp", payload], env)
+      expect(bypass.status, bypass.stderr).toBe(2)
+      expect(bypass.stderr).toContain("evidence binding")
+      fs.writeFileSync(source, JSON.stringify(structuredResult({ outcome: "clean", findings: [] })))
+      expect(renderReview(source, payload, env).status).toBe(0)
+      expect(run(["stamp", payload], env).status).toBe(0)
+      const shown = run(["show", payload], env)
+      expect(shown.status, shown.stderr).toBe(0)
+      const value = JSON.parse(fs.readFileSync(payload, "utf8"))
+      const bound = path.join(directory, `ledger-${value.evidence.ledgerSha256}.json`)
+      const original = fs.readFileSync(bound)
+      const originalPayload = fs.readFileSync(payload)
+      fs.rmSync(bound)
+      expect(run(["show", payload], env).status).toBe(2)
+      expect(run(["approve", payload, approval, previewDigest(shown.stderr)], env).status).toBe(2)
+      expect(fs.existsSync(approval)).toBe(false)
+      fs.writeFileSync(bound, original)
+      expect(run(["approve", payload, approval, previewDigest(shown.stderr)], env).status).toBe(0)
+      fs.writeFileSync(bound, Buffer.concat([original, Buffer.from("\n")]))
+      const changed = run(["post", payload, approval], env)
+      expect(changed.status, changed.stderr).toBe(2)
+      expect(changed.stderr).toContain("ledger changed")
+      expect(callsOf(state)).toEqual([])
+      // A new, internally consistent binding still needs a new preview/approval.
+      const replacement = Buffer.concat([original, Buffer.from("\n")])
+      value.evidence.ledgerSha256 = createHash("sha256").update(replacement).digest("hex")
+      fs.writeFileSync(path.join(directory, `ledger-${value.evidence.ledgerSha256}.json`), replacement)
+      fs.writeFileSync(payload, JSON.stringify(value, null, 2) + "\n")
+      expect(run(["post", payload, approval], env).status).not.toBe(0)
+      expect(callsOf(state)).toEqual([])
+      fs.writeFileSync(payload, originalPayload)
+      fs.writeFileSync(bound, original)
+      expect(run(["post", payload, approval], env).status).toBe(0)
+      expect(postsOf(state)).toBe(1)
+      expect(postBodies(state)).not.toContain("Fixture omission")
+      expect(postBodies(state)).not.toContain("ledgerSha256")
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("refuses evidence removed during a held lookup without sending a review", async () => {
+    const { directory, payload, approval, bin, state } = freshReview("review-evidence-race-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, GH_HOLD_GET: "1" }
+    const source = path.join(directory, "result.json")
+    let child: ChildProcess | undefined
+    try {
+      fs.writeFileSync(source, JSON.stringify(structuredResult({ outcome: "clean", findings: [] })))
+      expect(renderReview(source, payload, env).status).toBe(0)
+      expect(run(["stamp", payload], env).status).toBe(0)
+      expect(approve(payload, approval, env).status).toBe(0)
+      const value = JSON.parse(fs.readFileSync(payload, "utf8"))
+      child = spawnPost(payload, approval, env)
+      const done = collect(child)
+      waitFor("reviews lookup", () => callsOf(state).some(line => line.endsWith("/reviews")))
+      fs.rmSync(path.join(directory, `ledger-${value.evidence.ledgerSha256}.json`))
+      fs.writeFileSync(path.join(state, "release"), "go\n")
+      const refused = await done
+      expect(refused.status, refused.stderr).toBe(2)
+      expect(refused.stderr).toContain("ledger is missing")
+      expect(postsOf(state)).toBe(0)
+    } finally {
+      stopProcess(child)
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("recovers retained evidence after the working copy is lost", () => {
+    const { directory, bin, state } = freshReview("review-evidence-recovery-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    const working = path.join(directory, "working")
+    fs.mkdirSync(working)
+    const source = path.join(working, "result.json")
+    const payload = path.join(working, "payload.json")
+    try {
+      fs.writeFileSync(source, JSON.stringify(structuredResult({ outcome: "clean", findings: [] })))
+      expect(renderReview(source, payload, env).status).toBe(0)
+      expect(run(["stamp", payload], env).status).toBe(0)
+      const shown = run(["show", payload], env)
+      expect(shown.status, shown.stderr).toBe(0)
+      const retained = shown.stderr.match(/REVIEW_RETAINED=(.+)/)![1]!
+      const saved = path.join(retained, "payload.json")
+      const value = JSON.parse(fs.readFileSync(saved, "utf8"))
+      expect(fs.existsSync(path.join(retained, `ledger-${value.evidence.ledgerSha256}.json`))).toBe(true)
+      fs.rmSync(working, { recursive: true })
+      const recovered = run(["show", saved], env)
+      expect(recovered.status, recovered.stderr).toBe(0)
+      expect(recovered.stdout).toBe(shown.stdout)
+      const approval = path.join(retained, "approval.json")
+      expect(run(["approve", saved, approval, previewDigest(shown.stderr)], env).status).toBe(0)
+      expect(run(["post", saved, approval], env).status).toBe(0)
+      expect(postsOf(state)).toBe(1)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps an existing retained structured preview without command exits byte-identical", () => {
+    const { directory, payload, approval, bin, state } = freshReview("review-evidence-legacy-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    const source = path.join(directory, "result.json")
+    try {
+      fs.writeFileSync(source, JSON.stringify(structuredResult({ outcome: "clean", findings: [] })))
+      expect(renderReview(source, payload, env).status).toBe(0)
+      const old = JSON.parse(fs.readFileSync(payload, "utf8"))
+      delete old.evidence
+      delete old.result.checks.find((check: { name: string }) => check.name === "isolated-check").exitCode
+      old.body = old.body.replace("isolated-check: passed (exit 0).", "isolated-check: passed.")
+      writeLegacyPayload(payload, JSON.stringify(old))
+      const bytes = fs.readFileSync(payload)
+      expect(run(["stamp", payload], env).status).toBe(0)
+      const shown = run(["show", payload], env)
+      expect(shown.status, shown.stderr).toBe(0)
+      expect(Buffer.from(shown.stdout)).toEqual(bytes)
+      expect(run(["approve", payload, approval, previewDigest(shown.stderr)], env).status).toBe(0)
+      expect(run(["post", payload, approval], env).status).toBe(0)
+      expect(fs.readFileSync(payload)).toEqual(bytes)
+      expect(postsOf(state)).toBe(1)
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
     }

@@ -35,6 +35,7 @@ import base64
 import fcntl
 import hashlib
 import http.client
+import importlib.util
 import json
 import os
 import re
@@ -137,6 +138,8 @@ def identity_of(payload: dict) -> str:
         "comments": payload.get("comments", []),
         "result": payload.get("result"),
     }
+    if "evidence" in payload:
+        material["evidence"] = payload["evidence"]
     encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 
@@ -194,7 +197,7 @@ def text_field(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def validate_result(result: dict) -> list[str]:
+def validate_result(result: dict, *, require_commands: bool = False) -> list[str]:
     problems: list[str] = []
     extra = sorted(set(result) - RESULT_KEYS)
     if extra:
@@ -271,6 +274,10 @@ def validate_result(result: dict) -> list[str]:
                 adversarial_status = check.get("status")
     if diff_status is None:
         problems.append("checks.diff")
+    if require_commands and outcome in {"clean", "findings"}:
+        isolated = [check for check in checks if isinstance(check, dict) and check.get("name") == "isolated-check"]
+        if not isolated or not isinstance(isolated[0].get("exitCode"), int) or isinstance(isolated[0].get("exitCode"), bool):
+            problems.append("checks.isolated-check.exitCode")
     # Passing tests is supporting evidence, not an independent review. Keep
     # the reviewer's branch/state analysis explicit in publishable results.
     if outcome in {"clean", "findings"} and adversarial_status not in {"passed", "skipped"}:
@@ -1124,6 +1131,94 @@ def preview_path(path: Path) -> Path:
     return Path(str(path) + ".preview")
 
 
+def evidence_error(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(2)
+
+
+def compare_evidence(raw: bytes, result: dict) -> None:
+    """Use the same validator as the standalone ledger commands; never cache bytecode."""
+    try:
+        ledger = json.loads(raw)
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("review_ledger", Path(__file__).with_name("review-ledger.py"))
+        if spec is None or spec.loader is None:
+            raise ValueError("validator unavailable")
+        validator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(validator)
+        problems = validator.compare_ledger(ledger, result)
+    except (OSError, ValueError, UnicodeError):
+        evidence_error("Review evidence is unreadable or its validator is unavailable. GitHub was not called.")
+    if problems:
+        evidence_error("Review evidence is incomplete: " + ", ".join(problems) + ". GitHub was not called.")
+
+
+def evidence_name(payload: dict) -> str:
+    evidence = payload.get("evidence")
+    if (
+        not isinstance(evidence, dict) or set(evidence) != {"version", "ledgerSha256"}
+        or type(evidence.get("version")) is not int or evidence["version"] != 1
+        or not isinstance(evidence.get("ledgerSha256"), str)
+        or not DIGEST.fullmatch(evidence["ledgerSha256"])
+    ):
+        evidence_error("Review evidence binding is missing or invalid. Render the result with its ledger. GitHub was not called.")
+    return f"ledger-{evidence['ledgerSha256']}.json"
+
+
+def retained_legacy(raw: bytes, payload: dict) -> bool:
+    """An existing retained snapshot can recover without rewriting its approved bytes."""
+    directory = artifact_root() / f"preview-{hashlib.sha256(raw).hexdigest()}"
+    if directory.is_symlink():
+        return False
+    record = artifact_manifest(directory)
+    saved = directory / "payload.json"
+    return bool(
+        record and identity_of(payload) in record.get("identities", [])
+        and saved.is_file() and not saved.is_symlink() and saved.read_bytes() == raw
+    )
+
+
+def require_evidence(path: Path, raw: bytes, payload: dict) -> bytes | None:
+    if "evidence" not in payload and retained_legacy(raw, payload):
+        return None
+    name = evidence_name(payload)
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        evidence_error("Review evidence needs a structured result. GitHub was not called.")
+    problems = validate_result(result, require_commands=True)
+    if problems:
+        evidence_error("Review result is incomplete: " + ", ".join(problems) + ". GitHub was not called.")
+    try:
+        ledger = (path.parent / name).read_bytes()
+    except OSError:
+        evidence_error("The bound review ledger is missing. Recover it or render again. GitHub was not called.")
+    if hashlib.sha256(ledger).hexdigest() != payload["evidence"]["ledgerSha256"]:
+        evidence_error("The bound review ledger changed. Render again and approve the new preview. GitHub was not called.")
+    compare_evidence(ledger, result)
+    return ledger
+
+
+def keep_evidence(directory: Path, payload: dict, ledger: bytes) -> None:
+    target = directory / evidence_name(payload)
+    if target.is_symlink() or (target.exists() and target.read_bytes() != ledger):
+        evidence_error("Bound review evidence differs; refusing to overwrite it.")
+    if target.exists():
+        return
+    # Publish complete bytes without overwriting another renderer's binding.
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=directory)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(ledger)
+        try:
+            os.link(temporary, target)
+        except FileExistsError:
+            if target.is_symlink() or target.read_bytes() != ledger:
+                evidence_error("Bound review evidence differs; refusing to overwrite it.")
+    finally:
+        temporary.unlink()
+
+
 ARTIFACT_KIND = "cursor-review-artifacts-v1"
 
 
@@ -1175,12 +1270,14 @@ def refuse_discarded(payload: dict) -> None:
         raise SystemExit("This review was explicitly discarded. Create a fresh review and preview; it was not posted.")
 
 
-def retain_artifacts(raw: bytes, payload: dict, source: bytes | None = None, frozen: bool = False) -> Path:
+def retain_artifacts(raw: bytes, payload: dict, source: bytes | None = None, frozen: bool = False, ledger: bytes | None = None) -> Path:
     refuse_discarded(payload)
     directory = artifact_root() / f"preview-{hashlib.sha256(raw).hexdigest()}"
     if directory.is_symlink():
         raise SystemExit("The retained review directory is a symlink; refusing to write outside the store.")
     directory.mkdir(mode=0o700, exist_ok=True)
+    if ledger is not None:
+        keep_evidence(directory, payload, ledger)
     files = {"payload.json": raw}
     if source is not None:
         files["review.json"] = source
@@ -1268,6 +1365,7 @@ def show(path: Path) -> None:
     if problems:
         print("Payload is incomplete: " + ", ".join(problems), file=sys.stderr)
         raise SystemExit(2)
+    ledger = require_evidence(path, raw, payload)
     if not raw.endswith(b"\n"):
         print("Payload file must end with a newline so the shown bytes are exact.", file=sys.stderr)
         raise SystemExit(2)
@@ -1278,7 +1376,7 @@ def show(path: Path) -> None:
     os.replace(temporary, frozen)
     os.chmod(frozen, 0o444)
     digest = hashlib.sha256(raw).hexdigest()
-    retained = retain_artifacts(raw, payload, frozen=True)
+    retained = retain_artifacts(raw, payload, frozen=True, ledger=ledger)
     working = managed_artifacts(path)
     if working and working != retained:
         register_artifacts(working, payload)
@@ -1288,7 +1386,8 @@ def show(path: Path) -> None:
 
 
 def stamp(path: Path) -> None:
-    _raw, payload = load_payload(path)
+    raw, payload = load_payload(path)
+    refuse_scan(raw, payload)
     match_problems = publication_matches(payload)
     if "incomplete" in match_problems:
         print("The review is incomplete. GitHub was not called.", file=sys.stderr)
@@ -1296,6 +1395,7 @@ def stamp(path: Path) -> None:
     if match_problems:
         print("Review result is incomplete: " + ", ".join(match_problems), file=sys.stderr)
         raise SystemExit(2)
+    ledger = require_evidence(path, raw, payload)
     body = payload.get("body")
     if not isinstance(body, str):
         raise SystemExit("Payload body must be a string.")
@@ -1306,6 +1406,9 @@ def stamp(path: Path) -> None:
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     refuse_scan(text.encode(), payload)
     path.write_text(text, encoding="utf-8")
+    if ledger is None:
+        # Carry forward only a legacy snapshot already verified above.
+        retain_artifacts(text.encode(), payload)
     frozen = preview_path(path)
     if frozen.exists():
         frozen.chmod(0o644)
@@ -1340,6 +1443,7 @@ def approve(payload_path: Path, approval_path: Path, preview_sha: str) -> None:
     if problems:
         print("Payload is incomplete: " + ", ".join(problems), file=sys.stderr)
         raise SystemExit(2)
+    require_evidence(payload_path, raw, payload)
     refuse_discarded(payload)
     write_record(
         approval_path,
@@ -1439,6 +1543,7 @@ def authorized_post(payload_path: Path, approval_path: Path) -> tuple[bytes, dic
     if payload.get("base") != approval.get("base") or payload.get("runtime") != approval.get("runtime"):
         print("The payload differs from the approved target. GitHub was not called.", file=sys.stderr)
         raise SystemExit(5)
+    require_evidence(payload_path, raw, payload)
     return raw, payload, approval, digest
 
 
@@ -1697,13 +1802,18 @@ def bind(owner: str, repo: str, pull: int, out: Path | None) -> None:
     print("Recorded the pull request revision from GitHub. No GitHub changes were made.")
 
 
-def render(source: Path, dest: Path) -> None:
+def render(source: Path, dest: Path, ledger_path: Path | None = None) -> None:
     raw, result = load_payload(source)
     refuse_scan(raw, result)
-    problems = validate_result(result)
+    problems = validate_result(result, require_commands=True)
     if problems:
         print("Review result is incomplete: " + ", ".join(problems), file=sys.stderr)
         raise SystemExit(2)
+    try:
+        ledger = (ledger_path or source.with_name("ledger.json")).read_bytes()
+    except OSError:
+        evidence_error("Review evidence ledger is missing. Complete ledger.json before rendering. GitHub was not called.")
+    compare_evidence(ledger, result)
     body, comments = public_review(result)
     payload = {
         "owner": result["owner"],
@@ -1716,14 +1826,16 @@ def render(source: Path, dest: Path) -> None:
         "body": body,
         "comments": comments,
         "result": result,
+        "evidence": {"version": 1, "ledgerSha256": hashlib.sha256(ledger).hexdigest()},
     }
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     refuse_scan(text.encode(), payload)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    keep_evidence(dest.parent, payload, ledger)
     temporary = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
     temporary.write_text(text, encoding="utf-8")
     os.replace(temporary, dest)
-    retained = retain_artifacts(text.encode(), payload, source=raw)
+    retained = retain_artifacts(text.encode(), payload, source=raw, ledger=ledger)
     working = managed_artifacts(dest)
     if working and working != retained:
         register_artifacts(working, payload)
@@ -1771,7 +1883,7 @@ def main() -> None:
     elif args.command == "render":
         if args.payload is None or args.approval is None:
             parser.error("render requires a result file and an output file")
-        render(args.payload, args.approval)
+        render(args.payload, args.approval, Path(args.preview) if args.preview else None)
     elif args.command in {"bind", "threads", "start"}:
         if args.payload is None or args.approval is None or args.preview is None:
             parser.error("bind requires owner, repo, and pull")
