@@ -3545,7 +3545,7 @@ describe("exec safety net (unmapped variants)", () => {
       return {
         index,
         identity,
-        catalog: { namespace: descriptors[index]!.provider_identifier, toolName: descriptors[index]!.tool_name },
+        catalog: identity,
         envelope: definition.description.includes(envelope),
         schema: Buffer.from(definition.input_schema).equals(Buffer.from(descriptors[index]!.input_schema as Uint8Array)),
       }
