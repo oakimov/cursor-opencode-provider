@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `review-publish.py post --token-env NAME` and `complete-resolutions.py --token-env NAME` read a GitHub personal access token (`ghp_` or `github_pat_`) from that environment variable and use it for the review POST and thread resolution. Without the option, publication still uses the GitHub App installation token.
+
 ## [0.8.7] - 2026-11-09
 
 ### Added

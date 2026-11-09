@@ -142,7 +142,7 @@ function writeGh(bin: string): void {
   fs.mkdirSync(bin)
   writeAppKey(path.join(path.dirname(bin), "state"))
   const script = `#!${python}
-import base64, json, os, subprocess, sys, tempfile, time
+import base64, hashlib, json, os, subprocess, sys, tempfile, time
 from pathlib import Path
 state = Path(os.environ["GH_STATE"])
 args = sys.argv[1:]
@@ -234,9 +234,12 @@ if endpoint == "graphql":
     threads_path = state / "threads.json"
     threads = json.loads(threads_path.read_text()) if threads_path.exists() else []
     if "mutation ResolveThread" in query:
-        if token != "ghs_testinstallationtoken":
+        pat = token.startswith("ghp_") or token.startswith("github_pat_")
+        if token != "ghs_testinstallationtoken" and not pat:
             sys.stderr.write("HTTP 403\\n")
             raise SystemExit(1)
+        if pat:
+            (state / "resolve-token-sha256").write_text(hashlib.sha256(token.encode()).hexdigest(), encoding="utf-8")
         with (state / "resolves").open("a") as handle:
             handle.write(variables["id"] + "\\n")
         if os.environ.get("GH_RESOLVE_FORBIDDEN") == "1" or os.environ.get("GH_RESOLVE_FORBIDDEN_THREAD") == variables["id"]:
@@ -290,10 +293,20 @@ if endpoint.endswith("/installation"):
     raise SystemExit(0)
 if method == "POST" and endpoint.endswith("/reviews"):
     expected = "ghs_12345_synthetic.Header-with_dash.signature" if os.environ.get("GH_STATELESS") == "1" else "ghs_testinstallationtoken"
-    if token != expected:
+    pat = token.startswith("ghp_") or token.startswith("github_pat_")
+    if pat:
+        leaked = sorted(
+            key for key, value in os.environ.items()
+            if key not in ("GH_TOKEN", "GITHUB_TOKEN") and (value.startswith("ghp_") or value.startswith("github_pat_"))
+        )
+        (state / "pat-env-keys").write_text("\\n".join(leaked), encoding="utf-8")
+        (state / "token-sha256").write_text(hashlib.sha256(token.encode()).hexdigest(), encoding="utf-8")
+        (state / "review-auth").write_text("pat", encoding="utf-8")
+    elif token != expected:
         sys.stderr.write("HTTP 403 Resource not accessible by integration\\n")
         raise SystemExit(1)
-    (state / "review-auth").write_text("app", encoding="utf-8")
+    else:
+        (state / "review-auth").write_text("app", encoding="utf-8")
 reviews_path = state / "reviews.json"
 comments_path = state / "comments.json"
 reviews = json.loads(reviews_path.read_text(encoding="utf-8") or "[]")
@@ -543,6 +556,10 @@ function callsOf(state: string): string[] {
 
 function postsOf(state: string): number {
   return callsOf(state).filter((line) => /^POST repos\/\S+\/pulls\/\d+\/reviews$/.test(line)).length
+}
+
+function tokenSha(value: string): string {
+  return createHash("sha256").update(value).digest("hex")
 }
 
 function sleep(ms: number): void {
@@ -1928,6 +1945,183 @@ describe("review publication", () => {
       expect(userMint.stderr).not.toContain("ghp_")
       expect(postsOf(state)).toBe(0)
       expect(JSON.parse(fs.readFileSync(path.join(state, "reviews.json"), "utf8"))).toEqual([])
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("documents --token-env and does not accept it on other commands", () => {
+    const help = run(["--help"], { REVIEW_APP_UNCONFIGURED: "1" })
+    expect(help.status, help.stderr).toBe(0)
+    expect(help.stdout).toContain("--token-env")
+    expect(help.stdout).toContain("ghp_")
+    expect(help.stdout).toContain("github_pat_")
+    expect(help.stdout).toContain("do not pass the token")
+    const elsewhere = run(["show", "--token-env", "REVIEW_PUBLISH_TOKEN"], { REVIEW_APP_UNCONFIGURED: "1" })
+    expect(elsewhere.status).not.toBe(0)
+    expect(elsewhere.stderr).toContain("--token-env is only valid with post")
+    expect(elsewhere.stdout + elsewhere.stderr).not.toContain("REVIEW_PUBLISH_TOKEN=")
+  })
+
+  it("keeps the GitHub App path when --token-env is omitted", () => {
+    const { directory, payload, approval, bin, state } = freshReview("review-pat-ignored-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    const token = "ghp_ambienttokenvalue1234567890"
+    try {
+      installDraft(payload, approval, env, 156, "Summary of the checked diff.\n", "P1. An ambient PAT must not replace the App.")
+      const posted = run(["post", payload, approval], { ...env, REVIEW_PUBLISH_TOKEN: token, GITHUB_CC: token })
+      expect(posted.status, `${posted.stdout}\n${posted.stderr}`).toBe(0)
+      expect(posted.stdout + posted.stderr).not.toContain(token)
+      expect(fs.readFileSync(path.join(state, "review-auth"), "utf8")).toBe("app")
+      expect(callsOf(state)).toContain("POST app/installations/67890/access_tokens")
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("posts with the named personal access token and does not mint an app token", () => {
+    const { directory, payload, approval, bin, state } = freshReview("review-pat-post-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    const token = "ghp_exampletokenvalue1234567890"
+    try {
+      installDraft(payload, approval, env, 156, "Summary of the checked diff.\n", "P1. The named PAT posts the review.")
+      const posted = run(["post", payload, approval, "--token-env", "REVIEW_PUBLISH_TOKEN"], {
+        ...env,
+        REVIEW_APP_UNCONFIGURED: "1",
+        REVIEW_PUBLISH_TOKEN: token,
+      })
+      expect(posted.status, `${posted.stdout}\n${posted.stderr}`).toBe(0)
+      expect(posted.stdout).toContain("REVIEW_URL=")
+      expect(posted.stdout + posted.stderr).not.toContain(token)
+      expect(fs.readFileSync(path.join(state, "review-auth"), "utf8")).toBe("pat")
+      expect(fs.readFileSync(path.join(state, "token-sha256"), "utf8")).toBe(tokenSha(token))
+      expect(fs.readFileSync(path.join(state, "pat-env-keys"), "utf8")).not.toContain("REVIEW_PUBLISH_TOKEN")
+      expect(callsOf(state).some((line) => line.includes("access_tokens") || line.endsWith("/installation"))).toBe(false)
+      expect(callsOf(state).filter((line) => line.startsWith("POST "))).toEqual([
+        "POST repos/oakimov/cursor-opencode-provider/pulls/156/reviews",
+      ])
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("resolves threads with the named personal access token", () => {
+    const fixture = freshReview("review-pat-resolve-")
+    const { directory, payload, approval, state } = fixture
+    const token = "github_pat_11AAAAAAA_exampletokenvalue"
+    try {
+      const { env } = resolutionDraft(fixture, ["fixed"])
+      expect(approve(payload, approval, env).status).toBe(0)
+      const posted = run(["post", payload, approval, "--token-env", "GITHUB_CC"], { ...env, GITHUB_CC: token })
+      expect(posted.status, `${posted.stdout}\n${posted.stderr}`).toBe(0)
+      expect(posted.stdout).toContain("THREAD_RESOLVED=PRRT_fixture0")
+      expect(posted.stdout + posted.stderr).not.toContain(token)
+      expect(fs.readFileSync(path.join(state, "review-auth"), "utf8")).toBe("pat")
+      expect(fs.readFileSync(path.join(state, "token-sha256"), "utf8")).toBe(tokenSha(token))
+      expect(fs.readFileSync(path.join(state, "resolve-token-sha256"), "utf8")).toBe(tokenSha(token))
+      expect(fs.readFileSync(path.join(state, "pat-env-keys"), "utf8")).not.toContain("GITHUB_CC")
+      expect(callsOf(state).some((line) => line.includes("access_tokens") || line.endsWith("/installation"))).toBe(false)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("refuses a missing, empty, or non-PAT value without printing it", () => {
+    const { directory, payload, approval, bin, state } = freshReview("review-pat-refuse-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    const secret = "not-a-token-SECRETVALUE"
+    try {
+      installDraft(payload, approval, env, 156, "Summary of the checked diff.\n", "P1. A bad PAT must not be printed or sent.")
+      const missing = run(["post", payload, approval, "--token-env", "REVIEW_PUBLISH_TOKEN"], env)
+      expect(missing.status, missing.stderr).toBe(4)
+      expect(missing.stderr).toContain("REVIEW_PUBLISH_TOKEN is missing or empty")
+      expect(missing.stderr).toContain("GitHub was not called.")
+      expect(callsOf(state)).toEqual([])
+
+      const empty = run(["post", payload, approval, "--token-env", "REVIEW_PUBLISH_TOKEN"], {
+        ...env,
+        REVIEW_PUBLISH_TOKEN: "   ",
+      })
+      expect(empty.status, empty.stderr).toBe(4)
+      expect(empty.stderr).toContain("REVIEW_PUBLISH_TOKEN is missing or empty")
+      expect(callsOf(state)).toEqual([])
+
+      const named = run(["post", payload, approval, "--token-env", "ghp_commandlinesecret"], env)
+      expect(named.status, named.stderr).toBe(4)
+      expect(named.stderr).not.toContain("ghp_commandlinesecret")
+      expect(named.stderr).toContain("missing or empty")
+      expect(callsOf(state)).toEqual([])
+
+      const rejected = run(["post", payload, approval, "--token-env", "REVIEW_PUBLISH_TOKEN"], {
+        ...env,
+        REVIEW_PUBLISH_TOKEN: secret,
+      })
+      expect(rejected.status, rejected.stderr).toBe(4)
+      expect(rejected.stderr).toContain("personal access token")
+      expect(rejected.stderr).not.toContain(secret)
+      expect(rejected.stderr).not.toContain("SECRETVALUE")
+      expect(callsOf(state)).toEqual([])
+
+      const echoed = run(["post", payload, approval, "--token-env", "REVIEW_PUBLISH_TOKEN"], {
+        ...env,
+        REVIEW_APP_UNCONFIGURED: "1",
+        REVIEW_PUBLISH_TOKEN: "ghp_exampletokenvalue1234567890",
+        GH_FORBIDDEN: "1",
+      })
+      expect(echoed.status).not.toBe(0)
+      expect(echoed.stderr).not.toContain("ghp_exampletokenvalue1234567890")
+      expect(echoed.stderr).toContain("[redacted]")
+      expect(echoed.stderr).toContain("personal access token")
+      expect(JSON.parse(fs.readFileSync(path.join(state, "reviews.json"), "utf8"))).toEqual([])
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("complete-resolutions.py uses --token-env and refuses a missing variable before GitHub", () => {
+    const { directory, payload, approval, bin, state } = freshReview("review-pat-complete-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    try {
+      installDraft(payload, approval, env, 156, "Summary of the checked diff.\n", "P1. Resolution needs the named PAT.")
+      const help = runComplete(env, "--help")
+      expect(help.status, help.stderr).toBe(0)
+      expect(help.stdout).toContain("--token-env")
+      expect(help.stdout).toContain("command line")
+      const missing = runComplete(env, "--token-env", "REVIEW_PUBLISH_TOKEN", payload, approval)
+      expect(missing.status, missing.stderr).toBe(4)
+      expect(missing.stderr).toContain("REVIEW_PUBLISH_TOKEN is missing or empty")
+      expect(missing.stderr).toContain("GitHub was not called.")
+      expect(callsOf(state)).toEqual([])
+      const blank = runComplete({ ...env, REVIEW_PUBLISH_TOKEN: "" }, "--token-env", "REVIEW_PUBLISH_TOKEN", payload, approval)
+      expect(blank.status, blank.stderr).toBe(4)
+      expect(blank.stderr).toContain("missing or empty")
+      expect(callsOf(state)).toEqual([])
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("complete-resolutions.py resolves with the named personal access token", () => {
+    const fixture = freshReview("review-pat-complete-resolve-")
+    const { directory, payload, approval, state } = fixture
+    const token = "ghp_resolverexampletoken1234567890"
+    try {
+      const { env } = resolutionDraft(fixture, ["fixed"])
+      expect(approve(payload, approval, env).status).toBe(0)
+      const denied = run(["post", payload, approval], { ...env, GH_RESOLVE_FORBIDDEN: "1" })
+      expect(denied.status).not.toBe(0)
+      expect(denied.stdout).toContain("REVIEW_URL=")
+      const finished = runComplete({ ...env, GITHUB_CC: token }, "--token-env", "GITHUB_CC", payload, approval)
+      expect(finished.status, `${finished.stdout}\n${finished.stderr}`).toBe(0)
+      expect(finished.stdout).toContain("THREAD_RESOLVED=PRRT_fixture0")
+      expect(finished.stdout + finished.stderr).not.toContain(token)
+      expect(fs.readFileSync(path.join(state, "resolve-token-sha256"), "utf8")).toBe(tokenSha(token))
+      // The App post mints for the review and for its rejected resolution. The
+      // completion uses the named PAT and does not mint again.
+      expect(callsOf(state).filter((line) => line.includes("access_tokens"))).toEqual([
+        "POST app/installations/67890/access_tokens",
+        "POST app/installations/67890/access_tokens",
+      ])
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
     }
