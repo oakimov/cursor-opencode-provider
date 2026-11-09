@@ -1236,8 +1236,9 @@ describe("variantsSupportReasoning", () => {
   }
 
   it("shares one effort vocabulary with variant resolution", () => {
-    for (const id of ["effort", "reasoning", "reasoning_effort"]) {
-      // The default is `low`, so only a recognised effort id can select `high`.
+    const effortIds = ["effort", "reasoning", "reasoning_effort"]
+    // The default is `low`, so only a recognised effort id can select `high`.
+    expect(effortIds.map(id => {
       const model: ModelInfo = {
         id: "effort-params",
         variants: [
@@ -1245,10 +1246,16 @@ describe("variantsSupportReasoning", () => {
           { ...variant([{ id, value: "high" }]), isDefaultNonMax: false },
         ],
       }
-      expect(resolveVariantParameters(model, { reasoningEffort: "high" }), id)
-        .toEqual([{ id, value: "high" }])
-      expect(variantsSupportReasoning(model.variants), id).toBe(true)
-    }
+      return {
+        id,
+        selected: resolveVariantParameters(model, { reasoningEffort: "high" }),
+        reasoning: variantsSupportReasoning(model.variants),
+      }
+    })).toEqual(effortIds.map(id => ({
+      id,
+      selected: [{ id, value: "high" }],
+      reasoning: true,
+    })))
     const unknown: ModelInfo = {
       id: "effort-params",
       variants: [
