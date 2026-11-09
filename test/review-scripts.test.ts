@@ -292,6 +292,7 @@ describe("cloud agent install", () => {
     expect(environment.install).not.toContain("bash -s -- --version")
     expect(environment.install).toContain("https://opencode.ai/v2/install | bash -s -- --no-modify-path")
     expect(environment.install).toContain("https://opencode.ai/install | bash -s -- --no-modify-path")
+    expect(environment.install).toContain("bash -o pipefail -c")
     expect(environment.install).toContain("https://opencode.ai/update/api/latest/cli/npm")
     expect(environment.install).toContain("https://registry.npmjs.org/opencode-ai/latest")
     expect(environment.install).toContain('HOME="$opencode1_home"')
@@ -332,6 +333,55 @@ describe("cloud agent install", () => {
       expect(result.status, result.stderr).toBe(0)
       expect(result.stdout).toBe("parsed 9.9.9\nmatch 9.9.9\nmissing \none 1.2.3\nrejected\nsourced\n")
       expect(fs.existsSync(path.join(directory, "curl-called"))).toBe(false)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("stops when an older OpenCode 1.x download fails", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "install-old1-"))
+    const bin = path.join(directory, "bin")
+    const older = path.join(directory, ".opencode1", ".opencode", "bin", "opencode")
+    const current2 = path.join(directory, ".opencode", "bin", "opencode")
+    fs.mkdirSync(bin)
+    fs.mkdirSync(path.dirname(older), { recursive: true })
+    fs.mkdirSync(path.dirname(current2), { recursive: true })
+    fs.mkdirSync(path.join(directory, ".bun", "bin"), { recursive: true })
+    fs.writeFileSync(path.join(directory, ".bun", "bin", "bun"), "#!/bin/sh\nexit 0\n")
+    fs.chmodSync(path.join(directory, ".bun", "bin", "bun"), 0o755)
+    fs.writeFileSync(current2, "#!/bin/sh\necho 'opencode v9.9.9'\n")
+    fs.chmodSync(current2, 0o755)
+    fs.writeFileSync(older, "#!/bin/sh\necho '1.0.1'\n")
+    fs.chmodSync(older, 0o755)
+    fs.writeFileSync(path.join(bin, "sudo"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/sudo.log\"\nexit 0\n")
+    fs.chmodSync(path.join(bin, "sudo"), 0o755)
+    fs.writeFileSync(
+      path.join(bin, "curl"),
+      `#!/bin/sh
+printf '%s\\n' "$*" >> "$HOME/curl.log"
+url=""
+for arg in "$@"; do
+  case "$arg" in
+    http*) url="$arg" ;;
+  esac
+done
+case "$url" in
+  *update/api/latest/cli/npm*) printf '%s\\n' '{"version":"9.9.9"}' ;;
+  *opencode-ai/latest*) printf '%s\\n' '{"version":"1.2.3"}' ;;
+  *) exit 1 ;;
+esac
+`,
+    )
+    fs.chmodSync(path.join(bin, "curl"), 0o755)
+    try {
+      const result = run("bash", ["scripts/cloud-agent-install.sh"], {
+        env: without([], { HOME: directory, PATH: `${bin}:/usr/bin:/bin` }),
+      })
+      expect(result.status).not.toBe(0)
+      expect(result.stdout).not.toContain("OpenCode 1.x")
+      // The installer runs with the private prefix as HOME, so its curl log is there.
+      expect(fs.readFileSync(path.join(directory, ".opencode1", "curl.log"), "utf8")).toContain("https://opencode.ai/install")
+      expect(fs.readFileSync(older, "utf8")).toContain("echo '1.0.1'")
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
     }
@@ -1480,7 +1530,7 @@ describe("effective opencode permissions", () => {
       expect(Object.keys(config.permission.edit).at(-1)).toBe("*.env.example")
       const decide = (action: string, resource: string) => {
         const decided = run("bun", ["scripts/opencode-permission.mjs", configPath, action, resource])
-        expect(decided.status, `${action} ${resource}\n${decided.stderr}`).toBe(0)
+        if (decided.status !== 0) throw new Error(`${action} ${resource}\n${decided.stderr}`)
         return decided.stdout.trim()
       }
       for (const action of ["read", "edit"]) {

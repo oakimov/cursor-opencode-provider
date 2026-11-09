@@ -60,6 +60,22 @@ latest_opencode1_version() {
   opencode1_release_version "$metadata"
 }
 
+# The 1.x installer treats an `opencode` already on PATH as the copy to keep
+# and exits without writing this prefix. Drop those directories. curl and the
+# rest of PATH stay, so a failed download is still this command's failure.
+opencode1_installer_path() {
+  local dir filtered=""
+  local IFS=:
+  for dir in $PATH; do
+    [[ -n "$dir" ]] || continue
+    if [[ -x "$dir/opencode" || -x "$dir/opencode1" || -x "$dir/opencode2" ]]; then
+      continue
+    fi
+    filtered="${filtered:+$filtered:}$dir"
+  done
+  printf '%s' "$filtered"
+}
+
 install_main() {
   set -euo pipefail
   export PYTHONDONTWRITEBYTECODE=1
@@ -114,7 +130,9 @@ install_main() {
   if [[ "$installed1" != "$latest1" ]]; then
     echo "Installing OpenCode ${latest1}"
     mkdir -p "$opencode1_home"
-    HOME="$opencode1_home" PATH="/usr/bin:/bin:/usr/sbin" bash -c 'curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path'
+    # pipefail is not inherited by a new shell. Without it, a failed curl is
+    # hidden by the empty `bash -s` and an older opencode1 looks current.
+    HOME="$opencode1_home" PATH="$(opencode1_installer_path)" bash -o pipefail -c 'curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path'
   else
     echo "OpenCode ${installed1} is current"
   fi
