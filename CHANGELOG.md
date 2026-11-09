@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Image bursts no longer lose pending saves at the ninth image. Accepted images retain their bytes through saving; a shared 400 MiB payload budget refuses only new writes that do not fit. Refused copies of attached images also notify the model, immediately or on the next user turn if Cursor has ended the Run ([#165](https://github.com/oakimov/cursor-opencode-provider/issues/165), [#166](https://github.com/oakimov/cursor-opencode-provider/pull/166), [@nkoynov](https://github.com/nkoynov)).
 - New manual review payloads require a revision-matched evidence ledger and isolated-check exit record; preview and publication recheck retained evidence while preserving existing pending previews.
 - Debug and recovery logs retain recent diagnostics with OpenCode-style in-place trimming by default, or configurable numbered archives with `CURSOR_PROVIDER_DEBUG_LOG_MODE=rotate` ([#160](https://github.com/oakimov/cursor-opencode-provider/issues/160), [@nkoynov](https://github.com/nkoynov)).
 - Log rotation preserves archives when the active file cannot be renamed, and stale maintenance cleanup preserves replacement owners' locks ([#163](https://github.com/oakimov/cursor-opencode-provider/pull/163), [@nkoynov](https://github.com/nkoynov)).

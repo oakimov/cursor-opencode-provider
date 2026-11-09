@@ -12,6 +12,10 @@ agent protocol. TypeScript ESM; Bun installs/tests; `tsc` builds `dist/`.
 - Before changing behavior, read the [lessons index](tasks/lessons.md), the general
   lessons, and the relevant host lessons. Merge incident lessons by cause; keep
   current requirements here and dated validation in private run reports.
+- [tasks/todo.md](tasks/todo.md) is the backlog of future tasks, features and
+  unresolved work, with their scope and acceptance criteria. Remove completed
+  entries. Keep execution logs, completed checklists, review summaries and
+  validation results in pull requests or private run reports, outside the backlog.
 - Keep operator behavior in [README.md](README.md) and the matching
   [host guide](docs/README.md). Follow [CONTRIBUTING.md](CONTRIBUTING.md) and the
   [review rules](docs/review-rules.md), including every Greptile finding, every
