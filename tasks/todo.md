@@ -12,6 +12,10 @@
   - Review: issued handles survive capacity pressure, claimed saves retain their
     budget until settlement, and the 35-image burst saves byte-for-byte.
     Validation uses local fixtures and host contracts, without a live Cursor Run.
+  - [x] Address the PR #166 staging-refusal note gap: notify the model for
+    refused input-image copies, including ended Runs; add regressions and validate.
+    Review: capacity and size refusals notify through the existing host-note
+    lifecycle, preserve existing files, and leave generated-image replies intact.
 
 - [x] Enforce review evidence before rendering and publication.
   - [x] Reproduce clean rendering without a ledger and inspect later consumers.

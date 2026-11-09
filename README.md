@@ -235,6 +235,9 @@ eight-image count limit. Unclaimed handles expire after 10 minutes. Once a save
 claims an image, it retains its bytes, budget and path reservation throughout
 permission approval until completion or failure. Saving or discarding an image
 frees capacity for another write.
+If staging refuses a copy of an attached image, the provider also tells the
+model through a host note, since Cursor ignores that copy's write result.
+When Cursor has ended the Run, the note waits for the next user turn.
 
 #### Max mode
 

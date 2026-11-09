@@ -504,6 +504,11 @@ These are failure lessons shared by both hosts, not a replacement for
   approval waits and failures. Regress the binary-write-to-save path with 35
   images, saturation, refusal/retry and separate module graphs
   (`test/input-image-write.test.ts`, `test/generate-image.test.ts`).
+  The first refusal regression checked only WriteResult. Cursor ignores that
+  result for input-image copies, so a refusal before staging also needs a host
+  note; no save-tool result will arrive to create it. Retain it across a closed
+  Run or a failed write, and avoid claiming an existing target is absent
+  (`inputImageCopyNote`, staging-refusal cases in `test/input-image-write.test.ts`).
 
 ## Context, caching and accounting
 
