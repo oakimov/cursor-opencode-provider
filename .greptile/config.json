@@ -58,7 +58,7 @@
       "id": "both-majors",
       "severity": "medium",
       "scope": ["src/**"],
-      "rule": "A runtime fix must account for OpenCode 1.x and OpenCode 2.0 unless the bug is specific to one entrypoint. Verify each major's consumed representation and behavior on base and head. An unchanged major that already satisfies the contract needs no behavior change. Report an incomplete fix only with a concrete unmet requirement in that major; absence of an edit or a shared field being ignored is insufficient."
+      "rule": "A runtime fix must account for OpenCode 1.x and 2.x unless the bug is specific to one entrypoint. Verify each major's consumed representation and behavior on base and head. An unchanged major that already satisfies the contract needs no behavior change. Report an incomplete fix only with a concrete unmet requirement in that major; absence of an edit or a shared field being ignored is insufficient."
     },
     {
       "id": "cache-continuity",
