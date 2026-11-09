@@ -382,6 +382,7 @@ import {
   announcedCallsClaimed,
   AttemptReplaySafety,
   describeFrameLayout,
+  historyCoverage,
   markRunInjectionDelivered,
   takeAppendedInjection,
   trackRunInjection,
@@ -1447,9 +1448,8 @@ async function doStreamImpl(
               canRebaseFromHistory: (failed) => {
                 const completed = new Set(extractToolResults(prompt)
                   .map(result => `${result.sessionId}:${result.execId}`))
-                // The provider's own answers from terminal records ran nothing on the host.
-                const terminalReads = failed.replaySafety?.execs?.filter(exec => exec.terminalRead).length ?? 0
-                const execs = failed.replaySafety?.execs?.filter(exec => !exec.terminalRead)
+                // The provider's own answers ran nothing on the host and have no result of their own.
+                const coverage = historyCoverage(failed.replaySafety, completed)
                 const reason = failed !== session ? "different-run"
                   : trailingToolResults.length === 0 ? "no-tool-result-tail"
                   : !failed.checkpointRevokedByHostResult ? "checkpoint-not-revoked-by-result"
@@ -1457,11 +1457,14 @@ async function doStreamImpl(
                   : failed.replaySafety?.historyRebaseUnsafe ? "opaque-activity"
                   : !appendedInjectionsInRebuild(failed, prompt) ? "opaque-activity"
                   : !announcedCallsClaimed(failed.replaySafety) ? "unaccounted-display-calls"
-                  : !execs?.length ? "no-host-execs"
-                  : !execs.every(exec => completed.has(`${exec.sessionId}:${exec.id}`)) ? "missing-host-results"
+                  : !coverage.hostExecs ? "no-host-execs"
+                  : !coverage.complete ? "missing-host-results"
                   : "completed-tool-results"
+                const { answers } = coverage
                 trace(`recovery: history-check hostSessionId=${failed.openCodeSessionId} sessionId=${failed.sessionId} ` +
-                  `reason=${reason} execs=${execs?.length ?? 0} terminalReads=${terminalReads} results=${completed.size} pending=${failed.pending.size}`)
+                  `reason=${reason} execs=${coverage.hostExecs} terminalReads=${answers["terminal-read"] ?? 0} ` +
+                  `missingReads=${answers["missing-read"] ?? 0} editHandshakes=${answers["edit-handshake"] ?? 0} ` +
+                  `attachmentReads=${answers["task-attachment"] ?? 0} results=${completed.size} pending=${failed.pending.size}`)
                 return reason === "completed-tool-results"
               },
               recover: (recovery) => openSession({ recovery }),
@@ -5436,6 +5439,7 @@ export async function pump(
       })) {
         await writeWithBackpressure(session.stream, frame, "missing edit target reply")
       }
+      replaySafety.recordProviderAnswer(parsed.id, "edit-handshake")
       trace(
         `exec: missing edit target treated as empty file id=${parsed.id} ` +
           `path=${JSON.stringify(requestedPath)}; awaiting write_args`,
@@ -5479,6 +5483,7 @@ export async function pump(
       `reply to task attachment read id=${parsed.id}`,
     )
     if (!ok) return false
+    replaySafety.recordProviderAnswer(parsed.id, "task-attachment")
     trace(`exec: task attachment read answered id=${parsed.id} callId=${displayCallId} path=${JSON.stringify(requested)}`)
     return true
   }
@@ -5521,6 +5526,7 @@ export async function pump(
       for (const frame of buildReadRejectionMessages(parsed.id, readResult)) {
         await writeWithBackpressure(session.stream, frame, "missing read target reply")
       }
+      replaySafety.recordProviderAnswer(parsed.id, "missing-read")
       const kind = Object.keys(readResult)[0]
       trace(
         `exec: rejected missing read target id=${parsed.id} kind=${kind} ` +
@@ -6713,7 +6719,7 @@ export async function pump(
           for (const message of runtimeMessages) {
             await writeWithBackpressure(session.stream, message, `runtime metadata reply id=${esmId}`)
           }
-          if (isTerminalRecordRead(esm, session.requestContext)) replaySafety.recordTerminalRead(esmId)
+          if (isTerminalRecordRead(esm, session.requestContext)) replaySafety.recordProviderAnswer(esmId, "terminal-read")
           if (displayCallId) session.displayToolCalls.delete(displayCallId)
           disposeExecCall()
           if (closeIfParallelStepComplete()) return

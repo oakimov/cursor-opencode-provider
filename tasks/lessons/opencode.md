@@ -201,7 +201,14 @@ These are failure lessons shared by both hosts, not a replacement for
   failed (`missing-host-results`): the history check required a host result for
   every exec, including the terminal-record polls the provider answers itself.
   Reproduce a live refusal's full Run shape, not only the barrier it names; the
-  check's `execs` count exposed the polls (`recordTerminalRead`).
+  check's `execs` count exposed the polls (`recordTerminalRead`, now
+  `recordProviderAnswer`). Exempting only the polls left 30% of a reporter's
+  post-result cuts refused, mostly by the empty read before a new file's edit
+  ([#172](https://github.com/oakimov/cursor-opencode-provider/issues/172)).
+  Exempt answers by kind, and tie a read to its call's host result where one
+  holds the outcome (`historyCoverage`). A fixture must advertise the tool
+  whose answer it tests: without `read`, the provider refused the read as
+  unavailable, and that refusal posed as a missing-target answer.
   A failed replacement open moves a Run's injected notes into the deferred
   store before retrying. The rebuild guard must recognize that retained copy
   too: recomputing recovery from the emptied injection registry otherwise

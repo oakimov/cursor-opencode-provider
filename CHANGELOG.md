@@ -11,6 +11,7 @@
 - Log rotation preserves archives when the active file cannot be renamed, and stale maintenance cleanup preserves replacement owners' locks ([#163](https://github.com/oakimov/cursor-opencode-provider/pull/163), [@nkoynov](https://github.com/nkoynov)).
 - A Run Cursor cuts right after a tool result now rebuilds from host history when it earlier delivered an early steer or host note that history still holds, instead of ending the turn as "automatic retry unsafe" ([#159](https://github.com/oakimov/cursor-opencode-provider/issues/159), [@nkoynov](https://github.com/nkoynov)).
 - That rebuild is no longer refused (`missing-host-results`) when Cursor earlier waited on a background shell: its polls of the shell's terminal record are answered by the provider, ran nothing on the host, and no longer count as tool calls without a result ([#159](https://github.com/oakimov/cursor-opencode-provider/issues/159), [@nkoynov](https://github.com/nkoynov)).
+- The same rebuild also proceeds after the provider itself answered the empty read before a new file's edit or a Task attachment read, provided history holds that call's result, or a read of a missing file ([#172](https://github.com/oakimov/cursor-opencode-provider/issues/172), [@nkoynov](https://github.com/nkoynov)).
 - A failed OpenCode 1.x download no longer leaves the previous binary in place and reports a successful install.
 
 ### Changed

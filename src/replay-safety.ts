@@ -67,15 +67,27 @@ export function takeAppendedInjection(
     : { kind: "note", injectionId: injection.injectionId, notes: [...injection.notes ?? []] }
 }
 
+/**
+ * An exec the provider answered itself, so it has no host result. Each ran nothing on the host:
+ * - `terminal-read`: a read of a host shell's terminal record (Cursor's AwaitShell polls);
+ * - `missing-read`: the typed `file_not_found` / `invalid_file` of a read whose target is missing;
+ * - `edit-handshake`: the empty read before an edit creates a new file;
+ * - `task-attachment`: the placeholder read of a Task's attachment.
+ * The last two are only complete with their call's host result: the edit's write, the Task.
+ */
+export type ProviderAnswer = "terminal-read" | "missing-read" | "edit-handshake" | "task-attachment"
+
+const OWNED_ANSWERS: ReadonlySet<ProviderAnswer> = new Set(["edit-handshake", "task-attachment"])
+
 /** Plain Run-owned state retained across host tool-step pump calls. */
 export type ReplaySafetyState = {
   statefulBarrier?: ReplayBarrierReason
   /**
    * Every exec needs its owner's host result; ids can restart on a resumed Run.
-   * `callId` is the display call the exec claims. `terminalRead` marks the provider's own answer
-   * from a host shell's terminal record (Cursor's AwaitShell polls): it ran nothing, so history needs no result.
+   * `callId` is the display call the exec claims. `answer` marks an exec the provider answered
+   * itself (`ProviderAnswer`); history holds no result for it.
    */
-  execs?: Array<{ sessionId: string; id: number; callId?: string; terminalRead?: true }>
+  execs?: Array<{ sessionId: string; id: number; callId?: string; answer?: ProviderAnswer }>
   /** Display calls Cursor announced; history holds one only through the host exec that claims it. */
   announcedCalls?: string[]
   /** Only strict inline catalog lookups qualify; spilled catalogs remain barriers. */
@@ -87,6 +99,38 @@ export type ReplaySafetyState = {
    * rebuild may proceed when the prompt it seeds holds every one (checked at rebuild time).
    */
   appendedInjections?: AppendedInjection[]
+}
+
+export type HistoryCoverage = {
+  /** Execs that went to the host. */
+  hostExecs: number
+  /** Provider answers by kind. */
+  answers: Partial<Record<ProviderAnswer, number>>
+  /** Every host exec has its result in history, and every owned answer its call's host result. */
+  complete: boolean
+}
+
+/**
+ * Whether host history holds everything the Run's execs did. `completed` holds
+ * `sessionId:execId` of each host result in the prompt being rebuilt. A provider
+ * answer needs no result of its own; an edit handshake or Task attachment read
+ * needs a host exec of the same call whose result history holds.
+ */
+export function historyCoverage(state: ReplaySafetyState | undefined, completed: ReadonlySet<string>): HistoryCoverage {
+  const execs = state?.execs ?? []
+  const hostExecs = execs.filter((exec) => !exec.answer)
+  const resultHeld = (exec: { sessionId: string; id: number }) => completed.has(`${exec.sessionId}:${exec.id}`)
+  const answers: Partial<Record<ProviderAnswer, number>> = {}
+  let complete = hostExecs.every(resultHeld)
+  for (const exec of execs) {
+    if (!exec.answer) continue
+    answers[exec.answer] = (answers[exec.answer] ?? 0) + 1
+    if (OWNED_ANSWERS.has(exec.answer)
+      && !(exec.callId && hostExecs.some((owner) => owner.callId === exec.callId && resultHeld(owner)))) {
+      complete = false
+    }
+  }
+  return { hostExecs: hostExecs.length, answers, complete }
 }
 
 /** Every display call must be represented by a host exec or a completed inline catalog lookup. */
@@ -159,10 +203,10 @@ export class AttemptReplaySafety {
     execs.push({ sessionId: this.sessionId, id, ...(callId ? { callId } : {}) })
   }
 
-  /** The provider answered this exec itself by reading a host shell's terminal record. */
-  recordTerminalRead(id: number): void {
+  /** The provider answered this exec itself; nothing ran on the host. */
+  recordProviderAnswer(id: number, answer: ProviderAnswer): void {
     const exec = this.state.execs?.find(exec => exec.sessionId === this.sessionId && exec.id === id)
-    if (exec) exec.terminalRead = true
+    if (exec) exec.answer = answer
   }
 
   /**
