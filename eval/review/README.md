@@ -95,6 +95,13 @@ Held-out cases are marked in `list`. They were not used to choose the review
 skill's wording. Do not add their expected results to the skill, the prompt,
 or the scorer.
 
+The `consumer-parity` pair checks cross-consumer reasoning: one variant repairs
+the legacy representation while preserving an already-correct modern path;
+the other removes data the modern consumer needs. Fixture tests compare base
+and head through both real consumers. The answer key distinguishes an
+unchanged working consumer from that concrete regression. These are fixture
+and scoring controls, not fresh reviewer results.
+
 Run the baseline and revised skills in fresh reviewer contexts. A reviewer
 that already knows the answer key is not a blind run. If those reviews were
 not run, detection is unverified.
