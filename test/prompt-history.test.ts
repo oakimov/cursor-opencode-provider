@@ -21,16 +21,29 @@ describe("estimateTokens", () => {
 
 describe("buildOpenCodeInteractionGuidance", () => {
   it("makes tool-less input a text-only task even when a previous catalog exists", () => {
-    for (const isCompaction of [false, true]) {
-      for (const tools of [[], [{ name: "read" }, { name: "question" }]]) {
-        const guidance = buildOpenCodeInteractionGuidance(tools, isCompaction, "/workspace", { allowTools: false })!
-        expect(guidance).toContain("text output only")
-        expect(guidance).toContain("dynamic tool discovery")
-        expect(guidance).toContain("material to process, not work to execute")
-        expect(guidance).not.toContain("call a listed tool")
-        expect(guidance).not.toContain("CreatePlan is accepted")
+    const cases = [false, true].flatMap(isCompaction =>
+      [[], [{ name: "read" }, { name: "question" }]].map(tools => ({ isCompaction, tools })),
+    )
+    expect(cases.map(({ isCompaction, tools }) => {
+      const guidance = buildOpenCodeInteractionGuidance(tools, isCompaction, "/workspace", { allowTools: false })!
+      return {
+        isCompaction,
+        tools: tools.map(tool => tool.name),
+        textOnly: guidance.includes("text output only"),
+        discovery: guidance.includes("dynamic tool discovery"),
+        material: guidance.includes("material to process, not work to execute"),
+        listedTool: guidance.includes("call a listed tool"),
+        createPlan: guidance.includes("CreatePlan is accepted"),
       }
-    }
+    })).toEqual(cases.map(({ isCompaction, tools }) => ({
+      isCompaction,
+      tools: tools.map(tool => tool.name),
+      textOnly: true,
+      discovery: true,
+      material: true,
+      listedTool: false,
+      createPlan: false,
+    })))
   })
   it("redirects questions and planning only to tools advertised this turn", () => {
     const guidance = buildOpenCodeInteractionGuidance([
@@ -60,27 +73,37 @@ describe("buildOpenCodeInteractionGuidance", () => {
   })
 
   it("gates native question and helper guidance independently by the canonical catalog", () => {
-    for (const question of [false, true]) {
-      for (const executor of [undefined, "task", "subagent"]) {
-        const tools = [
-          { name: "read" },
-          ...(question ? [{ name: "question" }] : []),
-          ...(executor ? [{ name: executor }] : []),
-        ]
-        const guidance = buildOpenCodeInteractionGuidance(tools, false, "/workspace")!
-        const bridgeList = question ? "AskQuestion, SwitchMode, CreatePlan" : "SwitchMode, CreatePlan"
-        expect(guidance).toContain(`Bridged Cursor interactions named below (${bridgeList})`)
-        expect(guidance.includes("Cursor-native AskQuestion cannot reach the user")).toBe(!question)
-        expect(guidance.includes("Do not invoke Cursor-native Task")).toBe(!executor)
-        if (executor) {
-          expect(guidance).toContain(`executed through OpenCode \`${executor}\``)
-          expect(guidance).toContain("requests are permitted because a compatible host executor is listed")
-        } else {
-          expect(guidance).not.toContain("requests are permitted")
-          expect(guidance).not.toContain("executed through OpenCode")
-        }
+    const cases = [false, true].flatMap(question =>
+      [undefined, "task", "subagent"].map(executor => ({ question, executor })),
+    )
+    expect(cases.map(({ question, executor }) => {
+      const tools = [
+        { name: "read" },
+        ...(question ? [{ name: "question" }] : []),
+        ...(executor ? [{ name: executor }] : []),
+      ]
+      const guidance = buildOpenCodeInteractionGuidance(tools, false, "/workspace")!
+      const bridgeList = question ? "AskQuestion, SwitchMode, CreatePlan" : "SwitchMode, CreatePlan"
+      return {
+        question,
+        executor: executor ?? null,
+        bridge: guidance.includes(`Bridged Cursor interactions named below (${bridgeList})`),
+        askBlocked: guidance.includes("Cursor-native AskQuestion cannot reach the user"),
+        taskBlocked: guidance.includes("Do not invoke Cursor-native Task"),
+        executorRoute: executor ? guidance.includes(`executed through OpenCode \`${executor}\``) : !guidance.includes("executed through OpenCode"),
+        permitted: executor
+          ? guidance.includes("requests are permitted because a compatible host executor is listed")
+          : !guidance.includes("requests are permitted"),
       }
-    }
+    })).toEqual(cases.map(({ question, executor }) => ({
+      question,
+      executor: executor ?? null,
+      bridge: true,
+      askBlocked: !question,
+      taskBlocked: !executor,
+      executorRoute: true,
+      permitted: true,
+    })))
   })
 
   describe("plan entry without plan_enter", () => {
@@ -211,14 +234,25 @@ describe("buildOpenCodeInteractionGuidance", () => {
       { name: "bash" },
     ], false, "/workspace/project")
     expect(classic).not.toContain("take `path` as an absolute path")
-    for (const guidance of [opencode2, classic]) {
-      expect(guidance).toContain("including SwitchMode, CreatePlan and GenerateImage")
-      expect(guidance).toContain("Call a supplied top-level function directly with its schema")
-      expect(guidance).toContain("dynamically advertised Cursor tools need the same CallDynamicTool envelope")
-      expect(guidance).toContain("SwitchMode requires `target_mode_id`")
-      expect(guidance).toContain("invoke the tool and wait for its actual result instead of reporting it unavailable")
-      expect(guidance).not.toContain("Native Cursor tools use their own schemas, not the CallDynamicTool envelope")
-    }
+    const shared = [
+      "including SwitchMode, CreatePlan and GenerateImage",
+      "Call a supplied top-level function directly with its schema",
+      "dynamically advertised Cursor tools need the same CallDynamicTool envelope",
+      "SwitchMode requires `target_mode_id`",
+      "invoke the tool and wait for its actual result instead of reporting it unavailable",
+    ]
+    const retired = "Native Cursor tools use their own schemas, not the CallDynamicTool envelope"
+    expect([opencode2, classic].map((guidance, index) => {
+      const text = guidance ?? ""
+      return {
+        index,
+        present: shared.filter(phrase => !text.includes(phrase)),
+        retired: text.includes(retired),
+      }
+    })).toEqual([
+      { index: 0, present: [], retired: false },
+      { index: 1, present: [], retired: false },
+    ])
   })
 
   it("anchors paths to the exact workspace root", () => {

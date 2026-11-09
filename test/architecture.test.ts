@@ -160,8 +160,7 @@ describe("provider / compatibility-layer architecture", () => {
   })
 
   test("foreign identity checks cover every host family and other providers", () => {
-    for (const name of ["mimocode", "kilocode", ".kilo/plans", "checkpoint-writer", "OCP", "ocp-token", "PI_CODING_AGENT_DIR", "OMP", "@earendil-works/pi-ai", "@oh-my-pi/pi-ai", "@deepseek-ai/dsh-llm", "DSH", "Devin", "createDevin"]) {
-      expect(FOREIGN_VOCABULARY.test(name)).toBe(true)
-    }
+    const names = ["mimocode", "kilocode", ".kilo/plans", "checkpoint-writer", "OCP", "ocp-token", "PI_CODING_AGENT_DIR", "OMP", "@earendil-works/pi-ai", "@oh-my-pi/pi-ai", "@deepseek-ai/dsh-llm", "DSH", "Devin", "createDevin"]
+    expect(names.filter(name => !FOREIGN_VOCABULARY.test(name))).toEqual([])
   })
 })

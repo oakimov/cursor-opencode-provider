@@ -292,10 +292,19 @@ describe("cursorEditReadAnswer", () => {
       ["file over the edit limit", huge, workspace, "host", true],
       ["path through a file", path.join(inside, "child"), workspace, "host", false],
     ]
-    for (const [label, target, root, answer, reachesHost] of cases) {
-      expect({ label, answer: cursorEditReadAnswer(target, root) }).toEqual({ label, answer })
-      expect({ label, reachesHost: cursorEditReadReachesHost(target, root) }).toEqual({ label, reachesHost })
-    }
+    expect(cases.map(([label, target, root, answer, reachesHost]) => ({
+      label,
+      answer: cursorEditReadAnswer(target, root),
+      reachesHost: cursorEditReadReachesHost(target, root),
+      expectedAnswer: answer,
+      expectedHost: reachesHost,
+    }))).toEqual(cases.map(([label, , , answer, reachesHost]) => ({
+      label,
+      answer,
+      reachesHost,
+      expectedAnswer: answer,
+      expectedHost: reachesHost,
+    })))
   })
 
   it.skipIf(!canChmod)("leaves a workspace file the provider cannot read to the host", () => {

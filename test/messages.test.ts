@@ -363,14 +363,8 @@ describe("message schema accuracy", () => {
     const type = root.lookupType("InteractionUpdate")
     expect(type.oneofs).toHaveProperty("update")
     const fields = Object.keys(type.fields)
-    expect(fields).toContain("text_delta")
-    expect(fields).toContain("thinking_delta")
-    expect(fields).toContain("tool_call_started")
-    expect(fields).toContain("tool_call_completed")
-    expect(fields).toContain("partial_tool_call")
-    expect(fields).toContain("heartbeat")
-    expect(fields).toContain("turn_ended")
-    expect(fields).toContain("tool_requests_listed")
+    const required = ["text_delta", "thinking_delta", "tool_call_started", "tool_call_completed", "partial_tool_call", "heartbeat", "turn_ended", "tool_requests_listed"]
+    expect(required.filter(name => !fields.includes(name))).toEqual([])
   })
 
   it("InteractionUpdate decodes tool_requests_listed call_count", () => {
@@ -397,19 +391,12 @@ describe("message schema accuracy", () => {
     const root = getMessageTypes()
     const type = root.lookupType("ExecServerMessage")
     const fields = Object.keys(type.fields)
-    expect(fields).toContain("read_args")
-    expect(fields).toContain("write_args")
-    expect(fields).toContain("grep_args")
-    expect(fields).toContain("ls_args")
-    expect(fields).toContain("delete_args")
-    expect(fields).toContain("mcp_args")
-    expect(fields).toContain("mcp_state_exec_args")
-    expect(fields).toContain("subagent_args")
-    expect(fields).toContain("shell_stream_args")
-    expect(fields).toContain("background_shell_spawn_args")
-    expect(fields).toContain("pi_write_args")
-    expect(fields).toContain("list_mcp_resources_exec_args")
-    expect(fields).toContain("read_mcp_resource_exec_args")
+    const required = [
+      "read_args", "write_args", "grep_args", "ls_args", "delete_args", "mcp_args",
+      "mcp_state_exec_args", "subagent_args", "shell_stream_args", "background_shell_spawn_args",
+      "pi_write_args", "list_mcp_resources_exec_args", "read_mcp_resource_exec_args",
+    ]
+    expect(required.filter(name => !fields.includes(name))).toEqual([])
     expect(root.lookupType("ExecServerMessage").fields.list_mcp_resources_exec_args.id).toBe(17)
     expect(root.lookupType("ExecServerMessage").fields.read_mcp_resource_exec_args.id).toBe(18)
     expect(root.lookupType("ExecClientMessage").fields.list_mcp_resources_exec_result.id).toBe(17)

@@ -324,7 +324,7 @@ describe("modelInfoToConfig", () => {
     // Variant keys: parens removed, no markup chars, unique, params intact.
     const keys = Object.keys(config.variants)
     expect(keys).toEqual(["Claude Opus 4.8 Low", "Claude Opus 4.8 Max"])
-    for (const k of keys) expect(k).not.toMatch(INVALID)
+    expect(keys.filter(key => INVALID.test(key))).toEqual([])
     expect(config.variants["Claude Opus 4.8 Low"]).toEqual(
       variantParams([{ id: "effort", value: "low" }]),
     )
@@ -472,9 +472,8 @@ describe("modelInfoToConfig", () => {
       { id: "gpt-5.5-high", displayName: "GPT-5.5 High", supportsThinking: true, variants: [] },
     ]
     expect(thinkingSuffixBaseNames(models)).toEqual(new Set())
-    for (const m of models) {
-      expect(modelInfoToConfig(m, { thinkingSuffix: false }).name).toBe(m.displayName)
-    }
+    expect(models.map(model => [model.id, modelInfoToConfig(model, { thinkingSuffix: false }).name]))
+      .toEqual(models.map(model => [model.id, model.displayName]))
   })
 })
 

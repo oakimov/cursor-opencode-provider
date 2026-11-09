@@ -21,18 +21,33 @@ function expectFolder(context: Record<string, unknown>, folder?: string): void {
     conversationId: "transcripts-wire",
     requestContext: context,
   }))
+  const envs = [
+    ["context", context.env],
+    ["run", run.run_request.action.user_message_action.request_context.env],
+    ["exec", execFolderEnv(context)],
+  ] as const
+  // The folder is one fact. It has to agree on the context object and on both
+  // wire copies, including RequestContextEnv field 12 (absent, not "").
+  expect(envs.map(([label, env]) => {
+    const record = env as Record<string, unknown>
+    return {
+      label,
+      folder: Object.prototype.hasOwnProperty.call(record, "agent_transcripts_folder")
+        ? record.agent_transcripts_folder
+        : undefined,
+      field12: readAllFields(encodeMessage("RequestContextEnv", record))
+        .some(field => field.fn === 12),
+    }
+  })).toEqual(envs.map(([label]) => ({
+    label,
+    folder,
+    field12: folder !== undefined,
+  })))
+}
+
+function execFolderEnv(context: Record<string, unknown>): Record<string, unknown> {
   const exec = decodeMessageSparse<ExecMessage>("AgentClientMessage", buildRequestContextResult(1, context))
-  for (const env of [
-    context.env,
-    run.run_request.action.user_message_action.request_context.env,
-    exec.exec_client_message.request_context_result.success.request_context.env,
-  ]) {
-    if (folder === undefined) expect(env).not.toHaveProperty("agent_transcripts_folder")
-    else expect(env).toHaveProperty("agent_transcripts_folder", folder)
-    // RequestContextEnv field 12 must be absent, not an empty string on wire.
-    const fields = readAllFields(encodeMessage("RequestContextEnv", env as Record<string, unknown>))
-    expect(fields.some(field => field.fn === 12)).toBe(folder !== undefined)
-  }
+  return exec.exec_client_message.request_context_result.success.request_context.env
 }
 
 for (const [host, tools] of [

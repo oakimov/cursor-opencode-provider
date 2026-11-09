@@ -637,10 +637,9 @@ describe("mapCursorArgsToOpencode", () => {
       args: { command: "awk 'END { print }' extract.txt" },
     })
     expect(misplacedShellCommand({ name: "glob", inputSchema: schema }, glob.args)).toBe(true)
-    for (const name of ["read", "write", "edit"] as const) {
-      expect(mapCursorArgsToOpencode(name, { path: "/tmp/x", command: "printf hi" }).args.command)
-        .toBe("printf hi")
-    }
+    const kept = ["read", "write", "edit"] as const
+    expect(kept.map(name => [name, mapCursorArgsToOpencode(name, { path: "/tmp/x", command: "printf hi" }).args.command]))
+      .toEqual(kept.map(name => [name, "printf hi"]))
     const grep = mapCursorArgsToOpencode("grep", { path: "/src", command: "pwd" }, "grep_args")
     expect(grep).toEqual({ toolName: "grep", args: { path: "/src", command: "pwd" } })
     expect(misplacedShellCommand({ name: "grep", inputSchema: schema }, grep.args)).toBe(true)
@@ -1191,13 +1190,22 @@ describe("parseExecServerMessage", () => {
       },
     ] as const
 
-    for (const c of cases) {
+    expect(cases.map(c => {
       const parsed = parseExecServerMessage({ id: 45, [c.request]: c.raw })
-      expect(parsed?.toolName, c.request).toBe(c.toolName)
-      expect(parsed?.args, c.request).toEqual(c.args)
-      expect(parsed?.resultField, c.request).toBe(c.result)
-      expect(parsed?.localError, c.request).toBeUndefined()
-    }
+      return {
+        request: c.request,
+        toolName: parsed?.toolName,
+        args: parsed?.args,
+        resultField: parsed?.resultField,
+        localError: parsed?.localError ?? null,
+      }
+    })).toEqual(cases.map(c => ({
+      request: c.request,
+      toolName: c.toolName,
+      args: c.args,
+      resultField: c.result,
+      localError: null,
+    })))
   })
 
   it("returns a typed local error for an unrepresentable multi-edit Pi request", () => {
@@ -1709,15 +1717,27 @@ describe("buildExecClientMessages", () => {
       "pi_find_result",
       "pi_ls_result",
     ]
-    for (const [index, resultField] of fields.entries()) {
+    expect(fields.map((resultField, index) => {
       const execId = 45 + index
       const frames = buildExecClientMessages({ execId, resultField, output: `out-${resultField}` })
-      expect(frames).toHaveLength(2)
-      const ecm = decodeMessage<any>("AgentClientMessage", frames[0]).exec_client_message
-      expect(ecm[resultField]?.success?.output, resultField).toBe(`out-${resultField}`)
-      const close = decodeMessage<any>("AgentClientMessage", frames[1])
-      expect(close.exec_client_control_message?.stream_close?.id, resultField).toBe(execId)
-    }
+      const ecm = frames.length > 0
+        ? decodeMessage<any>("AgentClientMessage", frames[0]).exec_client_message
+        : undefined
+      const close = frames.length > 1
+        ? decodeMessage<any>("AgentClientMessage", frames[1])
+        : undefined
+      return {
+        resultField,
+        frames: frames.length,
+        output: ecm?.[resultField]?.success?.output,
+        close: close?.exec_client_control_message?.stream_close?.id,
+      }
+    })).toEqual(fields.map((resultField, index) => ({
+      resultField,
+      frames: 2,
+      output: `out-${resultField}`,
+      close: 45 + index,
+    })))
   })
 
   it("uses shell_stream Start→Stdout→Exit then stream_close for bash", () => {
@@ -2993,7 +3013,7 @@ describe("OpenCode 2 path and read edge cases", () => {
       `../../../workspace/example-project/${miss}`,
       `# ../../../workspace/example-project/${miss}`,
     ]
-    for (const output of samples) {
+    expect(samples.map(output => {
       const text = buildTypedExecResult(
         "pi_find_result",
         output,
@@ -3003,8 +3023,6 @@ describe("OpenCode 2 path and read edge cases", () => {
         undefined,
         root,
       ) as { success: { output: string } }
-      expect(text.success.output).toBe(miss)
-
       const mcp = buildTypedExecResult(
         "mcp_result",
         output,
@@ -3014,8 +3032,6 @@ describe("OpenCode 2 path and read edge cases", () => {
         undefined,
         root,
       ) as { success: { content: Array<{ text: { text: string } }> } }
-      expect(mcp.success.content[0]?.text.text).toBe(miss)
-
       const listed = buildTypedExecResult(
         "grep_result",
         output,
@@ -3025,8 +3041,18 @@ describe("OpenCode 2 path and read edge cases", () => {
         undefined,
         root,
       ) as { success: { workspace_results: Record<string, { files: { files: string[] } }> } }
-      expect(listed.success.workspace_results[root]?.files.files).toEqual([])
-    }
+      return {
+        output,
+        text: text.success.output,
+        mcp: mcp.success.content[0]?.text.text,
+        listed: listed.success.workspace_results[root]?.files.files ?? null,
+      }
+    })).toEqual(samples.map(output => ({
+      output,
+      text: miss,
+      mcp: miss,
+      listed: [],
+    })))
 
     const outside = [
       "# /tmp/glob-repro/",
@@ -3414,13 +3440,16 @@ describe("exec safety net (unmapped variants)", () => {
       [51, "pi_ls_result"],
     ] as const
 
-    for (const [requestField, resultField] of cases) {
+    expect(cases.map(([requestField, resultField]) => {
       const payload = asmWithExec(requestField)
       const decoded = decodeMessage<any>("AgentServerMessage", payload)
       const parsed = parseExecServerMessage(decoded.exec_server_message)
-      expect(detectExecVariantField(payload), `request field #${requestField}`).toBe(requestField)
-      expect(parsed?.resultField, `request field #${requestField}`).toBe(resultField)
-    }
+      return { requestField, detected: detectExecVariantField(payload), resultField: parsed?.resultField }
+    })).toEqual(cases.map(([requestField, resultField]) => ({
+      requestField,
+      detected: requestField,
+      resultField,
+    })))
   })
 
   it("decodes field #36 as mcp_state and replies from the live host catalog", () => {
@@ -3507,16 +3536,26 @@ describe("exec safety net (unmapped variants)", () => {
     const definitions: Array<{ description: string; provider_identifier: string; tool_name: string; input_schema: Uint8Array }> = decoded.exec_client_message.mcp_state_exec_result.success.servers
       .flatMap((server: { tools: Array<{ description: string; provider_identifier: string; tool_name: string; input_schema: Uint8Array }> }) => server.tools)
     expect(definitions).toHaveLength(descriptors.length)
-    for (const [index, definition] of definitions.entries()) {
+    expect(definitions.map((definition, index) => {
       // Cursor's search result truncates descriptions: identity must survive.
       const identity = JSON.parse(definition.description.slice(0, 170).match(/\{[^\n]+?\}/)![0])
-      expect(identity).toEqual({ namespace: definition.provider_identifier, toolName: definition.tool_name })
-      expect(identity).toEqual({ namespace: descriptors[index]!.provider_identifier, toolName: descriptors[index]!.tool_name })
-      expect(definition.description).toContain(`Complete outer envelope: ${JSON.stringify({
+      const envelope = `Complete outer envelope: ${JSON.stringify({
         namespace: definition.provider_identifier, toolName: definition.tool_name, arguments: {},
-      })}`)
-      expect(Buffer.from(definition.input_schema)).toEqual(Buffer.from(descriptors[index]!.input_schema as Uint8Array))
-    }
+      })}`
+      return {
+        index,
+        identity,
+        catalog: { namespace: descriptors[index]!.provider_identifier, toolName: descriptors[index]!.tool_name },
+        envelope: definition.description.includes(envelope),
+        schema: Buffer.from(definition.input_schema).equals(Buffer.from(descriptors[index]!.input_schema as Uint8Array)),
+      }
+    })).toEqual(definitions.map((definition, index) => ({
+      index,
+      identity: { namespace: definition.provider_identifier, toolName: definition.tool_name },
+      catalog: { namespace: descriptors[index]!.provider_identifier, toolName: descriptors[index]!.tool_name },
+      envelope: true,
+      schema: true,
+    })))
     expect(definitions.map((definition) => definition.tool_name)).toContain(CUSTOM_WEBSEARCH_TOOL)
     expect(descriptors).toEqual(before)
     expect(buildMcpStateResult(1, {}, descriptors)).toEqual(response)
