@@ -227,6 +227,10 @@ note_key()
 with (state / "calls").open("a", encoding="utf-8") as handle:
     handle.write(method + " " + endpoint + "\\n")
 token = os.environ.get("GH_TOKEN", "")
+if method == "GET":
+    digest = hashlib.sha256(token.encode()).hexdigest() if token else "missing"
+    with (state / "read-auth").open("a", encoding="utf-8") as handle:
+        handle.write(digest + "\\n")
 if endpoint == "graphql":
     request = json.load(sys.stdin)
     query = request["query"]
@@ -2002,6 +2006,55 @@ describe("review publication", () => {
       ])
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("uses the named token for required reads when it is the only GitHub credential", () => {
+    const token = "ghp_readpathonlytokenvalue123456"
+    const cases = [
+      { name: "GH_TOKEN", env: { GH_TOKEN: token, GITHUB_TOKEN: "" } },
+      { name: "GITHUB_CC", env: { GH_TOKEN: "", GITHUB_TOKEN: "", GITHUB_CC: token } },
+    ]
+    const directories: string[] = []
+    const observed = cases.map(item => {
+      const { directory, payload, approval, bin, state } = freshReview(`review-pat-read-${item.name}-`)
+      directories.push(directory)
+      const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state, REVIEW_APP_UNCONFIGURED: "1" }
+      installDraft(payload, approval, env, 156, "Summary of the checked diff.\n", "P1. Reads keep the only credential.")
+      const posted = run(["post", payload, approval, "--token-env", item.name], { ...env, ...item.env })
+      const readPath = path.join(state, "read-auth")
+      const reads = fs.existsSync(readPath) ? fs.readFileSync(readPath, "utf8").trim().split("\n") : []
+      const authPath = path.join(state, "review-auth")
+      return {
+        name: item.name,
+        status: posted.status,
+        detail: `${posted.stdout}\n${posted.stderr}`.slice(0, 500),
+        leaked: `${posted.stdout}${posted.stderr}`.includes(token),
+        readCount: reads.length,
+        readsMatch: reads.length > 0 && reads.every(line => line === tokenSha(token)),
+        auth: fs.existsSync(authPath) ? fs.readFileSync(authPath, "utf8") : "",
+      }
+    })
+    try {
+      expect(observed.map(row => ({
+        name: row.name,
+        status: row.status,
+        leaked: row.leaked,
+        readCount: row.readCount > 0,
+        readsMatch: row.readsMatch,
+        auth: row.auth,
+        detail: row.status === 0 ? "" : row.detail,
+      }))).toEqual(cases.map(item => ({
+        name: item.name,
+        status: 0,
+        leaked: false,
+        readCount: true,
+        readsMatch: true,
+        auth: "pat",
+        detail: "",
+      })))
+    } finally {
+      for (const directory of directories) fs.rmSync(directory, { recursive: true, force: true })
     }
   })
 

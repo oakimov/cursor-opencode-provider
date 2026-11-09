@@ -642,8 +642,10 @@ def redact_secret(text: str) -> str:
     return re.sub(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}", "[redacted]", text)
 
 
-# Names passed to --token-env. Their values are stripped from gh's environment
-# and from printed errors. The set is process-local; post is a short-lived command.
+# Names passed to --token-env. The named variable is removed from gh's
+# environment and its value is redacted from printed errors. A read that has
+# no other GitHub credential receives the value back as GH_TOKEN. The set is
+# process-local; post is a short-lived command.
 _hidden_env: set[str] = set()
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PERSONAL_ACCESS_TOKEN = re.compile(r"^(?:ghp_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+)$")
@@ -789,6 +791,15 @@ def publisher_env(token: str | None) -> dict[str, str]:
     env.pop("GH_DEBUG", None)
     env["GH_HOST"] = "github.com"
     env["GH_PROMPT_DISABLED"] = "1"
+    # Reads call gh without an explicit token and rely on GH_TOKEN / GITHUB_TOKEN.
+    # Hiding the selected PAT removes that credential when it is the only one,
+    # including when the named variable is GH_TOKEN or GITHUB_TOKEN itself.
+    if token is None and not any(env.get(name, "").strip() for name in ("GH_TOKEN", "GITHUB_TOKEN")):
+        for name in _hidden_env:
+            value = os.environ.get(name, "").strip()
+            if value:
+                token = value
+                break
     if token is not None:
         env["GH_TOKEN"] = token
         env["GITHUB_TOKEN"] = token
