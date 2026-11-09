@@ -13,6 +13,7 @@
 - That rebuild is no longer refused (`missing-host-results`) when Cursor earlier waited on a background shell: its polls of the shell's terminal record are answered by the provider, ran nothing on the host, and no longer count as tool calls without a result ([#159](https://github.com/oakimov/cursor-opencode-provider/issues/159), [@nkoynov](https://github.com/nkoynov)).
 - The same rebuild also proceeds after the provider itself answered the empty read before a new file's edit or a Task attachment read, provided history holds that call's result, or a read of a missing file ([#172](https://github.com/oakimov/cursor-opencode-provider/issues/172), [@nkoynov](https://github.com/nkoynov)).
 - A failed OpenCode 1.x download no longer leaves the previous binary in place and reports a successful install.
+- OpenCode 1.x model metadata now sets `reasoning` from reasoning variants too, not only `supports_thinking`, covering `deepseek-v41-flash-1017`, `claude-sonnet-5-5`, `claude-haiku-5-5` and `muse-wonder-1.0` ([#168](https://github.com/oakimov/cursor-opencode-provider/issues/168)).
 
 ### Changed
 

@@ -106,6 +106,61 @@ function optionalPositiveNumber(
   return undefined
 }
 
+/**
+ * Parameter ids Cursor uses for a reasoning-effort choice. The id differs by
+ * model, even within one family: `claude-opus-5-5` publishes `effort`,
+ * `claude-sonnet-5-5` publishes `reasoning_effort`, and GPT models publish
+ * `reasoning`.
+ */
+const EFFORT_PARAMETER_IDS = ["effort", "reasoning", "reasoning_effort"] as const
+const THINKING_PARAMETER_ID = "thinking"
+const DISABLED_REASONING_VALUES = new Set(["", "none", "false", "off", "disabled"])
+
+/** Shared by variant resolution and the reasoning capability check. */
+function isEffortParameter(id: string): boolean {
+  return (EFFORT_PARAMETER_IDS as readonly string[]).includes(id)
+}
+
+function isEnabledReasoningValue(value: string): boolean {
+  return !DISABLED_REASONING_VALUES.has(value.trim().toLowerCase())
+}
+
+/**
+ * Whether these variants expose a reasoning choice.
+ *
+ * A published `thinking` parameter decides on its own: `thinking: "false"`
+ * beside `effort: "high"` describes a non-thinking variant, so effort values
+ * only count when the model publishes no `thinking` parameter at all.
+ *
+ * Some Cursor models report `supports_thinking: false` yet still publish such
+ * variants (`deepseek-v41-flash-1017`, `claude-sonnet-5-5`,
+ * `claude-haiku-5-5`, `muse-wonder-1.0`). OpenCode 1.x reports the
+ * resulting `reasoning` flag as the model's capability; it offers the
+ * published variants either way, and OpenCode 2.x has no such flag.
+ *
+ * Pass the variants the entry is built from — not every variant the model
+ * lists — so a 1M or Fast entry is not marked reasoning because of variants it
+ * does not offer.
+ */
+export function variantsSupportReasoning(variants: ModelVariant[] | undefined): boolean {
+  if (!variants || variants.length === 0) return false
+  const publishesThinking = variants.some((variant) =>
+    variant.parameterValues.some((parameter) => parameter.id === THINKING_PARAMETER_ID),
+  )
+  if (publishesThinking) {
+    return variants.some((variant) =>
+      variant.parameterValues.some((parameter) =>
+        parameter.id === THINKING_PARAMETER_ID && isEnabledReasoningValue(parameter.value),
+      ),
+    )
+  }
+  return variants.some((variant) =>
+    variant.parameterValues.some((parameter) =>
+      isEffortParameter(parameter.id) && isEnabledReasoningValue(parameter.value),
+    ),
+  )
+}
+
 export function normalizeModelParameterValues(value: unknown): ModelParameterValue[] | null {
   if (!Array.isArray(value)) return null
   const parameters: ModelParameterValue[] = []
@@ -530,7 +585,7 @@ export function resolveVariantParameters(
   }
 
   const effortOf = (v: ModelVariant): string | undefined =>
-    v.parameterValues.find((p) => p.id === "effort" || p.id === "reasoning" || p.id === "reasoning_effort")?.value
+    v.parameterValues.find((p) => isEffortParameter(p.id))?.value
   const isFast = (v: ModelVariant): boolean =>
     v.parameterValues.find((p) => p.id === "fast")?.value === "true"
   const wantMax = (opts.maxMode ?? false) || model.supportsNonMaxMode === false

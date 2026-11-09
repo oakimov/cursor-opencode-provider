@@ -3,6 +3,7 @@ import {
   CURSOR_WIRE_MODEL_ID_KEY,
   findDefaultVariant,
   parseCursorContextLimit,
+  variantsSupportReasoning,
   type ModelInfo,
   type ModelVariant,
 } from "./models.js"
@@ -201,6 +202,12 @@ export function modelInfoToConfig(
     thinkingSuffix?: boolean
     contextTier?: ContextTier
     variants?: ModelVariant[]
+    /**
+     * Variants this entry publishes. Defaults to `variants`; `modelsToConfig`
+     * passes the speed group's advertised slice so a tier entry's `reasoning`
+     * reflects only the choices it actually offers.
+     */
+    advertisedVariants?: ModelVariant[]
     fast?: boolean
   } = {},
 ) {
@@ -234,7 +241,7 @@ export function modelInfoToConfig(
   const config: Record<string, any> = {
     name,
     attachment: readsImages,
-    reasoning: mi.supportsThinking ?? false,
+    reasoning: Boolean(mi.supportsThinking || variantsSupportReasoning(options.advertisedVariants ?? variants)),
     tool_call: mi.supportsAgent ?? true,
     temperature: false,
     modalities: {
@@ -358,6 +365,7 @@ export function modelsToConfig(models: ModelInfo[]): Record<string, any> {
         thinkingSuffix,
         contextTier: group.contextTier,
         variants: group.variants,
+        advertisedVariants: group.advertisedVariants,
         fast: group.fast,
       })
       config.variants = modelInfoVariants(m, group.advertisedVariants)
