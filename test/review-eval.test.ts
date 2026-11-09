@@ -556,6 +556,41 @@ print(json.dumps(module.harness_metadata()))
     }
   })
 
+  test("consumer parity distinguishes an unchanged working path from a regressed adapter", () => {
+    const preserved = prepare(["prepare", "--case", "consumer-parity", "--variant", "preserved", "--skill", "revised"])
+    const regressed = prepare(["prepare", "--case", "consumer-parity", "--variant", "regressed", "--skill", "revised"])
+    const base = path.join(ROOT, "eval/review/cases/consumer-parity/base")
+    const model = { tunable: false, levels: [
+      { id: "low", settings: { depth: 1 } },
+      { id: "high", settings: { depth: 3 } },
+    ] }
+    const run = (checkout: string, consumer: string) => {
+      const result = python(["catalog.py", consumer, JSON.stringify(model)], checkout)
+      expect(result.status, result.stderr).toBe(0)
+      return JSON.parse(result.stdout)
+    }
+    try {
+      expect(preserved.result.status, preserved.result.stderr).toBe(0)
+      expect(regressed.result.status, regressed.result.stderr).toBe(0)
+      expect(run(base, "legacy")).toEqual({ choices: [] })
+      const workingModern = run(base, "modern")
+      expect(workingModern).toEqual({ choices: model.levels })
+      for (const prepared of [preserved, regressed]) {
+        expect(python(["tests/test_catalog.py"], prepared.checkout).status).toBe(0)
+        expect(python(["scripts/review-eval.py", "verify-mount", prepared.mount]).status).toBe(0)
+        expect(run(prepared.checkout, "legacy")).toEqual({ choices: model.levels })
+      }
+      expect(run(preserved.checkout, "modern")).toEqual(workingModern)
+      expect(run(regressed.checkout, "modern")).toEqual({ choices: [] })
+      const diff = fs.readFileSync(path.join(preserved.mount, "diff.patch"), "utf8")
+      expect(diff).toContain('+        "tunable": model["tunable"] or bool(model["levels"])')
+      expect(diff).not.toContain("def modern")
+      expect(fs.existsSync(path.join(preserved.mount, "private/consumer-parity.json"))).toBe(false)
+    } finally {
+      removeOuts()
+    }
+  })
+
   test("the reviewer mount excludes the answer key and the other variant", () => {
     const prepared = prepare(["prepare", "--case", "index-sync", "--variant", "buggy", "--skill", "revised"])
     try {
@@ -929,6 +964,44 @@ describe("review ledger and score", () => {
       writeJson(ledgerPath, ledger)
       writeJson(reviewPath, incident)
       expect(python(["scripts/review-ledger.py", "compare", ledgerPath, reviewPath]).stderr).toContain("evidence")
+    } finally {
+      removeOuts()
+    }
+  })
+
+  test("consumer parity scoring rejects a missing-edit claim and credits a concrete regression", () => {
+    const dir = outDir()
+    fs.mkdirSync(dir)
+    try {
+      const score = (variant: string, findings: unknown[]) => {
+        const file = path.join(dir, `${variant}.json`)
+        writeJson(file, { head: "local", outcome: findings.length ? "findings" : "clean", findings })
+        const result = python(["scripts/review-eval.py", "score", "--case", "consumer-parity", "--variant", variant, "--review", file])
+        expect(result.status, result.stderr).toBe(0)
+        return JSON.parse(result.stdout)
+      }
+      const missingEdit = {
+        id: "missing-edit", path: "adapters.py", line: 3,
+        title: "Only legacy is fixed",
+        explanation: "The modern adapter ignores the flag and is unchanged, so the fix is incomplete.",
+        trigger: "Discovery leaves tunable false despite levels.",
+        consequence: "Both supported clients must change.", evidence: "source",
+      }
+      const lostChoices = {
+        id: "lost-choices", path: "adapters.py", line: 11,
+        title: "Modern loses the explicit choices",
+        explanation: "The modern adapter filters levels on the raw tunable flag, which can be false.",
+        trigger: "Discovery supplies levels while tunable is false.",
+        consequence: "The modern client receives an empty list and offers no choices.", evidence: "synthetic",
+      }
+      expect(score("preserved", [missingEdit]).falsePositives).toEqual([
+        { finding: "missing-edit", claims: ["unchanged-consumer-already-correct"] },
+      ])
+      const detected = score("regressed", [lostChoices])
+      expect(detected.detected).toEqual(["modern-choices-gated-on-legacy-flag"])
+      expect(detected.falsePositives).toEqual([])
+      expect(score("regressed", []).missed).toEqual(["modern-choices-gated-on-legacy-flag"])
+      expect(score("preserved", []).falsePositives).toEqual([])
     } finally {
       removeOuts()
     }

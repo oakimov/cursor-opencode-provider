@@ -1,0 +1,39 @@
+{
+  "heldout": false,
+  "variants": {
+    "preserved": {
+      "defects": [],
+      "nonDefects": [
+        {
+          "id": "unchanged-consumer-already-correct",
+          "paths": ["adapters.py"],
+          "lines": [1, 12],
+          "symbols": ["def modern"],
+          "causal": [
+            ["modern"],
+            ["unchanged", "ignores", "drops the flag", "does not read", "no boolean"],
+            ["incomplete", "must change", "not fixed", "only legacy", "fails to fix"]
+          ]
+        }
+      ],
+      "absentDefects": []
+    },
+    "regressed": {
+      "defects": [
+        {
+          "id": "modern-choices-gated-on-legacy-flag",
+          "paths": ["adapters.py"],
+          "lines": [8, 12],
+          "symbols": ["def modern"],
+          "causal": [
+            ["modern"],
+            ["tunable", "flag", "false"],
+            ["filter", "drops", "removes", "empty", "loses", "hidden"]
+          ]
+        }
+      ],
+      "nonDefects": [],
+      "absentDefects": []
+    }
+  }
+}

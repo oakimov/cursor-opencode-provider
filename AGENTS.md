@@ -15,7 +15,7 @@ agent protocol. TypeScript ESM; Bun installs/tests; `tsc` builds `dist/`.
 - Keep operator behavior in [README.md](README.md) and the matching
   [host guide](docs/README.md). Follow [CONTRIBUTING.md](CONTRIBUTING.md) and the
   [review rules](docs/review-rules.md), including every Greptile finding, every
-  Cursor review finding, and each applicable Codecov issue. User-facing changes
+  `caeliq-reviewer` review finding, and each applicable Codecov issue. User-facing changes
   need an Unreleased changelog line.
 - Never leave TMPDIR remnants, from tests, scripts or your own scratch work
   (files, directories, worktrees, detached processes and their logs). Remove
