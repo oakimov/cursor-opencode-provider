@@ -5,6 +5,7 @@ import {
   announcedCallsClaimed,
   AttemptReplaySafety,
   describeFrameLayout,
+  historyCoverage,
   markRunInjectionDelivered,
   takeAppendedInjection,
   trackRunInjection,
@@ -376,6 +377,86 @@ describe("display tool lifecycle", () => {
       expect(state.historyRebaseUnsafe).toBe(true)
       expect(safety.applyTo(failure()).replayBarrier).toBe("stateful")
     }
+  })
+})
+
+describe("history coverage of provider answers", () => {
+  // `sessionId:execId` of each host result the rebuilt prompt holds.
+  const run = (record: (safety: AttemptReplaySafety) => void, sessionId = "run-1", state: ReplaySafetyState = {}) => {
+    record(new AttemptReplaySafety(sessionId, state))
+    return state
+  }
+
+  it("needs a result for every exec the host ran", () => {
+    const state = run((safety) => { safety.recordExec(1, "a"); safety.recordExec(2, "b") })
+    expect(historyCoverage(state, new Set(["run-1:1", "run-1:2"]))).toEqual({ hostExecs: 2, answers: {}, complete: true })
+    expect(historyCoverage(state, new Set(["run-1:1"])).complete).toBe(false)
+    expect(historyCoverage(undefined, new Set())).toEqual({ hostExecs: 0, answers: {}, complete: true })
+  })
+
+  it("needs no result for terminal-record and missing-target reads", () => {
+    const state = run((safety) => {
+      safety.recordExec(1, "shell")
+      safety.recordExec(50, "poll")
+      safety.recordProviderAnswer(50, "terminal-read")
+      safety.recordExec(60)
+      safety.recordProviderAnswer(60, "missing-read")
+    })
+    expect(historyCoverage(state, new Set(["run-1:1"]))).toEqual({
+      hostExecs: 1, answers: { "terminal-read": 1, "missing-read": 1 }, complete: true,
+    })
+  })
+
+  for (const answer of ["edit-handshake", "task-attachment"] as const) {
+    it(`needs the host result of the call a ${answer} read belongs to`, () => {
+      const state = run((safety) => {
+        safety.recordExec(61, "call")
+        safety.recordProviderAnswer(61, answer)
+        safety.recordExec(2, "call")
+      })
+      expect(historyCoverage(state, new Set(["run-1:2"]))).toEqual({ hostExecs: 1, answers: { [answer]: 1 }, complete: true })
+      // The call's own exec has no result in history.
+      expect(historyCoverage(state, new Set(["run-1:9"])).complete).toBe(false)
+
+      // No host exec of that call: its write or Task never reached the host.
+      const unowned = run((safety) => {
+        safety.recordExec(1, "other")
+        safety.recordExec(61, "call")
+        safety.recordProviderAnswer(61, answer)
+      })
+      expect(historyCoverage(unowned, new Set(["run-1:1"])).complete).toBe(false)
+
+      // Without a call id nothing can own it, and another answer of the same call is no owner.
+      const uncorrelated = run((safety) => {
+        safety.recordExec(1, "other")
+        safety.recordExec(61)
+        safety.recordProviderAnswer(61, answer)
+      })
+      expect(historyCoverage(uncorrelated, new Set(["run-1:1"])).complete).toBe(false)
+      const answeredOwner = run((safety) => {
+        safety.recordExec(1, "other")
+        safety.recordExec(61, "call")
+        safety.recordProviderAnswer(61, answer)
+        safety.recordExec(62, "call")
+        safety.recordProviderAnswer(62, "missing-read")
+      })
+      expect(historyCoverage(answeredOwner, new Set(["run-1:1"])).complete).toBe(false)
+    })
+  }
+
+  it("matches an owner on a resumed Run by call id", () => {
+    const state = run((safety) => {
+      safety.recordExec(61, "call")
+      safety.recordProviderAnswer(61, "edit-handshake")
+    })
+    run((safety) => safety.recordExec(1, "call"), "run-2", state)
+    expect(historyCoverage(state, new Set(["run-2:1"])).complete).toBe(true)
+  })
+
+  it("marks only the current Run's exec", () => {
+    const state = run((safety) => safety.recordExec(1, "call"))
+    run((safety) => safety.recordProviderAnswer(1, "missing-read"), "run-2", state)
+    expect(state.execs).toEqual([{ sessionId: "run-1", id: 1, callId: "call" }])
   })
 })
 

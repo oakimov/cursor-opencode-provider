@@ -413,6 +413,7 @@ describe("checkpoint eligibility across host results", () => {
     "malformed-completion", "repeated-completion-id",
     "inline-catalog", "spilled-catalog", "unfinished-catalog", "unacknowledged-checkpoint",
     "terminal-poll", "terminal-poll-after-result",
+    "missing-read", "missing-read-after-result", "refused-read", "new-file-edit",
   ] as const) {
     it(`recovers a post-result drop only from represented completed work (${scenario})`, async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-result-history-"))
@@ -424,6 +425,8 @@ describe("checkpoint eligibility across host results", () => {
         || scenario === "unannounced-completion" || scenario === "oversized"
         || scenario === "malformed-completion" || scenario === "repeated-completion-id"
       const shellVariant = scenario === "announced-shell" ? "shell_args" : "shell_stream_args"
+      const newFileEdit = scenario === "new-file-edit"
+      const fileReads = newFileEdit || scenario === "missing-read" || scenario === "missing-read-after-result"
       scripted = (stream, message) => {
         const send = (value: Record<string, unknown>) => stream.write(frame(encodeMessage("AgentServerMessage", value)))
         const shell = (callId: string, command: string) => ({ shell_tool_call: { args: { command, tool_call_id: callId } } })
@@ -467,8 +470,8 @@ describe("checkpoint eligibility across host results", () => {
         } else if (message.exec_client_message) {
           const id = (message.exec_client_message as { id: number }).id
           // A result is complete with its exit; a large stdout arrives first.
-          const shellReply = message.exec_client_message as { shell_stream?: { exit?: unknown }; shell_result?: unknown }
-          if ((!shellReply.shell_stream?.exit && !shellReply.shell_result) || delivered.includes(id)) return
+          const hostReply = message.exec_client_message as { shell_stream?: { exit?: unknown }; shell_result?: unknown; write_result?: unknown }
+          if ((!hostReply.shell_stream?.exit && !hostReply.shell_result && !hostReply.write_result) || delivered.includes(id)) return
           delivered.push(id)
           if (id === 1) {
             completed("first", "echo first")
@@ -482,14 +485,31 @@ describe("checkpoint eligibility across host results", () => {
                 send({ exec_server_message: { id: poll, read_args: { path: record, tool_call_id: `poll-${poll}` } } })
               }
             }
-            started("second", "echo second")
-            send({ exec_server_message: { id: 2, [shellVariant]: { command: "echo second", tool_call_id: "second" } } })
+            // The provider answers a read of a missing path itself, with a typed file_not_found.
+            // Without an advertised `read` (`refused-read`) it refuses the call instead, which stays final.
+            if (scenario === "missing-read" || scenario === "refused-read") {
+              send({ exec_server_message: { id: 60, read_args: { path: path.join(root, "absent.txt"), tool_call_id: "absent" } } })
+            }
+            // A new file's edit: the provider answers its read with an empty file, then the write goes to the host.
+            if (newFileEdit) {
+              const target = path.join(root, "created.txt")
+              send({ interaction_update: { tool_call_started: { call_id: "edit", tool_call: { edit_tool_call: { args: { path: target } } } } } })
+              send({ exec_server_message: { id: 61, read_args: { path: target, tool_call_id: "edit" } } })
+              send({ exec_server_message: { id: 2, write_args: { path: target, file_text: "created\n", tool_call_id: "edit" } } })
+            } else {
+              started("second", "echo second")
+              send({ exec_server_message: { id: 2, [shellVariant]: { command: "echo second", tool_call_id: "second" } } })
+            }
           } else {
             completed("second", "echo second")
             // A poll after the last result belongs to the cut step itself, so the rebuild would lose it.
             if (scenario === "terminal-poll-after-result") {
               const env = sessionManager.findOpenByOpenCodeSessionId(`ses_result_history_${scenario}`)!.requestContext.env as { project_folder: string }
               send({ exec_server_message: { id: 50, read_args: { path: path.join(env.project_folder, "terminals", "7.txt") } } })
+            }
+            // A provider answer after the last result belongs to the cut attempt.
+            if (scenario === "missing-read-after-result") {
+              send({ exec_server_message: { id: 60, read_args: { path: path.join(root, "absent.txt"), tool_call_id: "absent" } } })
             }
             if (scenario === "malformed-completion" || scenario === "repeated-completion-id") {
               // Independent lifecycle wire: completion #3, call_id #1.
@@ -513,7 +533,14 @@ describe("checkpoint eligibility across host results", () => {
           workspaceRoot: root, cacheDir: root, retry: { baseDelayMs: 1, maxDelayMs: 1 } }).languageModel("composer-2.5")
         const prompt: LanguageModelV3CallOptions["prompt"] = [{ role: "user", content: [{ type: "text", text: "Run both commands" }] }]
         const options = { prompt, headers: { "x-opencode-session-id": `ses_result_history_${scenario}` },
-          tools: [{ type: "function" as const, name: "bash", inputSchema: { type: "object", properties: { command: { type: "string" } } } }] }
+          tools: [
+            { type: "function" as const, name: "bash", inputSchema: { type: "object", properties: { command: { type: "string" } } } },
+            // Without an advertised `read` the provider refuses the read instead of answering it.
+            ...(fileReads ? [{ type: "function" as const, name: "read", inputSchema: { type: "object",
+              properties: { filePath: { type: "string" } }, required: ["filePath"] } }] : []),
+            ...(newFileEdit ? [{ type: "function" as const, name: "write", inputSchema: { type: "object",
+              properties: { filePath: { type: "string" }, content: { type: "string" } }, required: ["filePath", "content"] } }] : []),
+          ] }
         const read = async () => {
           const parts: LanguageModelV3StreamPart[] = []
           const { stream } = await model.doStream(options)
@@ -536,7 +563,8 @@ describe("checkpoint eligibility across host results", () => {
         }
         if (scenario === "missing-history") prompt.splice(1, 2)
         if (scenario === "complete" || scenario === "announced" || scenario === "announced-shell" || scenario === "inline-catalog"
-          || scenario === "unacknowledged-checkpoint" || scenario === "terminal-poll") {
+          || scenario === "unacknowledged-checkpoint" || scenario === "terminal-poll"
+          || scenario === "missing-read" || scenario === "new-file-edit") {
           const parts = await read()
           expect(parts.some(part => part.type === "finish" && part.finishReason.unified === "stop")).toBe(true)
           expect(parts.some(part => part.type === "tool-call")).toBe(false)
