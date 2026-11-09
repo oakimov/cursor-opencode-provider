@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Idempotent Cloud Agent bootstrap. .cursor/environment.json install is this
 # file, so a build of main does not need this path to exist.
-# OpenCode is not pinned. Each run installs the current release when the
-# copy in ~/.opencode is missing or older.
+# Neither OpenCode major is pinned. Each run installs the current release
+# when the copy on disk is missing or older.
+# 2.x (@opencode/cli, https://opencode.ai/v2/install) lands in ~/.opencode
+# and is linked as opencode. 1.x (opencode-ai, https://opencode.ai/install)
+# uses its own prefix, because that installer always writes
+# $HOME/.opencode/bin/opencode and would replace the 2.x binary. It is
+# linked as opencode1.
 
 opencode_version_of() {
   local bin="$1"
@@ -15,7 +20,9 @@ opencode_version_of() {
   printf '%s' "$installed"
 }
 
-# metadata is the JSON from https://opencode.ai/update/api/latest/cli/npm
+# metadata is JSON with a "version" field. The 2.x feed is
+# https://opencode.ai/update/api/latest/cli/npm and the 1.x feed is
+# https://registry.npmjs.org/opencode-ai/latest.
 opencode_version_from_metadata() {
   local metadata="$1"
   local version
@@ -33,6 +40,24 @@ latest_opencode_version() {
     return 1
   fi
   printf '%s' "$version"
+}
+
+# Accept only an OpenCode 1 release. opencode-ai's latest dist-tag is that
+# line; a 2.x or pre-release value is refused instead of installed.
+opencode1_release_version() {
+  local version
+  version="$(opencode_version_from_metadata "$1")"
+  if [[ ! "$version" =~ ^1\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Could not read the latest OpenCode 1.x release." >&2
+    return 1
+  fi
+  printf '%s' "$version"
+}
+
+latest_opencode1_version() {
+  local metadata
+  metadata="$(curl -fsSL https://registry.npmjs.org/opencode-ai/latest)"
+  opencode1_release_version "$metadata"
 }
 
 install_main() {
@@ -79,16 +104,37 @@ install_main() {
     sudo ln -sf "$HOME/.opencode/bin/opencode2" /usr/local/bin/opencode2
   fi
 
+  # The 1.x installer writes $HOME/.opencode/bin/opencode and treats an
+  # `opencode` already on PATH as the install to keep. Give it a private HOME
+  # and a PATH with no opencode, so it cannot replace or skip past 2.x.
+  opencode1_home="$HOME/.opencode1"
+  opencode1_bin="$opencode1_home/.opencode/bin/opencode"
+  installed1="$(opencode_version_of "$opencode1_bin")"
+  latest1="$(latest_opencode1_version)"
+  if [[ "$installed1" != "$latest1" ]]; then
+    echo "Installing OpenCode ${latest1}"
+    mkdir -p "$opencode1_home"
+    HOME="$opencode1_home" PATH="/usr/bin:/bin:/usr/sbin" bash -c 'curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path'
+  else
+    echo "OpenCode ${installed1} is current"
+  fi
+  if [[ ! -x "$opencode1_bin" ]]; then
+    echo "OpenCode 1.x installer did not write ${opencode1_bin}." >&2
+    exit 1
+  fi
+  sudo ln -sf "$opencode1_bin" /usr/local/bin/opencode1
+
   /usr/local/bin/bun install --frozen-lockfile
   /usr/local/bin/bun run build
-  if [[ ! -f "$ROOT/dist/index.js" || ! -f "$ROOT/dist/plugin-opencode2.js" ]]; then
-    echo "Missing dist/index.js or dist/plugin-opencode2.js after build." >&2
+  if [[ ! -f "$ROOT/dist/index.js" || ! -f "$ROOT/dist/plugin.js" || ! -f "$ROOT/dist/plugin-opencode2.js" ]]; then
+    echo "Missing dist/index.js, dist/plugin.js, or dist/plugin-opencode2.js after build." >&2
     exit 1
   fi
 
   # OpenCode config is not written here. The review harness writes it after
   # this install, including on main, where that harness is absent.
   echo "OpenCode $(opencode_version_of /usr/local/bin/opencode)"
+  echo "OpenCode 1.x $(opencode_version_of /usr/local/bin/opencode1)"
 }
 
 if [[ -z "${BASH_SOURCE[0]:-}" || "${BASH_SOURCE[0]}" == "$0" ]]; then
