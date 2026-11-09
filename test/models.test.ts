@@ -19,7 +19,6 @@ import {
   CURSOR_VARIANT_PARAMETERS_KEY,
   CURSOR_WIRE_MODEL_ID_KEY,
   resolveCursorWireModelId,
-  EFFORT_PARAMETER_IDS,
   variantsSupportReasoning,
   type ModelCache,
   type ModelInfo,
@@ -1231,13 +1230,28 @@ describe("variantsSupportReasoning", () => {
   }
 
   it("shares one effort vocabulary with variant resolution", () => {
-    expect([...EFFORT_PARAMETER_IDS]).toEqual(["effort", "reasoning", "reasoning_effort"])
-    for (const id of EFFORT_PARAMETER_IDS) {
-      const model: ModelInfo = { id: "effort-params", variants: [variant([{ id, value: "high" }])] }
+    for (const id of ["effort", "reasoning", "reasoning_effort"]) {
+      // The default is `low`, so only a recognised effort id can select `high`.
+      const model: ModelInfo = {
+        id: "effort-params",
+        variants: [
+          variant([{ id, value: "low" }]),
+          { ...variant([{ id, value: "high" }]), isDefaultNonMax: false },
+        ],
+      }
       expect(resolveVariantParameters(model, { reasoningEffort: "high" }), id)
         .toEqual([{ id, value: "high" }])
       expect(variantsSupportReasoning(model.variants), id).toBe(true)
     }
+    const unknown: ModelInfo = {
+      id: "effort-params",
+      variants: [
+        variant([{ id: "speed", value: "low" }]),
+        { ...variant([{ id: "speed", value: "high" }]), isDefaultNonMax: false },
+      ],
+    }
+    expect(resolveVariantParameters(unknown, { reasoningEffort: "high" })).toEqual([{ id: "speed", value: "low" }])
+    expect(variantsSupportReasoning(unknown.variants)).toBe(false)
   })
 
   it("infers reasoning from non-off effort variants", () => {
@@ -1297,10 +1311,10 @@ describe("variantsSupportReasoning", () => {
         {
           key: "base",
           displayName: "Claude Sonnet 5.5",
-          parameterValues: [{ id: "context", value: "300k" }, { id: "reasoning_effort", value: "high" }],
+          parameterValues: [{ id: "context", value: "200k" }, { id: "reasoning_effort", value: "high" }],
           isDefaultNonMax: true,
           isDefaultMax: false,
-          isMaxMode: true,
+          isMaxMode: false,
         },
         {
           key: "long",
@@ -1313,6 +1327,7 @@ describe("variantsSupportReasoning", () => {
       ],
     }
     const config = modelsToConfig([tiered])
+    expect(Object.keys(config).sort()).toEqual([tiered.id, `${tiered.id}-1m`])
     // The base entry advertises the effort variant; its 1M entry does not.
     expect(config[tiered.id].reasoning).toBe(true)
     expect(config[`${tiered.id}-1m`].reasoning).toBe(false)
