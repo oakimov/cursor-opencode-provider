@@ -246,7 +246,9 @@ describe("retained image budget", () => {
     const copy = new Uint8Array(160 * 1024)
     const ids = Array.from({ length: 35 }, (_, i) => stageFor("ses_a", `shot-${i}.png`, copy))
     const { ctx } = askRecorder()
-    for (const id of ids) expect((await executeCursorImageSave({ image_id: id }, ctx)).bytes).toBe(copy.length)
+    const bytes: number[] = []
+    for (const id of ids) bytes.push((await executeCursorImageSave({ image_id: id }, ctx)).bytes)
+    expect(bytes).toEqual(ids.map(() => copy.length))
     expect(fs.readdirSync(path.join(projectDir, "assets"))).toHaveLength(35)
   })
 

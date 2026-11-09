@@ -95,7 +95,7 @@ describe("CreatePlan restart receipts", () => {
 
   it("keeps active receipts when the global session budget is full", () => {
     resetPlanOperationsForTests()
-    for (let i = 0; i < 64; i++) expect(recordPlanOperation(`plan-${i}`, receipt()).ok).toBe(true)
+    expect(Array.from({ length: 64 }, (_, i) => recordPlanOperation(`plan-${i}`, receipt()).ok)).toEqual(Array(64).fill(true))
     expect(recordPlanOperation("overflow", receipt()).ok).toBe(false)
     expect(planOperationsFor("plan-0")).toHaveLength(1)
     restorePlanOperations("restored-overflow", JSON.stringify({ version: 1, receipts: [receipt()] }))
@@ -105,7 +105,7 @@ describe("CreatePlan restart receipts", () => {
   it("enforces operation-count and byte budgets without losing existing receipts", async () => {
     resetPlanOperationsForTests()
     const { clearPlanOperation } = await import("../src/protocol/plan-operations.js")
-    for (let i = 0; i < 8; i++) expect(recordPlanOperation("count", { ...receipt(), hostCallId: `call-${i}` }).ok).toBe(true)
+    expect(Array.from({ length: 8 }, (_, i) => recordPlanOperation("count", { ...receipt(), hostCallId: `call-${i}` }).ok)).toEqual(Array(8).fill(true))
     expect(recordPlanOperation("count", receipt()).ok).toBe(false)
     clearPlanOperation("count", "call-0")
     expect(planOperationsFor("count")).toHaveLength(7)

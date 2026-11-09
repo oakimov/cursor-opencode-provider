@@ -576,6 +576,7 @@ describe.each([
   })
 
   it("round-trips small substring edits including leading and trailing blank lines", () => {
+    const failures: string[] = []
     for (const source of ["a\n", "\na\n", "\n", "\n\n", "a\n\n", "a\nb\n", "a\n\nb\n", "a\nb\n\n", "a\na\nb\n", "ab\ncd\n"]) {
       for (let offset = 0; offset < source.length; offset++) {
         for (let length = 1; length <= Math.min(4, source.length - offset); length++) {
@@ -585,14 +586,20 @@ describe.each([
             const expected = source.slice(0, offset) + newText + source.slice(offset + length)
             if (expected && !expected.endsWith("\n")) continue
             const plan = planSubstringEdit(source, oldText, newText)
-            expect(plan.ok).toBe(true)
-            if (!plan.ok) throw new Error(plan.reason)
+            if (!plan.ok) {
+              failures.push(`${JSON.stringify(source)} ${JSON.stringify(oldText)} -> ${JSON.stringify(newText)}: ${plan.reason}`)
+              continue
+            }
             const patch = buildUpdateFilePatch("file.txt", plan.chunks, patchTool)
-            expect(applyGeneratedPatch(patch, source, patchTool)).toBe(expected)
+            const actual = applyGeneratedPatch(patch, source, patchTool)
+            if (actual !== expected) {
+              failures.push(`${JSON.stringify(source)} ${JSON.stringify(oldText)} -> ${JSON.stringify(newText)}: ${JSON.stringify(actual)}`)
+            }
           }
         }
       }
     }
+    expect(failures).toEqual([])
   })
 
   it("resolves the host's patch tool name", () => {

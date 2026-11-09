@@ -51,6 +51,25 @@ const rejectionMessage = async (promise: Promise<unknown>): Promise<string> => {
   throw new Error("Expected the promise to reject")
 }
 
+/** Cap-filling hydrates are one check: none of these sessions has a snapshot. */
+async function expectNoSnapshots(cache: string, keys: readonly string[]): Promise<void> {
+  const hydrated: string[] = []
+  for (const sessionKey of keys) {
+    if (await hydrateConversationState(cache, sessionKey) !== undefined) hydrated.push(sessionKey)
+  }
+  expect(hydrated).toEqual([])
+}
+
+async function bindAndExpectNoSnapshot(cache: string, prefix: string, count = MAX_ACTIVE_CONVERSATION_BINDINGS): Promise<void> {
+  const hydrated: string[] = []
+  for (let index = 0; index < count; index++) {
+    const sessionKey = `${prefix}-${index}`
+    bindConversationId(sessionKey)
+    if (await hydrateConversationState(cache, sessionKey) !== undefined) hydrated.push(sessionKey)
+  }
+  expect(hydrated).toEqual([])
+}
+
 test("a rewrite without saved Cursor state leaves restart free to build its full context", async () => {
   const cache = root()
   await noteHostHistoryRewrite(cache, "empty", "evt_empty")
@@ -753,9 +772,10 @@ test("snapshot generation records stay bounded and keep every bound session's re
   setCheckpoint(conversationId, checkpointBytes)
   try {
     await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
-    for (let index = 0; index <= MAX_ACTIVE_CONVERSATION_BINDINGS; index++) {
-      expect(await hydrateConversationState(cache, `unbound-${index}`)).toBeUndefined()
-    }
+    await expectNoSnapshots(cache, Array.from(
+      { length: MAX_ACTIVE_CONVERSATION_BINDINGS + 1 },
+      (_, index) => `unbound-${index}`,
+    ))
     expect(snapshotGenerationRecordsForTests()).toBe(MAX_ACTIVE_CONVERSATION_BINDINGS)
     // An evicted record would count this copy as behind and restore the older snapshot over its live checkpoint.
     setCheckpoint(conversationId, live)
@@ -774,10 +794,7 @@ test("a copy whose snapshot record was evicted drops its older checkpoint while 
   setCheckpoint(conversationId, checkpointBytes)
   try {
     await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
-    for (let index = 0; index < MAX_ACTIVE_CONVERSATION_BINDINGS; index++) {
-      bindConversationId(`busy-${index}`)
-      expect(await hydrateConversationState(cache, `busy-${index}`)).toBeUndefined()
-    }
+    await bindAndExpectNoSnapshot(cache, "busy")
     // The session's binding and then its record are gone; the other copy rebinds it from disk.
     expect((await other.state.hydrateConversationState(cache, sessionKey))?.conversationId).toBe(conversationId)
     other.persistence.setConversationPersistenceHookForTests(phase => {
@@ -804,10 +821,7 @@ test("a copy whose snapshot record was evicted drops its older checkpoint once a
   setCheckpoint(conversationId, checkpointBytes)
   try {
     await persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
-    for (let index = 0; index < MAX_ACTIVE_CONVERSATION_BINDINGS; index++) {
-      bindConversationId(`busy-${index}`)
-      expect(await hydrateConversationState(cache, `busy-${index}`)).toBeUndefined()
-    }
+    await bindAndExpectNoSnapshot(cache, "busy")
     // The session's binding and then its record are gone; the other copy rebinds it from disk and saves a newer turn.
     expect((await other.state.hydrateConversationState(cache, sessionKey))?.conversationId).toBe(conversationId)
     other.checkpoint.setCheckpoint(conversationId, newer)
@@ -836,10 +850,7 @@ test("a copy behind drops its older checkpoint once the snapshot another copy re
     expect((await other.state.hydrateConversationState(cache, sessionKey))?.conversationId).toBe(conversationId)
     other.checkpoint.setCheckpoint(conversationId, newer)
     await other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
-    for (let index = 0; index < MAX_ACTIVE_CONVERSATION_BINDINGS; index++) {
-      bindConversationId(`busy-${index}`)
-      expect(await hydrateConversationState(cache, `busy-${index}`)).toBeUndefined()
-    }
+    await bindAndExpectNoSnapshot(cache, "busy")
     // The record that saw the other copy's write is gone; the other copy rebinds the session from that snapshot.
     expect((await other.state.hydrateConversationState(cache, sessionKey))?.conversationId).toBe(conversationId)
     writeFileSync(other.persistence.conversationCacheFilePath(cache, sessionKey), "not a snapshot")
@@ -864,10 +875,7 @@ test("a copy whose binding and record were evicted drops its older checkpoint wh
     expect((await other.state.hydrateConversationState(cache, sessionKey))?.conversationId).toBe(conversationId)
     other.checkpoint.setCheckpoint(conversationId, newer)
     await other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
-    for (let index = 0; index < MAX_ACTIVE_CONVERSATION_BINDINGS; index++) {
-      bindConversationId(`busy-${index}`)
-      expect(await hydrateConversationState(cache, `busy-${index}`)).toBeUndefined()
-    }
+    await bindAndExpectNoSnapshot(cache, "busy")
     writeFileSync(other.persistence.conversationCacheFilePath(cache, sessionKey), "not a snapshot")
     expect(await hydrateConversationState(cache, sessionKey)).toBeUndefined()
     // The next Run binds the session's default conversation id again.
@@ -908,10 +916,7 @@ test("a copy behind drops its older checkpoint once another copy took up the ses
     expect((await other.state.hydrateConversationState(cache, sessionKey))?.conversationId).toBe(conversationId)
     other.checkpoint.setCheckpoint(conversationId, newer)
     await other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
-    for (let index = 0; index < MAX_ACTIVE_CONVERSATION_BINDINGS; index++) {
-      bindConversationId(`busy-${index}`)
-      expect(await hydrateConversationState(cache, `busy-${index}`)).toBeUndefined()
-    }
+    await bindAndExpectNoSnapshot(cache, "busy")
     writeFileSync(other.persistence.conversationCacheFilePath(cache, sessionKey), "not a snapshot")
     // The other copy returns first, finds no snapshot, and its next Run binds the session again before saving.
     expect(await other.state.hydrateConversationState(cache, sessionKey)).toBeUndefined()
@@ -944,10 +949,7 @@ test("an unbound copy behind drops its older checkpoint while another copy's lat
       .toContain("disk full")
     other.persistence.setConversationPersistenceHookForTests()
     // The binding is gone; the record of the failed save outlives the cap.
-    for (let index = 0; index < MAX_ACTIVE_CONVERSATION_BINDINGS; index++) {
-      bindConversationId(`busy-${index}`)
-      expect(await hydrateConversationState(cache, `busy-${index}`)).toBeUndefined()
-    }
+    await bindAndExpectNoSnapshot(cache, "busy")
     expect(await hydrateConversationState(cache, sessionKey)).toBeUndefined()
     expect(getCheckpoint(conversationId)).toBeUndefined()
     expect(await other.state.hydrateConversationState(cache, sessionKey)).toBeUndefined()
@@ -1003,10 +1005,7 @@ test("an unbound copy behind takes a snapshot without provenance over its own ol
     await other.state.hydrateConversationState(cache, sessionKey)
     other.provenance.forgetTurnProvenance(sessionKey)
     await other.state.persistConversationState(cache, { sessionKey, conversationId, requestContext: { rules_info_complete: true } })
-    for (let index = 0; index < MAX_ACTIVE_CONVERSATION_BINDINGS; index++) {
-      bindConversationId(`busy-${index}`)
-      expect(await hydrateConversationState(cache, `busy-${index}`)).toBeUndefined()
-    }
+    await bindAndExpectNoSnapshot(cache, "busy")
     replaced.length = 0
     expect((await hydrateConversationState(cache, sessionKey))?.conversationId).toBe(conversationId)
     expect(getTurnProvenance(sessionKey)).toBeUndefined()
@@ -1260,11 +1259,7 @@ test("at most the cap's worth of unbound failed-save records stay past the cap, 
 
 test("snapshot generation records of bound sessions are kept past the cap", async () => {
   const cache = root()
-  for (let index = 0; index < MAX_ACTIVE_CONVERSATION_BINDINGS; index++) {
-    const sessionKey = `bound-${index}`
-    bindConversationId(sessionKey)
-    expect(await hydrateConversationState(cache, sessionKey)).toBeUndefined()
-  }
+  await bindAndExpectNoSnapshot(cache, "bound")
   expect(snapshotGenerationRecordsForTests()).toBe(MAX_ACTIVE_CONVERSATION_BINDINGS)
   expect(await hydrateConversationState(cache, "unbound-late")).toBeUndefined()
   expect(snapshotGenerationRecordsForTests()).toBe(MAX_ACTIVE_CONVERSATION_BINDINGS + 1)

@@ -954,10 +954,10 @@ describe("CreatePlan full-pump host write and patch matrix", () => {
   it.each([false, true])("refuses a writer before mutation when durable receipt admission is full (deny=%s)", async denied => {
     resetPlanOperationsForTests()
     const key = "create-plan-opencode-session"
-    for (let i = 0; i < 8; i++) expect(recordPlanOperation(key, {
+    expect(Array.from({ length: 8 }, (_, i) => recordPlanOperation(key, {
       interactionId: i, hostCallId: `other-${i}`, planPath: "/workspace/plan.md", planUri: "file:///workspace/plan.md",
       markdown: "# Pending\n", phase: "write", bridgeKind: "approve",
-    }).ok).toBe(true)
+    }).ok)).toEqual(Array(8).fill(true))
     setActiveCursorMode(key, "plan")
     const writes: Uint8Array[] = []
     const parts: LanguageModelV3StreamPart[] = []
@@ -989,10 +989,10 @@ describe("CreatePlan full-pump host write and patch matrix", () => {
     const controller = { enqueue(part: LanguageModelV3StreamPart) { parts.push(part) }, error() {} }
     try {
       if (phase === "budget") {
-        for (let i = 0; i < 8; i++) expect(recordPlanOperation(session.openCodeSessionId, {
+        expect(Array.from({ length: 8 }, (_, i) => recordPlanOperation(session.openCodeSessionId, {
           interactionId: i, hostCallId: `call-${i}`, planPath: "/workspace/plan.md", planUri: "file:///workspace/plan.md",
           markdown: "# Pending\n", phase: "write", bridgeKind: "approve",
-        }).ok).toBe(true)
+        }).ok)).toEqual(Array(8).fill(true))
       } else {
         await pump(session, controller as ReadableStreamDefaultController<LanguageModelV3StreamPart>, { textId: "write", reasoningId: "r" })
         const call = parts.find(part => part.type === "tool-call")

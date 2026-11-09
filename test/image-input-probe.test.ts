@@ -93,12 +93,16 @@ describe("live image-input probe", () => {
     expect(rendered).toEndWith('export const CURSOR_IMAGE_INPUT = {\n  "alpha": true,\n  "zeta": false\n} as const\n')
     const committed = readFileSync(new URL("../src/image-input-data.ts", import.meta.url), "utf8")
     expect(committed).toBe(renderImageInputModule(CURSOR_IMAGE_INPUT))
-    for (const value of Object.values(CURSOR_IMAGE_INPUT)) expect(typeof value).toBe("boolean")
+    expect(Object.values(CURSOR_IMAGE_INPUT).map((value) => typeof value)).toEqual(
+      Object.values(CURSOR_IMAGE_INPUT).map(() => "boolean"),
+    )
   })
 
   it("advertises image input only for a model recorded as reading images", () => {
     const record = CURSOR_IMAGE_INPUT as Record<string, boolean>
-    for (const [id, reads] of Object.entries(record)) expect(cursorModelReadsImages(id)).toBe(reads)
-    for (const id of ["unrecorded-model", "toString", "__proto__", ""]) expect(cursorModelReadsImages(id)).toBe(false)
+    expect(Object.fromEntries(Object.keys(record).map((id) => [id, cursorModelReadsImages(id)]))).toEqual(record)
+    expect(["unrecorded-model", "toString", "__proto__", ""].map((id) => cursorModelReadsImages(id))).toEqual([
+      false, false, false, false,
+    ])
   })
 })
