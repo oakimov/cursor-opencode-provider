@@ -1,7 +1,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { processShared } from "./process-shared.js"
 
 // Wire-level diagnostics. Opt in with CURSOR_PROVIDER_DEBUG=1 (or "true"); =2 (or
@@ -76,7 +76,7 @@ const maintenance = processShared("debug.maintenance.v1", () => new Map<string, 
 type DebugLogIdentity = { dev: number; ino: number; size: number; head: string }
 // Keys `traceOncePerLog` already wrote to the current file, shared by every copy
 // since they append to the same file, and the file as checked before the last such line.
-const writtenOnce = processShared("debug.written-once.v2", () => ({
+const writtenOnce = processShared("debug.once-per-log.v1", () => ({
   keys: new Set<string>(),
   file: undefined as (DebugLogIdentity & { at: number }) | undefined,
 }))
@@ -450,6 +450,15 @@ function onceLogReplaced(current: DebugLogIdentity | undefined): boolean {
   return !current || Date.now() - seen.at >= WRITTEN_ONCE_MAX_AGE_MS
     || current.dev !== seen.dev || current.ino !== seen.ino || current.size < seen.size
     || !current.head.startsWith(seen.head)
+}
+
+/** The tools a request advertised, by name once per log file and by hash after that. */
+export function traceToolList(incoming: number, advertised: readonly { name: string }[]): void {
+  if (!DEBUG_ENABLED) return
+  const names = advertised.map((tool) => tool.name).join(",")
+  const hash = createHash("sha256").update(names).digest("hex").slice(0, 12)
+  const counts = `extractTools: ${incoming} incoming → ${advertised.length} advertised tools=${hash}`
+  traceOncePerLog(`extractTools:${hash}`, `${counts} [${names}]`, counts)
 }
 
 function debugLogIdentity(): DebugLogIdentity | undefined {

@@ -937,7 +937,6 @@ describe("debug log levels", () => {
   const messages = (file: string) => fs.readFileSync(file, "utf8").split("\n")
     .map((line) => line.match(/^\[[^\]]+\] (?:#\d+ )?(.*)$/)?.[1])
     .filter((line): line is string => line !== undefined && !line.startsWith("debug: "))
-  const toolLines = (file: string) => messages(file).filter((line) => line.startsWith("tools=a"))
   const traceAll = (debug: Debug) => {
     debug.trace("plain line")
     debug.traceVerbose("pump frame: verbose only")
@@ -996,6 +995,39 @@ describe("debug log levels", () => {
       expect(messages(file)).toEqual(process.getuid?.() === 0
         ? ["start", "tools=a [full]", "tools=a", "tools=a"]
         : ["start", "tools=a [full]", "tools=a"])
+    })
+  })
+
+  it("names each advertised tool list once per file by a stable hash at level 1 and every time at level 2", async () => {
+    const lists = (debug: Debug) => {
+      const tools = (...names: string[]) => names.map((name) => ({ name }))
+      debug.traceToolList(2, tools("read", "edit"))
+      debug.traceToolList(2, tools("read", "edit"))
+      debug.traceToolList(4, tools("read", "edit", "shell"))
+      debug.traceToolList(3, tools("read", "edit"))
+    }
+    const toolsLines = (file: string) => messages(file).filter((line) => line.startsWith("extractTools:"))
+    await atLevel("1", (debug, file) => {
+      lists(debug)
+      const lines = toolsLines(file)
+      expect(lines.map((line) => line.replace(/tools=[0-9a-f]{12}/, "tools=H"))).toEqual([
+        "extractTools: 2 incoming → 2 advertised tools=H [read,edit]",
+        "extractTools: 2 incoming → 2 advertised tools=H",
+        "extractTools: 4 incoming → 3 advertised tools=H [read,edit,shell]",
+        "extractTools: 3 incoming → 2 advertised tools=H",
+      ])
+      const hashes = lines.map((line) => line.match(/tools=([0-9a-f]{12})/)![1])
+      expect(hashes[1]).toBe(hashes[0]!)
+      expect(hashes[3]).toBe(hashes[0]!)
+      expect(hashes[2]).not.toBe(hashes[0]!)
+    })
+    await atLevel("2", (debug, file) => {
+      lists(debug)
+      expect(toolsLines(file).every((line) => line.endsWith("]"))).toBe(true)
+    })
+    await atLevel("0", (debug, file) => {
+      lists(debug)
+      expect(fs.existsSync(file)).toBe(false)
     })
   })
 
@@ -1082,34 +1114,36 @@ describe("debug log levels", () => {
     try {
       await atLevel("1", (debug, file) => {
         const twice = () => {
-          debug.traceOncePerLog("tools:a", "tools=a [full]", "tools=a")
-          debug.traceOncePerLog("tools:a", "tools=a [full]", "tools=a")
+          debug.traceToolList(1, [{ name: "read" }])
+          debug.traceToolList(1, [{ name: "read" }])
         }
+        const lists = () => messages(file).filter((line) => line.startsWith("extractTools:"))
+          .map((line) => (line.endsWith("[read]") ? "full" : "hash"))
         twice()
-        expect(toolLines(file)).toEqual(["tools=a [full]", "tools=a"])
+        expect(lists()).toEqual(["full", "hash"])
         // Rotated: a new file at the path.
         fs.renameSync(file, `${file}.1`)
         twice()
-        expect(toolLines(file)).toEqual(["tools=a [full]", "tools=a"])
+        expect(lists()).toEqual(["full", "hash"])
         // Trimmed in place to less than it held.
         fs.truncateSync(file, 0)
         twice()
-        expect(toolLines(file)).toEqual(["tools=a [full]", "tools=a"])
+        expect(lists()).toEqual(["full", "hash"])
         // Trimmed in place and grown back past its old size: only its first bytes changed.
         fs.writeFileSync(file, `[2026-01-01T00:00:00.000Z] kept tail\n${"x".repeat(fs.statSync(file).size)}\n`)
         twice()
-        expect(toolLines(file)).toEqual(["tools=a [full]", "tools=a"])
+        expect(lists()).toEqual(["full", "hash"])
         // Replaced by a copy on another inode with the same bytes.
         fs.copyFileSync(file, `${file}.copy`)
         fs.renameSync(`${file}.copy`, file)
         twice()
-        expect(toolLines(file)).toEqual(["tools=a [full]", "tools=a", "tools=a [full]", "tools=a"])
+        expect(lists()).toEqual(["full", "hash", "full", "hash"])
         clock += 10 * 60 * 1000 - 1
         twice()
-        expect(toolLines(file).slice(4)).toEqual(["tools=a", "tools=a"])
+        expect(lists().slice(4)).toEqual(["hash", "hash"])
         clock += 1
         twice()
-        expect(toolLines(file).slice(6)).toEqual(["tools=a [full]", "tools=a"])
+        expect(lists().slice(6)).toEqual(["full", "hash"])
       })
     } finally {
       now.mockRestore()

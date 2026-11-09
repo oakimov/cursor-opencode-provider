@@ -75,7 +75,7 @@ import {
   type EarlySteer,
   type HostSteer,
 } from "./host-steer.js"
-import { isDebugEnabled, trace, traceOncePerLog, traceRequestContextPaths, traceVerbose } from "./debug.js"
+import { isDebugEnabled, trace, traceRequestContextPaths, traceToolList, traceVerbose } from "./debug.js"
 import { toolResultFailure, type ToolRefusal } from "./opencode2/tool-results.js"
 import { isExchangeableApiKey } from "./auth.js"
 import { resolveBearerToken } from "./auth-renewal.js"
@@ -8680,10 +8680,7 @@ export function extractTools(callOptions: LanguageModelV3CallOptions): OpencodeT
       out.push({ name: any.name, description: any.description, inputSchema: schema })
     }
   }
-  const names = out.map((t) => t.name).join(",")
-  const hash = createHash("sha256").update(names).digest("hex").slice(0, 12)
-  const counts = `extractTools: ${tools.length} incoming → ${out.length} advertised tools=${hash}`
-  traceOncePerLog(`extractTools:${hash}`, `${counts} [${names}]`, counts)
+  traceToolList(tools.length, out)
   return out
 }
 
