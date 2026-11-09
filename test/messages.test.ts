@@ -348,15 +348,14 @@ describe("message schema accuracy", () => {
       "McpArgs", "McpResult",
       "ConversationAction", "ConversationStateStructure",
     ]
-    for (const name of types) {
+    const unresolved = types.flatMap((name) => {
       const type = root.lookupType(name)
-      expect(type).toBeDefined()
-      expect(type.fields).toBeDefined()
-      expect(Object.keys(type.fields).length).toBeGreaterThanOrEqual(
-        // some types can have 0 fields (ClientHeartbeat, AvailableModelsRequest)
-        name === "ClientHeartbeat" || name === "AvailableModelsRequest" ? 0 : 1,
-      )
-    }
+      if (!type?.fields) return [`${name} is not a message`]
+      const count = Object.keys(type.fields).length
+      const minimum = name === "ClientHeartbeat" || name === "AvailableModelsRequest" ? 0 : 1
+      return count >= minimum ? [] : [`${name} has ${count} fields`]
+    })
+    expect(unresolved).toEqual([])
   })
 
   it("InteractionUpdate has all required oneof fields", () => {

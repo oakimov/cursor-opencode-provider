@@ -108,15 +108,21 @@ check_tool_path() {
   printf '%s' "$path"
 }
 
-# Unit-test PATH plus a private directory that contains only an opencode symlink.
+# Unit-test PATH plus a private directory of opencode and opencode1 symlinks.
+# A binary that is not installed is left out; the live test then fails on it.
 check_live_path() {
   [[ -n "$isolate_tmp" ]] || return 1
-  local path bin
+  local path name bin linked=""
   path="$(check_tool_path)"
-  bin="$(command -v opencode 2>/dev/null || true)"
-  if [[ -n "$bin" ]]; then
-    mkdir -p "$isolate_tmp/opencode-bin"
-    ln -sfn "$bin" "$isolate_tmp/opencode-bin/opencode"
+  for name in opencode opencode1; do
+    bin="$(command -v "$name" 2>/dev/null || true)"
+    if [[ -n "$bin" ]]; then
+      mkdir -p "$isolate_tmp/opencode-bin"
+      ln -sfn "$bin" "$isolate_tmp/opencode-bin/$name"
+      linked=1
+    fi
+  done
+  if [[ -n "$linked" ]]; then
     path="${path}:${isolate_tmp}/opencode-bin"
   fi
   printf '%s' "$path"
@@ -169,7 +175,7 @@ check_run_isolated() {
 check_run_live() {
   local worktree="$1"
   "$ROOT/scripts/isolate-run.sh" --src "$worktree" \
-    --tool bun --tool node --tool git --tool python3 --tool opencode \
+    --tool bun --tool node --tool git --tool python3 --tool opencode --tool opencode1 \
     --ro-bind "$ROOT/scripts:/opt/harness/scripts" \
     --env CURSOR_API_KEY \
     --set OPENCODE_CONFIG_ROOT=/src \
@@ -277,7 +283,7 @@ check_main() {
       echo "Passing checks is not a decision to trust this revision. Set CURSOR_REVIEW_TRUST=1 and CURSOR_REVIEW_TRUST_SHA to the reviewed commit. CURSOR_API_KEY was not passed."
       ;;
     run)
-      echo "Loading /src/dist/plugin-opencode2.js through a private OpenCode config."
+      echo "Loading /src/dist/plugin.js with opencode1 and /src/dist/plugin-opencode2.js with opencode."
       echo "CURSOR_REVIEW_TRUST=1 was set separately from the check result."
       check_refuse_moved_commit "$fetched"
       set +e

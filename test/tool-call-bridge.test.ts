@@ -780,25 +780,31 @@ describe("tool-call-bridge", () => {
       },
     ]
 
-    for (const c of cases) {
+    const observed = cases.map((c) => {
       const display = parseDisplayToolCall(`tc_${c.variant}`, { [c.variant]: c.payload })
-      expect(display, c.variant).toBeDefined()
-      expect(display!.variant, c.variant).toBe(c.variant)
-      expect(display!.preferredToolName, c.variant).toBe(c.preferred)
-      expect(isNativeDisplayToolCall(c.variant), c.variant).toBe(c.variant === "get_mcp_tools_tool_call")
-      const bridged = resolveBridgedOpenCodeToolCall(display!, c.advertised)
-      if (
-        c.variant === "update_todos_tool_call" ||
-        c.variant === "create_plan_tool_call"
-      ) {
-        expect(bridged?.toolName, c.variant).toBe("todowrite")
-      } else if (c.variant === "read_todos_tool_call") {
-        expect(bridged?.toolName, c.variant).toBe("todoread")
-        expect(bridged?.args, c.variant).toEqual({})
-      } else {
-        expect(bridged, c.variant).toBeUndefined()
+      const bridged = display ? resolveBridgedOpenCodeToolCall(display, c.advertised) : undefined
+      const bridge = c.variant === "update_todos_tool_call" || c.variant === "create_plan_tool_call"
+        ? bridged?.toolName
+        : c.variant === "read_todos_tool_call"
+          ? { toolName: bridged?.toolName, args: bridged?.args }
+          : bridged
+      return {
+        variant: display?.variant,
+        preferred: display?.preferredToolName,
+        native: isNativeDisplayToolCall(c.variant),
+        bridge,
       }
-    }
+    })
+    expect(observed).toEqual(cases.map((c) => ({
+      variant: c.variant,
+      preferred: c.preferred,
+      native: c.variant === "get_mcp_tools_tool_call",
+      bridge: c.variant === "update_todos_tool_call" || c.variant === "create_plan_tool_call"
+        ? "todowrite"
+        : c.variant === "read_todos_tool_call"
+          ? { toolName: "todoread", args: {} }
+          : undefined,
+    })))
   })
 
   it("round-trips every schema ToolCall variant through encode/decode", () => {
@@ -838,12 +844,11 @@ describe("tool-call-bridge", () => {
       ["pi_find_tool_call", { args: { pattern: "*.ts", path: "/tmp" } }],
       ["pi_ls_tool_call", { args: { path: "/tmp" } }],
     ]
-    for (const [variant, payload] of variants) {
+    expect(variants.map(([variant, payload]) => {
       const encoded = encodeMessage("ToolCall", { tool_call_id: `id_${variant}`, [variant]: payload })
       const decoded = decodeMessage<Record<string, unknown>>("ToolCall", encoded)
-      const display = parseDisplayToolCall(`id_${variant}`, decoded)
-      expect(display?.variant, variant).toBe(variant)
-    }
+      return parseDisplayToolCall(`id_${variant}`, decoded)?.variant
+    })).toEqual(variants.map(([variant]) => variant))
   })
 
   it("round-trips GetMcpToolsToolCall result content and output_file_path", () => {

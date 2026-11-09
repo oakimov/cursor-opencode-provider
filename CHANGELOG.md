@@ -12,11 +12,13 @@
 - A Run Cursor cuts right after a tool result now rebuilds from host history when it earlier delivered an early steer or host note that history still holds, instead of ending the turn as "automatic retry unsafe" ([#159](https://github.com/oakimov/cursor-opencode-provider/issues/159), [@nkoynov](https://github.com/nkoynov)).
 - That rebuild is no longer refused (`missing-host-results`) when Cursor earlier waited on a background shell: its polls of the shell's terminal record are answered by the provider, ran nothing on the host, and no longer count as tool calls without a result ([#159](https://github.com/oakimov/cursor-opencode-provider/issues/159), [@nkoynov](https://github.com/nkoynov)).
 - The same rebuild also proceeds after the provider itself answered the empty read before a new file's edit or a Task attachment read, provided history holds that call's result, or a read of a missing file ([#172](https://github.com/oakimov/cursor-opencode-provider/issues/172), [@nkoynov](https://github.com/nkoynov)).
+- A failed OpenCode 1.x download no longer leaves the previous binary in place and reports a successful install.
 
 ### Changed
 
 - `CURSOR_PROVIDER_DEBUG=1` no longer writes a line per wire frame and KV message (`pump frame`, `frame yield`, `kv frame raw`, `kv replied` unless the blob was missing, a held Run's `answered KV` and `queued a frame`); `CURSOR_PROVIDER_DEBUG=2` (or `verbose`) still does. With `CURSOR_PROVIDER_DEBUG_LOG_MODE=rotate`, `extractTools:` lists each distinct tool list once per log file and names it by `tools=<hash>` afterwards, again at least every 10 minutes ([#160](https://github.com/oakimov/cursor-opencode-provider/issues/160), [@nkoynov](https://github.com/nkoynov))
 - Local test checks detect Linux, macOS and Windows capabilities; Windows can run the full suite through a local Linux-container engine without Cursor agent installed.
+- Cloud Agent setup installs the current OpenCode 1.x (`opencode1`) and 2.x (`opencode`) at install time. The live test loads the classic plugin on 1.x and `plugin-opencode2` on 2.x, and a missing binary for either major fails the run.
 
 ### Fixed
 

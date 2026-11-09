@@ -100,10 +100,11 @@ describe("canonical Cursor exec variant map", () => {
   })
 
   it("keeps OpenCode tool classifications synchronized with executable mappings", () => {
-    for (const variant of CURSOR_EXEC_VARIANTS) {
-      if (variant.handling !== "opencode-tool") continue
-      expect(mapExecServerToToolName(variant.requestName), variant.requestName).toBeDefined()
-    }
+    const unmapped = CURSOR_EXEC_VARIANTS
+      .filter((variant) => variant.handling === "opencode-tool")
+      .filter((variant) => mapExecServerToToolName(variant.requestName) === undefined)
+      .map((variant) => variant.requestName)
+    expect(unmapped).toEqual([])
   })
 
   it("looks up the non-identical Pi request/result pair by id and name", () => {
@@ -127,9 +128,8 @@ describe("canonical Cursor exec variant map", () => {
   })
 
   it("detects every canonical request id from an independent raw wire frame", () => {
-    for (const [requestField] of CLI_EXEC_PAIRS) {
-      expect(detectExecVariantField(rawAgentServerExec(requestField))).toBe(requestField)
-    }
+    expect(CLI_EXEC_PAIRS.map(([requestField]) => detectExecVariantField(rawAgentServerExec(requestField))))
+      .toEqual(CLI_EXEC_PAIRS.map(([requestField]) => requestField))
   })
 
   it("describes known unsupported and future unknown fields without guessing", () => {
@@ -192,15 +192,15 @@ const UNSUPPORTED_DENY_WIRE: readonly DenyWireExpect[] = [
 
 function requireField(bytes: Uint8Array, fn: number, label: string): RawField {
   const hit = readAllFields(bytes).find((field) => field.fn === fn)
-  expect(hit, `${label} missing field #${fn}`).toBeDefined()
-  return hit!
+  if (!hit) throw new Error(`${label} missing field #${fn}`)
+  return hit
 }
 
 function requireLengthDelimited(bytes: Uint8Array, fn: number, label: string): Uint8Array {
   const hit = requireField(bytes, fn, label)
-  expect(hit.wt, `${label} field #${fn} wire type`).toBe(2)
-  expect(hit.bytes, `${label} field #${fn} bytes`).toBeDefined()
-  return hit.bytes!
+  if (hit.wt !== 2) throw new Error(`${label} field #${fn} wire type ${hit.wt}`)
+  if (!hit.bytes) throw new Error(`${label} field #${fn} bytes missing`)
+  return hit.bytes
 }
 
 function isStreamClose(frame: Uint8Array, execId: number): boolean {
@@ -218,38 +218,49 @@ describe("unsupported exec deny wire shapes", () => {
   })
 
   it("emits the canonical result oneof field, not a guessed sibling", () => {
-    for (const entry of UNSUPPORTED_DENY_WIRE) {
+    const observed = UNSUPPORTED_DENY_WIRE.map((entry) => {
       const variant = cursorExecVariantByRequestName(entry.requestName)
-      expect(variant, entry.requestName).toBeDefined()
+      if (!variant) return { requestName: entry.requestName, error: "missing variant" }
       const frames = buildUnsupportedExecDeny({
         execId: 42,
-        variant: variant!,
+        variant,
         reason: "not available; use listed tools",
       })
-      expect(frames.length, entry.requestName).toBe(2)
-      expect(isStreamClose(frames[1]!, 42), `${entry.requestName} stream_close`).toBe(true)
-
+      if (frames.length !== 2 || !isStreamClose(frames[1]!, 42)) {
+        return { requestName: entry.requestName, error: `frames ${frames.length}` }
+      }
       if (entry.kind === "throw") {
         const control = requireLengthDelimited(frames[0]!, 5, `${entry.requestName} ACM`)
         const thrown = requireLengthDelimited(control, 2, `${entry.requestName} throw`)
-        expect(requireField(thrown, 1, `${entry.requestName} throw.id`).varint).toBe(42)
+        const id = requireField(thrown, 1, `${entry.requestName} throw.id`).varint
         const errorBytes = requireLengthDelimited(thrown, 2, `${entry.requestName} throw.error`)
-        expect(new TextDecoder().decode(errorBytes)).toContain("not available")
-        continue
+        return {
+          requestName: entry.requestName,
+          id,
+          error: new TextDecoder().decode(errorBytes).includes("not available") ? undefined : "missing reason",
+        }
       }
-
       const exec = requireLengthDelimited(frames[0]!, 2, `${entry.requestName} ACM`)
-      expect(requireField(exec, 1, `${entry.requestName} id`).varint).toBe(42)
+      const id = requireField(exec, 1, `${entry.requestName} id`).varint
       const resultBytes = requireLengthDelimited(exec, entry.resultField, `${entry.requestName} result`)
       const inner = readAllFields(resultBytes).find((field) => field.fn === entry.innerOneofField)
-      expect(inner, `${entry.requestName} inner oneof #${entry.innerOneofField}`).toBeDefined()
-      if (entry.innerVarint) {
-        expect(inner!.wt, `${entry.requestName} inner wire type`).toBe(0)
-        expect(inner!.varint, `${entry.requestName} inner varint`).toBe(entry.innerVarint.value)
-      } else {
-        expect(inner!.wt, `${entry.requestName} inner wire type`).toBe(2)
+      return {
+        requestName: entry.requestName,
+        id,
+        innerWire: inner?.wt,
+        innerVarint: entry.innerVarint ? inner?.varint : undefined,
       }
-    }
+    })
+    expect(observed).toEqual(UNSUPPORTED_DENY_WIRE.map((entry) => (
+      entry.kind === "throw"
+        ? { requestName: entry.requestName, id: 42, error: undefined }
+        : {
+          requestName: entry.requestName,
+          id: 42,
+          innerWire: entry.innerVarint ? 0 : 2,
+          innerVarint: entry.innerVarint?.value,
+        }
+    )))
   })
 
   it("cites ForceBackgroundStatus error = 2", () => {

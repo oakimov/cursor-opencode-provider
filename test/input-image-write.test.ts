@@ -354,9 +354,10 @@ describe("Cursor's input-image writes, which Cursor never waits for", () => {
       if (save.type === "tool-call") await executeCursorImageSave(JSON.parse(save.input), ctx)
     }
     expect(fs.readdirSync(run.assets).sort()).toEqual(images.map((_, i) => `shot-${i}.png`).sort())
-    for (const [i, image] of images.entries()) {
-      expect(fs.readFileSync(path.join(run.assets, `shot-${i}.png`))).toEqual(Buffer.from(image))
-    }
+    expect(images.map((image, i) => Buffer.compare(
+      fs.readFileSync(path.join(run.assets, `shot-${i}.png`)),
+      Buffer.from(image),
+    ))).toEqual(images.map(() => 0))
   })
 
   it("refuse only the new write at capacity and save it after an earlier image is discarded", async () => {
@@ -389,7 +390,7 @@ describe("Cursor's input-image writes, which Cursor never waits for", () => {
     })
     expect(permissions).toEqual(["external_directory", "edit"])
     expect(fs.readFileSync(path.join(retry.assets, "cvs.png"))).toEqual(Buffer.from(PNG_A))
-    for (const id of held) expect(takePendingCursorImage(id)?.data).toBe(data)
+    expect(held.map((id) => takePendingCursorImage(id)?.data)).toEqual(held.map(() => data))
   })
 
   const fillImageBudget = () => {
