@@ -748,9 +748,8 @@ These are failure lessons shared by both hosts, not a replacement for
   publishing, and scan commit bodies and coauthor trailers as well as author /
   committer identities. A clean file diff alone does not establish privacy.
 - **Keep task lists actionable.** Completed fix checklists and review summaries
-  accumulated in `tasks/todo.md`, obscuring future work. Remove finished items
-  and dated validation reports; retain open tasks and their acceptance criteria.
-  Keep validation evidence in pull requests or private run reports.
+  accumulated in `tasks/todo.md`, obscuring future work. The storage rule belongs
+  in [working conventions](../../AGENTS.md#working-conventions).
 - **Coverage must be measured on the commit it is reported for.** On a pull
   request, checkout tests the merge with main while codecov-action files the
   report under the PR head. Once main changed `src/language-model.ts`, PR #107's
