@@ -923,12 +923,13 @@ describe("debug log paths / modes (F9)", () => {
 
 describe("debug log levels", () => {
   type Debug = typeof import("../src/debug.js")
-  /** A fresh module copy at this level, writing to its own file, in this process. */
+  /** A fresh module copy at this level, writing to its own file in rotate mode (no rotation unless `env` asks), in this process. */
   const atLevel = async (level: string, run: (debug: Debug, file: string) => void | Promise<void>,
     env: Record<string, string> = {}) => {
     const announce = spyOn(console, "error").mockImplementation(() => {})
     try {
-      await withTrace({ CURSOR_PROVIDER_DEBUG: level, ...env }, async (file, load) => run(await load(), file))
+      await withTrace({ CURSOR_PROVIDER_DEBUG: level, CURSOR_PROVIDER_DEBUG_LOG_MODE: "rotate",
+        CURSOR_PROVIDER_DEBUG_ROTATE_MAX_BYTES: String(DEBUG_LOG_MAX_BYTES), ...env }, async (file, load) => run(await load(), file))
     } finally {
       announce.mockRestore()
     }
@@ -1036,7 +1037,7 @@ describe("debug log levels", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-provider-debug-extract-tools-"))
     const runLevel = (level: string, file: string, script: string) => Bun.spawnSync([process.execPath, "-e", script], {
       env: { ...process.env, CURSOR_PROVIDER_DEBUG: level, CURSOR_PROVIDER_RECOVERY_DEBUG: "0", CURSOR_PROVIDER_DEBUG_FILE: file,
-        CURSOR_PROVIDER_DEBUG_LOG_MODE: "trim", CURSOR_PROVIDER_DEBUG_ROTATE_MAX_BYTES: "", CURSOR_PROVIDER_DEBUG_ROTATE_BACKUPS: "" },
+        CURSOR_PROVIDER_DEBUG_LOG_MODE: "rotate", CURSOR_PROVIDER_DEBUG_ROTATE_MAX_BYTES: "", CURSOR_PROVIDER_DEBUG_ROTATE_BACKUPS: "" },
     })
     const script = `
       import { extractTools } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/language-model.ts"))}
@@ -1073,7 +1074,7 @@ describe("debug log levels", () => {
   it("writes a list in full again in the file a rotation starts", async () => {
     await atLevel("1", (debug, file) => {
       for (let i = 0; i < 60; i++) {
-        debug.traceOncePerLog("tools:a", `tools=a [full] ${i} ${"z".repeat(60)}`, `tools=a ${i} ${"z".repeat(60)}`)
+        debug.traceOncePerLog("tools:a", `tools=a [full] ${i} ${"z".repeat(60)}`, `tools=a ${i} ${"z".repeat(60)}`, "tools=a [full]")
       }
       for (const part of [`${file}.1`, file]) {
         const lines = messages(part)
@@ -1084,31 +1085,83 @@ describe("debug log levels", () => {
     }, { CURSOR_PROVIDER_DEBUG_LOG_MODE: "rotate", CURSOR_PROVIDER_DEBUG_ROTATE_MAX_BYTES: "2000", CURSOR_PROVIDER_DEBUG_ROTATE_BACKUPS: "1" })
   })
 
-  it("writes a list in full again after a trim", async () => {
-    let clock = Date.now()
-    const now = spyOn(Date, "now").mockImplementation(() => clock)
-    try {
-      await atLevel("1", (debug, file) => {
-        const once = () => debug.traceOncePerLog("tools:a", "tools=a [full]", "tools=a")
-        once()
-        once()
-        fs.writeFileSync(file, "expired-record\n")
-        fs.truncateSync(file, DEBUG_LOG_MAX_BYTES + 1)
-        fs.appendFileSync(file, "\nrecent-record\n")
-        clock += DEBUG_LOG_TRIM_INTERVAL_MS
-        once()
-        once()
-        const log = fs.readFileSync(file, "utf8").split("\n")
-        expect(log[0]).toBe("recent-record")
-        expect(log[1]).toMatch(/debug: size-cap trim/)
-        expect(log.slice(2, 4).map((line) => line.replace(/^\[[^\]]+\] (?:#\d+ )?/, ""))).toEqual(["tools=a [full]", "tools=a"])
-      })
-    } finally {
-      now.mockRestore()
-    }
+  it("writes every list in full in trim mode, whose trim can drop a list's full line and keep its hash", async () => {
+    await atLevel("1", (debug, file) => {
+      debug.traceToolList(1, [{ name: "read" }])
+      debug.traceToolList(1, [{ name: "read" }])
+      expect(messages(file).every((line) => line.endsWith("[read]"))).toBe(true)
+      expect(messages(file)).toHaveLength(2)
+    }, { CURSOR_PROVIDER_DEBUG_LOG_MODE: "trim" })
   })
 
-  it("writes a list in full again after another process rotates, trims or replaces the file, and every 10 minutes", async () => {
+  const readList = (debug: Debug, file: string) => ({
+    list: () => debug.traceToolList(1, [{ name: "read" }]),
+    lists: () => messages(file).filter((line) => line.startsWith("extractTools:"))
+      .map((line) => (line.endsWith("[read]") ? "full" : "hash")),
+  })
+
+  it("writes a list in full again after the file is cut back to its size before the list", async () => {
+    await atLevel("1", (debug, file) => {
+      const { list, lists } = readList(debug, file)
+      debug.trace("before the list")
+      const before = fs.statSync(file).size
+      list()
+      fs.truncateSync(file, before)
+      list()
+      list()
+      expect(lists()).toEqual(["full", "hash"])
+    })
+  })
+
+  it("writes a list in full again after the file is cut back before the list and grows past it again", async () => {
+    await atLevel("1", (debug, file) => {
+      const { list, lists } = readList(debug, file)
+      debug.trace("before the list")
+      const before = fs.statSync(file).size
+      list()
+      fs.truncateSync(file, before)
+      debug.trace(`same first bytes, longer than the list ${"x".repeat(500)}`)
+      list()
+      list()
+      expect(lists()).toEqual(["full", "hash"])
+    })
+  })
+
+  it("writes each line whole when the system takes it in parts", async () => {
+    await atLevel("1", (debug, file) => {
+      const { list, lists } = readList(debug, file)
+      const write = fs.writeSync.bind(fs)
+      const parts = spyOn(fs, "writeSync").mockImplementation(((fd: number, data: Uint8Array | string, offset = 0, length?: number) => {
+        const bytes = typeof data === "string" ? Buffer.from(data) : data
+        const start = typeof data === "string" ? 0 : offset
+        return write(fd, bytes, start, Math.min(length ?? bytes.length - start, 7))
+      }) as unknown as typeof fs.writeSync)
+      try {
+        debug.trace("plain line")
+        list()
+        list()
+      } finally {
+        parts.mockRestore()
+      }
+      expect(messages(file)).toEqual(["plain line", expect.stringMatching(/\[read\]$/), expect.stringMatching(/tools=[0-9a-f]{12}$/)])
+      expect(lists()).toEqual(["full", "hash"])
+    })
+  })
+
+  it("writes a list in full again after the file is emptied a second time", async () => {
+    await atLevel("1", (debug, file) => {
+      const { list, lists } = readList(debug, file)
+      list()
+      fs.truncateSync(file, 0)
+      list()
+      fs.truncateSync(file, 0)
+      list()
+      list()
+      expect(lists()).toEqual(["full", "hash"])
+    })
+  })
+
+  it("keeps each list's names in the file through rotations, cuts and replacements by this process or another", async () => {
     let clock = Date.now()
     const now = spyOn(Date, "now").mockImplementation(() => clock)
     try {
@@ -1117,7 +1170,7 @@ describe("debug log levels", () => {
           debug.traceToolList(1, [{ name: "read" }])
           debug.traceToolList(1, [{ name: "read" }])
         }
-        const lists = () => messages(file).filter((line) => line.startsWith("extractTools:"))
+        const lists = (log = file) => messages(log).filter((line) => line.startsWith("extractTools:"))
           .map((line) => (line.endsWith("[read]") ? "full" : "hash"))
         twice()
         expect(lists()).toEqual(["full", "hash"])
@@ -1133,17 +1186,43 @@ describe("debug log levels", () => {
         fs.writeFileSync(file, `[2026-01-01T00:00:00.000Z] kept tail\n${"x".repeat(fs.statSync(file).size)}\n`)
         twice()
         expect(lists()).toEqual(["full", "hash"])
-        // Replaced by a copy on another inode with the same bytes.
+        // Replaced by a copy on another inode with the same bytes: it still holds the list.
         fs.copyFileSync(file, `${file}.copy`)
         fs.renameSync(`${file}.copy`, file)
         twice()
-        expect(lists()).toEqual(["full", "hash", "full", "hash"])
+        expect(lists()).toEqual(["full", "hash", "hash", "hash"])
         clock += 10 * 60 * 1000 - 1
         twice()
         expect(lists().slice(4)).toEqual(["hash", "hash"])
         clock += 1
         twice()
         expect(lists().slice(6)).toEqual(["full", "hash"])
+        // Cut, then rotated, between this process's check and its write.
+        const write = fs.writeSync.bind(fs)
+        const betweenCheckAndWrite = (act: () => void) => {
+          let pending = true
+          const writes = spyOn(fs, "writeSync").mockImplementation(((...args: Parameters<typeof fs.writeSync>) => {
+            if (pending) {
+              pending = false
+              act()
+            }
+            return write(...args)
+          }) as typeof fs.writeSync)
+          try {
+            debug.traceToolList(1, [{ name: "read" }])
+          } finally {
+            writes.mockRestore()
+          }
+        }
+        betweenCheckAndWrite(() => fs.truncateSync(file, 0))
+        expect(lists()).toEqual(["hash", "full"])
+        twice()
+        expect(lists()).toEqual(["hash", "full", "hash", "hash"])
+        // The line still goes to the file that was checked, which holds the list.
+        betweenCheckAndWrite(() => fs.renameSync(file, `${file}.1`))
+        expect(lists(`${file}.1`)).toEqual(["hash", "full", "hash", "hash", "hash"])
+        twice()
+        expect(lists()).toEqual(["full", "hash"])
       })
     } finally {
       now.mockRestore()

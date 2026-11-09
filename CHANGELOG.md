@@ -11,7 +11,7 @@
 
 ### Changed
 
-- `CURSOR_PROVIDER_DEBUG=1` no longer writes a line per wire frame and KV message (`pump frame`, `frame yield`, `kv frame raw`, `kv replied` unless the blob was missing, a held Run's `answered KV` and `queued a frame`); `CURSOR_PROVIDER_DEBUG=2` (or `verbose`) still does. `extractTools:` lists each distinct tool list once per log file and names it by `tools=<hash>` afterwards, again after a trim or rotation (also another process's) and every 10 minutes ([#160](https://github.com/oakimov/cursor-opencode-provider/issues/160), [@nkoynov](https://github.com/nkoynov))
+- `CURSOR_PROVIDER_DEBUG=1` no longer writes a line per wire frame and KV message (`pump frame`, `frame yield`, `kv frame raw`, `kv replied` unless the blob was missing, a held Run's `answered KV` and `queued a frame`); `CURSOR_PROVIDER_DEBUG=2` (or `verbose`) still does. With `CURSOR_PROVIDER_DEBUG_LOG_MODE=rotate`, `extractTools:` lists each distinct tool list once per log file and names it by `tools=<hash>` afterwards, again at least every 10 minutes ([#160](https://github.com/oakimov/cursor-opencode-provider/issues/160), [@nkoynov](https://github.com/nkoynov))
 - Local test checks detect Linux, macOS and Windows capabilities; Windows can run the full suite through a local Linux-container engine without Cursor agent installed.
 
 ### Fixed

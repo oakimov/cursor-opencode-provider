@@ -57,11 +57,13 @@ in-place trimming, select [rotation](#numbered-rotation).
 KV message (`pump frame`, `frame yield`, `kv frame raw`, `kv replied`, a held
 Run's `answered KV` and `queued a frame`) and the full advertised tool list on
 every request. Level 1 leaves the per-frame lines out (a KV reply for a missing
-blob stays) and lists each distinct tool list once per log file as
-`extractTools: … tools=<hash> [names]`; later requests with the same list log
-only `tools=<hash>`. A trim or rotation, also one another process made, and
-every 10 minutes start the file's lists over. Use level 2 when a reproduction
-needs every frame.
+blob stays). In [rotation](#numbered-rotation) mode it also lists each distinct
+tool list once per log file as `extractTools: … tools=<hash> [names]`; later
+requests with the same list log only `tools=<hash>`, until the file no longer
+holds that full line where it was written or 10 minutes have passed. In the
+default trim mode every request lists its tools in full, since a trim can drop
+a list's full line and keep later ones. Use level 2 when a reproduction needs
+every frame.
 
 For OpenCode 2, a plugin reload can append a new header without replacing the
 daemon's cached SDK or language model. Fully restart the daemon after a rebuild.

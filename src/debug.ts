@@ -73,17 +73,12 @@ const logOptions = resolveDebugLogOptions()
 const moduleCopies = processShared("debug.module-copies.v1", () => ({ count: 0 }))
 const MODULE_COPY = ++moduleCopies.count
 const maintenance = processShared("debug.maintenance.v1", () => new Map<string, number>())
-type DebugLogIdentity = { dev: number; ino: number; size: number; head: string }
-// Keys `traceOncePerLog` already wrote to the current file, shared by every copy
-// since they append to the same file, and the file as checked before the last such line.
-const writtenOnce = processShared("debug.once-per-log.v1", () => ({
-  keys: new Set<string>(),
-  file: undefined as (DebugLogIdentity & { at: number }) | undefined,
-}))
+// Where `traceOncePerLog` last wrote each key's full line (the file's size right after it, and
+// its length) and when, shared by every copy since they append to the same file.
+const writtenOnce = processShared("debug.once-per-log.v2", () => new Map<string, { end: number; length: number; at: number }>())
 const WRITTEN_ONCE_MAX_KEYS = 4096
 const WRITTEN_ONCE_MAX_AGE_MS = 10 * 60 * 1000
-// A trim moves the file's tail to its start, so another process's trim shows in its first bytes.
-const DEBUG_LOG_HEAD_BYTES = 64
+const WRITTEN_ONCE_SEARCH_BYTES = 64 * 1024
 
 let _traceInitialized = false
 let _debugFile: string | undefined
@@ -378,8 +373,11 @@ export function trace(msg: string): void {
   appendTrace(() => msg)
 }
 
-/** `message` runs after maintenance, so it sees the file this line goes to. */
-function appendTrace(message: () => string): boolean {
+/**
+ * `message` and `written` get the descriptor the line goes through, opened after maintenance, so
+ * they see the very file that holds it even if another process renames it away meanwhile.
+ */
+function appendTrace(message: (fd: number) => string, written?: (fd: number, line: string) => void): boolean {
   try {
     if (!_debugFile) {
       _debugFileUsesManagedDirectory = !process.env.CURSOR_PROVIDER_DEBUG_FILE
@@ -402,11 +400,27 @@ function appendTrace(message: () => string): boolean {
       )
     }
     maintainDebugLog(_debugFile)
-    fs.appendFileSync(_debugFile, `[${new Date().toISOString()}] ${copyTag()}${message()}\n`, { mode: 0o600 })
+    const fd = fs.openSync(_debugFile, "a+", 0o600)
+    try {
+      const line = debugLine(message(fd))
+      writeAll(fd, line)
+      written?.(fd, line)
+    } finally {
+      fs.closeSync(fd)
+    }
     return true
   } catch {
     return false
   }
+}
+
+function debugLine(message: string): string {
+  return `[${new Date().toISOString()}] ${copyTag()}${message}\n`
+}
+
+function writeAll(fd: number, text: string): void {
+  const bytes = Buffer.from(text)
+  for (let offset = 0; offset < bytes.length;) offset += fs.writeSync(fd, bytes, offset, bytes.length - offset)
 }
 
 /** `trace` only at `CURSOR_PROVIDER_DEBUG=2`: per-frame wire detail. */
@@ -415,41 +429,42 @@ export function traceVerbose(msg: string): void {
 }
 
 /**
- * Write `full` the first time `key` appears in the current log file, `brief` after that
- * (level 2: always `full`). A trim, rotation or replacement of the file, by this process or
- * another, starts over, so the file still holds the full line for each key it mentions.
+ * Write `brief` only while the file this line goes to still holds `proof` (part of `full`) near
+ * where `key`'s full line was last written, at most 10 minutes ago; otherwise write `full`.
+ * Checked through the descriptor the line goes through, before and after it, so a rotation,
+ * truncation or replacement by this process or another leads to `full`. Only in rotate mode:
+ * a trim drops a file's oldest lines, which can hold the full line of a hash it keeps.
  */
-export function traceOncePerLog(key: string, full: string, brief: string): void {
+export function traceOncePerLog(key: string, full: string, brief: string, proof = full): void {
   if (!DEBUG_ENABLED) return
-  const keys = writtenOnce.keys
-  let current: DebugLogIdentity | undefined
-  const written = appendTrace(() => {
-    current = debugLogIdentity()
-    if (onceLogReplaced(current)) {
-      keys.clear()
-      writtenOnce.file = undefined
+  const last = writtenOnce.get(key)
+  const fresh = last !== undefined && Date.now() - last.at < WRITTEN_ONCE_MAX_AGE_MS
+  let wroteBrief = false
+  appendTrace((fd) => {
+    wroteBrief = DEBUG_LEVEL < 2 && logOptions.mode === "rotate" && fresh && fileHolds(fd, last, proof)
+    return wroteBrief ? brief : full
+  }, (fd, line) => {
+    // The file was cut between the check and the write: this line is the brief one, so write the full one too.
+    if (wroteBrief && !fileHolds(fd, last!, proof)) {
+      line = debugLine(full)
+      writeAll(fd, line)
+      wroteBrief = false
     }
-    return DEBUG_LEVEL < 2 && keys.has(key) ? brief : full
+    // Re-inserted on every use, so eviction drops the least recently used key.
+    writtenOnce.delete(key)
+    writtenOnce.set(key, wroteBrief ? last! : { end: fs.fstatSync(fd).size, length: Buffer.byteLength(line), at: Date.now() })
+    if (writtenOnce.size > WRITTEN_ONCE_MAX_KEYS) writtenOnce.delete(writtenOnce.keys().next().value!)
   })
-  if (!written) return
-  // Re-inserted on every use, so eviction drops the least recently used key.
-  keys.delete(key)
-  keys.add(key)
-  if (keys.size > WRITTEN_ONCE_MAX_KEYS) keys.delete(keys.values().next().value!)
-  // The file as checked, not as after the append: a rotation in between then shows on the next check.
-  writtenOnce.file = current && { ...current, at: writtenOnce.file?.at ?? Date.now() }
 }
 
 /**
- * Whether the file may not hold the full lines the memory names: it is not the file last checked
- * (rotated, trimmed or replaced since), or the memory is 10 minutes old.
+ * Whether the file holds `text` inside the full line that ended at `end`, give or take what other
+ * processes appended between that write and its size check.
  */
-function onceLogReplaced(current: DebugLogIdentity | undefined): boolean {
-  const seen = writtenOnce.file
-  if (!seen) return false
-  return !current || Date.now() - seen.at >= WRITTEN_ONCE_MAX_AGE_MS
-    || current.dev !== seen.dev || current.ino !== seen.ino || current.size < seen.size
-    || !current.head.startsWith(seen.head)
+function fileHolds(fd: number, written: { end: number; length: number }, text: string): boolean {
+  const start = Math.max(0, written.end - written.length - WRITTEN_ONCE_SEARCH_BYTES)
+  const window = Buffer.alloc(written.end - start)
+  return window.subarray(0, fs.readSync(fd, window, 0, window.length, start)).includes(text)
 }
 
 /** The tools a request advertised, by name once per log file and by hash after that. */
@@ -458,23 +473,7 @@ export function traceToolList(incoming: number, advertised: readonly { name: str
   const names = advertised.map((tool) => tool.name).join(",")
   const hash = createHash("sha256").update(names).digest("hex").slice(0, 12)
   const counts = `extractTools: ${incoming} incoming → ${advertised.length} advertised tools=${hash}`
-  traceOncePerLog(`extractTools:${hash}`, `${counts} [${names}]`, counts)
-}
-
-function debugLogIdentity(): DebugLogIdentity | undefined {
-  try {
-    const fd = fs.openSync(_debugFile!, "r")
-    try {
-      const stat = fs.fstatSync(fd)
-      const head = Buffer.alloc(DEBUG_LOG_HEAD_BYTES)
-      const read = fs.readSync(fd, head, 0, head.length, 0)
-      return { dev: stat.dev, ino: stat.ino, size: stat.size, head: head.subarray(0, read).toString("latin1") }
-    } finally {
-      fs.closeSync(fd)
-    }
-  } catch {
-    return undefined
-  }
+  traceOncePerLog(`extractTools:${hash}`, `${counts} [${names}]`, counts, `tools=${hash} [${names}]`)
 }
 
 /**
