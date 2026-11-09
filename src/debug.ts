@@ -1,10 +1,12 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { processShared } from "./process-shared.js"
 
-// Wire-level diagnostics. Opt in with CURSOR_PROVIDER_DEBUG=1 (or "true").
+// Wire-level diagnostics. Opt in with CURSOR_PROVIDER_DEBUG=1 (or "true"); =2 (or
+// "verbose") adds the per-frame lines (`pump frame`, `frame yield`, KV frames) and
+// the advertised tool list on every request, which level 1 writes once per list.
 // CURSOR_PROVIDER_RECOVERY_DEBUG=1 keeps only recovery metadata, without payload traces.
 // Default path mirrors Cursor CLI: $TMPDIR/cursor-provider-logs-<uid>/debug-<pid>.log
 // with directory mode 0o700 and file mode 0o600. Override with CURSOR_PROVIDER_DEBUG_FILE.
@@ -14,9 +16,16 @@ import { processShared } from "./process-shared.js"
 // the override path before starting the host. By default, periodically compact
 // oversized logs in place like OpenCode. CURSOR_PROVIDER_DEBUG_LOG_MODE=rotate
 // selects numbered archives instead. Tokens / checksums: redact in callers.
-const DEBUG_ENABLED =
-  process.env.CURSOR_PROVIDER_DEBUG === "1" ||
-  process.env.CURSOR_PROVIDER_DEBUG === "true"
+/** `CURSOR_PROVIDER_DEBUG` as a level: 0 off, 1 (`1`/`true`), 2 (`2`/`verbose`). */
+export function resolveDebugLevel(
+  value: string | undefined = process.env.CURSOR_PROVIDER_DEBUG,
+): 0 | 1 | 2 {
+  if (value === "2" || value === "verbose") return 2
+  return value === "1" || value === "true" ? 1 : 0
+}
+
+const DEBUG_LEVEL = resolveDebugLevel()
+const DEBUG_ENABLED = DEBUG_LEVEL > 0
 const RECOVERY_DEBUG_ENABLED = ["1", "true"].includes(process.env.CURSOR_PROVIDER_RECOVERY_DEBUG ?? "")
 
 // OpenCode v2.2.5 packages/util/src/observability/logging.ts retention policy.
@@ -64,6 +73,12 @@ const logOptions = resolveDebugLogOptions()
 const moduleCopies = processShared("debug.module-copies.v1", () => ({ count: 0 }))
 const MODULE_COPY = ++moduleCopies.count
 const maintenance = processShared("debug.maintenance.v1", () => new Map<string, number>())
+// Where `traceOncePerLog` last wrote each key's full line (the file's size right after it, and
+// its length) and when, shared by every copy since they append to the same file.
+const writtenOnce = processShared("debug.once-per-log.v2", () => new Map<string, { end: number; length: number; at: number }>())
+const WRITTEN_ONCE_MAX_KEYS = 4096
+const WRITTEN_ONCE_MAX_AGE_MS = 10 * 60 * 1000
+const WRITTEN_ONCE_SEARCH_BYTES = 64 * 1024
 
 let _traceInitialized = false
 let _debugFile: string | undefined
@@ -355,6 +370,14 @@ function maintainDebugLog(filePath: string): void {
 
 export function trace(msg: string): void {
   if (!DEBUG_ENABLED && !(RECOVERY_DEBUG_ENABLED && msg.startsWith("recovery:"))) return
+  appendTrace(() => msg)
+}
+
+/**
+ * `message` and `written` get the descriptor the line goes through, opened after maintenance, so
+ * they see the very file that holds it even if another process renames it away meanwhile.
+ */
+function appendTrace(message: (fd: number) => string, written?: (fd: number, line: string) => void): boolean {
   try {
     if (!_debugFile) {
       _debugFileUsesManagedDirectory = !process.env.CURSOR_PROVIDER_DEBUG_FILE
@@ -377,10 +400,80 @@ export function trace(msg: string): void {
       )
     }
     maintainDebugLog(_debugFile)
-    fs.appendFileSync(_debugFile, `[${new Date().toISOString()}] ${copyTag()}${msg}\n`, { mode: 0o600 })
+    const fd = fs.openSync(_debugFile, "a+", 0o600)
+    try {
+      const line = debugLine(message(fd))
+      writeAll(fd, line)
+      written?.(fd, line)
+    } finally {
+      fs.closeSync(fd)
+    }
+    return true
   } catch {
-    /* ignore */
+    return false
   }
+}
+
+function debugLine(message: string): string {
+  return `[${new Date().toISOString()}] ${copyTag()}${message}\n`
+}
+
+function writeAll(fd: number, text: string): void {
+  const bytes = Buffer.from(text)
+  for (let offset = 0; offset < bytes.length;) offset += fs.writeSync(fd, bytes, offset, bytes.length - offset)
+}
+
+/** `trace` only at `CURSOR_PROVIDER_DEBUG=2`: per-frame wire detail. */
+export function traceVerbose(msg: string): void {
+  if (DEBUG_LEVEL >= 2) trace(msg)
+}
+
+/**
+ * Write `brief` only while the file this line goes to still holds `proof` (part of `full`) near
+ * where `key`'s full line was last written, at most 10 minutes ago; otherwise write `full`.
+ * Checked through the descriptor the line goes through, before and after it, so a rotation,
+ * truncation or replacement by this process or another leads to `full`. Only in rotate mode:
+ * a trim drops a file's oldest lines, which can hold the full line of a hash it keeps.
+ */
+export function traceOncePerLog(key: string, full: string, brief: string, proof = full): void {
+  if (!DEBUG_ENABLED) return
+  const last = writtenOnce.get(key)
+  const fresh = last !== undefined && Date.now() - last.at < WRITTEN_ONCE_MAX_AGE_MS
+  let wroteBrief = false
+  appendTrace((fd) => {
+    wroteBrief = DEBUG_LEVEL < 2 && logOptions.mode === "rotate" && fresh && fileHolds(fd, last, proof)
+    return wroteBrief ? brief : full
+  }, (fd, line) => {
+    // The file was cut between the check and the write: this line is the brief one, so write the full one too.
+    if (wroteBrief && !fileHolds(fd, last!, proof)) {
+      line = debugLine(full)
+      writeAll(fd, line)
+      wroteBrief = false
+    }
+    // Re-inserted on every use, so eviction drops the least recently used key.
+    writtenOnce.delete(key)
+    writtenOnce.set(key, wroteBrief ? last! : { end: fs.fstatSync(fd).size, length: Buffer.byteLength(line), at: Date.now() })
+    if (writtenOnce.size > WRITTEN_ONCE_MAX_KEYS) writtenOnce.delete(writtenOnce.keys().next().value!)
+  })
+}
+
+/**
+ * Whether the file holds `text` inside the full line that ended at `end`, give or take what other
+ * processes appended between that write and its size check.
+ */
+function fileHolds(fd: number, written: { end: number; length: number }, text: string): boolean {
+  const start = Math.max(0, written.end - written.length - WRITTEN_ONCE_SEARCH_BYTES)
+  const window = Buffer.alloc(written.end - start)
+  return window.subarray(0, fs.readSync(fd, window, 0, window.length, start)).includes(text)
+}
+
+/** The tools a request advertised, by name once per log file and by hash after that. */
+export function traceToolList(incoming: number, advertised: readonly { name: string }[]): void {
+  if (!DEBUG_ENABLED) return
+  const names = advertised.map((tool) => tool.name).join(",")
+  const hash = createHash("sha256").update(names).digest("hex").slice(0, 12)
+  const counts = `extractTools: ${incoming} incoming → ${advertised.length} advertised tools=${hash}`
+  traceOncePerLog(`extractTools:${hash}`, `${counts} [${names}]`, counts, `tools=${hash} [${names}]`)
 }
 
 /**

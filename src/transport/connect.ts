@@ -3,7 +3,7 @@ import { decodeFramePayload, encodeFrame, encodeGzipFrame, FLAG_END_STREAM, stre
 import { createCursorChecksumHeader } from "../protocol/checksum.js"
 import { getDeviceIds } from "../protocol/device-id.js"
 import { resolveClientVersion } from "../protocol/client-version.js"
-import { trace } from "../debug.js"
+import { trace, traceVerbose } from "../debug.js"
 import {
   CursorLocalCancellationError,
   CursorProtocolError,
@@ -1224,7 +1224,7 @@ export async function bidiRunStream(
         while (true) {
           const frame = await nextInboundFrame()
           if (!frame) break
-          trace(`frame yield: flags=0x${frame.flags.toString(16)} payload=${frame.payload.length}B`)
+          traceVerbose(`frame yield: flags=0x${frame.flags.toString(16)} payload=${frame.payload.length}B`)
           yield frame
         }
 
