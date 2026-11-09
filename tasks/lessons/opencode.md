@@ -817,6 +817,13 @@ These are failure lessons shared by both hosts, not a replacement for
   reviewer ran. Repair the review harness when that is the requested target,
   using the reviewed defect as evaluation evidence rather than turning the
   repair into a patch to the subject (`docs/pr-review.md`).
+  The #166 audit then rendered a synthetic clean verdict with only `diff` and
+  `adversarial` assertions: the required ledger comparison was a manual step
+  no later consumer enforced. Run it inside rendering, retain digest-bound
+  evidence with the payload, and revalidate after publication lookups. Regress
+  missing and changed evidence, working-copy loss and retained legacy recovery
+  (`review evidence gate` in `test/review-publish.test.ts`). Those regressions
+  measure the evidence gate, not a fresh reviewer's defect-detection rate.
 - **A returned call is not settled ownership.** A clean review of #161 passed
   a process runner that waited for the check's leader only, sent KILL only
   when that leader overran, and had no SIGTERM handler, while its contract
@@ -873,6 +880,8 @@ These are failure lessons shared by both hosts, not a replacement for
   revision before assigning the failure. A read-only API lookup is still a
   GitHub call: `bind` must report that it read the revision without making
   GitHub changes (`records the pull request revision` regression).
+  Scope direct Bun runs to `./test` when ignored scratch checkouts exist;
+  unqualified or filename-pattern runs can mix revisions in one aggregate.
 - **An approval wait outlives temporary cleanup.** A successful `show` froze a
   preview that the agent then removed with its temporary review directory.
   Review results, ledgers, previews, and publication state belong in a persistent
