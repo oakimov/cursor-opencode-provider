@@ -2,9 +2,17 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Saved OpenCode variant picks that use the old full-name keys (for example `grok-4.7#Grok 4.7 High 500k`) no longer match a variant until it is picked again under its new key. OpenCode 1.x sends the model's default variant meanwhile; OpenCode 2.x rejects the prompt with a variant-unavailable error. A variant whose delta is empty is keyed `Standard`, because OpenCode reserves `default` for "no variant".
+
 ### Added
 
 - `review-publish.py post --token-env NAME` and `complete-resolutions.py --token-env NAME` read a GitHub personal access token (`ghp_` or `github_pat_`) from that environment variable and use it for the review POST and thread resolution. Without the option, publication still uses the GitHub App installation token.
+
+### Changed
+
+- OpenCode variant picker keys are now the delta after the model name (`Extra High`, `No Thinking Low`, `High 500k`) instead of repeating the full Cursor display string; Fast and dedicated context-tier entries (`-500k`, `-1m`) also drop their redundant `Fast` / tier token, and variants are ordered No Thinking → Thinking then Low → Max.
 
 ### Fixed
 

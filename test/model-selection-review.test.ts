@@ -105,19 +105,28 @@ describe("adversarial model selection", () => {
     const slow = { ...variant("500k", "high"), displayName: "Grok 4.7 High 500k" }
     const fast = { ...variant("500k", "high", true), displayName: "Grok 4.7 High Fast 500k Fast" }
     const model: ModelInfo = {
-      id: "grok-4.7", maxContext: 256_000, maxContextForMaxMode: 500_000,
-      variants: [variant("256k", "high"), variant("256k", "high", true), slow, fast],
+      id: "grok-4.7", displayName: "Grok 4.7", maxContext: 256_000, maxContextForMaxMode: 500_000,
+      variants: [
+        { ...variant("256k", "high"), displayName: "Grok 4.7 High" },
+        { ...variant("256k", "high", true), displayName: "Grok 4.7 High Fast" },
+        slow,
+        fast,
+      ],
     }
     const classic = modelsToConfig([model])
     const modern = modelsToCatalogModelMap([model])
-    const savedEntries = [["grok-4.7", slow], ["grok-4.7-fast", fast]] as const
-    expect(savedEntries.map(([id, saved]) => {
+    // Variant keys are the delta after the model name; Fast entries also drop Fast.
+    const savedEntries = [
+      ["grok-4.7", slow, "High 500k"],
+      ["grok-4.7-fast", fast, "High 500k"],
+    ] as const
+    expect(savedEntries.map(([id, saved, key]) => {
       const originalParams = saved.parameterValues
-      const picked = classic[id].variants[saved.displayName]?.[CURSOR_VARIANT_PARAMETERS_KEY]
+      const picked = classic[id].variants[key]?.[CURSOR_VARIANT_PARAMETERS_KEY]
       return {
         id,
         picked,
-        modern: modern[id]?.variants.find(v => v.id === saved.displayName)?.settings ?? null,
+        modern: modern[id]?.variants.find(v => v.id === key)?.settings ?? null,
         resolved: resolveVariantParameters(model, { picked }),
         maxMode: resolveVariantMaxMode(originalParams, { model, picked: originalParams }),
         context: classic[id].limit.context,
@@ -134,22 +143,28 @@ describe("adversarial model selection", () => {
     })))
     expect(classic["grok-4.7-500k"].limit.context).toBe(500_000)
     expect(classic["grok-4.7-500k-fast"].limit.context).toBe(500_000)
+    // Dedicated tier entries drop their own tier (and Fast) tokens too.
+    expect(Object.keys(classic["grok-4.7-500k"].variants)).toEqual(["High"])
+    expect(Object.keys(classic["grok-4.7-500k-fast"].variants)).toEqual(["High"])
     expect(classic["grok-4.7-fast"].options[CURSOR_VARIANT_PARAMETERS_KEY])
       .toEqual(variant("256k", "high", true).parameterValues)
   })
 
   it("keeps the old Fast entry when its only variants moved to a max tier", () => {
-    const fast = variant("500k", "high", true)
+    const fast = {
+      ...variant("500k", "high", true),
+      displayName: "Grok 4.7 High Fast",
+    }
     const model: ModelInfo = {
-      id: "grok-4.7", maxContext: 256_000,
-      variants: [variant("256k", "high"), fast],
+      id: "grok-4.7", displayName: "Grok 4.7", maxContext: 256_000,
+      variants: [{ ...variant("256k", "high"), displayName: "Grok 4.7 High" }, fast],
     }
     const config = modelsToConfig([model])
-    expect(config["grok-4.7-fast"].variants[fast.displayName]?.[CURSOR_VARIANT_PARAMETERS_KEY])
+    expect(config["grok-4.7-fast"].variants.High?.[CURSOR_VARIANT_PARAMETERS_KEY])
       .toEqual(fast.parameterValues)
     expect(config["grok-4.7-fast"].options[CURSOR_VARIANT_PARAMETERS_KEY]).toEqual(fast.parameterValues)
     expect(config["grok-4.7-500k-fast"].limit.context).toBe(500_000)
-    expect(modelsToCatalogModelMap([model])["grok-4.7-fast"]?.variants[0]?.id).toBe(fast.displayName)
+    expect(modelsToCatalogModelMap([model])["grok-4.7-fast"]?.variants[0]?.id).toBe("High")
   })
 
   it("preserves pre-split collision labels without adding 1M variants to the base picker", () => {

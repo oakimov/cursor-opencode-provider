@@ -321,14 +321,14 @@ describe("modelInfoToConfig", () => {
     expect(config.name).toBe("Claude Opus 4.8")
     expect(config.name).not.toMatch(INVALID)
 
-    // Variant keys: parens removed, no markup chars, unique, params intact.
+    // Variant keys: model name stripped, parens removed, unique, params intact.
     const keys = Object.keys(config.variants)
-    expect(keys).toEqual(["Claude Opus 4.8 Low", "Claude Opus 4.8 Max"])
+    expect(keys).toEqual(["Low", "Max"])
     expect(keys.filter(key => INVALID.test(key))).toEqual([])
-    expect(config.variants["Claude Opus 4.8 Low"]).toEqual(
+    expect(config.variants.Low).toEqual(
       variantParams([{ id: "effort", value: "low" }]),
     )
-    expect(config.variants["Claude Opus 4.8 Max"]).toEqual(
+    expect(config.variants.Max).toEqual(
       variantParams([{ id: "effort", value: "max" }]),
     )
   })
@@ -352,15 +352,14 @@ describe("modelInfoToConfig", () => {
         parameterValues: [],
       }],
     })
-    expect(config.variants).toEqual({ "Plain default": variantParams([]) })
+    expect(config.variants).toEqual({ Standard: variantParams([]) })
   })
 
   it("disambiguates variants that share a display name by tagging distinguishing params", () => {
     // Mirrors Cursor's Composer 2.5: both variants render the same base
     // display name (the "Fast" suffix is in a <span> that safeLabel drops);
-    // without disambiguation the colliding variant would silently overwrite
-    // the first under the same key. The first variant's key also gets
-    // suffixed so it never equals the model name itself.
+    // after stripping the model name both are empty, so the Fast param
+    // becomes the Fast variant's key.
     const mi: ModelInfo = {
       id: "composer-2.5",
       displayName: "Composer 2.5",
@@ -385,11 +384,11 @@ describe("modelInfoToConfig", () => {
     const config = modelInfoToConfig(mi)
     const keys = Object.keys(config.variants)
     expect(keys).toHaveLength(2)
-    expect(keys).toEqual(["Composer 2.5 default", "Composer 2.5 Fast"])
-    expect(config.variants["Composer 2.5 default"]).toEqual(
+    expect(keys).toEqual(["Standard", "Fast"])
+    expect(config.variants.Standard).toEqual(
       variantParams([{ id: "fast", value: "false" }]),
     )
-    expect(config.variants["Composer 2.5 Fast"]).toEqual(
+    expect(config.variants.Fast).toEqual(
       variantParams([{ id: "fast", value: "true" }]),
     )
   })
@@ -439,10 +438,142 @@ describe("modelInfoToConfig", () => {
       ],
     }
     const config = modelInfoToConfig(mi)
-    // First variant collides with the model name itself, gets suffixed.
-    // Second variant collides with the first, also gets default since
-    // "effort" is not in the distinguishing set.
-    expect(Object.keys(config.variants)).toEqual(["M default", "M default 2"])
+    // Stripping the model name leaves both empty → "Standard" (OpenCode reserves "default"); the second
+    // collision is numbered because effort is not a display tag.
+    expect(Object.keys(config.variants)).toEqual(["Standard", "Standard 2"])
+  })
+
+  it("orders No Thinking before Thinking and effort low→high", () => {
+    const config = modelInfoToConfig({
+      id: "claude-opus-4-8",
+      displayName: "Claude Opus 4.8",
+      variants: [
+        {
+          key: "high",
+          displayName: "Claude Opus 4.8 High",
+          isDefaultNonMax: false,
+          isDefaultMax: true,
+          parameterValues: [
+            { id: "thinking", value: "true" },
+            { id: "effort", value: "high" },
+          ],
+        },
+        {
+          key: "low-off",
+          displayName: "Claude Opus 4.8 Low No Thinking",
+          isDefaultNonMax: true,
+          isDefaultMax: false,
+          parameterValues: [
+            { id: "thinking", value: "false" },
+            { id: "effort", value: "low" },
+          ],
+        },
+        {
+          key: "low",
+          displayName: "Claude Opus 4.8 Low",
+          isDefaultNonMax: false,
+          isDefaultMax: false,
+          parameterValues: [
+            { id: "thinking", value: "true" },
+            { id: "effort", value: "low" },
+          ],
+        },
+        {
+          key: "high-off",
+          displayName: "Claude Opus 4.8 High No Thinking",
+          isDefaultNonMax: false,
+          isDefaultMax: false,
+          parameterValues: [
+            { id: "thinking", value: "false" },
+            { id: "effort", value: "high" },
+          ],
+        },
+      ],
+    })
+    expect(Object.keys(config.variants)).toEqual([
+      "No Thinking Low",
+      "No Thinking High",
+      "Low",
+      "High",
+    ])
+  })
+
+  it("strips Fast from variant keys when the catalog entry is already Fast", () => {
+    const config = modelInfoToConfig(
+      {
+        id: "grok-4.7",
+        displayName: "Grok 4.7",
+        variants: [
+          {
+            key: "low",
+            displayName: "Grok 4.7 Low Fast\u200B\u200B",
+            isDefaultNonMax: true,
+            isDefaultMax: false,
+            parameterValues: [
+              { id: "reasoning_effort", value: "low" },
+              { id: "fast", value: "true" },
+            ],
+          },
+          {
+            key: "high",
+            displayName: "Grok 4.7 High Fast\u200B\u200B",
+            isDefaultNonMax: false,
+            isDefaultMax: true,
+            parameterValues: [
+              { id: "reasoning_effort", value: "high" },
+              { id: "fast", value: "true" },
+            ],
+          },
+        ],
+      },
+      { fast: true },
+    )
+    expect(config.name).toBe("Grok 4.7 Fast")
+    expect(Object.keys(config.variants)).toEqual(["Low", "High"])
+  })
+
+  it("keeps Fast in variant keys when only the model name ends in Fast", () => {
+    // Cursor lists models such as "GPT-5 Fast"; the name is not a Fast entry.
+    const config = modelInfoToConfig({
+      id: "turbo",
+      displayName: "Turbo Fast",
+      variants: [
+        {
+          key: "low",
+          displayName: "Turbo Fast Low",
+          isDefaultNonMax: true,
+          isDefaultMax: false,
+          parameterValues: [{ id: "effort", value: "low" }],
+        },
+        {
+          key: "low-fast",
+          displayName: "Turbo Fast Low Fast",
+          isDefaultNonMax: false,
+          isDefaultMax: false,
+          parameterValues: [
+            { id: "effort", value: "low" },
+            { id: "fast", value: "true" },
+          ],
+        },
+      ],
+    })
+    expect(Object.keys(config.variants)).toEqual(["Low", "Low Fast"])
+  })
+
+  it("ranks a disabled effort value before enabled efforts", () => {
+    const variant = (value: string, isDefaultNonMax = false) => ({
+      key: value,
+      displayName: `M ${value}`,
+      isDefaultNonMax,
+      isDefaultMax: false,
+      parameterValues: [{ id: "reasoning_effort", value }],
+    })
+    const config = modelInfoToConfig({
+      id: "m",
+      displayName: "M",
+      variants: [variant("high", true), variant("off"), variant("XHIGH"), variant("low")],
+    })
+    expect(Object.keys(config.variants)).toEqual(["off", "low", "high", "XHIGH"])
   })
 
   it("tags only the thinking model of an ambiguous pair (Cursor's Claude convention)", () => {

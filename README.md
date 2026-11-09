@@ -175,11 +175,19 @@ Each dedicated context entry keeps only its tier's variants and retains the decl
 effort, including when the default's non-Fast twin is needed. Non-1M entries
 retain the base output limit of 32,000 tokens.
 
-Existing non-1M variant names also remain on the original base/Fast entries so
-saved selections such as `grok-4.7#Grok 4.7 High 500k` keep working after an
-upgrade. These legacy selections send the selected 500k parameters and max-mode
-flag, but keep the original entry's conservative static context budget. Select
-`grok-4.7-500k` or `grok-4.7-500k-fast` to give OpenCode the full 500k budget.
+Variant picker keys are the delta after the catalog model name (for example
+`High`, `No Thinking Low`, `High 500k`), not Cursor's full `<model> <delta>`
+string. Fast and dedicated context-tier entries also drop their redundant
+`Fast` / tier token from those keys (`grok-4.7-500k-fast` offers `High`).
+Non-1M max-tier variants (such as Grok 4.7's 500k choices) remain selectable on
+the original base/Fast entries as `High 500k`; those picks still send the
+selected parameters and max-mode flag but keep the original entry's conservative
+static context budget. Select `grok-4.7-500k` or `grok-4.7-500k-fast` to give
+OpenCode the full 500k budget. A pick saved under an older full-name key (such
+as `grok-4.7#Grok 4.7 High 500k`) no longer matches until the variant is picked
+again: OpenCode 1.x sends the entry's default variant meanwhile, and OpenCode
+2.x rejects the prompt as variant-unavailable. A variant with no delta is keyed
+`Standard`, because OpenCode reserves `default` for "no variant".
 
 #### Fast variants with distinct prices
 
