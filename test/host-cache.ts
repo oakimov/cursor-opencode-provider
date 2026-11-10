@@ -30,6 +30,7 @@ function enter(): TempHostCache {
   }
   setHostCacheDirOverride(cacheDir)
   process.env.XDG_CACHE_HOME = cacheDir
+  open.add(state)
   return state
 }
 
@@ -53,32 +54,33 @@ async function leave(state: TempHostCache): Promise<void> {
     await waitForConversationMaintenanceForTests(state.cacheDir)
   } finally {
     restore(state)
+    open.delete(state)
     fs.rmSync(state.cacheDir, { recursive: true, force: true })
   }
 }
 
-/** `withTempHostCache` bodies that have not returned, oldest first. */
-const running = new Set<TempHostCache>()
+/** Temp host caches entered and not yet left, oldest first. */
+const open = new Set<TempHostCache>()
 
 /**
- * A test that timed out has ended while its body still runs. Its roots go back
- * now, newest first: restored only when the body finishes, they would be the
- * roots of the tests in between, and a body that entered meanwhile would later
- * restore the removed dir as the root of every test after it.
+ * One still open when its test has ended belongs to a test or hook that timed
+ * out, in its body or while `leave` waits: Bun fails it and lets it keep
+ * running. Its roots go back now, newest first. Restored only when it
+ * finishes, they would be the roots of the tests in between, and a scope
+ * entered meanwhile would later restore the removed dir as the root of every
+ * test after it.
  */
 atTestEnd(() => {
-  for (const state of [...running].reverse()) restore(state)
-  running.clear()
+  for (const state of [...open].reverse()) restore(state)
+  open.clear()
 })
 
 /** Run one test body with the host cache in a private temp dir. */
 export async function withTempHostCache<T>(run: (cacheDir: string) => T | Promise<T>): Promise<T> {
   const state = enter()
-  running.add(state)
   try {
     return await run(state.cacheDir)
   } finally {
-    running.delete(state)
     await leave(state)
   }
 }

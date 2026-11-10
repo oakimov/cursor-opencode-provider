@@ -40,6 +40,13 @@ fs.mkdirSync(hostDataHome)
 process.env.XDG_DATA_HOME = hostDataHome
 delete process.env.OPENCODE_AUTH_CONTENT
 
+/**
+ * The client version sent to Cursor is fixed. Unset, it is the newest Cursor
+ * CLI build installed under the operator's home, or else the one named on
+ * Cursor's installer page, which is a request to cursor.com.
+ */
+process.env.CURSOR_CLIENT_VERSION = "cli-test"
+
 /** Nothing a test does reaches Cursor or any other host (`test/network-guard.ts`). */
 installNetworkGuard()
 

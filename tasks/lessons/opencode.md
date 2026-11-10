@@ -824,6 +824,10 @@ These are failure lessons shared by both hosts, not a replacement for
   `test/host-cache.ts` puts the roots back when the test ends
   (`test/test-isolation.test.ts`). Redirect the variable the code reads first:
   a fake `HOME` does not move the store while `XDG_DATA_HOME` is set.
+  The developer's machine hid a third caller: with a Cursor CLI installed the
+  client version comes from disk, and without one, as in CI, six Run tests
+  fetched Cursor's installer page. The preload fixes `CURSOR_CLIENT_VERSION`.
+  Look for such callers with a home that has none of the operator's installs.
 - **Match CI environments.** Narrow PATH fixtures omitted mkdir. Queued
   publication tests once read Linux's `/proc/locks`, which macOS lacks;
   observe the test contender at the real `flock` call after its approval peek,

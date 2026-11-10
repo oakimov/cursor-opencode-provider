@@ -337,6 +337,8 @@ describe("bounded conversation maintenance", () => {
     const cacheDir = await root()
     const filePath = await snapshot(cacheDir)
     expect(await getPersistedConversation(cacheDir, sessionKey, now)).toBeDefined()
+    // That read started maintenance, which recovers whatever it finds in quarantine.
+    await waitForConversationMaintenanceForTests(cacheDir, now)
     const directory = path.join(conversationCacheDirectoryPath(cacheDir), ".gc", path.basename(filePath))
     await mkdir(directory, { recursive: true })
     const moved = path.join(directory, "moved.snapshot")

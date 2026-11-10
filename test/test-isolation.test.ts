@@ -7,6 +7,7 @@ import path from "node:path"
 import tls from "node:tls"
 import { readStoredAuth } from "../src/context/auth-store.js"
 import { hostGlobalDataDir } from "../src/context/paths.js"
+import { resetClientVersionCache, resolveClientVersion } from "../src/protocol/client-version.js"
 import { isLocalHost, takeNetworkAttempts } from "./network-guard.js"
 
 /** TEST-NET-1 (RFC 5737): reserved for documentation and never routed. */
@@ -24,6 +25,11 @@ describe("test run isolation (test/preload.ts)", () => {
     expect(hostGlobalDataDir()).toBe(path.join(dataHome, "opencode"))
     expect(existsSync(hostGlobalDataDir())).toBe(false)
     expect(await readStoredAuth("cursor")).toBeUndefined()
+  })
+
+  it("resolves the client version without the operator's Cursor CLI or Cursor's installer page", async () => {
+    resetClientVersionCache()
+    expect(await resolveClientVersion()).toBe("cli-test")
   })
 
   it("refuses a request that leaves this machine and records it without its query", async () => {
@@ -45,6 +51,63 @@ describe("test run isolation (test/preload.ts)", () => {
       `a connection to ${REMOTE}:443`,
       `a connection to ${REMOTE}:443`,
     ])
+  })
+
+  /** A local server that redirects by path and records what reached it. */
+  function redirector() {
+    const seen: string[] = []
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const { pathname } = new URL(request.url)
+        const body = await request.text()
+        seen.push(`${request.method} ${pathname} ${request.headers.get("content-type")} ${JSON.stringify(body)}`)
+        const to = (status: number, location: string) => new Response(null, { status, headers: { location } })
+        if (pathname === "/out") return to(302, `https://${REMOTE}/elsewhere?token=example`)
+        if (pathname === "/hop") return to(307, "/out")
+        if (pathname === "/repeat") return to(307, "/see-other")
+        if (pathname === "/see-other") return to(303, "/end")
+        if (pathname === "/moved") return to(302, "/end")
+        if (pathname === "/loop") return to(302, "/loop")
+        return new Response("end")
+      },
+    })
+    return { server, seen, base: `http://127.0.0.1:${server.port}` }
+  }
+
+  it("refuses a redirect that leaves this machine before following it", async () => {
+    const { server, seen, base } = redirector()
+    using _server = server
+    await expect(fetch(`${base}/out`)).rejects.toThrow(REFUSED)
+    const post = { method: "POST", body: "payload", headers: { "content-type": "text/plain" } }
+    await expect(fetch(new Request(`${base}/hop`, post))).rejects.toThrow(REFUSED)
+    expect(takeNetworkAttempts()).toEqual([
+      `fetch https://${REMOTE}/elsewhere, redirected from ${base}/out`,
+      `fetch https://${REMOTE}/elsewhere, redirected from ${base}/out`,
+    ])
+    expect(seen).toEqual(['GET /out null ""', 'POST /hop text/plain "payload"', 'POST /out text/plain "payload"'])
+  })
+
+  it("follows redirects on this machine as fetch does", async () => {
+    const { server, seen, base } = redirector()
+    using _server = server
+    const post = { method: "POST", body: "payload", headers: { "content-type": "text/plain" } }
+
+    const repeated = await fetch(`${base}/repeat`, post)
+    expect([repeated.status, repeated.redirected, repeated.url, await repeated.text()]).toEqual([200, true, `${base}/end`, "end"])
+    expect(seen.splice(0)).toEqual(['POST /repeat text/plain "payload"', 'POST /see-other text/plain "payload"', 'GET /end null ""'])
+
+    expect(await (await fetch(new Request(`${base}/repeat`, post))).text()).toBe("end")
+    expect(seen.splice(0)).toEqual(['POST /repeat text/plain "payload"', 'POST /see-other text/plain "payload"', 'GET /end null ""'])
+
+    expect(await (await fetch(`${base}/moved`, post)).text()).toBe("end")
+    expect(seen.splice(0)).toEqual(['POST /moved text/plain "payload"', 'GET /end null ""'])
+
+    const unfollowed = await fetch(`${base}/moved`, { redirect: "manual" })
+    expect([unfollowed.status, unfollowed.redirected, unfollowed.headers.get("location")]).toEqual([302, false, "/end"])
+    await expect(fetch(`${base}/moved`, { redirect: "error" })).rejects.toThrow("UnexpectedRedirect")
+    await expect(fetch(`${base}/loop`)).rejects.toThrow("more than 20 redirects")
+    expect(takeNetworkAttempts()).toEqual([])
   })
 
   it("leaves this machine reachable", async () => {
@@ -105,6 +168,13 @@ describe("a test that breaks isolation", () => {
   it("does not pass its temp host cache on when it times out", () => {
     const run = runFixture("host-cache-timeout")
     expect(run.output).toContain("(fail) times out inside a temp host cache")
+    expect(run.output).not.toContain("Tests left")
+    expect({ pass: run.pass, fail: run.fail, exitCode: run.exitCode }).toEqual({ pass: 3, fail: 1, exitCode: 1 })
+  }, 30_000)
+
+  it("does not pass its temp host cache on when it times out while that cache is cleaned up", () => {
+    const run = runFixture("host-cache-cleanup-timeout")
+    expect(run.output).toContain("(fail) times out while its temp host cache is cleaned up")
     expect(run.output).not.toContain("Tests left")
     expect({ pass: run.pass, fail: run.fail, exitCode: run.exitCode }).toEqual({ pass: 3, fail: 1, exitCode: 1 })
   }, 30_000)
