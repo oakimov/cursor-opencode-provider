@@ -9,6 +9,8 @@
 # LIVE_TEST_TIMEOUT, when set, is the deadline command (SECONDS COMMAND...).
 # Otherwise GNU timeout or gtimeout is required. The script exits 1 if neither
 # exists. LIVE_TEST_PYTHON, when set, is the interpreter used to read logs.
+# TERM, INT, HUP, or QUIT sent to this script stops the OpenCode process it
+# started before its temporary files are removed. SIGKILL cannot be handled.
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 # Cleanup can run while a command's stderr is redirected at a temp log.
@@ -112,7 +114,7 @@ kill_owned() {
 # shellcheck disable=SC2317
 cleanup_owned() {
   local status=$?
-  trap - EXIT INT TERM
+  trap - EXIT INT TERM QUIT
   if ! kill_owned; then
     if [[ "$status" -eq 0 ]]; then
       status=1
@@ -129,8 +131,13 @@ cleanup_owned() {
   exit "$status"
 }
 
+# A signal sent only to this script's pid must reach cleanup_owned, which
+# stops the OpenCode process holding CURSOR_API_KEY before removing its files.
+# Bash runs the EXIT trap for HUP by itself. It does not for QUIT: 3.2 dies
+# without cleanup and 5.x keeps waiting, so QUIT is trapped like INT and TERM.
 trap cleanup_owned EXIT
 trap 'exit 143' INT TERM
+trap 'exit 131' QUIT
 
 live_python() {
   if [[ -n "${LIVE_TEST_PYTHON:-}" && -x "${LIVE_TEST_PYTHON}" ]]; then

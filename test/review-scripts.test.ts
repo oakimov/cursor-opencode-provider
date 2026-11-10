@@ -1639,7 +1639,9 @@ describe("live test deadlines and cleanup", () => {
     }
   })
 
-  it("removes plugin-list files when the live test is cancelled", async () => {
+  // The signal goes to the script's pid alone. QUIT once left OpenCode, which
+  // holds the key, running: bash does not run the EXIT trap for it.
+  for (const [signal, code] of [["SIGTERM", 143], ["SIGQUIT", 131]] as const) it(`removes plugin-list files and stops OpenCode when the live test receives ${signal}`, async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "live-cancel-"))
     const bin = path.join(directory, "bin")
     const reviewHome = path.join(directory, "review-home")
@@ -1675,16 +1677,17 @@ describe("live test deadlines and cleanup", () => {
         if (Date.now() - started > 8000) throw new Error("plugin list did not start")
         await pause()
       }
-      child.kill("SIGTERM")
+      child.kill(signal)
       const killed = Date.now()
       while (child.exitCode === null && child.signalCode === null) {
-        if (Date.now() - killed > 8000) throw new Error("live test did not exit after SIGTERM")
+        if (Date.now() - killed > 8000) throw new Error(`live test did not exit after ${signal}`)
         await pause()
       }
-      const temps = fs.readdirSync(path.join(reviewHome, "tmp"))
-      expect(temps).toEqual([])
       const sleeperAlive = spawnSync("kill", ["-0", fs.readFileSync(pidFile, "utf8").trim()])
       expect(sleeperAlive.status).not.toBe(0)
+      expect(child.exitCode).toBe(code)
+      const temps = fs.readdirSync(path.join(reviewHome, "tmp"))
+      expect(temps).toEqual([])
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
       if (fs.existsSync(pidFile)) spawnSync("kill", ["-KILL", fs.readFileSync(pidFile, "utf8").trim()])
@@ -1872,6 +1875,220 @@ wait
       if (listed.exitCode === null && listed.signalCode === null) listed.kill("SIGKILL")
       if (fs.existsSync(hiddenPid)) spawnSync("kill", ["-KILL", fs.readFileSync(hiddenPid, "utf8").trim()])
       fs.rmSync(hidden, { recursive: true, force: true })
+    }
+  })
+})
+
+// Cancellation that reaches only the script's own pid, as a tool runner's
+// kill(pid) or subprocess.terminate() does. A process-group signal also
+// reaches the boundary directly and does not show whether the script passes
+// the cancellation on before its cleanup runs.
+describe("pid-targeted cancellation", () => {
+  const pause = () => new Promise((resolve) => setTimeout(resolve, 50))
+
+  // Visible to ps on the host for both the Linux namespace and macOS sandbox.
+  function marked(marker: string): number[] {
+    const listing = spawnSync("ps", ["-A", "-o", "pid=,args="], { encoding: "utf8" })
+    if (listing.status !== 0) throw new Error(`ps failed: ${listing.stderr}`)
+    return listing.stdout.split("\n").filter((line) => line.includes(marker)).map((line) => Number.parseInt(line, 10))
+  }
+
+  function commandAlive(marker: string): boolean {
+    return marked(marker).length > 0
+  }
+
+  // A failed assertion must not leave the command it found running.
+  function killMarked(marker: string): void {
+    for (const pid of marked(marker)) {
+      try { process.kill(pid, "SIGKILL") } catch { /* already gone */ }
+    }
+  }
+
+  type Exit = { code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string; at: number }
+
+  async function cancelAfterReady(
+    args: string[],
+    readyFile: string,
+    signal: NodeJS.Signals,
+    env: NodeJS.ProcessEnv,
+  ): Promise<Exit & { unavailable: boolean; signalledAt: number }> {
+    const child = spawn("bash", args, { cwd: root, env: { ...env, PYTHONDONTWRITEBYTECODE: "1" } })
+    let stdout = ""
+    let stderr = ""
+    child.stdout.on("data", (chunk) => (stdout += chunk))
+    child.stderr.on("data", (chunk) => (stderr += chunk))
+    const exited = new Promise<Exit>((resolve) =>
+      child.on("exit", (code, exitSignal) => resolve({ code, signal: exitSignal, stdout, stderr, at: Date.now() })),
+    )
+    const started = Date.now()
+    try {
+      while (!fs.existsSync(readyFile)) {
+        if (child.exitCode !== null || child.signalCode !== null) {
+          const early = await exited
+          return { ...early, unavailable: /ISOLATION=unavailable/.test(early.stderr), signalledAt: early.at }
+        }
+        if (Date.now() - started > 15000) throw new Error(`command did not start\n${stdout}\n${stderr}`)
+        await pause()
+      }
+      const signalledAt = Date.now()
+      child.kill(signal)
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`no exit after ${signal}\n${stdout}\n${stderr}`)), 20000),
+      )
+      const result = await Promise.race([exited, timeout])
+      return { ...result, unavailable: false, signalledAt }
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+    }
+  }
+
+  // The temp root is left as the host reports it; on macOS that is a symlink.
+  function fixture(prefix: string) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+    const src = path.join(base, "src")
+    const tmp = path.join(base, "tmp")
+    fs.mkdirSync(src)
+    fs.mkdirSync(tmp)
+    const marker = `${prefix}${process.pid}-${Math.random().toString(36).slice(2)}`
+    return { base, src, tmp, marker }
+  }
+
+  it("isolate-run.sh kills a command that ignores TERM before removing its stage", async () => {
+    const { base, src, tmp, marker } = fixture("isolate-ignore-term-")
+    try {
+      const result = await cancelAfterReady(
+        [
+          "scripts/isolate-run.sh", "--src", src, "--",
+          "/bin/sh", "-c", 'trap "" TERM; echo ready > ready; while :; do sleep 0.1; done', marker,
+        ],
+        path.join(src, "ready"),
+        "SIGTERM",
+        { ...process.env, TMPDIR: tmp, ISOLATE_TERM_GRACE: "1" },
+      )
+      if (result.unavailable) return
+      // The command outlived TERM, so this exit must follow the grace-period kill.
+      expect(commandAlive(marker), `${result.stdout}\n${result.stderr}`).toBe(false)
+      expect(result.code, result.stderr).toBe(143)
+      expect(result.at - result.signalledAt).toBeGreaterThanOrEqual(900)
+      expect(fs.readdirSync(tmp)).toEqual([])
+    } finally {
+      killMarked(marker)
+      fs.rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  it("isolate-run.sh forwards TERM so the command can stop itself", async () => {
+    const { base, src, tmp, marker } = fixture("isolate-forward-term-")
+    try {
+      const result = await cancelAfterReady(
+        [
+          "scripts/isolate-run.sh", "--src", src, "--",
+          "/bin/sh", "-c", 'trap "echo stopped > stopped; exit 0" TERM; echo ready > ready; while :; do sleep 0.1; done', marker,
+        ],
+        path.join(src, "ready"),
+        "SIGTERM",
+        { ...process.env, TMPDIR: tmp, ISOLATE_TERM_GRACE: "30" },
+      )
+      if (result.unavailable) return
+      expect(commandAlive(marker)).toBe(false)
+      expect(result.code, result.stderr).toBe(143)
+      expect(fs.readFileSync(path.join(src, "stopped"), "utf8")).toBe("stopped\n")
+      // Far below the grace period: the command stopped on the forwarded TERM.
+      expect(result.at - result.signalledAt).toBeLessThan(10000)
+      expect(fs.readdirSync(tmp)).toEqual([])
+    } finally {
+      killMarked(marker)
+      fs.rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  for (const [signal, code] of [["SIGTERM", 143], ["SIGINT", 130]] as const) {
+    it(`isolated-check.sh waits for the boundary before removing the archive on ${signal}`, async () => {
+      const { base, src, tmp, marker } = fixture(`isolated-check-${signal.toLowerCase()}-`)
+      try {
+        const result = await cancelAfterReady(
+          [
+            "-c",
+            `
+            set -euo pipefail
+            source scripts/isolated-check.sh
+            worktree="$WT"
+            trap check_cleanup EXIT
+            cd "$WT"
+            check_step UNIT_TESTS /bin/sh -c 'trap "" TERM INT; echo ready > ready; while :; do sleep 0.1; done' "$MARKER" || true
+            echo after-step
+            `,
+          ],
+          path.join(src, "ready"),
+          signal,
+          { ...process.env, TMPDIR: tmp, ISOLATE_TERM_GRACE: "1", WT: src, MARKER: marker },
+        )
+        if (result.unavailable) return
+        expect(commandAlive(marker), `${result.stdout}\n${result.stderr}`).toBe(false)
+        expect(result.code, result.stderr).toBe(code)
+        expect(result.stderr).toContain(`Check cancelled by ${signal}.`)
+        // The cancelled check neither reports the step nor runs the next one.
+        expect(result.stdout).not.toContain("UNIT_TESTS=")
+        expect(result.stdout).not.toContain("after-step")
+        expect(fs.existsSync(src)).toBe(false)
+        expect(fs.readdirSync(tmp)).toEqual([])
+      } finally {
+        killMarked(marker)
+        fs.rmSync(base, { recursive: true, force: true })
+      }
+    })
+  }
+
+  // check_run_live is the call that passes CURSOR_API_KEY into the boundary.
+  // The harness here is a stand-in checkout: the real isolate-run.sh, and a
+  // live-test.sh that reports whether it was given a key and ignores TERM.
+  it("isolated-check.sh waits for the live boundary, which holds the key, before removing the archive", async () => {
+    const { base, src, tmp, marker } = fixture("isolated-check-live-")
+    const harness = path.join(base, "harness")
+    fs.mkdirSync(path.join(harness, "scripts"), { recursive: true })
+    fs.copyFileSync(path.join(root, "scripts/isolate-run.sh"), path.join(harness, "scripts/isolate-run.sh"))
+    fs.chmodSync(path.join(harness, "scripts/isolate-run.sh"), 0o755)
+    fs.writeFileSync(
+      path.join(harness, "scripts/live-test.sh"),
+      [
+        'echo "LIVE_STUB key=${CURSOR_API_KEY:+present}"',
+        `exec /bin/sh -c 'trap "" TERM INT; echo ready > ready; while :; do sleep 0.1; done' ${marker}`,
+        "",
+      ].join("\n"),
+    )
+    try {
+      const result = await cancelAfterReady(
+        [
+          "-c",
+          `
+          set -euo pipefail
+          source scripts/isolated-check.sh
+          ROOT="$HARNESS"
+          worktree="$WT"
+          trap check_cleanup EXIT
+          cd "$WT"
+          set +e
+          check_run_live "$WT"
+          echo "live_exit=$?"
+          `,
+        ],
+        path.join(src, "ready"),
+        "SIGTERM",
+        { ...process.env, TMPDIR: tmp, ISOLATE_TERM_GRACE: "1", WT: src, HARNESS: harness, CURSOR_API_KEY: secret },
+      )
+      if (result.unavailable) return
+      expect(commandAlive(marker), `${result.stdout}\n${result.stderr}`).toBe(false)
+      expect(result.code, result.stderr).toBe(143)
+      expect(result.stderr).toContain("Check cancelled by SIGTERM.")
+      expect(result.stdout).toContain("LIVE_STUB key=present")
+      expect(result.stdout).not.toContain(secret)
+      // The cancelled live run does not return to the caller's summary.
+      expect(result.stdout).not.toContain("live_exit=")
+      expect(fs.existsSync(src)).toBe(false)
+      expect(fs.readdirSync(tmp)).toEqual([])
+    } finally {
+      killMarked(marker)
+      fs.rmSync(base, { recursive: true, force: true })
     }
   })
 })
