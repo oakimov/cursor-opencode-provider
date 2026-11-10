@@ -643,10 +643,14 @@ def redact_secret(text: str) -> str:
 
 
 # Names passed to --token-env. The named variable is removed from gh's
-# environment and its value is redacted from printed errors. A read that has
-# no other GitHub credential receives the value back as GH_TOKEN. The set is
-# process-local; post is a short-lived command.
+# environment and its value is redacted from printed errors. The publication
+# credential, once chosen, is what gh receives. The set is process-local;
+# post, threads, and complete-resolutions are short-lived commands.
 _hidden_env: set[str] = set()
+# One credential for every gh call in this process: the --token-env PAT, or
+# the App installation token. None until begin_publication selects it.
+_publication_token: str | None = None
+_publication_required = False
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PERSONAL_ACCESS_TOKEN = re.compile(r"^(?:ghp_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+)$")
 
@@ -791,15 +795,18 @@ def publisher_env(token: str | None) -> dict[str, str]:
     env.pop("GH_DEBUG", None)
     env["GH_HOST"] = "github.com"
     env["GH_PROMPT_DISABLED"] = "1"
-    # Reads call gh without an explicit token and rely on GH_TOKEN / GITHUB_TOKEN.
-    # Hiding the selected PAT removes that credential when it is the only one,
-    # including when the named variable is GH_TOKEN or GITHUB_TOKEN itself.
-    if token is None and not any(env.get(name, "").strip() for name in ("GH_TOKEN", "GITHUB_TOKEN")):
+    # The publication credential and a --token-env PAT both win over ambient
+    # GH_TOKEN / GITHUB_TOKEN. An empty result is not an anonymous gh login.
+    if token is None:
+        token = _publication_token
+    if token is None:
         for name in _hidden_env:
             value = os.environ.get(name, "").strip()
             if value:
                 token = value
                 break
+    if token is None and _publication_required:
+        refuse_publication("No GitHub credential is available. GitHub was not called.")
     if token is not None:
         env["GH_TOKEN"] = token
         env["GITHUB_TOKEN"] = token
@@ -1070,6 +1077,14 @@ def publication_token(owner: str, repo: str, token_env: str | None) -> str:
     return personal_access_token(token_env)
 
 
+def begin_publication(owner: str, repo: str, token_env: str | None) -> str:
+    """Select the one credential for every later gh call in this process."""
+    global _publication_token, _publication_required
+    _publication_required = True
+    _publication_token = publication_token(owner, repo, token_env)
+    return _publication_token
+
+
 def resolve_threads(
     payload_path: Path,
     approval_path: Path,
@@ -1083,7 +1098,9 @@ def resolve_threads(
         return
     require_same_operation(payload_path, approval_path, pinned)
     owner, repo, pull = payload["owner"], payload["repo"], payload["pull"]
-    token = publication_token(str(owner), str(repo), token_env)
+    token = _publication_token
+    if token is None:
+        token = publication_token(str(owner), str(repo), token_env)
     require_same_operation(payload_path, approval_path, pinned)
     for action in actions:
         thread = checked_thread(payload, action, token)
@@ -1705,8 +1722,7 @@ def post(payload_path: Path, approval_path: Path, token_env: str | None = None) 
             print("The approval record was replaced. GitHub was not called.", file=sys.stderr)
             raise SystemExit(5)
         pinned = operation_key(payload, approval, digest)
-        if token_env is not None:
-            personal_access_token(token_env)
+        begin_publication(str(owner), str(repo), token_env)
         if isinstance(payload.get("result"), dict):
             inventory = thread_inventory(owner, repo, pull)
             require_same_operation(payload_path, approval_path, pinned)
@@ -1747,10 +1763,9 @@ def post_locked(
     token_env: str | None = None,
 ) -> None:
     owner, repo, pull = payload["owner"], payload["repo"], payload["pull"]
-    if token_env is None:
-        app_id, pem = load_app_material()
-    else:
-        personal_access_token(token_env)
+    token = _publication_token
+    if not token:
+        refuse_publication("No GitHub credential is available. GitHub was not called.")
     approved_head = payload["head"]
     approved_base = payload["base"]
     marker = f"<!-- cursor-review:{approval['identity']} -->"
@@ -1782,17 +1797,11 @@ def post_locked(
     )
     try:
         # The reviews lookup is the last preparatory read. Fetch the remote
-        # revision, then take the publication credential and re-read the pinned
-        # approval. Without --token-env that credential is a new installation
-        # token. A push after this fetch is not covered. A changed revision or
-        # approval is not sent.
+        # revision again and re-read the pinned approval. The credential was
+        # selected once, before the first gh call. A push after this fetch is
+        # not covered. A changed revision or approval is not sent.
         fetched_head, fetched_base, readable = read_pull(owner, repo, pull)
         reject_moved_revision(fetched_head, fetched_base, readable, approved_head, approved_base)
-        require_same_operation(payload_path, approval_path, pinned)
-        if token_env is None:
-            token = installation_token(str(owner), str(repo), app_id, pem)
-        else:
-            token = personal_access_token(token_env)
         require_same_operation(payload_path, approval_path, pinned)
     except SystemExit:
         # The request was not sent. Drop the checkpoint so it is not an unsettled delivery.
@@ -1945,17 +1954,17 @@ def main() -> None:
         "--token-env",
         metavar="NAME",
         help=(
-            "post only: read a GitHub personal access token (ghp_ or github_pat_) from "
-            "environment variable NAME and use it for the review POST and resolveReviewThread. "
-            "NAME is the variable's name; do not pass the token on the command line. "
+            "post and threads: read a GitHub personal access token (ghp_ or github_pat_) from "
+            "environment variable NAME and send it as GH_TOKEN on every gh call, including "
+            "thread reads. NAME is the variable's name; do not pass the token on the command line. "
             "Omit this option to mint a GitHub App installation token instead."
         ),
     )
     args = parser.parse_args()
     if args.discard_instruction is not None and args.command != "cleanup":
         parser.error("--discard-instruction is only valid with cleanup")
-    if args.token_env is not None and args.command != "post":
-        parser.error("--token-env is only valid with post")
+    if args.token_env is not None and args.command not in {"post", "threads"}:
+        parser.error("--token-env is only valid with post and threads")
     if args.command == "auth-info":
         auth_info()
     elif args.command == "cleanup":
@@ -1992,6 +2001,7 @@ def main() -> None:
         if args.command == "start":
             start_review(str(args.payload), str(args.approval), pull)
         elif args.command == "threads":
+            begin_publication(str(args.payload), str(args.approval), args.token_env)
             json.dump(thread_inventory(str(args.payload), str(args.approval), pull), sys.stdout, indent=2)
             sys.stdout.write("\n")
         else:

@@ -13,10 +13,11 @@ any other mutation is sent.
     python3 scripts/complete-resolutions.py <payload.json> <approval.json>
     python3 scripts/complete-resolutions.py --token-env NAME <payload.json> <approval.json>
 
-Without --token-env, resolution uses the GitHub App installation token.
+Without --token-env, every gh call uses one GitHub App installation token.
 --token-env NAME reads a GitHub personal access token (ghp_ or github_pat_)
-from that environment variable and uses it for resolveReviewThread. The token
-value is never taken from the command line.
+from that environment variable and sends it as GH_TOKEN on every gh call,
+including the review lookup and resolveReviewThread. The token value is never
+taken from the command line. An ambient GH_TOKEN does not replace it.
 """
 
 from __future__ import annotations
@@ -52,9 +53,9 @@ def main() -> None:
         metavar="NAME",
         help=(
             "read a GitHub personal access token (ghp_ or github_pat_) from environment "
-            "variable NAME and use it for resolveReviewThread. NAME is the variable's name; "
-            "do not pass the token on the command line. Omit this option to mint a GitHub App "
-            "installation token instead."
+            "variable NAME and send it as GH_TOKEN on every gh call, including the review "
+            "lookup and resolveReviewThread. NAME is the variable's name; do not pass the token "
+            "on the command line. Omit this option to mint a GitHub App installation token instead."
         ),
     )
     arguments = parser.parse_args()
@@ -78,8 +79,7 @@ def main() -> None:
     lock = lock_path.open("a+")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        if arguments.token_env is not None:
-            publisher.personal_access_token(arguments.token_env)
+        publisher.begin_publication(str(owner), str(repo), arguments.token_env)
         marker = f"<!-- cursor-review:{identity} -->"
         existing = publisher.matching_review(publisher.reviews_of(owner, repo, pull), marker)
         journal = publisher.read_json_object(checkpoint_path)
