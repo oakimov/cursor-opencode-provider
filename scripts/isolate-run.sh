@@ -88,14 +88,40 @@ isolate_unavailable() {
 # scope, so these are globals.
 isolate_sup_leader=""
 isolate_sup_signal=""
-isolate_sup_sent=""
+isolate_sup_stopping=""
+isolate_sup_grace=10
 
-# Record the first cancellation signal and pass it to the whole session.
+# Record the first cancellation signal and stop the session.
 isolate_sup_note() {
   [[ -n "$isolate_sup_signal" ]] || isolate_sup_signal="$1"
-  if [[ -n "$isolate_sup_leader" ]] && kill -s "$isolate_sup_signal" -- "-$isolate_sup_leader" 2>/dev/null; then
-    isolate_sup_sent=1
-  fi
+  isolate_sup_stop
+}
+
+# Pass the recorded signal to the whole session and return once its leader
+# has gone, killing the session after the grace period. This runs inside the
+# trap: `wait` ends early only for a signal that arrives during it, so a trap
+# taken just before `wait` starts must not leave the stopping to the code
+# after it. A trap taken before the leader is known returns at once, and
+# isolate_supervise calls this again.
+isolate_sup_stop() {
+  local ticks sent="" killed=""
+  [[ -n "$isolate_sup_leader" && -z "$isolate_sup_stopping" ]] || return 0
+  isolate_sup_stopping=1
+  # Count 0.1 s sleeps rather than whole-second SECONDS ticks, which can end
+  # a one-second grace almost at once.
+  ticks=$((isolate_sup_grace * 10))
+  while kill -0 "$isolate_sup_leader" 2>/dev/null; do
+    # The session may not exist yet; send the signal once it does.
+    if [[ -z "$sent" ]] && kill -s "$isolate_sup_signal" -- "-$isolate_sup_leader" 2>/dev/null; then
+      sent=1
+    fi
+    if [[ -z "$killed" && "$ticks" -le 0 ]]; then
+      kill -s KILL -- "-$isolate_sup_leader" 2>/dev/null || true
+      killed=1
+    fi
+    sleep 0.1 || true
+    ticks=$((ticks - 1))
+  done
 }
 
 # Run COMMAND in DIR as the leader of a new session and wait for it.
@@ -113,13 +139,13 @@ isolate_sup_note() {
 # A cancelled run returns 128 plus the signal number. SIGKILL to this shell
 # cannot be forwarded.
 isolate_supervise() {
-  local dir="$1" status=0 grace ticks killed=""
+  local dir="$1" status=0
   shift
-  grace="${ISOLATE_TERM_GRACE:-10}"
-  [[ "$grace" =~ ^[0-9]+$ ]] || grace=10
+  isolate_sup_grace="${ISOLATE_TERM_GRACE:-10}"
+  [[ "$isolate_sup_grace" =~ ^[0-9]+$ ]] || isolate_sup_grace=10
   command -v python3 >/dev/null 2>&1 || isolate_unavailable "python3 is required to supervise the command." || return 2
   isolate_sup_signal=""
-  isolate_sup_sent=""
+  isolate_sup_stopping=""
   isolate_sup_leader=""
   trap 'isolate_sup_note TERM' TERM
   trap 'isolate_sup_note INT' INT
@@ -140,24 +166,14 @@ os.execvp(sys.argv[1], sys.argv[1:])
 ' "$@"
   ) <&0 &
   isolate_sup_leader=$!
-  wait "$isolate_sup_leader"
-  status=$?
-  if [[ -n "$isolate_sup_signal" ]]; then
-    # Count 0.1 s sleeps rather than whole-second SECONDS ticks, which can
-    # end a one-second grace almost at once.
-    ticks=$((grace * 10))
-    while kill -0 "$isolate_sup_leader" 2>/dev/null; do
-      # The signal can arrive before the session exists; send it once it does.
-      [[ -n "$isolate_sup_sent" ]] || isolate_sup_note "$isolate_sup_signal"
-      if [[ -z "$killed" && "$ticks" -le 0 ]]; then
-        kill -s KILL -- "-$isolate_sup_leader" 2>/dev/null || true
-        killed=1
-      fi
-      sleep 0.1 || true
-      ticks=$((ticks - 1))
-    done
-    wait "$isolate_sup_leader" 2>/dev/null || true
+  if [[ -z "$isolate_sup_signal" ]]; then
+    wait "$isolate_sup_leader"
+    status=$?
+  else
+    # A signal trapped before the line above found no leader to stop.
+    isolate_sup_stop
   fi
+  [[ -z "$isolate_sup_signal" ]] || wait "$isolate_sup_leader" 2>/dev/null || true
   kill -s KILL -- "-$isolate_sup_leader" 2>/dev/null || true
   trap - TERM INT HUP QUIT
   if [[ -n "$isolate_sup_signal" ]]; then
