@@ -227,6 +227,8 @@ note_key()
 with (state / "calls").open("a", encoding="utf-8") as handle:
     handle.write(method + " " + endpoint + "\\n")
 token = os.environ.get("GH_TOKEN", "")
+with (state / "call-auth").open("a", encoding="utf-8") as handle:
+    handle.write((hashlib.sha256(token.encode()).hexdigest() if token else "missing") + "\\n")
 if method == "GET":
     digest = hashlib.sha256(token.encode()).hexdigest() if token else "missing"
     with (state / "read-auth").open("a", encoding="utf-8") as handle:
@@ -564,6 +566,25 @@ function postsOf(state: string): number {
 
 function tokenSha(value: string): string {
   return createHash("sha256").update(value).digest("hex")
+}
+
+function callAuth(state: string): string[] {
+  const file = path.join(state, "call-auth")
+  return fs.existsSync(file) ? fs.readFileSync(file, "utf8").split("\n").filter(Boolean) : []
+}
+
+function credentialRows(state: string, stdout: string, stderr: string, secret: string) {
+  const calls = callsOf(state)
+  const auth = callAuth(state)
+  const data = calls.flatMap((call, index) => (
+    call.includes("access_tokens") || call.endsWith("/installation") ? [] : [auth[index] ?? "missing"]
+  ))
+  return {
+    paired: auth.length === calls.length && calls.length > 0,
+    missing: auth.includes("missing"),
+    data,
+    leaked: `${stdout}${stderr}`.includes(secret),
+  }
 }
 
 function sleep(ms: number): void {
@@ -1347,7 +1368,7 @@ describe("review publication", () => {
       expect(result.stderr).toContain("The approval record was replaced.")
       expect(postsOf(state)).toBe(0)
       expect(postBodies(state)).toBe("")
-      expect(callsOf(state).filter((line) => line.startsWith("POST "))).toEqual([])
+      expect(callsOf(state).filter((line) => line.startsWith("POST ") && !line.includes("access_tokens"))).toEqual([])
     } finally {
       stopProcess(child)
       fs.rmSync(directory, { recursive: true, force: true })
@@ -1824,8 +1845,8 @@ describe("review publication", () => {
       expect(stored[0]?.request.comments[0]?.path).toBe("scripts/review-publish.py")
       expect(stored[0]?.request.comments[0]?.body).toContain("High: Replacement approval is sent to the locked pull request")
       expect(callsOf(state).filter((line) => line.startsWith("POST "))).toEqual([
-        "POST graphql",
         "POST app/installations/67890/access_tokens",
+        "POST graphql",
         "POST repos/oakimov/cursor-opencode-provider/pulls/156/reviews",
       ])
       expect(fs.readFileSync(path.join(state, "review-auth"), "utf8")).toBe("app")
@@ -1960,10 +1981,10 @@ describe("review publication", () => {
     expect(help.stdout).toContain("--token-env")
     expect(help.stdout).toContain("ghp_")
     expect(help.stdout).toContain("github_pat_")
-    expect(help.stdout).toContain("do not pass the token")
+    expect(help.stdout.replaceAll(/\s+/g, " ")).toContain("do not pass the token")
     const elsewhere = run(["show", "--token-env", "REVIEW_PUBLISH_TOKEN"], { REVIEW_APP_UNCONFIGURED: "1" })
     expect(elsewhere.status).not.toBe(0)
-    expect(elsewhere.stderr).toContain("--token-env is only valid with post")
+    expect(elsewhere.stderr).toContain("--token-env is only valid with post and threads")
     expect(elsewhere.stdout + elsewhere.stderr).not.toContain("REVIEW_PUBLISH_TOKEN=")
   })
 
@@ -2058,6 +2079,187 @@ describe("review publication", () => {
     }
   })
 
+  it("sends the publication credential on every threads and pre-publish gh call", () => {
+    const pat = "ghp_threadreadtokenvalue123456789"
+    const ambient = "ghp_ambientthreadtokenvalue12345"
+    const installation = "ghs_testinstallationtoken"
+    const thread = {
+      id: "PRRT_fixture0",
+      isResolved: false,
+      pullRequest: { number: 156, repository: { nameWithOwner: "oakimov/cursor-opencode-provider" } },
+      comments: [{
+        id: "original",
+        url: "https://github.com/oakimov/cursor-opencode-provider/pull/156#discussion_r10",
+        body: "Earlier review finding",
+        updatedAt: "2026-01-01T00:00:00Z",
+      }],
+    }
+    const directories: string[] = []
+    const observed: Array<Record<string, unknown>> = []
+    try {
+      const appFixture = freshReview("review-thread-app-")
+      directories.push(appFixture.directory)
+      fs.writeFileSync(path.join(appFixture.state, "threads.json"), JSON.stringify([thread]))
+      const appEnv = { PATH: `${appFixture.bin}:/usr/bin:/bin`, GH_STATE: appFixture.state, GH_TOKEN: ambient, GITHUB_TOKEN: ambient }
+      const appThreads = run(["threads", "oakimov", "cursor-opencode-provider", "156"], appEnv)
+      const appRows = credentialRows(appFixture.state, appThreads.stdout, appThreads.stderr, installation)
+      observed.push({
+        name: "threads-app",
+        status: appThreads.status,
+        graphql: callsOf(appFixture.state).includes("POST graphql"),
+        paired: appRows.paired,
+        missing: appRows.missing,
+        authed: appRows.data.length > 0 && appRows.data.every(line => line === tokenSha(installation)),
+        leaked: appRows.leaked || `${appThreads.stdout}${appThreads.stderr}`.includes(ambient),
+      })
+
+      const patFixture = freshReview("review-thread-pat-")
+      directories.push(patFixture.directory)
+      fs.writeFileSync(path.join(patFixture.state, "threads.json"), JSON.stringify([thread]))
+      const patThreads = run(
+        ["threads", "oakimov", "cursor-opencode-provider", "156", "--token-env", "REVIEW_PUBLISH_TOKEN"],
+        {
+          PATH: `${patFixture.bin}:/usr/bin:/bin`,
+          GH_STATE: patFixture.state,
+          REVIEW_APP_UNCONFIGURED: "1",
+          REVIEW_PUBLISH_TOKEN: pat,
+          GH_TOKEN: ambient,
+          GITHUB_TOKEN: ambient,
+        },
+      )
+      const patRows = credentialRows(patFixture.state, patThreads.stdout, patThreads.stderr, pat)
+      observed.push({
+        name: "threads-pat",
+        status: patThreads.status,
+        graphql: callsOf(patFixture.state).includes("POST graphql"),
+        minted: callsOf(patFixture.state).some(line => line.includes("access_tokens") || line.endsWith("/installation")),
+        paired: patRows.paired,
+        missing: patRows.missing,
+        authed: patRows.data.length > 0 && patRows.data.every(line => line === tokenSha(pat)),
+        leaked: patRows.leaked || `${patThreads.stdout}${patThreads.stderr}`.includes(ambient),
+      })
+
+      const missingFixture = freshReview("review-thread-missing-")
+      directories.push(missingFixture.directory)
+      const missing = run(["threads", "oakimov", "cursor-opencode-provider", "156"], {
+        PATH: `${missingFixture.bin}:/usr/bin:/bin`,
+        GH_STATE: missingFixture.state,
+        REVIEW_APP_UNCONFIGURED: "1",
+        GH_TOKEN: ambient,
+        GITHUB_TOKEN: ambient,
+      })
+      observed.push({
+        name: "threads-missing",
+        status: missing.status,
+        told: missing.stderr.includes("GitHub was not called.") && missing.stderr.includes("REVIEW_APP_ID"),
+        calls: callsOf(missingFixture.state).join("\n"),
+        leaked: `${missing.stdout}${missing.stderr}`.includes(ambient),
+      })
+    } finally {
+      for (const directory of directories) fs.rmSync(directory, { recursive: true, force: true })
+    }
+    expect(observed).toEqual([
+      { name: "threads-app", status: 0, graphql: true, paired: true, missing: false, authed: true, leaked: false },
+      { name: "threads-pat", status: 0, graphql: true, minted: false, paired: true, missing: false, authed: true, leaked: false },
+      { name: "threads-missing", status: 4, told: true, calls: "", leaked: false },
+    ])
+  })
+
+  it("sends that same credential on the pre-publish thread lookup and resolution reads", () => {
+    const pat = "ghp_prepublishreadtokenvalue12345"
+    const ambient = "ghp_ambientprepublishtokenvalue1"
+    const installation = "ghs_testinstallationtoken"
+    const directories: string[] = []
+    const observed: Array<Record<string, unknown>> = []
+    try {
+      const appFixture = freshReview("review-prepublish-app-")
+      directories.push(appFixture.directory)
+      const { env } = resolutionDraft(appFixture, ["fixed"])
+      fs.rmSync(path.join(appFixture.state, "calls"), { force: true })
+      fs.rmSync(path.join(appFixture.state, "call-auth"), { force: true })
+      expect(approve(appFixture.payload, appFixture.approval, env).status).toBe(0)
+      const posted = run(["post", appFixture.payload, appFixture.approval], { ...env, GH_TOKEN: ambient, GITHUB_TOKEN: ambient })
+      const appRows = credentialRows(appFixture.state, posted.stdout, posted.stderr, installation)
+      observed.push({
+        name: "post-app",
+        status: posted.status,
+        graphql: callsOf(appFixture.state).includes("POST graphql"),
+        paired: appRows.paired,
+        missing: appRows.missing,
+        authed: appRows.data.length > 0 && appRows.data.every(line => line === tokenSha(installation)),
+        leaked: appRows.leaked || `${posted.stdout}${posted.stderr}`.includes(ambient),
+      })
+
+      fs.rmSync(path.join(appFixture.state, "calls"), { force: true })
+      fs.rmSync(path.join(appFixture.state, "call-auth"), { force: true })
+      const appFinished = runComplete({ ...env, GH_TOKEN: ambient, GITHUB_TOKEN: ambient }, appFixture.payload, appFixture.approval)
+      const appCompleteRows = credentialRows(appFixture.state, appFinished.stdout, appFinished.stderr, installation)
+      observed.push({
+        name: "complete-app",
+        status: appFinished.status,
+        reviews: callsOf(appFixture.state).some(line => line.endsWith("/reviews")),
+        paired: appCompleteRows.paired,
+        missing: appCompleteRows.missing,
+        authed: appCompleteRows.data.length > 0 && appCompleteRows.data.every(line => line === tokenSha(installation)),
+        leaked: appCompleteRows.leaked || `${appFinished.stdout}${appFinished.stderr}`.includes(ambient),
+      })
+
+      const patFixture = freshReview("review-prepublish-pat-")
+      directories.push(patFixture.directory)
+      const drafted = resolutionDraft(patFixture, ["fixed"])
+      fs.rmSync(path.join(patFixture.state, "calls"), { force: true })
+      fs.rmSync(path.join(patFixture.state, "call-auth"), { force: true })
+      expect(approve(patFixture.payload, patFixture.approval, drafted.env).status).toBe(0)
+      const patPosted = run(["post", patFixture.payload, patFixture.approval, "--token-env", "REVIEW_PUBLISH_TOKEN"], {
+        ...drafted.env,
+        REVIEW_APP_UNCONFIGURED: "1",
+        REVIEW_PUBLISH_TOKEN: pat,
+        GH_TOKEN: ambient,
+        GITHUB_TOKEN: ambient,
+      })
+      const patRows = credentialRows(patFixture.state, patPosted.stdout, patPosted.stderr, pat)
+      observed.push({
+        name: "post-pat",
+        status: patPosted.status,
+        graphql: callsOf(patFixture.state).includes("POST graphql"),
+        minted: callsOf(patFixture.state).some(line => line.includes("access_tokens") || line.endsWith("/installation")),
+        paired: patRows.paired,
+        missing: patRows.missing,
+        authed: patRows.data.length > 0 && patRows.data.every(line => line === tokenSha(pat)),
+        leaked: patRows.leaked || `${patPosted.stdout}${patPosted.stderr}`.includes(ambient),
+      })
+
+      fs.rmSync(path.join(patFixture.state, "calls"), { force: true })
+      fs.rmSync(path.join(patFixture.state, "call-auth"), { force: true })
+      const finished = runComplete({
+        ...drafted.env,
+        REVIEW_APP_UNCONFIGURED: "1",
+        REVIEW_PUBLISH_TOKEN: pat,
+        GH_TOKEN: ambient,
+        GITHUB_TOKEN: ambient,
+      }, "--token-env", "REVIEW_PUBLISH_TOKEN", patFixture.payload, patFixture.approval)
+      const completeRows = credentialRows(patFixture.state, finished.stdout, finished.stderr, pat)
+      observed.push({
+        name: "complete-pat",
+        status: finished.status,
+        reviews: callsOf(patFixture.state).some(line => line.endsWith("/reviews")),
+        minted: callsOf(patFixture.state).some(line => line.includes("access_tokens") || line.endsWith("/installation")),
+        paired: completeRows.paired,
+        missing: completeRows.missing,
+        authed: completeRows.data.length > 0 && completeRows.data.every(line => line === tokenSha(pat)),
+        leaked: completeRows.leaked || `${finished.stdout}${finished.stderr}`.includes(ambient),
+      })
+    } finally {
+      for (const directory of directories) fs.rmSync(directory, { recursive: true, force: true })
+    }
+    expect(observed).toEqual([
+      { name: "post-app", status: 0, graphql: true, paired: true, missing: false, authed: true, leaked: false },
+      { name: "complete-app", status: 0, reviews: true, paired: true, missing: false, authed: true, leaked: false },
+      { name: "post-pat", status: 0, graphql: true, minted: false, paired: true, missing: false, authed: true, leaked: false },
+      { name: "complete-pat", status: 0, reviews: true, minted: false, paired: true, missing: false, authed: true, leaked: false },
+    ])
+  })
+
   it("resolves threads with the named personal access token", () => {
     const fixture = freshReview("review-pat-resolve-")
     const { directory, payload, approval, state } = fixture
@@ -2065,6 +2267,8 @@ describe("review publication", () => {
     try {
       const { env } = resolutionDraft(fixture, ["fixed"])
       expect(approve(payload, approval, env).status).toBe(0)
+      fs.rmSync(path.join(state, "calls"), { force: true })
+      fs.rmSync(path.join(state, "call-auth"), { force: true })
       const posted = run(["post", payload, approval, "--token-env", "GITHUB_CC"], { ...env, GITHUB_CC: token })
       expect(posted.status, `${posted.stdout}\n${posted.stderr}`).toBe(0)
       expect(posted.stdout).toContain("THREAD_RESOLVED=PRRT_fixture0")
@@ -2169,8 +2373,7 @@ describe("review publication", () => {
       expect(finished.stdout).toContain("THREAD_RESOLVED=PRRT_fixture0")
       expect(finished.stdout + finished.stderr).not.toContain(token)
       expect(fs.readFileSync(path.join(state, "resolve-token-sha256"), "utf8")).toBe(tokenSha(token))
-      // The App post mints for the review and for its rejected resolution. The
-      // completion uses the named PAT and does not mint again.
+      // threads and the App post each mint once. The completion uses the named PAT.
       expect(callsOf(state).filter((line) => line.includes("access_tokens"))).toEqual([
         "POST app/installations/67890/access_tokens",
         "POST app/installations/67890/access_tokens",
@@ -2204,7 +2407,7 @@ async function expectNoPublishWhenRevisionMoves(kind: "head" | "base"): Promise<
     const duringLookup = callsOf(state)
     expect(duringLookup.filter((line) => line === pull)).toHaveLength(1)
     expect(duringLookup.some((line) => line.endsWith("/reviews"))).toBe(true)
-    expect(duringLookup.some((line) => line.startsWith("POST "))).toBe(false)
+    expect(duringLookup.some((line) => line.startsWith("POST ") && line.endsWith("/reviews"))).toBe(false)
     if (kind === "head") fs.writeFileSync(path.join(state, "head"), `${otherHead}\n`)
     else fs.writeFileSync(path.join(state, "base"), `${"d".repeat(40)}\n`)
     fs.writeFileSync(path.join(state, "release"), "go\n")
@@ -2221,7 +2424,7 @@ async function expectNoPublishWhenRevisionMoves(kind: "head" | "base"): Promise<
     expect(pullGets).toHaveLength(2)
     expect(pullGets[0]!.index).toBeLessThan(reviewsAt)
     expect(pullGets[1]!.index).toBeGreaterThan(reviewsAt)
-    expect(calls.some((line) => line.startsWith("POST "))).toBe(false)
+    expect(calls.some((line) => line.startsWith("POST ") && line.endsWith("/reviews"))).toBe(false)
     const journalDir = path.join(directory, ".review-publish")
     const journals = fs.existsSync(journalDir) ? fs.readdirSync(journalDir).filter((name) => name.endsWith(".json")) : []
     expect(journals).toEqual([])

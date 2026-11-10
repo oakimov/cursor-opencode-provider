@@ -8,7 +8,7 @@
 
 ### Added
 
-- `review-publish.py post --token-env NAME` and `complete-resolutions.py --token-env NAME` read a GitHub personal access token (`ghp_` or `github_pat_`) from that environment variable and use it for the review POST and thread resolution. Without the option, publication still uses the GitHub App installation token.
+- `review-publish.py post --token-env NAME`, `review-publish.py threads --token-env NAME`, and `complete-resolutions.py --token-env NAME` read a GitHub personal access token (`ghp_` or `github_pat_`) from that environment variable and send it on every `gh` call those commands make. Without the option, those commands use the GitHub App installation token.
 
 ### Changed
 
@@ -16,7 +16,7 @@
 
 ### Fixed
 
-- `--token-env` keeps that personal access token available to the pull and review reads those commands require when it is the only GitHub credential, including when the named variable is `GH_TOKEN` or `GITHUB_TOKEN`.
+- Thread listing, the pre-publish thread lookup, and resolution reads no longer call `gh` anonymously. `post`, `threads`, and `complete-resolutions.py` send one credential on every `gh` call: the `--token-env` personal access token when that option is set, otherwise the GitHub App installation token. The named token wins over an ambient `GH_TOKEN` or `GITHUB_TOKEN`.
 
 ## [0.8.7] - 2026-11-09
 
