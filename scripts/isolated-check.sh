@@ -18,7 +18,11 @@
 # built plugin, still inside the boundary. The revision's shell is not run.
 #
 # Exit 0 when the checks pass, 1 when a check fails, 2 when the invocation
-# or the isolation mechanism is unusable.
+# or the isolation mechanism is unusable, and 128 plus the signal number when
+# TERM, INT, HUP, or QUIT cancels a check or the live test. A cancelled run
+# waits for the boundary to stop before it removes the archive. SIGKILL
+# cannot be forwarded: killing this script that way can leave the boundary
+# running, on the --live path with CURSOR_API_KEY.
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -165,16 +169,63 @@ check_refuse_moved_commit() {
   echo "Check commit: $again"
 }
 
+check_child=""
+check_signal=""
+
+# Record the first cancellation signal and ask isolate-run.sh to stop. A
+# background job cannot trap INT or QUIT, so the request is always TERM.
+check_note_signal() {
+  [[ -n "$check_signal" ]] || check_signal="$1"
+  [[ -z "$check_child" ]] || kill -s TERM "$check_child" 2>/dev/null || true
+}
+
+# Run isolate-run.sh with these arguments and wait for it.
+#
+#   check_supervise ISOLATE_RUN_ARGUMENT...
+#
+# isolate-run.sh runs in the background so that TERM, INT, HUP, or QUIT sent
+# only to this shell is passed on, and this shell waits until the boundary
+# has stopped. Only then does the cancelled run exit with 128 plus the signal
+# number, and its EXIT trap remove the archive. isolate-run.sh, not this
+# shell, kills a boundary that ignores the request. Every boundary this
+# script starts goes through here, the live test's included.
+check_supervise() {
+  local status
+  check_signal=""
+  check_child=""
+  trap 'check_note_signal TERM' TERM
+  trap 'check_note_signal INT' INT
+  trap 'check_note_signal HUP' HUP
+  trap 'check_note_signal QUIT' QUIT
+  "$ROOT/scripts/isolate-run.sh" "$@" <&0 &
+  check_child=$!
+  [[ -z "$check_signal" ]] || kill -s TERM "$check_child" 2>/dev/null || true
+  while :; do
+    wait "$check_child"
+    status=$?
+    kill -0 "$check_child" 2>/dev/null || break
+  done
+  check_child=""
+  trap - TERM INT HUP QUIT
+  if [[ -n "$check_signal" ]]; then
+    echo "Check cancelled by SIG${check_signal}." >&2
+    exit $((128 + $(kill -l "$check_signal")))
+  fi
+  return "$status"
+}
+
 # Run a command inside the filesystem and process boundary.
 check_run_isolated() {
-  "$ROOT/scripts/isolate-run.sh" --src "${ISOLATE_SRC:-$PWD}" \
+  check_supervise --src "${ISOLATE_SRC:-$PWD}" \
     --tool bun --tool node --tool git --tool python3 -- "$@"
 }
 
 # Load the archived tree with this checkout's harness. Tests replace this.
+# This boundary holds CURSOR_API_KEY, so a cancelled live test is waited for
+# like any check.
 check_run_live() {
   local worktree="$1"
-  "$ROOT/scripts/isolate-run.sh" --src "$worktree" \
+  check_supervise --src "$worktree" \
     --tool bun --tool node --tool git --tool python3 --tool opencode --tool opencode1 \
     --ro-bind "$ROOT/scripts:/opt/harness/scripts" \
     --env CURSOR_API_KEY \

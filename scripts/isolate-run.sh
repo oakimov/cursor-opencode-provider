@@ -20,6 +20,13 @@
 # file read. If neither mechanism works, the script exits 2. It does not fall
 # back to env -i.
 #
+# On both platforms the boundary runs as its own session. TERM, INT, HUP, or
+# QUIT sent to this script's pid alone is forwarded to that session, and the
+# script removes its staging files only after the session has stopped,
+# killing it after ISOLATE_TERM_GRACE seconds (default 10). A cancelled run
+# exits 128 plus the signal number. SIGKILL cannot be forwarded: killing this
+# script that way can leave the boundary running.
+#
 #   scripts/isolate-run.sh --src DIR [--tool NAME] [--ro-bind HOST:DEST] \
 #     [--env NAME] [--set NAME=VALUE] -- COMMAND...
 #
@@ -35,9 +42,12 @@ isolate_mechanism_name=""
 # parent UID 0 into another user namespace requires CAP_SETFCAP (Linux 5.12+).
 # --keep-caps retains setup capabilities across exec for this non-root UID;
 # drop-caps.py clears every set before the command runs.
+isolate_unshare_argv=(
+  unshare --user --map-user=1000 --map-group=1000 --keep-caps
+  --mount --pid --fork --mount-proc
+)
 isolate_unshare() {
-  unshare --user --map-user=1000 --map-group=1000 --keep-caps \
-    --mount --pid --fork --mount-proc "$@"
+  "${isolate_unshare_argv[@]}" "$@"
 }
 
 # Sets isolate_mechanism_name. Also prints that name. A command substitution
@@ -72,6 +82,105 @@ isolate_unavailable() {
   echo "$1" >&2
   echo "Refusing to run without a filesystem and process boundary. env -i is not a substitute." >&2
   return 2
+}
+
+# State for isolate_supervise. Traps run in this shell, not in the function's
+# scope, so these are globals.
+isolate_sup_leader=""
+isolate_sup_signal=""
+isolate_sup_stopping=""
+isolate_sup_grace=10
+
+# Record the first cancellation signal and stop the session.
+isolate_sup_note() {
+  [[ -n "$isolate_sup_signal" ]] || isolate_sup_signal="$1"
+  isolate_sup_stop
+}
+
+# Pass the recorded signal to the whole session and return once its leader
+# has gone, killing the session after the grace period. This runs inside the
+# trap: `wait` ends early only for a signal that arrives during it, so a trap
+# taken just before `wait` starts must not leave the stopping to the code
+# after it. A trap taken before the leader is known returns at once, and
+# isolate_supervise calls this again.
+isolate_sup_stop() {
+  local ticks sent="" killed=""
+  [[ -n "$isolate_sup_leader" && -z "$isolate_sup_stopping" ]] || return 0
+  isolate_sup_stopping=1
+  # Count 0.1 s sleeps rather than whole-second SECONDS ticks, which can end
+  # a one-second grace almost at once.
+  ticks=$((isolate_sup_grace * 10))
+  while kill -0 "$isolate_sup_leader" 2>/dev/null; do
+    # The session may not exist yet; send the signal once it does.
+    if [[ -z "$sent" ]] && kill -s "$isolate_sup_signal" -- "-$isolate_sup_leader" 2>/dev/null; then
+      sent=1
+    fi
+    if [[ -z "$killed" && "$ticks" -le 0 ]]; then
+      kill -s KILL -- "-$isolate_sup_leader" 2>/dev/null || true
+      killed=1
+    fi
+    sleep 0.1 || true
+    ticks=$((ticks - 1))
+  done
+}
+
+# Run COMMAND in DIR as the leader of a new session and wait for it.
+#
+#   isolate_supervise DIR COMMAND...
+#
+# Run in the foreground, a signal sent only to this shell's pid ended the
+# shell while the boundary kept running, and the caller's cleanup removed
+# files the command still used. TERM, INT, HUP, and QUIT are now forwarded to
+# the whole session. A session still alive at least ISOLATE_TERM_GRACE
+# seconds later (default 10) is killed. Members left in the session are killed before this
+# returns, so a caller's cleanup never overlaps the command. On Linux the
+# leader is unshare, which ignores TERM while it waits, and the namespace
+# PID 1 shares its process group; killing that group ends the pid namespace.
+# A cancelled run returns 128 plus the signal number. SIGKILL to this shell
+# cannot be forwarded.
+isolate_supervise() {
+  local dir="$1" status=0
+  shift
+  isolate_sup_grace="${ISOLATE_TERM_GRACE:-10}"
+  [[ "$isolate_sup_grace" =~ ^[0-9]+$ ]] || isolate_sup_grace=10
+  command -v python3 >/dev/null 2>&1 || isolate_unavailable "python3 is required to supervise the command." || return 2
+  isolate_sup_signal=""
+  isolate_sup_stopping=""
+  isolate_sup_leader=""
+  trap 'isolate_sup_note TERM' TERM
+  trap 'isolate_sup_note INT' INT
+  trap 'isolate_sup_note HUP' HUP
+  trap 'isolate_sup_note QUIT' QUIT
+  # A background job of a non-interactive shell starts with INT and QUIT
+  # ignored and stdin from /dev/null. Keep stdin; restore both signals so the
+  # command handles them as it would in the foreground.
+  (
+    cd "$dir"
+    exec python3 -c '
+import os, signal, sys
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+signal.signal(signal.SIGQUIT, signal.SIG_DFL)
+if os.getpgrp() != os.getpid():
+    os.setsid()
+os.execvp(sys.argv[1], sys.argv[1:])
+' "$@"
+  ) <&0 &
+  isolate_sup_leader=$!
+  if [[ -z "$isolate_sup_signal" ]]; then
+    wait "$isolate_sup_leader"
+    status=$?
+  else
+    # A signal trapped before the line above found no leader to stop.
+    isolate_sup_stop
+  fi
+  [[ -z "$isolate_sup_signal" ]] || wait "$isolate_sup_leader" 2>/dev/null || true
+  kill -s KILL -- "-$isolate_sup_leader" 2>/dev/null || true
+  trap - TERM INT HUP QUIT
+  if [[ -n "$isolate_sup_signal" ]]; then
+    status=$((128 + $(kill -l "$isolate_sup_signal")))
+  fi
+  isolate_sup_leader=""
+  return "$status"
 }
 
 # Print the regular file that should be placed on the boundary PATH under the
@@ -306,11 +415,13 @@ EOF
   done
   # The enter script and stage live on the host and disappear at pivot.
   # An empty bind list must not be expanded: bash 3.2 treats that as unset.
+  # isolate_supervise returns only after the namespace is gone, so the stage
+  # is not removed under a running command.
   set +e
   if [[ "$(isolate_count bind_args)" -gt 0 ]]; then
-    isolate_unshare bash "$enter" "$root" "$src" "${bind_args[@]}"
+    isolate_supervise . "${isolate_unshare_argv[@]}" bash "$enter" "$root" "$src" "${bind_args[@]}"
   else
-    isolate_unshare bash "$enter" "$root" "$src"
+    isolate_supervise . "${isolate_unshare_argv[@]}" bash "$enter" "$root" "$src"
   fi
   status=$?
   set -e
@@ -787,7 +898,7 @@ isolate_darwin() {
     i=$((i + 1))
   done
   set +e
-  (cd "$src" && sandbox-exec -f "$darwin_profile" env -i "${env_args[@]}" "${darwin_command[@]}")
+  isolate_supervise "$src" sandbox-exec -f "$darwin_profile" env -i "${env_args[@]}" "${darwin_command[@]}"
   status=$?
   set -e
   isolate_darwin_cleanup
