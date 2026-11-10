@@ -154,12 +154,18 @@ if ignore:
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
 (state / "descendant.pid").write_text(str(os.getpid()))
 (state / "workspace").write_text(os.getcwd())
+open("heartbeat", "a").close()
 (state / "descendant.ready").write_text("1")
 deadline = time.monotonic() + 20
 while time.monotonic() < deadline and not (state / "stop").exists():
     try:
-        with open("heartbeat", "a") as handle:
-            handle.write("x")
+        # Append without creating. A write that brought the file back between
+        # a runner's unlink and rmdir made that runner's removal fail.
+        handle = os.open("heartbeat", os.O_WRONLY | os.O_APPEND)
+        try:
+            os.write(handle, b"x")
+        finally:
+            os.close(handle)
     except OSError:
         pass
     time.sleep(0.05)

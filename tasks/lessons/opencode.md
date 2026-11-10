@@ -806,6 +806,11 @@ These are failure lessons shared by both hosts, not a replacement for
   process listing or a writer surviving termination must fail cleanup, not
   silently permit removal (`test/process-cleanup.test.ts`). Test log content
   separately from its path-bearing diagnostic header (`test/debug.test.ts`).
+  A fixture writer that opens its file with create can bring it back between
+  a remover's unlink and rmdir: the review fixture's defective runner then
+  failed with ENOTEMPTY and exit 1 instead of the expected status, about once
+  in six full runs. Create the file once and append without creating
+  (`test/review-eval.test.ts`).
 - **Match CI environments.** Narrow PATH fixtures omitted mkdir. Queued
   publication tests once read Linux's `/proc/locks`, which macOS lacks;
   observe the test contender at the real `flock` call after its approval peek,
