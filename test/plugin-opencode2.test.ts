@@ -1153,15 +1153,24 @@ describe("opencode2 setup", () => {
         return { type: "key", key: "example-already-token" }
       },
     }
-    const cleanup = await setupPlugin(ctx)
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    const before = resolves
-    const event: any = { model: { providerID: "cursor", id: "m", modelID: "m" }, package: CURSOR_AISDK_PACKAGE, options: {} }
-    await hooks.get("aisdk.sdk")!(event)
-    expect(typeof event.sdk?.languageModel).toBe("function")
-    expect(resolves).toBe(before)
-    expect(typeof cleanup).toBe("function")
-    if (typeof cleanup === "function") await cleanup()
+    // With a connected credential and no cached models, setup asks Cursor for
+    // the model list and warns when that fails.
+    const warning = spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      await withFetch(() => new Response("unavailable", { status: 503 }), async () => {
+        const cleanup = await setupPlugin(ctx)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        const before = resolves
+        const event: any = { model: { providerID: "cursor", id: "m", modelID: "m" }, package: CURSOR_AISDK_PACKAGE, options: {} }
+        await hooks.get("aisdk.sdk")!(event)
+        expect(typeof event.sdk?.languageModel).toBe("function")
+        expect(resolves).toBe(before)
+        expect(typeof cleanup).toBe("function")
+        if (typeof cleanup === "function") await cleanup()
+      })
+    } finally {
+      warning.mockRestore()
+    }
   }))
 
   test("a preloaded Cursor SDK still resolves current credentials before opening a Run", () => withTempHostCache(async () => {

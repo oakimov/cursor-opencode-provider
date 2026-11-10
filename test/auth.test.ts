@@ -330,10 +330,16 @@ describe("pollForTokens", () => {
   }, 10000)
 
   it("honours abort signal", async () => {
+    using server = Bun.serve({
+      port: 0,
+      fetch() {
+        return new Response("Not found", { status: 404 })
+      },
+    })
     const ctrl = new AbortController()
     setTimeout(() => ctrl.abort(), 50)
     await expect(
-      pollForTokens("u", "v", undefined, ctrl.signal),
+      pollForTokens("u", "v", `http://localhost:${server.port}`, ctrl.signal),
     ).rejects.toThrow(AuthTimeoutError)
   })
 

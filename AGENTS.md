@@ -33,6 +33,13 @@ agent protocol. TypeScript ESM; Bun installs/tests; `tsc` builds `dist/`.
   resolves the client version its own cache root (`withTempHostCache` or
   `useTempHostCache`, `test/host-cache.ts`). Node test scripts
   import `test/node-tmpdir.mjs` first for the TMPDIR guard.
+- Tests never read the operator's credentials or reach Cursor. `test/preload.ts`
+  points the credential store (`XDG_DATA_HOME`) into the run's TMPDIR, clears
+  `OPENCODE_AUTH_CONTENT`, fixes `CURSOR_CLIENT_VERSION`, and refuses every
+  `fetch`, redirect and socket that leaves the machine (`test/network-guard.ts`);
+  a test that tries one, or leaves the store pointing elsewhere, fails. Write a
+  fake credential, stub `fetch` or serve from localhost, and set a fake `HOME`
+  in a test that removes `XDG_DATA_HOME`.
 - Pending review artifacts are durable work, not disposable scratch. Use
   `review-publish.py start` and the gitignored `.review-artifacts/` store,
   outside TMPDIR. Keep the result, ledger, payload, frozen preview, approval,

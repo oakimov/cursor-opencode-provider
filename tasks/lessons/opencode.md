@@ -811,6 +811,23 @@ These are failure lessons shared by both hosts, not a replacement for
   failed with ENOTEMPTY and exit 1 instead of the expected status, about once
   in six full runs. Create the file once and append without creating
   (`test/review-eval.test.ts`).
+- **A test's default paths and hosts are the operator's.** Three `CursorPlugin
+  shell result hooks` tests called `plugin.config` with an empty temp cache and
+  the native data root, so each read the developer's `auth.json` and ran live
+  model discovery: about 1 s where an empty store takes 65 ms. A 2.x setup test
+  sent its placeholder token to Cursor, and the `pollForTokens` abort test
+  polled it. One slow answer reached Bun's 5 s timeout. Bun fails that test and
+  keeps running its body, so `withTempHostCache` restored the process-wide
+  cache root late: the scope entered meanwhile then restored the removed dir
+  as the root, and 14 later tests and the leftover check failed with it.
+  `test/preload.ts` owns the data root and refuses the network, and
+  `test/host-cache.ts` puts the roots back when the test ends
+  (`test/test-isolation.test.ts`). Redirect the variable the code reads first:
+  a fake `HOME` does not move the store while `XDG_DATA_HOME` is set.
+  The developer's machine hid a third caller: with a Cursor CLI installed the
+  client version comes from disk, and without one, as in CI, six Run tests
+  fetched Cursor's installer page. The preload fixes `CURSOR_CLIENT_VERSION`.
+  Look for such callers with a home that has none of the operator's installs.
 - **Match CI environments.** Narrow PATH fixtures omitted mkdir. Queued
   publication tests once read Linux's `/proc/locks`, which macOS lacks;
   observe the test contender at the real `flock` call after its approval peek,
