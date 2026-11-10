@@ -2190,6 +2190,20 @@ describe("review publication", () => {
         leaked: appRows.leaked || `${posted.stdout}${posted.stderr}`.includes(ambient),
       })
 
+      fs.rmSync(path.join(appFixture.state, "calls"), { force: true })
+      fs.rmSync(path.join(appFixture.state, "call-auth"), { force: true })
+      const appFinished = runComplete({ ...env, GH_TOKEN: ambient, GITHUB_TOKEN: ambient }, appFixture.payload, appFixture.approval)
+      const appCompleteRows = credentialRows(appFixture.state, appFinished.stdout, appFinished.stderr, installation)
+      observed.push({
+        name: "complete-app",
+        status: appFinished.status,
+        reviews: callsOf(appFixture.state).some(line => line.endsWith("/reviews")),
+        paired: appCompleteRows.paired,
+        missing: appCompleteRows.missing,
+        authed: appCompleteRows.data.length > 0 && appCompleteRows.data.every(line => line === tokenSha(installation)),
+        leaked: appCompleteRows.leaked || `${appFinished.stdout}${appFinished.stderr}`.includes(ambient),
+      })
+
       const patFixture = freshReview("review-prepublish-pat-")
       directories.push(patFixture.directory)
       const drafted = resolutionDraft(patFixture, ["fixed"])
@@ -2240,6 +2254,7 @@ describe("review publication", () => {
     }
     expect(observed).toEqual([
       { name: "post-app", status: 0, graphql: true, paired: true, missing: false, authed: true, leaked: false },
+      { name: "complete-app", status: 0, reviews: true, paired: true, missing: false, authed: true, leaked: false },
       { name: "post-pat", status: 0, graphql: true, minted: false, paired: true, missing: false, authed: true, leaked: false },
       { name: "complete-pat", status: 0, reviews: true, minted: false, paired: true, missing: false, authed: true, leaked: false },
     ])
