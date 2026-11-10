@@ -272,7 +272,11 @@ def scenario(name, mode, cancel, ignore, then=None, filler=0, after="leader.read
         for name in ("descendant.pid", "leader.pid", "service.pid"):
             pid = pid_of(state / name)
             if pid and alive(pid):
-                os.kill(pid, signal.SIGKILL)
+                try:
+                    # Same race as alive(): the process can exit between the check and kill.
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
         deadline = time.monotonic() + 5
         while any(alive(pid_of(state / name) or 0) for name in ("descendant.pid", "leader.pid", "service.pid") if (state / name).exists()):
             if time.monotonic() > deadline:
