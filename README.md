@@ -459,18 +459,18 @@ For complete local checks across Linux, macOS and native Windows, use
 `python3 -B scripts/test-harness.py` (`python -B` on Windows). It detects native
 test capabilities and uses a local Linux-container engine on Windows or when
 native prerequisites are missing. Cursor agent is optional. Run with
-`--diagnose` to check prerequisites; see the [test harness guide](docs/pr-review.md#local-checks-on-different-operating-systems)
-for the image build and isolation requirements.
+`--diagnose` to check prerequisites; see the [review harness setup guide](docs/review-harness.md#run-the-same-flow-locally)
+and [local checks](docs/pr-review.md#local-checks-on-different-operating-systems) for the image build and isolation requirements.
 
-Changes listed under [Unreleased](CHANGELOG.md#unreleased) describe the development checkout; use a rebuilt local install to test them before a release. Maintainer guides and incident lessons are linked from the [documentation index](docs/README.md). The manual `caeliq-reviewer` review, isolated pull-request checks, and OpenCode live test are in [docs/pr-review.md](docs/pr-review.md).
+Changes listed under [Unreleased](CHANGELOG.md#unreleased) describe the development checkout; use a rebuilt local install to test them before a release. Maintainer guides and incident lessons are linked from the [documentation index](docs/README.md). First-time credential setup (App or PAT), how to run a review, and what gets posted are in the [review harness setup guide](docs/review-harness.md). The agent procedure, isolated checks, and live plugin test are in [docs/pr-review.md](docs/pr-review.md).
 
-Manual Cloud Agent reviews publish through the configured GitHub App after exact-preview approval. `post`, `threads`, and `complete-resolutions.py` send that App token on every `gh` call. `--token-env NAME` uses a personal access token from that environment variable instead, including when `GH_TOKEN` is also set. See the [App publisher setup](docs/pr-review.md#github-app-publisher) for `REVIEW_APP_ID`, the private key and optional installation ID. Tokens are restricted to this repository and retain the installation's configured permissions; the returned grant must include review-write access. `review-publish.py auth-info` reports configuration without printing secrets. Reviews use the App's bot identity, with no automatic review trigger.
+Manual Cloud Agent reviews publish through the configured GitHub App after exact-preview approval. `post`, `threads`, and `complete-resolutions.py` send that App token on every `gh` call. `--token-env NAME` uses a personal access token from that environment variable instead, including when `GH_TOKEN` is also set. See [setup](docs/review-harness.md#setup) for App env vars, Runtime Secrets, and PAT usage. Tokens are restricted to this repository and retain the installation's configured permissions; the returned grant must include review-write access. `review-publish.py auth-info` reports configuration without printing secrets. Reviews use the App's bot identity, with no automatic review trigger.
 
 New review payloads require a completed, revision-matched evidence ledger and
 an isolated-check exit record. Rendering retains the ledger privately and binds
 its digest; preview and publication recheck those bytes. Keep the digest-named
 ledger file with its payload, including during recovery. Existing retained
-legacy previews remain usable; see the [review procedure](docs/pr-review.md).
+legacy previews remain usable; see the [agent review procedure](docs/pr-review.md).
 
 Linux isolated checks include the nested sandbox tests. Live credentials require
 the full check to pass and a separate trust decision for that exact revision.
@@ -478,8 +478,9 @@ the full check to pass and a separate trust decision for that exact revision.
 Re-reviews verify earlier threads and replies, and resolve fixed or refuted
 findings through the App after approval of the listed actions. The publisher
 checks the discussion and revision again and confirms resolved readback; a
-summary or an author reply alone does not close a thread. See the
-[re-review procedure](docs/pr-review.md#re-review-and-thread-resolution).
+summary or an author reply alone does not close a thread. Operator steps are in
+the [review harness setup guide](docs/review-harness.md); the agent re-review procedure
+is in [docs/pr-review.md](docs/pr-review.md#re-review-and-thread-resolution).
 
 Review results and previews live in persistent, gitignored `.review-artifacts/`,
 created by `review-publish.py start`. They survive approval waits and ordinary

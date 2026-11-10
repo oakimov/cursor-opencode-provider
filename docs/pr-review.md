@@ -1,5 +1,9 @@
 # Pull request review
 
+This document is the agent procedure for a manual review. First-time credential
+setup (App or PAT), how to launch and approve a review, and what GitHub receives
+are in [review-harness.md](review-harness.md).
+
 Reviews are published by the `caeliq-reviewer` GitHub App.
 
 A review reads the diff, the code, and `.cursor/rules/`, then runs build, typecheck, and unit tests. OpenCode is only the runtime for a live plugin test. Do not send the diff or a review prompt to `opencode run`.
