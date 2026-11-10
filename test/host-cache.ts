@@ -5,8 +5,14 @@ import path from "node:path"
 import { getHostCacheDirOverride, setHostCacheDirOverride } from "../src/context/paths.js"
 import { settleRunSavesForTests } from "../src/language-model.js"
 import { waitForConversationMaintenanceForTests } from "../src/protocol/conversation-persistence.js"
+import { atTestEnd } from "./test-end.js"
 
-type TempHostCache = { cacheDir: string; previousOverride: string | undefined; previousXdg: string | undefined }
+type TempHostCache = {
+  cacheDir: string
+  previousOverride: string | undefined
+  previousXdg: string | undefined
+  restored: boolean
+}
 
 /**
  * Without a cache root of its own, a test writes project folders, model and
@@ -16,10 +22,24 @@ type TempHostCache = { cacheDir: string; previousOverride: string | undefined; p
  */
 function enter(): TempHostCache {
   const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-host-cache-"))
-  const state = { cacheDir, previousOverride: getHostCacheDirOverride(), previousXdg: process.env.XDG_CACHE_HOME }
+  const state = {
+    cacheDir,
+    previousOverride: getHostCacheDirOverride(),
+    previousXdg: process.env.XDG_CACHE_HOME,
+    restored: false,
+  }
   setHostCacheDirOverride(cacheDir)
   process.env.XDG_CACHE_HOME = cacheDir
   return state
+}
+
+/** Put the previous roots back, once. */
+function restore(state: TempHostCache): void {
+  if (state.restored) return
+  state.restored = true
+  setHostCacheDirOverride(state.previousOverride)
+  if (state.previousXdg === undefined) delete process.env.XDG_CACHE_HOME
+  else process.env.XDG_CACHE_HOME = state.previousXdg
 }
 
 /**
@@ -32,19 +52,33 @@ async function leave(state: TempHostCache): Promise<void> {
     await settleRunSavesForTests()
     await waitForConversationMaintenanceForTests(state.cacheDir)
   } finally {
-    setHostCacheDirOverride(state.previousOverride)
-    if (state.previousXdg === undefined) delete process.env.XDG_CACHE_HOME
-    else process.env.XDG_CACHE_HOME = state.previousXdg
+    restore(state)
     fs.rmSync(state.cacheDir, { recursive: true, force: true })
   }
 }
 
+/** `withTempHostCache` bodies that have not returned, oldest first. */
+const running = new Set<TempHostCache>()
+
+/**
+ * A test that timed out has ended while its body still runs. Its roots go back
+ * now, newest first: restored only when the body finishes, they would be the
+ * roots of the tests in between, and a body that entered meanwhile would later
+ * restore the removed dir as the root of every test after it.
+ */
+atTestEnd(() => {
+  for (const state of [...running].reverse()) restore(state)
+  running.clear()
+})
+
 /** Run one test body with the host cache in a private temp dir. */
 export async function withTempHostCache<T>(run: (cacheDir: string) => T | Promise<T>): Promise<T> {
   const state = enter()
+  running.add(state)
   try {
     return await run(state.cacheDir)
   } finally {
+    running.delete(state)
     await leave(state)
   }
 }
