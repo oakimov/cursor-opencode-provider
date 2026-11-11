@@ -943,6 +943,12 @@ These are failure lessons shared by both hosts, not a replacement for
   Parse the `--paginate` JSON stream locally, including later-page receipts,
   and reject partial or malformed output before inferring no prior review
   (`publishes and recovers later-page receipts with gh that has no slurp flag`).
+  A re-review can change the verdict without changing the PR head. Keep the
+  reviewer's existing summary current instead of leaving an earlier clean
+  post beside a newer contradictory one. Bind the replacement to the existing
+  review id, author and body digest, then verify its body at that same id;
+  summary edits retain the original commit/inline anchors, so new findings
+  need source locations in the summary (`review summary updates` regressions).
 - **A code verdict is not a command exit status.** A review labelled an isolated
   check passed while reporting its nonzero exit and failing self-tests. The
   result model also rejected clean code verdicts with established baseline or

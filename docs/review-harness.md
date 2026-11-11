@@ -339,13 +339,14 @@ backend. Details of that runner stay in [pr-review.md](pr-review.md#local-checks
 ## What gets posted
 
 Only after `approve` of the exact preview digest does `post` call GitHub. It
-creates **one pull-request review**:
+creates an initial **pull-request review**, or updates that review's summary
+on re-review:
 
 | Piece | Content |
 |-------|---------|
 | Author | App bot (default), or the user account for a `--token-env` PAT |
 | Event | `COMMENT` only — never Approve or Request changes |
-| Commit | the approved `head` SHA |
+| Commit | initial review: the approved `head` SHA; updates keep the original metadata and name the new head in the summary |
 | Summary body | review summary text, plus a stamp `<!-- cursor-review:<digest> -->` used to find the same review on retry |
 | Inline comments | optional; each has repository-relative `path`, diff `line`, `side` (`LEFT`/`RIGHT`), and `body` |
 
@@ -357,7 +358,13 @@ Do **not** post with a PR discussion comment, `gh pr comment`, or the agent's
 chat reply. Those are not a submitted review receipt.
 
 On a re-review, the approved payload may list `resolve` actions for earlier
-threads. Those run only after the COMMENT review is confirmed and the thread
+threads. First use `review-publish.py reviews` to inventory this reviewer's
+existing post and set the result's `update` target as described in
+[re-reviewing](pr-review.md#re-review-and-thread-resolution). Replace its
+summary in place; do not post another top-level review. Updates require a new
+approved preview and put new findings in the summary, preserving old inline
+anchors. Failure to update must not create a replacement post.
+Thread actions run only after the initial review or summary update is confirmed and the thread
 still matches the inventoried snapshot. Reply proposals in the payload are not
 sent. Publication never merges the pull request.
 

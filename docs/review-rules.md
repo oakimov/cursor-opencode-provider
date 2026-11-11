@@ -12,7 +12,10 @@ publication or an explicit discard instruction; routine cleanup and denial of
 publication do not authorize deletion. See [artifact retention](pr-review.md#artifact-retention).
 
 On re-review, read earlier threads and replies and verify them against the
-current head. Fixed or refuted inline findings must have approved resolution
+current head. Update this reviewer's existing summary post with the current
+verdict and reviewed head; do not add a duplicate top-level review. The exact
+replacement and existing-post target need a new approved preview, as the
+review procedure describes. Fixed or refuted inline findings must have approved resolution
 actions and confirmed resolved readback, as [the review procedure](pr-review.md#re-review-and-thread-resolution)
 describes. Apply this to Greptile and Cursor findings equally. An author reply
 or outdated anchor is not evidence that a defect is fixed.

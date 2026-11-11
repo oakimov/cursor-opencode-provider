@@ -225,6 +225,23 @@ done. It is not machine proof of semantic correctness.
 
 ## Re-review earlier threads
 
+First inventory submitted reviews with
+`python3 scripts/review-publish.py reviews <owner> <repo> <pull>` (use the same
+publisher identity as before). When this reviewer already has a stamped
+COMMENT review on the PR, update that existing summary post in place. Do not
+create another top-level review, even when the head or verdict changed. Put
+`update: { review, author, bodySha256 }` in the new result, using the existing
+review's `id`, `user.id`, and inventory digest. If multiple own posts exist,
+use the latest stamped COMMENT review; leave other authors' reviews alone.
+The revised summary must state the current verdict, findings, checks and
+reviewed head. Render, show and obtain approval of the exact updated payload
+before `post`; an earlier publication approval does not approve a new verdict.
+New findings go in the updated summary with source locations. GitHub does not
+move the original review's commit or inline anchors when its summary is edited.
+Keep earlier threads and classify/resolve them below. If the existing post
+cannot be updated, retain the evidence and report the failure; never fall back
+to a duplicate review or discussion comment.
+
 Read every earlier review thread and all replies using
 `python3 scripts/review-publish.py threads <owner> <repo> <pull>`. Keep that
 inventory private. Recheck each open thread against the bound head, including
@@ -241,7 +258,7 @@ Apply the same standard to Greptile and Cursor findings.
 For each fixed or refuted inline finding, add a `resolve` action with the prior
 finding id, thread id and discussion `snapshot` from that inventory, plus the
 reason and source/test evidence. Include those actions in the exact preview.
-After approval, `post` submits the review and resolves those threads through
+After approval, `post` updates the existing summary and resolves those threads through
 the App. Confirm every `THREAD_RESOLVED` receipt. Do not claim resolution from
 a posted summary, a reply, or a proposed action. If any action fails, report
 the submitted review and remaining thread actions separately, then finish the
