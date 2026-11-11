@@ -297,7 +297,7 @@ if endpoint.endswith("/installation"):
     verify_jwt(token)
     json.dump({"id": 67890}, sys.stdout)
     raise SystemExit(0)
-if (method == "POST" and endpoint.endswith("/reviews")) or (method == "PUT" and "/reviews/" in endpoint):
+if (method == "POST" and endpoint.endswith(("/reviews", "/comments"))) or (method == "PUT" and "/reviews/" in endpoint) or (method == "PATCH" and "/pulls/comments/" in endpoint):
     expected = "ghs_12345_synthetic.Header-with_dash.signature" if os.environ.get("GH_STATELESS") == "1" else "ghs_testinstallationtoken"
     pat = token.startswith("ghp_") or token.startswith("github_pat_")
     if pat:
@@ -317,6 +317,54 @@ reviews_path = state / "reviews.json"
 comments_path = state / "comments.json"
 reviews = json.loads(reviews_path.read_text(encoding="utf-8") or "[]")
 comments = json.loads(comments_path.read_text(encoding="utf-8")) if comments_path.exists() else []
+if (method == "POST" and endpoint.endswith("/comments")) or (method == "PATCH" and "/pulls/comments/" in endpoint):
+    request = json.load(sys.stdin)
+    with (state / "inline-writes").open("a") as handle:
+        handle.write(json.dumps({"method": method, "endpoint": endpoint, "request": request}) + "\\n")
+    if os.environ.get("GH_INLINE_REJECT") == "1":
+        sys.stderr.write("HTTP 403 Resource not accessible by integration\\n")
+        raise SystemExit(1)
+    if method == "PATCH":
+        assert set(request) == {"body"}
+        identifier = int(endpoint.rsplit("/", 1)[1])
+        existing = next(item for item in comments if item["id"] == identifier)
+        comment = dict(existing, body=request["body"])
+    else:
+        assert set(request) == {"commit_id", "body", "path", "line", "side"}
+        identifier = max([item["id"] for item in comments] + [1000]) + 1
+        comment = dict(request, id=identifier, user={"id": 77}, pull_request_review_id=900,
+          html_url="https://github.com/oakimov/cursor-opencode-provider/pull/156#discussion_r" + str(identifier))
+    if os.environ.get("GH_INLINE_FAIL") != "1" or os.environ.get("GH_INLINE_COMMIT") == "1":
+        if method == "PATCH": comments = [comment if item["id"] == identifier else item for item in comments]
+        else: comments.append(comment)
+        if os.environ.get("GH_INLINE_NO_APPLY") != "1":
+            comments_path.write_text(json.dumps(comments))
+            if method == "POST":
+                reviews.append({"request": {}, "review": {"id": 1900 + identifier, "body": "", "state": "COMMENTED", "user": {"id": 77}, "commit_id": request["commit_id"],
+                  "html_url": "https://github.com/oakimov/cursor-opencode-provider/pull/156#pullrequestreview-" + str(1900 + identifier)}})
+                comment["pull_request_review_id"] = 1900 + identifier
+                comments_path.write_text(json.dumps(comments))
+                reviews_path.write_text(json.dumps(reviews))
+            threads_path = state / "threads.json"
+            threads = json.loads(threads_path.read_text()) if threads_path.exists() else []
+            if method == "POST":
+                threads.append({"id": "PRRT_inline" + str(identifier), "isResolved": False,
+                  "pullRequest": {"number": 156, "repository": {"nameWithOwner": "oakimov/cursor-opencode-provider"}},
+                  "comments": [{"id": "inline-" + str(identifier), "url": comment["html_url"], "body": comment["body"], "updatedAt": "2026-01-01T00:00:00Z"}]})
+            else:
+                for thread in threads:
+                    for row in thread["comments"]:
+                        if row["url"] == comment["html_url"]: row["body"] = comment["body"]
+            threads_path.write_text(json.dumps(threads))
+    if os.environ.get("GH_INLINE_FAIL") == "1":
+        sys.stderr.write("connection reset\\n")
+        raise SystemExit(1)
+    if os.environ.get("GH_INLINE_WRONG_TARGET") == "1": comment = dict(comment, line=99)
+    after = os.environ.get("GH_AFTER_INLINE")
+    if after == "head": (state / "head").write_text("c" * 40)
+    if after == "deny": Path(os.environ["GH_APPROVAL_PATH"]).write_text(json.dumps({"decision":"deny"}))
+    json.dump(comment, sys.stdout)
+    raise SystemExit(0)
 if "/reviews/" in endpoint and method in ("GET", "PUT"):
     review_id = int(endpoint.rsplit("/", 1)[1])
     entry = next((item for item in reviews if item["review"]["id"] == review_id), None)
@@ -345,6 +393,9 @@ if "/reviews/" in endpoint and method in ("GET", "PUT"):
         sys.stderr.write("connection reset\\n")
         raise SystemExit(1)
     if os.environ.get("GH_UPDATE_WRONG_ID") == "1": changed["id"] += 1
+    after = os.environ.get("GH_AFTER_UPDATE")
+    if after == "head": (state / "head").write_text("c" * 40)
+    if after == "deny": Path(os.environ["GH_APPROVAL_PATH"]).write_text(json.dumps({"decision":"deny"}))
     json.dump(changed, sys.stdout)
     raise SystemExit(0)
 if method == "POST":
@@ -375,6 +426,7 @@ if method == "POST":
         "id": review_id,
         "body": payload.get("body", ""),
         "html_url": review_url,
+        "state": "COMMENTED", "user": {"id": 77}, "commit_id": payload.get("commit_id"),
     }
     rows = [
         {
@@ -385,9 +437,12 @@ if method == "POST":
             "line": comment.get("line"),
             "side": comment.get("side"),
             "body": comment.get("body"),
+            "commit_id": payload.get("commit_id"), "user": {"id": 77},
         }
         for index, comment in enumerate(payload.get("comments") or [])
     ]
+    if os.environ.get("GH_INITIAL_INLINE_FAULT") == "missing": rows = []
+    if os.environ.get("GH_INITIAL_INLINE_FAULT") == "anchor": rows = [dict(row, line=99) for row in rows]
     if os.environ.get("GH_FAIL") == "1":
         if os.environ.get("GH_COMMIT") == "1":
             reviews.append({"request": payload, "review": review})
@@ -2537,25 +2592,270 @@ describe("review summary updates", () => {
   }
 
   const puts = (state: string) => callsOf(state).filter(line => line.startsWith("PUT ")).length
+  const inlineWrites = (state: string) => {
+    const file = path.join(state, "inline-writes")
+    return fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").map(line => JSON.parse(line)) : []
+  }
+
+  function withExistingInline(f: ReturnType<typeof fixture>, oldHead = head, side = "RIGHT") {
+    const comment = { id: 100, user: { id: 77 }, pull_request_review_id: 7,
+      html_url: "https://github.com/oakimov/cursor-opencode-provider/pull/156#discussion_r100",
+      path: "scripts/review-publish.py", line: 44, side, commit_id: oldHead,
+      body: "Earlier finding with its original explanation.",
+    }
+    fs.writeFileSync(path.join(f.state, "comments.json"), JSON.stringify([comment]))
+    fs.writeFileSync(path.join(f.state, "threads.json"), JSON.stringify([{
+      id: "PRRT_existing", isResolved: false,
+      pullRequest: { number: 156, repository: { nameWithOwner: "oakimov/cursor-opencode-provider" } },
+      comments: [{ id: "native-100", url: comment.html_url, body: comment.body, updatedAt: "2026-01-01T00:00:00Z" }],
+    }]))
+    const inventory = run(["threads", "oakimov", "cursor-opencode-provider", "156"], f.env)
+    expect(inventory.status, inventory.stderr).toBe(0)
+    const thread = JSON.parse(inventory.stdout).threads[0]
+    const result = JSON.parse(fs.readFileSync(f.source, "utf8"))
+    result.findings[0].side = side
+    result.diff[0].side = side
+    result.findings[0].comment = { id: comment.id, author: comment.user.id, thread: thread.id, repliesSha256: thread.repliesSha256,
+      bodySha256: createHash("sha256").update(comment.body).digest("hex"),
+    }
+    result.prior = [{ id: result.findings[0].id, status: "still_present", source: comment.html_url,
+      note: "Verified that the existing inline finding remains present on the bound head." }]
+    fs.writeFileSync(f.source, JSON.stringify(result))
+    expect(renderReview(f.source, f.payload, f.env).status).toBe(0)
+    expect(run(["stamp", f.payload], f.env).status).toBe(0)
+    expect(approve(f.payload, f.approval, f.env).status).toBe(0)
+    return { comment, result }
+  }
+
+  it.each(["RIGHT", "LEFT"])("updates an owned inline thread in place on the %s side", side => {
+    const f = fixture()
+    try {
+      withExistingInline(f, head, side)
+      const posted = run(["post", f.payload, f.approval], f.env)
+      expect(posted.status, posted.stderr).toBe(0)
+      expect(posted.stdout).toContain("#discussion_r100")
+      expect(inlineWrites(f.state)).toMatchObject([{ method: "PATCH", endpoint: "repos/oakimov/cursor-opencode-provider/pulls/comments/100" }])
+      const comments = JSON.parse(fs.readFileSync(path.join(f.state, "comments.json"), "utf8"))
+      expect(comments).toHaveLength(1)
+      expect(comments[0]).toMatchObject({ id: 100, commit_id: head, line: 44, side })
+      expect(comments[0].body).toContain("<!-- cursor-finding:publish-lock -->")
+      expect(run(["post", f.payload, f.approval], f.env).status).toBe(0)
+      expect(inlineWrites(f.state)).toHaveLength(1)
+      expect(puts(f.state)).toBe(1)
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  it("creates a current-head inline thread when the bound earlier anchor belongs to another commit", () => {
+    const f = fixture()
+    try {
+      const { comment } = withExistingInline(f, otherHead)
+      const posted = run(["post", f.payload, f.approval], f.env)
+      expect(posted.status, posted.stderr).toBe(0)
+      expect(inlineWrites(f.state)).toMatchObject([{ method: "POST", request: { commit_id: head, path: comment.path, line: 44, side: "RIGHT" } }])
+      const comments = JSON.parse(fs.readFileSync(path.join(f.state, "comments.json"), "utf8"))
+      expect(comments).toHaveLength(2)
+      expect(comments[0]).toEqual(comment)
+      expect(comments[1].commit_id).toBe(head)
+      expect(postsOf(f.state)).toBe(0)
+      expect(run(["post", f.payload, f.approval], f.env).status).toBe(0)
+      expect(inlineWrites(f.state)).toHaveLength(1)
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  it.each(["body", "author", "anchor", "url", "reply", "discussion"])("refuses a changed inline %s before updating the summary", change => {
+    const f = fixture()
+    try {
+      const { comment } = withExistingInline(f)
+      const changed = { ...comment, ...(change === "body" ? { body: "Concurrent edit" }
+        : change === "author" ? { user: { id: 78 } }
+        : change === "anchor" ? { line: 99 }
+        : change === "url" ? { html_url: comment.html_url.replace("/156#", "/157#") }
+        : change === "reply" ? { in_reply_to_id: 50 } : {}) }
+      fs.writeFileSync(path.join(f.state, "comments.json"), JSON.stringify([changed]))
+      if (change === "discussion") {
+        const threads = JSON.parse(fs.readFileSync(path.join(f.state, "threads.json"), "utf8"))
+        threads[0].comments.push({ id: "reply-101", url: comment.html_url.replace("100", "101"), body: "New evidence after preview", updatedAt: "2026-01-02T00:00:00Z" })
+        fs.writeFileSync(path.join(f.state, "threads.json"), JSON.stringify(threads))
+      }
+      expect(run(["post", f.payload, f.approval], f.env).status).not.toBe(0)
+      expect(puts(f.state)).toBe(0)
+      expect(inlineWrites(f.state)).toEqual([])
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  it.each([false, true])("recovers a lost inline response only when the approved comment is visible (delivered=%s)", delivered => {
+    const f = fixture()
+    try {
+      const first = run(["post", f.payload, f.approval], { ...f.env, GH_INLINE_FAIL: "1", GH_INLINE_COMMIT: delivered ? "1" : "0" })
+      expect(first.status, first.stderr).toBe(delivered ? 0 : 1)
+      const second = run(["post", f.payload, f.approval], f.env)
+      expect(second.status, second.stderr).toBe(delivered ? 0 : 1)
+      expect(inlineWrites(f.state)).toHaveLength(1)
+      expect(puts(f.state)).toBe(1)
+      if (!delivered) {
+        expect(second.stderr).toContain("No automatic resend")
+        expect(runComplete(f.env, f.payload, f.approval).stderr).toContain("Inline publication is incomplete")
+      }
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  it("keeps a rejected inline action retryable without resending the summary", () => {
+    const f = fixture()
+    try {
+      const first = run(["post", f.payload, f.approval], { ...f.env, GH_INLINE_REJECT: "1" })
+      expect(first.status).toBe(1)
+      expect(first.stdout).toContain(f.original.html_url)
+      expect(first.stderr).toContain("inline publication remains pending")
+      expect(run(["post", f.payload, f.approval], f.env).status).toBe(0)
+      expect(inlineWrites(f.state)).toHaveLength(2)
+      expect(puts(f.state)).toBe(1)
+      expect(JSON.parse(fs.readFileSync(path.join(f.state, "comments.json"), "utf8"))).toHaveLength(1)
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  it.each(["GH_INLINE_NO_APPLY", "GH_INLINE_WRONG_TARGET"])("requires actual inline target readback after %s", fault => {
+    const f = fixture()
+    try {
+      const first = run(["post", f.payload, f.approval], { ...f.env, [fault]: "1" })
+      expect(first.status).toBe(1)
+      const second = run(["post", f.payload, f.approval], f.env)
+      expect(second.status).toBe(fault === "GH_INLINE_WRONG_TARGET" ? 0 : 1)
+      expect(inlineWrites(f.state)).toHaveLength(1)
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  it.each(["head", "deny"])("stops new inline publication after a summary-side %s change", change => {
+    const f = fixture()
+    try {
+      const result = run(["post", f.payload, f.approval], { ...f.env, GH_AFTER_UPDATE: change, GH_APPROVAL_PATH: f.approval })
+      expect(result.status).not.toBe(0)
+      expect(puts(f.state)).toBe(1)
+      expect(inlineWrites(f.state)).toEqual([])
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  it.each(["head", "deny"])("stops further inline writes after the first comment and a %s change", change => {
+    const f = fixture()
+    try {
+      const result = JSON.parse(fs.readFileSync(f.source, "utf8"))
+      result.findings.push({ ...result.findings[0], id: "second-lock", title: "Second publication defect", line: 45 })
+      result.diff.push({ ...result.diff[0], line: 45 })
+      fs.writeFileSync(f.source, JSON.stringify(result))
+      expect(renderReview(f.source, f.payload, f.env).status).toBe(0)
+      expect(run(["stamp", f.payload], f.env).status).toBe(0)
+      expect(approve(f.payload, f.approval, f.env).status).toBe(0)
+      const posted = run(["post", f.payload, f.approval], { ...f.env, GH_AFTER_INLINE: change, GH_APPROVAL_PATH: f.approval })
+      expect(posted.status).not.toBe(0)
+      expect(inlineWrites(f.state)).toHaveLength(1)
+      expect(puts(f.state)).toBe(1)
+      if (change === "head") fs.writeFileSync(path.join(f.state, "head"), head)
+      else expect(approve(f.payload, f.approval, f.env).status).toBe(0)
+      const resumed = run(["post", f.payload, f.approval], f.env)
+      expect(resumed.status, resumed.stderr).toBe(0)
+      expect(inlineWrites(f.state)).toHaveLength(2)
+      expect(puts(f.state)).toBe(1)
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  it("refuses malformed or missing snapshots instead of duplicating an existing finding", () => {
+    const f = fixture()
+    try {
+      const { result } = withExistingInline(f)
+      for (const binding of [undefined, { ...result.findings[0].comment, id: true },
+        { ...result.findings[0].comment, author: 78 }, { ...result.findings[0].comment, bodySha256: "not-a-digest" }]) {
+        const changed = structuredClone(result)
+        changed.findings[0].comment = binding
+        fs.writeFileSync(f.source, JSON.stringify(changed))
+        const rendered = renderReview(f.source, f.payload, f.env)
+        expect(rendered.status, rendered.stderr).toBe(2)
+        expect(rendered.stderr).toContain(".comment")
+      }
+      expect(inlineWrites(f.state)).toEqual([])
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  it("uses the chosen personal access token for every inline-publication call", () => {
+    const f = fixture()
+    const token = "ghp_" + "syntheticinlinefixturetoken"
+    try {
+      const before = fs.readFileSync(path.join(f.state, "call-auth"), "utf8").trim().split("\n").length
+      const posted = run(["post", f.payload, f.approval, "--token-env", "REVIEW_TEST_PAT"], { ...f.env, REVIEW_TEST_PAT: token })
+      expect(posted.status, posted.stderr).toBe(0)
+      expect(inlineWrites(f.state)).toHaveLength(1)
+      const digests = fs.readFileSync(path.join(f.state, "call-auth"), "utf8").trim().split("\n").slice(before)
+      expect(digests.length).toBeGreaterThan(0)
+      expect([...new Set(digests)]).toEqual([createHash("sha256").update(token).digest("hex")])
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  it("keeps a retained version-three summary-only update byte-identical without adding inline writes", () => {
+    const f = fixture()
+    try {
+      const legacy = spawnSync(python, ["-B", "-W", "error", "-c", `
+import importlib.util,json,sys
+spec=importlib.util.spec_from_file_location("publisher","scripts/review-publish.py")
+publisher=importlib.util.module_from_spec(spec);spec.loader.exec_module(publisher)
+with open(sys.argv[1]) as source: result=json.load(source)
+body,comments=publisher.public_review(result)
+print(json.dumps({"body":body,"comments":comments}))
+`, f.source], { cwd: root, encoding: "utf8" })
+      expect(legacy.status, legacy.stderr).toBe(0)
+      const value = JSON.parse(fs.readFileSync(f.payload, "utf8"))
+      Object.assign(value, JSON.parse(legacy.stdout))
+      value.evidence.version = 3
+      writeLegacyPayload(f.payload, JSON.stringify(value))
+      const original = fs.readFileSync(f.payload)
+      expect(run(["show", f.payload], f.env).status).toBe(0)
+      expect(fs.readFileSync(f.payload)).toEqual(original)
+      expect(run(["stamp", f.payload], f.env).status).toBe(0)
+      expect(approve(f.payload, f.approval, f.env).status).toBe(0)
+      expect(run(["post", f.payload, f.approval], f.env).status).toBe(0)
+      expect(inlineWrites(f.state)).toEqual([])
+      expect(puts(f.state)).toBe(1)
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  it.each(["missing", "anchor"])("requires proper initial review anchors after a %s readback fault", fault => {
+    const f = freshReview("review-initial-inline-")
+    const env = { PATH: `${f.bin}:/usr/bin:/bin`, GH_STATE: f.state }
+    const source = path.join(f.directory, "result.json")
+    try {
+      fs.writeFileSync(source, JSON.stringify(structuredResult()))
+      expect(renderReview(source, f.payload, env).status).toBe(0)
+      expect(run(["stamp", f.payload], env).status).toBe(0)
+      expect(approve(f.payload, f.approval, env).status).toBe(0)
+      const first = run(["post", f.payload, f.approval], { ...env, GH_INITIAL_INLINE_FAULT: fault })
+      expect(first.status).toBe(1)
+      expect(first.stderr).toContain("inline anchors are unconfirmed")
+      expect(run(["post", f.payload, f.approval], env).status).toBe(1)
+      expect(runComplete(env, f.payload, f.approval).stderr).toContain("Inline publication is incomplete")
+      expect(postsOf(f.state)).toBe(1)
+      expect(inlineWrites(f.state)).toEqual([])
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
 
   it("updates the original post with the current verdict and head, preserving its URL and old inline anchors", () => {
     const f = fixture()
     try {
       const payload = JSON.parse(fs.readFileSync(f.payload, "utf8"))
-      expect(payload.comments).toEqual([])
+      expect(payload.comments).toHaveLength(1)
+      expect(payload.comments[0]).toMatchObject({ path: "scripts/review-publish.py", line: 44, side: "RIGHT", finding: "publish-lock" })
+      expect(payload.comments[0].body).toContain("<!-- cursor-finding:publish-lock -->")
       expect(payload.body).toContain("1 actionable finding.")
-      expect(payload.body).toContain("Location: scripts/review-publish.py:44 RIGHT")
       expect(payload.body).toContain(`at ${head}`)
       const posted = run(["post", f.payload, f.approval], f.env)
       expect(posted.status, posted.stderr).toBe(0)
       expect(posted.stdout).toContain(f.original.html_url)
+      expect(posted.stdout).toContain("#discussion_r1001")
       const rows = JSON.parse(fs.readFileSync(path.join(f.state, "reviews.json"), "utf8"))
-      expect(rows).toHaveLength(1)
+      expect(rows.filter((row: { review: { body: string } }) => row.review.body.includes("<!-- cursor-review:"))).toHaveLength(1)
       expect(rows[0].review).toEqual({ ...f.original, body: payload.body })
       expect(postsOf(f.state)).toBe(0)
       expect(puts(f.state)).toBe(1)
+      expect(fs.readFileSync(path.join(f.state, "inline-writes"), "utf8").trim().split("\n")).toHaveLength(1)
       expect(run(["post", f.payload, f.approval], f.env).status).toBe(0)
       expect(puts(f.state)).toBe(1)
+      expect(fs.readFileSync(path.join(f.state, "inline-writes"), "utf8").trim().split("\n")).toHaveLength(1)
       const later = `A later verdict.\n<!-- cursor-review:${"e".repeat(64)} -->\n`
       rows[0].review.body = later
       fs.writeFileSync(path.join(f.state, "reviews.json"), JSON.stringify(rows))
@@ -3254,7 +3554,7 @@ describe("review evidence gate", () => {
       const rendered = run(["render", source, payload], env)
       expect(rendered.status, rendered.stderr).toBe(0)
       const value = JSON.parse(fs.readFileSync(payload, "utf8"))
-      expect(value.evidence.version).toBe(3)
+      expect(value.evidence.version).toBe(4)
       expect(value.body).toContain("1 actionable finding.")
       expect(value.body).toContain("outside the reviewed head")
       expect(value.body).toContain(otherHead)
@@ -3318,7 +3618,7 @@ describe("review evidence gate", () => {
     }
   })
 
-  it.each([1, 2])("recovers retained version-%i evidence without allowing a fresh downgrade", (version) => {
+  it.each([1, 2, 3])("recovers retained version-%i evidence without allowing a fresh downgrade", (version) => {
     const { directory, payload, approval, bin, state } = freshReview("review-scope-legacy-")
     const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
     const source = path.join(directory, "result.json")
@@ -3329,10 +3629,13 @@ describe("review evidence gate", () => {
       const value = JSON.parse(fs.readFileSync(payload, "utf8"))
       const ledger = evidenceLedger(result)
       const { diagnostics: _diagnostics, ...previousLedger } = ledger
-      const legacy = JSON.stringify({ ...previousLedger, version,
+      const legacy = JSON.stringify({ ...(version === 3 ? ledger : previousLedger), version,
         candidates: version === 1 ? ledger.candidates.map(({ assessment: _assessment, ...item }) => item) : ledger.candidates,
       })
       value.evidence = { version, ledgerSha256: createHash("sha256").update(legacy).digest("hex") }
+      value.comments = value.comments.map(({ finding: _finding, update: _update, ...comment }: Record<string, unknown>) => ({
+        ...comment, body: String(comment.body).split("\n\n<!-- cursor-finding:")[0],
+      }))
       fs.writeFileSync(path.join(directory, `ledger-${value.evidence.ledgerSha256}.json`), legacy)
       fs.writeFileSync(payload, JSON.stringify(value, null, 2) + "\n")
       const refused = run(["stamp", payload], env)

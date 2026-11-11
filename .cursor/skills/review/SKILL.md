@@ -285,15 +285,28 @@ First inventory submitted reviews with
 `python3 scripts/review-publish.py reviews <owner> <repo> <pull>` (use the same
 publisher identity as before). When this reviewer already has a stamped
 COMMENT review on the PR, update that existing summary post in place. Do not
-create another top-level review, even when the head or verdict changed. Put
+create another summary post, even when the head or verdict changed. Put
 `update: { review, author, bodySha256 }` in the new result, using the existing
 review's `id`, `user.id`, and inventory digest. If multiple own posts exist,
 use the latest stamped COMMENT review; leave other authors' reviews alone.
 The revised summary must state the current verdict, findings, checks and
 reviewed head. Render, show and obtain approval of the exact updated payload
 before `post`; an earlier publication approval does not approve a new verdict.
-New findings go in the updated summary with source locations. GitHub does not
-move the original review's commit or inline anchors when its summary is edited.
+Put new findings at verified current-diff locations in the rendered inline
+comments. The publisher updates the one summary and publishes those findings
+as native code threads. It checks their actual anchors on readback. GitHub does
+not move the original review's commit or inline anchors when its summary is edited.
+The `reviews` inventory includes native comments and their body digests. For a
+still-present inline finding, bind its `comment` snapshot (`id`, `author`,
+`bodySha256`, plus `thread` and `repliesSha256` from the matching thread
+inventory) in that finding, retaining its `prior` source. New replies require
+re-review and another preview. The publisher updates
+an owned current-head comment in place, or creates a current-head thread when
+the bound earlier anchor belongs to another commit. Keep the old discussion
+classified. Findings outside the current diff remain in the summary.
+An inline action's failure leaves publication partial even if the summary
+was updated. Retry `post` with the same approved payload; do not resend completed
+actions or replace an uncertain native write with a plain post.
 Keep earlier threads and classify/resolve them below. If the existing post
 cannot be updated, retain the evidence and report the failure; never fall back
 to a duplicate review or discussion comment.

@@ -149,9 +149,9 @@ head)". The detail is public; use repository-relative evidence and state what
 the separate commit fixes. Another tree's successful tests are not the head's
 test results. A new head containing the repair needs a new review and preview.
 
-Rendering requires the new ledger format and binds evidence version 3 to the
+Rendering requires the version 3 ledger and binds evidence version 4 to the
 payload. Preview, approval and publication recheck it. Already-retained legacy
-version 1 and 2 previews remain recoverable with their original bytes and approval flow;
+version 1, 2 and 3 previews remain recoverable with their original bytes and approval flow;
 fresh payloads cannot select legacy evidence to bypass this requirement.
 
 ### Failed-check diagnosis
@@ -360,8 +360,8 @@ handoff while waiting; a successful `show` is not publication.
 
 Re-review updates this reviewer's existing summary post in place, including a
 clean-to-findings verdict change on the same head. It must not leave an old
-clean verdict as the apparent current result or create a duplicate top-level
-review. Inventory the posts using the same publishing identity:
+clean verdict as the apparent current result or create a duplicate summary
+post. Inventory the posts using the same publishing identity:
 
 ```bash
 python3 scripts/review-publish.py reviews owner repo 156 > "$review_dir/reviews.json"
@@ -376,9 +376,11 @@ inventory's review `id`, `user.id`, and exact UTF-8 body digest:
 ```
 
 Use the normal render → stamp → show → approve → post flow. The approval binds
-both the replacement summary and the target review snapshot; old approval does
-not authorize an update. The renderer puts all new findings and their source
-locations in the summary. `post` calls GitHub's
+the replacement summary, inline findings and target snapshots; old approval
+does not authorize an update. Findings at verified current-diff locations stay
+in the payload's `comments` array and become native inline review threads.
+Findings outside the diff stay in the summary; never invent an anchor.
+`post` calls GitHub's
 [update-review endpoint](https://docs.github.com/en/rest/pulls/reviews#update-a-review-for-a-pull-request)
 with the body only. It checks the review id, author, COMMENT state and old body
 digest again before sending, then requires the approved body at that same id
@@ -388,8 +390,51 @@ recovered from the existing post; an unsettled update is not blindly resent.
 
 The review URL remains the same. GitHub retains its original `commit_id` and
 inline anchors, so the updated summary explicitly names the newly reviewed
-head and verdict. Existing inline threads remain subject to the resolution
-procedure below. No update target means an initial review, created as before.
+head and verdict. A submitted review cannot accept new threads through that
+summary endpoint. The publisher creates new anchored findings with GitHub's
+[native review-comment endpoint](https://docs.github.com/en/rest/pulls/comments#create-a-review-comment-for-a-pull-request),
+using the approved head, path, line and side. These are code threads, not issue
+comments or another summary post. GitHub owns their review-record grouping.
+
+The `reviews` inventory includes each review's native `comments`, their `id`,
+`user.id`, `commit_id`, anchor and `bodySha256`. For an existing inline finding,
+keep its id in `prior` and add this snapshot to the corresponding finding:
+
+```json
+"comment": {
+  "id": 789, "author": 456,
+  "bodySha256": "<64-character-comment-body-digest>",
+  "thread": "PRRT_thread-id-from-inventory",
+  "repliesSha256": "<64-character-replies-digest-from-thread-inventory>"
+}
+```
+
+Match the comment URL with the `threads` inventory to copy its thread id and
+`repliesSha256`. The publisher verifies the reviewer's root comment on this PR
+and rejects added, edited or removed replies after the preview.
+If its anchor still matches the approved head/location, it updates that
+comment's body in place. If it belongs to an earlier commit, it creates a
+thread at the new verified anchor and preserves the old discussion. A changed
+body, author or current-head anchor requires another review and preview.
+Do not drop the binding to create a duplicate of a still-present finding.
+
+Each native write has a durable receipt separate from the summary receipt.
+Readback must match the actual body, commit, path, line and side. A lost response
+may be recovered from that exact comment; an ambiguous missing result is never
+automatically resent. A proven rejection can be retried with the same approved
+payload. `post` resumes partial inline publication without re-sending the
+summary or completed comments. Recheck head and approval before each write.
+Those reads are not atomic with GitHub's write; a change after the final read
+can still race the send.
+Artifacts stay pending and thread resolutions do not start until every approved
+inline action is confirmed. `complete-resolutions.py` never creates comments;
+finish missing inline actions through `post` first.
+
+Evidence version 4 selects these publication semantics. Retained older previews
+keep their original summary-only updates and bytes; their earlier approval
+does not authorize new inline writes. No update target means an initial review,
+created with native inline comments as before, with anchor readback verified.
+Existing inline threads remain subject to the resolution procedure below.
 
 Read all review threads and their replies, including outdated anchors, before
 classifying earlier findings. The private inventory includes complete paginated

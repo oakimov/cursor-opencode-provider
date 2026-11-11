@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Re-review findings at current-diff locations create native inline code threads while the existing summary is updated in place. Existing comment snapshots prevent duplicate edits, and partial inline publication keeps its own recovery receipts ([#188](https://github.com/oakimov/cursor-opencode-provider/pull/188)).
 - Refresh model metadata when its cache root or file generation changes, even with equal timestamps, so a request cannot inherit another catalog's variant or max-mode settings ([#188](https://github.com/oakimov/cursor-opencode-provider/pull/188)).
 - Map prototype-sensitive model and variant names to selectable keys in both OpenCode catalogs while preserving the original Cursor id and parameters. Inherited object keys no longer supply invalid token rates ([#188](https://github.com/oakimov/cursor-opencode-provider/pull/188)).
 - Thread listing, the pre-publish thread lookup, and resolution reads no longer call `gh` anonymously. `post`, `threads`, and `complete-resolutions.py` send one credential on every `gh` call: the `--token-env` personal access token when that option is set, otherwise the GitHub App installation token. The named token wins over an ambient `GH_TOKEN` or `GITHUB_TOKEN`.

@@ -997,8 +997,14 @@ These are failure lessons shared by both hosts, not a replacement for
   reviewer's existing summary current instead of leaving an earlier clean
   post beside a newer contradictory one. Bind the replacement to the existing
   review id, author and body digest, then verify its body at that same id;
-  summary edits retain the original commit/inline anchors, so new findings
-  need source locations in the summary (`review summary updates` regressions).
+  Summary-only edits then flattened anchored findings into prose: the updated
+  #183/#184 payloads had empty inline arrays. Keep current-diff findings as
+  native code comments, bind existing comment snapshots, and track/read back
+  their anchors separately from the summary receipt. A submitted review's
+  body edit cannot create a thread. Recover partial native actions without
+  duplicating the summary or treating a missing response as an unsent comment
+  (`review summary updates` regressions). Retain older preview semantics so
+  their exact approval cannot silently authorize new native writes.
 - **A code verdict is not a command exit status.** A review labelled an isolated
   check passed while reporting its nonzero exit and failing self-tests. The
   result model also rejected clean code verdicts with established baseline or

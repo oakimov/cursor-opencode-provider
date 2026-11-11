@@ -55,7 +55,7 @@ Cursor. Passing tests do **not** mean the review skill finds real defects.
 
 | Suite | File | Focus |
 |-------|------|-------|
-| Publication | `test/review-publish.test.ts` | App/PAT auth, preview approval, idempotent post, privacy refusals, artifact retention, thread resolve, evidence/ledger gate |
+| Publication | `test/review-publish.test.ts` | App/PAT auth, preview approval, native inline re-review anchors and recovery, privacy refusals, artifact retention, thread resolve, evidence/ledger gate |
 | Isolation / live scripts | `test/review-scripts.test.ts` | Cloud install string, isolated-check targets, sandbox PATH/secrets, live-test skip/deadline/cleanup, pid-targeted cancel |
 | Subject contracts | `test/review-model-contracts.test.ts`, `test/review-model-cache-contract.test.ts`, `test/review-retention-contracts.test.ts` | upstream tuple preservation, cache identity at the Run boundary, independent phase results, persistence probes and deliberately broken controls |
 | Eval fixtures / scorer | `test/review-eval.test.ts` | Case orchestration fixtures, mount excludes answer keys, ledger compare, score detection vs false positives |
@@ -85,6 +85,13 @@ a finding; an unknown cause keeps the review incomplete. See
 [failed-check diagnosis](pr-review.md#failed-check-diagnosis). These tests
 verify the gate, not whether an agent's assessment is correct. Maintainers
 still test reviewer behavior before accepting an instruction change.
+
+Re-review keeps one summary post and publishes current-diff findings as native
+code threads. Existing inline findings bind their comment snapshots so their
+bodies can be updated without duplication. A summary receipt alone does not
+complete publication: every approved inline anchor needs readback, and partial
+or uncertain writes remain pending. See
+[re-review publication](pr-review.md#re-review-and-thread-resolution).
 
 ### Live OpenCode tests
 

@@ -159,7 +159,7 @@ RESULT_KEYS = {
 }
 FINDING_KEYS = {
     "id", "severity", "rule", "title", "explanation", "trigger",
-    "consequence", "evidence", "verification", "path", "line", "side",
+    "consequence", "evidence", "verification", "path", "line", "side", "comment",
 }
 OUTCOMES = {"findings", "clean", "incomplete"}
 CHECK_STATUS = {"passed", "failed", "skipped", "unavailable"}
@@ -217,7 +217,7 @@ def validate_update(value: object) -> list[str]:
     return []
 
 
-def validate_result(result: dict, *, require_commands: bool = False) -> list[str]:
+def validate_result(result: dict, *, require_commands: bool = False, require_inline: bool = False) -> list[str]:
     problems: list[str] = []
     extra = sorted(set(result) - RESULT_KEYS)
     if extra:
@@ -362,6 +362,27 @@ def validate_result(result: dict, *, require_commands: bool = False) -> list[str
                 problems.append(f"findings[{index}].evidence")
             if "verification" in finding and not text_field(finding.get("verification")):
                 problems.append(f"findings[{index}].verification")
+            if "comment" in finding:
+                binding = finding["comment"]
+                if (not isinstance(binding, dict) or set(binding) != {"id", "author", "bodySha256", "thread", "repliesSha256"}
+                        or any(type(binding.get(key)) is not int or binding[key] < 1 for key in ("id", "author"))
+                        or not isinstance(binding.get("bodySha256"), str) or not DIGEST.fullmatch(binding["bodySha256"])
+                        or not isinstance(binding.get("thread"), str) or not THREAD_ID.fullmatch(binding["thread"])
+                        or not isinstance(binding.get("repliesSha256"), str) or not DIGEST.fullmatch(binding["repliesSha256"])
+                        or not isinstance(result.get("update"), dict)
+                        or binding.get("author") != result["update"].get("author")):
+                    problems.append(f"findings[{index}].comment")
+                if (finding.get("path"), finding.get("line"), finding.get("side")) not in anchors:
+                    problems.append(f"findings[{index}].comment.anchor")
+            if require_inline:
+                prior = result.get("prior")
+                earlier = [item for item in prior if isinstance(item, dict) and item.get("id") == identifier] if isinstance(prior, list) else []
+                if (earlier and "#discussion_r" in str(earlier[0].get("source"))
+                        and (finding.get("path"), finding.get("line"), finding.get("side")) in anchors):
+                    binding = finding.get("comment")
+                    expected = f"https://github.com/{result.get('owner')}/{result.get('repo')}/pull/{result.get('pull')}#discussion_r{binding.get('id')}" if isinstance(binding, dict) else None
+                    if expected != earlier[0].get("source"):
+                        problems.append(f"findings[{index}].comment.prior")
             located = "path" in finding or "line" in finding or "side" in finding
             if located and ("path" not in finding or "line" not in finding or "side" not in finding):
                 problems.append(f"findings[{index}].path")
@@ -500,10 +521,9 @@ def finding_text(finding: dict, *, located: bool) -> str:
     return "\n".join(lines)
 
 
-def public_review(result: dict) -> tuple[str, list[dict]]:
-    # GitHub can edit a submitted review's summary, but cannot move its commit
-    # or append inline comments to it. Re-review findings go in that summary.
-    anchors = set() if "update" in result else {
+def public_review(result: dict, *, inline_updates: bool = False) -> tuple[str, list[dict]]:
+    # Legacy retained previews keep their exact summary-only update format.
+    anchors = set() if "update" in result and not inline_updates else {
         (item["path"], item["line"], item["side"]) for item in result["diff"]
     }
     comments: list[dict] = []
@@ -511,12 +531,18 @@ def public_review(result: dict) -> tuple[str, list[dict]]:
     for finding in result["findings"]:
         key = (finding.get("path"), finding.get("line"), finding.get("side"))
         if finding.get("path") and key in anchors:
-            comments.append({
+            comment = {
                 "path": finding["path"],
                 "line": finding["line"],
                 "side": finding["side"],
                 "body": finding_text(finding, located=True),
-            })
+            }
+            if inline_updates:
+                comment["finding"] = finding["id"]
+                comment["body"] += f"\n\n<!-- cursor-finding:{finding['id']} -->"
+                if "comment" in finding:
+                    comment["update"] = finding["comment"]
+            comments.append(comment)
         else:
             outside.append(finding)
     count = len(result["findings"])
@@ -562,13 +588,19 @@ def public_review(result: dict) -> tuple[str, list[dict]]:
     return "\n".join(lines) + "\n", comments
 
 
+def inline_comments_enabled(payload: dict) -> bool:
+    evidence = payload.get("evidence")
+    return isinstance(evidence, dict) and evidence.get("version") == 4
+
+
 def publication_matches(payload: dict) -> list[str]:
     if "result" not in payload:
         return []
     result = payload.get("result")
     if not isinstance(result, dict):
         return ["result"]
-    problems = validate_result(result)
+    inline_updates = inline_comments_enabled(payload)
+    problems = validate_result(result, require_inline=inline_updates)
     if problems:
         return problems
     if result.get("outcome") == "incomplete":
@@ -578,7 +610,7 @@ def publication_matches(payload: dict) -> list[str]:
             problems.append(field)
     if payload.get("update") != result.get("update"):
         problems.append("update")
-    body, comments = public_review(result)
+    body, comments = public_review(result, inline_updates=inline_updates)
     current = payload.get("body")
     if not isinstance(current, str) or MARKER.sub("", current).strip() != body.strip():
         problems.append("body")
@@ -643,7 +675,7 @@ def validate(payload: dict) -> list[str]:
     problems.extend(publication_matches(payload))
     if "update" in payload:
         problems.extend(validate_update(payload["update"]))
-        if payload.get("comments"):
+        if payload.get("comments") and not inline_comments_enabled(payload):
             problems.append("update.comments")
     body = payload.get("body")
     if not isinstance(body, str) or not body.strip():
@@ -1070,7 +1102,8 @@ def read_thread(owner: str, repo: str, pull: int, identifier: str, token: str | 
         raise SystemExit("The review thread comments are incomplete.")
     material = {"owner": owner, "repo": repo, "pull": pull, "id": identifier, "comments": comments}
     snapshot = hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return {"id": identifier, "isResolved": resolved, "comments": comments, "snapshot": snapshot}
+    replies = hashlib.sha256(json.dumps(comments[1:], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return {"id": identifier, "isResolved": resolved, "comments": comments, "snapshot": snapshot, "repliesSha256": replies}
 
 
 def thread_inventory(owner: str, repo: str, pull: int) -> dict:
@@ -1225,6 +1258,143 @@ def checked_update_review(payload: dict, review: dict | None, *, original: bool 
     return review
 
 
+def inline_targets(payload: dict) -> list[dict]:
+    return payload["comments"] if inline_comments_enabled(payload) and "update" in payload else []
+
+
+def inline_owned(payload: dict, comment: object) -> bool:
+    if not isinstance(comment, dict) or type(comment.get("id")) is not int or comment["id"] < 1:
+        return False
+    user = comment.get("user")
+    return (isinstance(user, dict) and type(user.get("id")) is int
+            and user["id"] == payload["update"]["author"] and not comment.get("in_reply_to_id")
+            and comment.get("html_url") == f"https://github.com/{payload['owner']}/{payload['repo']}/pull/{payload['pull']}#discussion_r{comment['id']}")
+
+
+def inline_anchor(payload: dict, expected: dict, comment: dict) -> bool:
+    return (comment.get("commit_id") == payload["head"]
+            and all(comment.get(key) == expected[key] for key in ("path", "line", "side")))
+
+
+def checked_inline_snapshot(payload: dict, expected: dict, comments: list[dict]) -> dict | None:
+    binding = expected.get("update")
+    if binding is None:
+        return None
+    comment = next((item for item in comments if item.get("id") == binding["id"]), None)
+    if not inline_owned(payload, comment) or comment["user"]["id"] != binding["author"]:
+        raise SystemExit("The inline target is missing, belongs to another author, or is not a root comment on this PR.")
+    discussion = read_thread(payload["owner"], payload["repo"], payload["pull"], binding["thread"])
+    if (discussion["comments"][0]["url"] != comment["html_url"]
+            or discussion["repliesSha256"] != binding["repliesSha256"]):
+        raise SystemExit("The inline discussion changed. Re-review its replies and approve a new preview.")
+    if (not isinstance(comment.get("commit_id"), str) or not SHA.fullmatch(comment["commit_id"])
+            or (comment["commit_id"] == payload["head"] and not inline_anchor(payload, expected, comment))):
+        raise SystemExit("The inline target's anchor changed. Refresh the review before publication.")
+    body = comment.get("body")
+    if (not isinstance(body, str)
+            or (hashlib.sha256(body.encode()).hexdigest() != binding["bodySha256"]
+                and not (inline_anchor(payload, expected, comment) and body == expected["body"]))):
+        raise SystemExit("The inline comment changed. Refresh its snapshot and approve the new preview.")
+    return comment
+
+
+def visible_inline(payload: dict, expected: dict, comments: list[dict]) -> dict | None:
+    bound = checked_inline_snapshot(payload, expected, comments)
+    matches = [comment for comment in comments
+               if inline_owned(payload, comment) and inline_anchor(payload, expected, comment)
+               and comment.get("body") == expected["body"]
+               and (bound is None or not inline_anchor(payload, expected, bound) or comment["id"] == bound["id"])]
+    if len(matches) > 1:
+        raise SystemExit("Multiple matching inline comments are visible. Reconcile them before continuing.")
+    return matches[0] if matches else None
+
+
+def require_inline_complete(payload: dict, journal: dict) -> None:
+    if (inline_comments_enabled(payload) and "update" not in payload and payload["comments"]
+            and journal.get("initial_inline_verified") is not True):
+        raise SystemExit("Inline publication is incomplete; the initial anchors have not been verified.")
+    states = journal.get("inline_comments", {})
+    if (not isinstance(states, dict) or any(
+            not isinstance(states.get(item["finding"]), dict)
+            or states[item["finding"]].get("state") != "posted" for item in inline_targets(payload))):
+        raise SystemExit("Inline publication is incomplete; artifacts remain pending. Retry post with the same approved payload.")
+
+
+def publish_inline_comments(payload_path: Path, approval_path: Path, payload: dict, pinned: tuple, checkpoint_path: Path) -> None:
+    targets = inline_targets(payload)
+    if not targets:
+        return
+    owner, repo, pull = payload["owner"], payload["repo"], payload["pull"]
+    journal = read_json_object(checkpoint_path)
+    if not isinstance(journal, dict) or journal.get("state") != "posted":
+        raise SystemExit("No confirmed summary receipt; inline comments were not sent.")
+    states = journal.setdefault("inline_comments", {})
+    if not isinstance(states, dict):
+        raise SystemExit("The inline publication journal is unreadable.")
+    for expected in targets:
+        identifier = expected["finding"]
+        comments = comments_of(owner, repo, pull)
+        require_same_operation(payload_path, approval_path, pinned)
+        visible = visible_inline(payload, expected, comments)
+        previous = states.get(identifier, {})
+        if not isinstance(previous, dict):
+            raise SystemExit("The inline publication journal is unreadable.")
+        if visible is None:
+            if previous.get("state") in {"sending", "posted"}:
+                raise SystemExit("Inline delivery is unconfirmed, deleted, or changed. No automatic resend; refresh the review.")
+            bound = checked_inline_snapshot(payload, expected, comments)
+            marker = f"<!-- cursor-finding:{identifier} -->"
+            if bound is None and any(inline_owned(payload, item) and item.get("commit_id") == payload["head"]
+                                     and marker in str(item.get("body", "")) for item in comments):
+                raise SystemExit("This finding already has an inline comment. Bind its snapshot instead of creating a duplicate.")
+            # A submitted review only accepts summary edits. Use GitHub's native
+            # line-comment endpoint; never turn the finding into an issue post.
+            updating = bound is not None and inline_anchor(payload, expected, bound)
+            endpoint = f"repos/{owner}/{repo}/pulls/comments/{bound['id']}" if updating else f"repos/{owner}/{repo}/pulls/{pull}/comments"
+            request = {"body": expected["body"]} if updating else {
+                "commit_id": payload["head"], **{key: expected[key] for key in ("path", "line", "side", "body")},
+            }
+            summary = review_with_id(reviews_of(owner, repo, pull), payload["update"]["review"])
+            checked_update_review(payload, summary, delivered=True)
+            # Re-read a bound comment immediately before its mutation too.
+            if bound is not None:
+                checked_inline_snapshot(payload, expected, comments_of(owner, repo, pull))
+            head, base, readable = read_pull(owner, repo, pull)
+            reject_moved_revision(head, base, readable, payload["head"], payload["base"])
+            require_same_operation(payload_path, approval_path, pinned)
+            states[identifier] = {"state": "sending"}
+            write_checkpoint(checkpoint_path, journal)
+            try:
+                require_same_operation(payload_path, approval_path, pinned)
+            except SystemExit:
+                states[identifier] = previous
+                write_checkpoint(checkpoint_path, journal)
+                raise
+            code, raw, detail = gh_api("PATCH" if updating else "POST", endpoint, request, token=_publication_token)
+            require_same_operation(payload_path, approval_path, pinned)
+            if code == 0:
+                created = json_object(raw)
+                if (not inline_owned(payload, created) or not inline_anchor(payload, expected, created)
+                        or created.get("body") != expected["body"] or (updating and created["id"] != bound["id"])):
+                    raise SystemExit("GitHub did not confirm the approved inline target. No automatic resend.")
+            comments = comments_of(owner, repo, pull)
+            require_same_operation(payload_path, approval_path, pinned)
+            visible = visible_inline(payload, expected, comments)
+            if visible is None:
+                if code and PROVEN_REJECTION.search(detail.decode("utf-8", errors="replace")):
+                    states[identifier] = {"state": "rejected"}
+                    write_checkpoint(checkpoint_path, journal)
+                if detail:
+                    print(redact_secret(detail.decode("utf-8", errors="replace")), file=sys.stderr)
+                raise SystemExit("Inline delivery is unconfirmed. The summary is posted; inline publication remains pending.")
+        states[identifier] = {"state": "posted", "comment_id": visible["id"], "url": visible["html_url"]}
+        journal["comment_ids"] = sorted(set(journal.get("comment_ids", []) + [visible["id"]]))
+        journal["comment_urls"] = sorted(set(journal.get("comment_urls", []) + [visible["html_url"]]))
+        write_checkpoint(checkpoint_path, journal)
+        print(f"COMMENT_URL={visible['html_url']}")
+    require_inline_complete(payload, journal)
+
+
 def record_visible_review(
     owner: str,
     repo: str,
@@ -1234,6 +1404,7 @@ def record_visible_review(
     checkpoint_path: Path,
     head: str,
     already: bool,
+    *, payload: dict | None = None,
 ) -> None:
     if not review_matches(review, owner, repo, pull):
         print(
@@ -1269,8 +1440,22 @@ def record_visible_review(
             "pull": pull,
             "head": head,
             "resolutions": (read_json_object(checkpoint_path) or {}).get("resolutions", {}),
+            "inline_comments": (read_json_object(checkpoint_path) or {}).get("inline_comments", {}),
         },
     )
+    if payload is not None and inline_comments_enabled(payload) and "update" not in payload:
+        for expected in payload["comments"]:
+            matches = [comment for comment in visible if inline_anchor(payload, expected, comment)
+                       and comment.get("body") == expected["body"] and not comment.get("in_reply_to_id")
+                       and type(comment.get("id")) is int
+                       and comment.get("html_url") == f"https://github.com/{owner}/{repo}/pull/{pull}#discussion_r{comment['id']}"]
+            if len(matches) != 1:
+                raise SystemExit("The review is submitted but its approved inline anchors are unconfirmed. No review was resent; artifacts remain pending.")
+        journal = read_json_object(checkpoint_path)
+        if journal is None:
+            raise SystemExit("The publication journal is unreadable; artifacts remain pending.")
+        journal["initial_inline_verified"] = True
+        write_checkpoint(checkpoint_path, journal)
     if already:
         print("REVIEW_ALREADY_POSTED=1")
     print(f"REVIEW_URL={review.get('html_url') or review.get('url') or ''}")
@@ -1308,7 +1493,7 @@ def evidence_name(payload: dict) -> str:
     evidence = payload.get("evidence")
     if (
         not isinstance(evidence, dict) or set(evidence) != {"version", "ledgerSha256"}
-        or type(evidence.get("version")) is not int or evidence["version"] not in (1, 2, 3)
+        or type(evidence.get("version")) is not int or evidence["version"] not in (1, 2, 3, 4)
         or not isinstance(evidence.get("ledgerSha256"), str)
         or not DIGEST.fullmatch(evidence["ledgerSha256"])
     ):
@@ -1333,7 +1518,7 @@ def require_evidence(path: Path, raw: bytes, payload: dict) -> bytes | None:
     if "evidence" not in payload and retained_legacy(raw, payload):
         return None
     name = evidence_name(payload)
-    if payload["evidence"]["version"] < 3 and not retained_legacy(raw, payload):
+    if payload["evidence"]["version"] < 4 and not retained_legacy(raw, payload):
         evidence_error("Unretained legacy evidence cannot bypass head assessment. Render again. GitHub was not called.")
     result = payload.get("result")
     if not isinstance(result, dict):
@@ -1475,6 +1660,7 @@ def retain_receipt(payload_path: Path, payload: dict, checkpoint_path: Path) -> 
     receipt = read_json_object(checkpoint_path)
     if not receipt or receipt.get("state") != "posted":
         raise SystemExit("Review publication is unconfirmed; artifacts remain pending.")
+    require_inline_complete(payload, receipt)
     identity = identity_of(payload)
     directories = [path for path in artifact_root().iterdir() if not path.is_symlink() and path.is_dir() and artifact_manifest(path)]
     working = managed_artifacts(payload_path)
@@ -1560,7 +1746,7 @@ def stamp(path: Path) -> None:
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     refuse_scan(text.encode(), payload)
     path.write_text(text, encoding="utf-8")
-    if ledger is None or payload.get("evidence", {}).get("version", 0) < 3:
+    if ledger is None or payload.get("evidence", {}).get("version", 0) < 4:
         # Carry forward only a legacy snapshot already verified above.
         retain_artifacts(text.encode(), payload, ledger=ledger)
     frozen = preview_path(path)
@@ -1802,6 +1988,15 @@ def post(payload_path: Path, approval_path: Path, token_env: str | None = None) 
             own_urls = set()
             if isinstance(journal, dict) and journal.get("state") == "posted" and isinstance(journal.get("comment_urls"), list):
                 own_urls = {url for url in journal["comment_urls"] if isinstance(url, str)}
+                if inline_targets(payload):
+                    # Recover a lost native-comment response before demanding a
+                    # classification of the thread this operation just opened.
+                    comments = comments_of(owner, repo, pull)
+                    require_same_operation(payload_path, approval_path, pinned)
+                    for expected in inline_targets(payload):
+                        visible = visible_inline(payload, expected, comments)
+                        if visible is not None:
+                            own_urls.add(visible["html_url"])
             if any(
                 not thread["isResolved"]
                 and thread["comments"][0]["url"] not in classified
@@ -1812,7 +2007,13 @@ def post(payload_path: Path, approval_path: Path, token_env: str | None = None) 
         for action in resolution_targets(payload):
             checked_thread(payload, action)
             require_same_operation(payload_path, approval_path, pinned)
+        if inline_targets(payload):
+            comments = comments_of(owner, repo, pull)
+            require_same_operation(payload_path, approval_path, pinned)
+            for expected in inline_targets(payload):
+                checked_inline_snapshot(payload, expected, comments)
         post_locked(payload_path, approval_path, payload, approval, digest, pinned, checkpoint_path, token_env)
+        publish_inline_comments(payload_path, approval_path, payload, pinned, checkpoint_path)
         resolve_threads(payload_path, approval_path, payload, pinned, checkpoint_path, token_env)
         retain_receipt(payload_path, payload, checkpoint_path)
     finally:
@@ -1846,7 +2047,7 @@ def post_locked(
     if existing is not None:
         if "update" in payload:
             checked_update_review(payload, existing, delivered=True)
-        record_visible_review(owner, repo, pull, existing, digest, checkpoint_path, approved_head, True)
+        record_visible_review(owner, repo, pull, existing, digest, checkpoint_path, approved_head, True, payload=payload)
         return
     journal = read_json_object(checkpoint_path)
     if isinstance(journal, dict) and journal.get("state") == "posted":
@@ -1854,7 +2055,7 @@ def post_locked(
         if prior is not None:
             if "update" in payload:
                 checked_update_review(payload, prior)
-            record_visible_review(owner, repo, pull, prior, digest, checkpoint_path, approved_head, True)
+            record_visible_review(owner, repo, pull, prior, digest, checkpoint_path, approved_head, True, payload=payload)
             return
         label = journal.get("review_id")
         shown = label if isinstance(label, int) and not isinstance(label, bool) else "unknown"
@@ -1914,7 +2115,7 @@ def post_locked(
         if recovered is not None:
             if updating:
                 checked_update_review(payload, recovered, delivered=True)
-            record_visible_review(owner, repo, pull, recovered, digest, checkpoint_path, approved_head, True)
+            record_visible_review(owner, repo, pull, recovered, digest, checkpoint_path, approved_head, True, payload=payload)
             return
         detail = stderr.decode("utf-8", errors="replace")
         if PROVEN_REJECTION.search(detail):
@@ -1936,7 +2137,7 @@ def post_locked(
         visible = review_with_id(reviews_of(owner, repo, pull), payload["update"]["review"])
         checked_update_review(payload, visible, delivered=True)
         created = visible
-    record_visible_review(owner, repo, pull, created, digest, checkpoint_path, approved_head, False)
+    record_visible_review(owner, repo, pull, created, digest, checkpoint_path, approved_head, False, payload=payload)
 
 
 def bind(owner: str, repo: str, pull: int, out: Path | None) -> None:
@@ -1990,7 +2191,7 @@ def bind(owner: str, repo: str, pull: int, out: Path | None) -> None:
 def render(source: Path, dest: Path, ledger_path: Path | None = None) -> None:
     raw, result = load_payload(source)
     refuse_scan(raw, result)
-    problems = validate_result(result, require_commands=True)
+    problems = validate_result(result, require_commands=True, require_inline=True)
     if problems:
         print("Review result is incomplete: " + ", ".join(problems), file=sys.stderr)
         raise SystemExit(2)
@@ -1999,7 +2200,7 @@ def render(source: Path, dest: Path, ledger_path: Path | None = None) -> None:
     except OSError:
         evidence_error("Review evidence ledger is missing. Complete ledger.json before rendering. GitHub was not called.")
     compare_evidence(ledger, result, require_scope=True, require_diagnostics=True)
-    body, comments = public_review(result)
+    body, comments = public_review(result, inline_updates=True)
     payload = {
         "owner": result["owner"],
         "repo": result["repo"],
@@ -2011,7 +2212,7 @@ def render(source: Path, dest: Path, ledger_path: Path | None = None) -> None:
         "body": body,
         "comments": comments,
         "result": result,
-        "evidence": {"version": 3, "ledgerSha256": hashlib.sha256(ledger).hexdigest()},
+        "evidence": {"version": 4, "ledgerSha256": hashlib.sha256(ledger).hexdigest()},
     }
     if "update" in result:
         payload["update"] = result["update"]
@@ -2098,9 +2299,13 @@ def main() -> None:
                 inventory = thread_inventory(str(args.payload), str(args.approval), pull)
             else:
                 inventory = reviews_of(str(args.payload), str(args.approval), pull)
+                comments = comments_of(str(args.payload), str(args.approval), pull)
                 for review in inventory:
                     if isinstance(review.get("body"), str):
                         review["bodySha256"] = hashlib.sha256(review["body"].encode()).hexdigest()
+                    review["comments"] = [{**comment, "bodySha256": hashlib.sha256(comment["body"].encode()).hexdigest()}
+                                          for comment in comments if comment.get("pull_request_review_id") == review.get("id")
+                                          and isinstance(comment.get("body"), str)]
             json.dump(inventory, sys.stdout, indent=2)
             sys.stdout.write("\n")
         else:
