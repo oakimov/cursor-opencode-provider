@@ -401,7 +401,8 @@ diff. A submitted review cannot accept new threads through the summary update.
 New anchored findings from one re-review go out together as one COMMENT review
 whose body is empty, using the approved head, path, line and side. That review
 is not a second summary. `post` refuses to create another review when its body
-contains summary text and a stamped summary already exists. An owned comment
+contains summary text and this publishing identity already has a stamped summary.
+Another author's summary does not block the first post. An owned comment
 whose anchor is still the current head is edited in place. A fixed finding
 resolves its existing thread and leaves that comment; it does not open another
 review.

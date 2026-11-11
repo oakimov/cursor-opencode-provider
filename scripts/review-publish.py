@@ -1354,13 +1354,41 @@ def inline_targets(payload: dict) -> list[dict]:
     return payload["comments"] if inline_comments_enabled(payload) and "update" in payload else []
 
 
+def review_author(review: dict) -> int | None:
+    user = review.get("user")
+    if not isinstance(user, dict):
+        return None
+    author = user.get("id")
+    if isinstance(author, bool) or type(author) is not int or author < 1:
+        return None
+    return author
+
+
+def publication_user() -> int:
+    code, stdout, stderr = gh_api("GET", "user", token=_publication_token)
+    user = json_object(stdout) if code == 0 else None
+    author = user.get("id") if isinstance(user, dict) else None
+    if isinstance(author, bool) or type(author) is not int or author < 1:
+        if stderr:
+            print(redact_secret(stderr.decode("utf-8", errors="replace")), file=sys.stderr)
+        raise SystemExit("The publishing identity could not be read. No review was created.")
+    return author
+
+
 def refuse_second_summary(body: str, reviews: list[dict], owner: str, repo: str, pull: int) -> None:
-    """One harness summary per pull request. A later review may carry only inline comments."""
+    """One summary per publishing identity. Another author's summary does not block a first post."""
     if not isinstance(body, str) or not body.strip():
         return
-    for review in reviews:
-        text = review.get("body")
-        if isinstance(text, str) and MARKER.search(text) and review_matches(review, owner, repo, pull):
+    stamped = [
+        review for review in reviews
+        if isinstance(review.get("body"), str) and MARKER.search(review["body"]) and review_matches(review, owner, repo, pull)
+    ]
+    if not stamped:
+        return
+    publisher = publication_user()
+    for review in stamped:
+        author = review_author(review)
+        if author is None or author == publisher:
             raise SystemExit(
                 "A summary review already exists. Refusing to create another review with summary text. No review was created."
             )
@@ -2281,6 +2309,7 @@ def post_locked(
         require_same_operation(payload_path, approval_path, pinned)
         if not updating:
             refuse_second_summary(payload["body"], reviews, owner, repo, pull)
+            require_same_operation(payload_path, approval_path, pinned)
     except SystemExit:
         # The request was not sent. Drop the checkpoint so it is not an unsettled delivery.
         checkpoint_path.unlink(missing_ok=True)

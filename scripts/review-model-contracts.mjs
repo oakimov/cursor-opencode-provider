@@ -21,7 +21,8 @@ function inspect(models) {
   const classic = modelsToConfig(models)
   const modern = modelsToCatalogModelMap(models)
   if (JSON.stringify(models) !== before) throw new Error("catalog construction mutated discovery metadata")
-  const expected = new Set(models.flatMap((model) => model.variants.map((variant) => tupleKey(variant.parameterValues))))
+  const ownedKey = (modelId, parameters) => JSON.stringify([modelId, tupleKey(parameters)])
+  const expected = new Set(models.flatMap((model) => model.variants.map((variant) => ownedKey(model.id, variant.parameterValues))))
   for (const [host, catalog] of [["1.x", classic], ["2.x", modern]]) {
     const retained = new Set()
     for (const [catalogId, entry] of Object.entries(catalog)) {
@@ -43,8 +44,15 @@ function inspect(models) {
         throw new Error(`OpenCode ${host} has invalid or duplicate ids`)
       }
       for (const [, settings] of choices) {
-        const key = tupleKey(settings?.cursorVariantParameters ?? [])
-        if (!expected.has(key)) throw new Error(`OpenCode ${host} published a tuple absent from discovery`)
+        const parameters = settings?.cursorVariantParameters ?? []
+        const key = ownedKey(wireId, parameters)
+        if (!expected.has(key)) {
+          const bare = tupleKey(parameters)
+          const known = models.some((model) => model.variants.some((variant) => tupleKey(variant.parameterValues) === bare))
+          throw new Error(known
+            ? `OpenCode ${host} assigned a tuple to the wrong model`
+            : `OpenCode ${host} published a tuple absent from discovery`)
+        }
         retained.add(key)
       }
     }
@@ -105,6 +113,12 @@ function* cases(effort) {
       variants: reverse ? variants.toReversed().map((variant) => ({ ...variant, parameterValues: variant.parameterValues.toReversed() })) : variants,
     }] }
   }
+  yield { id: "two-model", models: [
+    { id: "review-model-a", variants: [{ key: "a", displayName: "High", isDefaultNonMax: true, isDefaultMax: false,
+      parameterValues: [{ id: effort, value: "high" }] }] },
+    { id: "review-model-b", variants: [{ key: "b", displayName: "Low", isDefaultNonMax: true, isDefaultMax: false,
+      parameterValues: [{ id: effort, value: "low" }] }] },
+  ] }
 }
 
 let failed = false

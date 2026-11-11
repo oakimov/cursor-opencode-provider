@@ -33,13 +33,17 @@ test("the isolated contract uses the trusted harness file and the subject's impl
   `)
   fs.writeFileSync(path.join(subject, "src/models.ts"), `export const normalizeModelCache = value => value\n`)
   const catalog = path.join(subject, "src/opencode2/catalog.ts")
-  const implementation = (broken: boolean, empty = false) => `
+  const implementation = (broken: boolean, empty = false, swapped = false) => `
     import { modelsToConfig } from "../model-config.ts"
     export function modelsToCatalogModelMap(models) {
-      return Object.fromEntries(Object.entries(modelsToConfig(models)).map(([id, entry]) => [id, { modelID:entry.options.cursorModelId, variants:
-        ${empty ? "[]" : `Object.entries(entry.variants).map(([id, settings]) => ({id, settings}))
-          ${broken ? '.concat([{id:"default",settings:{cursorVariantParameters:[{id:"effort",value:"default"}]}}])' : ""}`}
-      }]))
+      const entries = Object.entries(modelsToConfig(models))
+      return Object.fromEntries(entries.map(([id, entry], index) => {
+        const source = ${swapped ? "entries[(index + 1) % entries.length][1]" : "entry"}
+        return [id, { modelID:entry.options.cursorModelId, variants:
+          ${empty ? "[]" : `Object.entries(source.variants).map(([id, settings]) => ({id, settings}))
+            ${broken ? '.concat([{id:"default",settings:{cursorVariantParameters:[{id:"effort",value:"default"}]}}])' : ""}`}
+        }]
+      }))
     }
   `
   const run = () => spawnSync("bash", [
@@ -68,7 +72,7 @@ test("the isolated contract uses the trusted harness file and the subject's impl
       ['.map(choice => ({...choice, id:"__proto__"}))', "object-control variant id"],
     ]) {
       const valid = implementation(false)
-      const original = "Object.entries(entry.variants).map(([id, settings]) => ({id, settings}))"
+      const original = "Object.entries(source.variants).map(([id, settings]) => ({id, settings}))"
       expect(valid.includes(original)).toBe(true)
       fs.writeFileSync(catalog, valid.replace(original, original + expression))
       const mutated = run()
@@ -79,6 +83,11 @@ test("the isolated contract uses the trusted harness file and the subject's impl
     const wire = run()
     expect(wire.status, wire.stderr).toBe(1)
     expect(wire.stderr).toContain("changed the wire model id")
+    fs.writeFileSync(catalog, implementation(false, false, true))
+    const swapped = run()
+    expect(swapped.status, swapped.stderr).toBe(1)
+    expect(swapped.stderr).toContain("assigned a tuple to the wrong model")
+    expect(swapped.stderr).toContain("example=two-model")
   } finally {
     fs.rmSync(directory, { recursive: true, force: true })
   }

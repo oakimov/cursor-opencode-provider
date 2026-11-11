@@ -233,6 +233,12 @@ if method == "GET":
     digest = hashlib.sha256(token.encode()).hexdigest() if token else "missing"
     with (state / "read-auth").open("a", encoding="utf-8") as handle:
         handle.write(digest + "\\n")
+if method == "GET" and endpoint == "user":
+    if os.environ.get("GH_USER_FAIL") == "1":
+        sys.stderr.write("HTTP 401\\n")
+        raise SystemExit(1)
+    json.dump({"id": int(os.environ.get("GH_USER_ID", "77"))}, sys.stdout)
+    raise SystemExit(0)
 if endpoint == "graphql":
     request = json.load(sys.stdin)
     query = request["query"]
@@ -3267,6 +3273,45 @@ print(json.dumps({"body":body,"comments":comments}))
       expect(refused.stderr).toContain("Refusing to create another review with summary text")
       expect(postsOf(f.state)).toBe(1)
       expect(JSON.parse(fs.readFileSync(path.join(f.state, "reviews.json"), "utf8"))).toHaveLength(1)
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  it("publishes beside another reviewer's stamped summary and still refuses a second one of its own", () => {
+    const f = freshReview("review-other-author-")
+    const env = { PATH: `${f.bin}:/usr/bin:/bin`, GH_STATE: f.state }
+    const source = path.join(f.directory, "result.json")
+    const other = {
+      id: 4, state: "COMMENTED", user: { id: 78 },
+      body: `Other reviewer.\n<!-- cursor-review:${"a".repeat(64)} -->\n`,
+      html_url: "https://github.com/oakimov/cursor-opencode-provider/pull/156#pullrequestreview-4",
+    }
+    fs.writeFileSync(path.join(f.state, "reviews.json"), JSON.stringify([{ request: {}, review: other }]))
+    try {
+      fs.writeFileSync(source, JSON.stringify(structuredResult({ outcome: "clean", findings: [], diff: [] })))
+      expect(renderReview(source, f.payload, env).status).toBe(0)
+      expect(run(["stamp", f.payload], env).status).toBe(0)
+      expect(approve(f.payload, f.approval, env).status).toBe(0)
+      const unread = run(["post", f.payload, f.approval], { ...env, GH_USER_FAIL: "1" })
+      expect(unread.status, unread.stderr).not.toBe(0)
+      expect(unread.stderr).toContain("The publishing identity could not be read")
+      expect(postsOf(f.state)).toBe(0)
+      const posted = run(["post", f.payload, f.approval], env)
+      expect(posted.status, posted.stderr).toBe(0)
+      expect(postsOf(f.state)).toBe(1)
+      const rows = JSON.parse(fs.readFileSync(path.join(f.state, "reviews.json"), "utf8"))
+      expect(rows.map((row: { review: { user: { id: number } } }) => row.review.user.id).sort()).toEqual([77, 78])
+      const secondPayload = path.join(f.directory, "second.json")
+      const secondApproval = path.join(f.directory, "second-approval.json")
+      const changed = structuredResult({ outcome: "clean", findings: [], diff: [] })
+      changed.checks[0]!.detail = "Read the changed files again."
+      fs.writeFileSync(source, JSON.stringify(changed))
+      expect(renderReview(source, secondPayload, env).status).toBe(0)
+      expect(run(["stamp", secondPayload], env).status).toBe(0)
+      expect(approve(secondPayload, secondApproval, env).status).toBe(0)
+      const refused = run(["post", secondPayload, secondApproval], env)
+      expect(refused.status, refused.stderr).not.toBe(0)
+      expect(refused.stderr).toContain("Refusing to create another review with summary text")
+      expect(postsOf(f.state)).toBe(1)
     } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
   })
 })
