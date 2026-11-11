@@ -51,6 +51,9 @@ Evaluation adapter (applies equally to both instruction snapshots):
   The local result has outcome (clean, findings, or incomplete), findings, and
   limits. Each finding has id, title, explanation, trigger, consequence,
   evidence, path, and line. Ledger candidates and findings share ids.
+  Use ledger version 2 and assess each candidate at head "local" before
+  considering other revisions. A defect present on that head stays actionable;
+  fixes at other pinned revisions belong in externalFixes, not a clean verdict.
   Use the ledger schema and enums in scripts/review-ledger.py. Record the
   candidate-validation, omission, and failed-work retry passes even with the
   baseline snapshot. For each relevant stateful operation, record the

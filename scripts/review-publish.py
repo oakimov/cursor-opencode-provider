@@ -155,7 +155,7 @@ def identity_of(payload: dict) -> str:
 
 RESULT_KEYS = {
     "owner", "repo", "pull", "base", "head", "runtime", "outcome",
-    "checks", "limitations", "diff", "prior", "findings", "mutations", "update",
+    "checks", "limitations", "diff", "prior", "findings", "mutations", "update", "externalFixes",
 }
 FINDING_KEYS = {
     "id", "severity", "rule", "title", "explanation", "trigger",
@@ -381,6 +381,22 @@ def validate_result(result: dict, *, require_commands: bool = False) -> list[str
             signatures.add(signature)
         if low > 5:
             problems.append("nits")
+    external_fixes = result.get("externalFixes", [])
+    if not isinstance(external_fixes, list):
+        problems.append("externalFixes")
+    else:
+        seen_fixes: set[tuple[str, str]] = set()
+        for index, fix in enumerate(external_fixes):
+            if (not isinstance(fix, dict) or set(fix) != {"finding", "revision", "detail"}
+                    or not isinstance(fix.get("finding"), str) or fix["finding"] not in finding_ids
+                    or not isinstance(fix.get("revision"), str) or not SHA.fullmatch(fix["revision"])
+                    or fix["revision"] == result.get("head") or not text_field(fix.get("detail"))):
+                problems.append(f"externalFixes[{index}]")
+                continue
+            pair = (fix["finding"], fix["revision"])
+            if pair in seen_fixes:
+                problems.append(f"externalFixes[{index}]")
+            seen_fixes.add(pair)
     prior = result.get("prior")
     if not isinstance(prior, list):
         problems.append("prior")
@@ -524,6 +540,10 @@ def public_review(result: dict) -> tuple[str, list[dict]]:
         lines.extend(["", "Findings:" if "update" in result else "Findings outside the current diff:"])
         for finding in outside:
             lines.extend(["", finding_text(finding, located=False)])
+    if result.get("externalFixes"):
+        lines.extend(["", "Fixes on other revisions (outside the reviewed head):"])
+        for fix in result["externalFixes"]:
+            lines.append(f"- {fix['finding']} at {fix['revision']}: {fix['detail'].strip()}")
     if result["prior"]:
         lines.extend(["", "Earlier findings:"])
         for item in result["prior"]:
@@ -1267,7 +1287,7 @@ def evidence_error(message: str) -> None:
     raise SystemExit(2)
 
 
-def compare_evidence(raw: bytes, result: dict) -> None:
+def compare_evidence(raw: bytes, result: dict, *, require_scope: bool = False) -> None:
     """Use the same validator as the standalone ledger commands; never cache bytecode."""
     try:
         ledger = json.loads(raw)
@@ -1277,7 +1297,7 @@ def compare_evidence(raw: bytes, result: dict) -> None:
             raise ValueError("validator unavailable")
         validator = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(validator)
-        problems = validator.compare_ledger(ledger, result)
+        problems = validator.compare_ledger(ledger, result, require_scope=require_scope)
     except (OSError, ValueError, UnicodeError):
         evidence_error("Review evidence is unreadable or its validator is unavailable. GitHub was not called.")
     if problems:
@@ -1288,7 +1308,7 @@ def evidence_name(payload: dict) -> str:
     evidence = payload.get("evidence")
     if (
         not isinstance(evidence, dict) or set(evidence) != {"version", "ledgerSha256"}
-        or type(evidence.get("version")) is not int or evidence["version"] != 1
+        or type(evidence.get("version")) is not int or evidence["version"] not in (1, 2)
         or not isinstance(evidence.get("ledgerSha256"), str)
         or not DIGEST.fullmatch(evidence["ledgerSha256"])
     ):
@@ -1313,6 +1333,8 @@ def require_evidence(path: Path, raw: bytes, payload: dict) -> bytes | None:
     if "evidence" not in payload and retained_legacy(raw, payload):
         return None
     name = evidence_name(payload)
+    if payload["evidence"]["version"] == 1 and not retained_legacy(raw, payload):
+        evidence_error("Unretained legacy evidence cannot bypass head assessment. Render again. GitHub was not called.")
     result = payload.get("result")
     if not isinstance(result, dict):
         evidence_error("Review evidence needs a structured result. GitHub was not called.")
@@ -1325,7 +1347,7 @@ def require_evidence(path: Path, raw: bytes, payload: dict) -> bytes | None:
         evidence_error("The bound review ledger is missing. Recover it or render again. GitHub was not called.")
     if hashlib.sha256(ledger).hexdigest() != payload["evidence"]["ledgerSha256"]:
         evidence_error("The bound review ledger changed. Render again and approve the new preview. GitHub was not called.")
-    compare_evidence(ledger, result)
+    compare_evidence(ledger, result, require_scope=payload["evidence"]["version"] == 2)
     return ledger
 
 
@@ -1537,9 +1559,9 @@ def stamp(path: Path) -> None:
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     refuse_scan(text.encode(), payload)
     path.write_text(text, encoding="utf-8")
-    if ledger is None:
+    if ledger is None or payload.get("evidence", {}).get("version") == 1:
         # Carry forward only a legacy snapshot already verified above.
-        retain_artifacts(text.encode(), payload)
+        retain_artifacts(text.encode(), payload, ledger=ledger)
     frozen = preview_path(path)
     if frozen.exists():
         frozen.chmod(0o644)
@@ -1975,7 +1997,7 @@ def render(source: Path, dest: Path, ledger_path: Path | None = None) -> None:
         ledger = (ledger_path or source.with_name("ledger.json")).read_bytes()
     except OSError:
         evidence_error("Review evidence ledger is missing. Complete ledger.json before rendering. GitHub was not called.")
-    compare_evidence(ledger, result)
+    compare_evidence(ledger, result, require_scope=True)
     body, comments = public_review(result)
     payload = {
         "owner": result["owner"],
@@ -1988,7 +2010,7 @@ def render(source: Path, dest: Path, ledger_path: Path | None = None) -> None:
         "body": body,
         "comments": comments,
         "result": result,
-        "evidence": {"version": 1, "ledgerSha256": hashlib.sha256(ledger).hexdigest()},
+        "evidence": {"version": 2, "ledgerSha256": hashlib.sha256(ledger).hexdigest()},
     }
     if "update" in result:
         payload["update"] = result["update"]

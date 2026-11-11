@@ -62,6 +62,15 @@ to child writers, but must restore it before returning. A leaked override
 fails that test and is cleared before the next one. Subprocess regressions in
 `test/test-isolation.test.ts` exercise inherited settings and that recovery.
 
+New review evidence also records each candidate's status on the exact PR
+head. A defect declared present must remain a finding even when another
+commit fixes it; that fix appears separately in the summary. Rendering rejects
+missing head assessments and contradictory dispositions. See
+[the revision rules](pr-review.md#reviewed-head-and-fixes-elsewhere) for the
+version 2 ledger/result fields and retained-preview compatibility. These tests
+verify the gate, not whether an agent's assessment is correct. Maintainers
+still test reviewer behavior before accepting an instruction change.
+
 ### Live OpenCode tests
 
 Unit tests never load a real OpenCode process against Cursor. The live path

@@ -6,6 +6,11 @@ A review reports findings. It does not approve or merge the pull request. The ma
 
 Cite `file:line`. State the concrete consequence. Confirm the finding is in the diff or in a file you read. Say what you could not check. Do not praise. Do not pad. If nothing is wrong, say so.
 
+The verdict applies to the bound PR head. Assess a fix on main or another
+revision separately; it cannot silently remove a defect still present on
+that head. The procedure's versioned ledger and `externalFixes` record this
+distinction in the evidence and public summary.
+
 Pending review artifacts belong in the persistent, gitignored review store.
 Keep them through approval waits and failures. Delete them only after confirmed
 publication or an explicit discard instruction; routine cleanup and denial of

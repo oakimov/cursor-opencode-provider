@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test"
 import {
   CURSOR_VARIANT_PARAMETERS_KEY,
+  extractCursorVariantParameters,
   mapAvailableModelsResponse,
   normalizeModelCache,
   resolveVariantMaxMode,
@@ -28,6 +29,40 @@ function variant(context: string, effort: string, fast = false): ModelVariant {
 }
 
 describe("adversarial model selection", () => {
+  it.each(["effort", "reasoning", "reasoning_effort"])(
+    "keeps the host's default sentinel out of published variant ids (%s)",
+    (effort) => {
+      // AvailableModels parameters are strings. A valid upstream value can
+      // collide with a host control id even when its display label is safe.
+      const models = mapAvailableModelsResponse({ models: [{ name: "sentinel-fixture", variants: [
+        { displayName: "High", isDefaultNonMaxConfig: true,
+          parameterValues: [{ id: effort, value: "high" }] },
+        { displayName: "Provider Default",
+          parameterValues: [{ id: effort, value: "default" }] },
+        { displayName: "default",
+          parameterValues: [{ id: effort, value: "low" }] },
+      ] }] })
+      const expected = ["high", "default", "low"].map((value) => [{ id: effort, value }])
+      const classic = modelsToConfig(models)["sentinel-fixture"]
+      const modern = modelsToCatalogModelMap(models)["sentinel-fixture"]!
+
+      // Both hosts interpret `default` as no explicit override, so advertising
+      // it as a selectable tuple would silently select another variant.
+      expect(Object.hasOwn(classic.variants, "default")).toBe(false)
+      expect(modern.variants.some((choice) => choice.id === "default")).toBe(false)
+      for (const [index, label] of ["High", "Provider Default", "Standard"].entries()) {
+        const parameters = expected[index]!
+        expect(extractCursorVariantParameters(classic.variants[label])).toEqual(parameters)
+        const choice = modern.variants.find((item) => item.id === label)
+        expect(choice).toBeDefined()
+        const picked = extractCursorVariantParameters(choice?.settings)
+        expect(picked).toEqual(parameters)
+        expect(resolveVariantParameters(models[0], { picked })).toEqual(parameters)
+      }
+      expect(resolveVariantParameters(models[0])).toEqual(expected[0]!)
+    },
+  )
+
   it("advertises recorded image input for every context/Fast entry on both hosts despite a false live flag", () => {
     const [model] = mapAvailableModelsResponse({ models: [{
       name: "grok-4.7", supportsImages: false,

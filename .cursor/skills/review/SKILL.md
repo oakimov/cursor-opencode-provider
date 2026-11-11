@@ -65,6 +65,12 @@ outside `src/`.
    suspected state machine or hand it the expected result. A helper test, an
    immediate exit status, or a mocked transition does not establish the
    behavior the orchestration owns.
+   For generated names or aliases, check the receiving host's reserved ids,
+   sentinels and normalization rules as well as collisions in the producer.
+   Use schema-valid upstream values outside the current sample, and follow a
+   published choice through selection to the consumed settings or request.
+   Local uniqueness and equal alias settings do not prove that the host
+   applies those settings. Preserve an ordinary selectable label as a control.
    When fixed behavior becomes configurable, also run the affected test
    entrypoint with a supported setting inherited from its caller. A clean
    environment and tests that set their own overrides do not establish that
@@ -121,6 +127,25 @@ and downstream consequence, and why that outcome violates the contract. An
 error return, a thrown exception, a conservative rejection, or a red check is
 an observation, not by itself a defect. Reproduction proves the behavior you
 exercised. It does not prove that a preferred alternative is correct.
+
+Assess each candidate at the exact bound PR head before classifying it.
+Use ledger `version: 2` and an `assessment` with `head`, `status`, `basis`, and
+`elsewhere`. Status is `present` for a contract violation on that head,
+`absent` for a defect verified fixed or unreachable on that head,
+`not-a-defect` for a disproved contract violation or a policy/operational
+limitation, and `unverified` for a hypothesis. `present` must be `actionable`;
+an error attributed to the environment is not automatically a code defect.
+
+The harness checkout, target branch, merged tree and PR head can differ. A fix
+on another revision does not repair the bound head. Record each comparison
+in `elsewhere` as `{ revision, status, basis }`, with a full commit SHA and
+status `fixed`, `present`, or `unverified`. Keep a defect present at the head
+in the findings even when another revision fixes it; include each such fix in
+the result's `externalFixes` as `{ finding, revision, detail }`. Explain that
+the fix is outside the reviewed head. Do not replace the head's verdict with
+a merged-tree verdict, or erase the violated contract to label it operational.
+When the PR head itself changes to contain the repair, rebind/re-review it;
+only evidence from that head can establish that the defect is absent there.
 
 Tests are evidence of intent, not an infallible specification. If a test
 encodes a defect, name the independently supported contract it violates. An

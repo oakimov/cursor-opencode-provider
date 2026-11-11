@@ -115,6 +115,45 @@ review shows the failure, exit code, cause and evidence. A code verdict is not
 a passing test result or merge approval, and the live credential gate still
 requires the isolated check to exit zero.
 
+### Reviewed head and fixes elsewhere
+
+New ledgers use `version: 2`. Every candidate records the assessment at the
+bound PR head, independently of the harness checkout or target branch:
+
+```json
+"assessment": {
+  "head": "<full-reviewed-head-sha>",
+  "status": "present",
+  "basis": "Source and experiment showing the contract violation on this head.",
+  "elsewhere": [{
+    "revision": "<full-other-commit-sha>",
+    "status": "fixed",
+    "basis": "Source and regression establishing the separate repair."
+  }]
+}
+```
+
+`present` requires an actionable finding. `absent` requires `refuted` and
+evidence that the defect is fixed or unreachable on the reviewed head.
+`not-a-defect` permits a refutation, policy proposal or operational limitation;
+`unverified` is a hypothesis. These declarations must follow the contract and
+observations; schema validation cannot determine whether their reasoning is
+correct. A missing tool or an expected fail-closed response can still be a
+legitimate non-defect.
+
+A separate repair cannot turn a head defect into an operational dismissal.
+Keep that finding and add `externalFixes` to the result, with one
+`{ finding, revision, detail }` per pinned `fixed` comparison for it. The
+publisher renders these under "Fixes on other revisions (outside the reviewed
+head)". The detail is public; use repository-relative evidence and state what
+the separate commit fixes. Another tree's successful tests are not the head's
+test results. A new head containing the repair needs a new review and preview.
+
+Rendering requires the new ledger format and binds evidence version 2 to the
+payload. Preview, approval and publication recheck it. Already-retained legacy
+previews remain recoverable with their original bytes and approval flow;
+fresh payloads cannot select legacy evidence to bypass this requirement.
+
 `bind` reads the pull request and records its base and head. When the result file already has a different revision, `bind` stops and leaves the file unchanged. `render` checks the result and writes the payload. `REVIEW_OUTCOME=incomplete` means the analysis did not reach a defensible review: the diff was unreadable, required analysis was unavailable, or the result is malformed. That file can be read and cannot be stamped or posted. Rendering is not publication. Showing the preview is not approval. Approval is not a merge.
 
 Structured results require an `adversarial` check in addition to `diff` and test
@@ -162,6 +201,12 @@ the orchestration that owns a later retry or consumer is still wrong. A live
 `pong` covers plugin loading and the reply path only. Missing optional live
 evidence is a limitation. Required analysis that could not be performed is an
 incomplete review.
+
+When a change generates ids or aliases, verify the receiving host's reserved
+values and selection behavior. Exercise schema-valid input beyond the current
+catalog sample, and compare the generated choice with its original label at
+the consumed settings or request. The review skill describes that experiment;
+`test/model-selection-review.test.ts` guards the host's `default` sentinel.
 
 A behavior that acquires, starts, delegates, or cleans up a resource also
 records its ownership postconditions: an `ownership` entry naming the owner,

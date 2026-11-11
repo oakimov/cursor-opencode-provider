@@ -514,6 +514,7 @@ function writeLegacyPayload(payload: string, text: string): void {
 
 function evidenceLedger(result: ReturnType<typeof structuredResult>) {
   return {
+    version: 2,
     revision: result.head,
     behaviors: [{
       id: "publication", summary: "Synthetic publication fixture",
@@ -531,6 +532,7 @@ function evidenceLedger(result: ReturnType<typeof structuredResult>) {
       consequence: finding.consequence, violation: "A replacement is sent.",
       evidenceKind: "synthetic", setup: "synthetic", provenance: "introduced",
       policyConflict: false, citedRequirement: "",
+      assessment: { head: result.head, status: "present", basis: finding.explanation, elsewhere: [] },
     })),
     omissions: [], omissionsNone: "Fixture omission pass completed.",
     retries: [], retriesNone: "No refresh operation in this fixture.",
@@ -3147,6 +3149,141 @@ describe("review thread resolution", () => {
 })
 
 describe("review evidence gate", () => {
+  it("keeps a defect on the reviewed head actionable when another revision fixes it", () => {
+    const { directory, payload, approval, bin, state } = freshReview("review-revision-scope-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    const source = path.join(directory, "result.json")
+    const ledgerPath = path.join(directory, "ledger.json")
+    const result = structuredResult()
+    const original = evidenceLedger(result)
+    const candidate = { ...original.candidates[0]!, assessment: {
+      head, status: "present", basis: "The reviewed head still sends the replacement.",
+      elsewhere: [{ revision: otherHead, status: "fixed", basis: "The other revision pins the operation." }],
+    } }
+    const ledger = { ...original, candidates: [candidate] }
+    const externalFixes = [{ finding: candidate.id, revision: otherHead,
+      detail: "The separate commit pins the operation; the reviewed head still has the defect." }]
+    try {
+      fs.writeFileSync(source, JSON.stringify(structuredResult({ outcome: "clean", findings: [] })))
+      // The former shape admitted a clean verdict after the agent relabelled
+      // the reproduced problem operational because another tree repaired it.
+      fs.writeFileSync(ledgerPath, JSON.stringify({ ...ledger, candidates: [{ ...candidate,
+        disposition: "operational", violation: "", provenance: "not-applicable",
+      }] }))
+      const dismissed = run(["render", source, payload], env)
+      expect(dismissed.status, dismissed.stderr).toBe(2)
+      expect(dismissed.stderr).toContain("assessment.disposition")
+      expect(fs.existsSync(payload)).toBe(false)
+
+      fs.writeFileSync(ledgerPath, JSON.stringify(ledger))
+      const clean = run(["render", source, payload], env)
+      expect(clean.status, clean.stderr).toBe(2)
+      expect(clean.stderr).toContain("findings.candidates")
+      fs.writeFileSync(source, JSON.stringify(result))
+      const hiddenFix = run(["render", source, payload], env)
+      expect(hiddenFix.status, hiddenFix.stderr).toBe(2)
+      expect(hiddenFix.stderr).toContain("externalFixes.candidates")
+
+      fs.writeFileSync(source, JSON.stringify(structuredResult({ externalFixes })))
+      const rendered = run(["render", source, payload], env)
+      expect(rendered.status, rendered.stderr).toBe(0)
+      const value = JSON.parse(fs.readFileSync(payload, "utf8"))
+      expect(value.evidence.version).toBe(2)
+      expect(value.body).toContain("1 actionable finding.")
+      expect(value.body).toContain("outside the reviewed head")
+      expect(value.body).toContain(otherHead)
+      expect(value.head).toBe(head)
+      expect(value.comments).toHaveLength(1)
+      expect(run(["stamp", payload], env).status).toBe(0)
+      expect(approve(payload, approval, env).status).toBe(0)
+      expect(run(["post", payload, approval], env).status).toBe(0)
+      expect(postBodies(state)).toContain("1 actionable finding.")
+      expect(postBodies(state)).toContain(otherHead)
+      expect(postsOf(state)).toBe(1)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("distinguishes a fixed reviewed head and a genuine operational limitation from a fix elsewhere", () => {
+    const { directory, payload, bin, state } = freshReview("review-head-assessment-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    const source = path.join(directory, "result.json")
+    const ledgerPath = path.join(directory, "ledger.json")
+    const original = evidenceLedger(structuredResult())
+    const candidate = { ...original.candidates[0]!, disposition: "operational", violation: "",
+      provenance: "not-applicable", assessment: { head, status: "not-a-defect",
+        basis: "The environment lacks a required tool; source behavior satisfies its contract.", elsewhere: [] },
+    }
+    const render = (value: unknown) => {
+      fs.writeFileSync(ledgerPath, JSON.stringify(value))
+      return run(["render", source, payload], env)
+    }
+    try {
+      fs.writeFileSync(source, JSON.stringify(structuredResult({ outcome: "clean", findings: [] })))
+      const ledger = { ...original, candidates: [candidate] }
+      expect(render(ledger).status).toBe(0)
+      const fixedHead = { ...candidate, disposition: "refuted", assessment: {
+        head, status: "absent", basis: "The repair is already in the reviewed head, verified at the source and regression.", elsewhere: [],
+      } }
+      expect(render({ ...ledger, candidates: [fixedHead] }).status).toBe(0)
+      for (const [assessment, diagnostic] of [
+        [{ ...candidate.assessment, head: otherHead }, "assessment.head"],
+        [{ ...candidate.assessment, status: "present" }, "assessment.disposition"],
+        [{ ...candidate.assessment, status: ["present"] }, "assessment.status"],
+        [{ ...candidate.assessment, basis: "" }, "assessment.basis"],
+        [{ ...candidate.assessment, elsewhere: [{ revision: otherHead, status: "fixed", basis: "Separate repair." }] }, "head-status"],
+        [{ ...fixedHead.assessment, elsewhere: [{ revision: "main", status: "fixed", basis: "A moving branch is not evidence." }] }, ".revision"],
+        [{ ...fixedHead.assessment, elsewhere: [{ revision: head, status: "fixed", basis: "The same revision is not elsewhere." }] }, ".revision"],
+      ] as const) {
+        const refused = render({ ...ledger, candidates: [{ ...candidate, assessment }] })
+        expect(refused.status, refused.stderr).toBe(2)
+        expect(refused.stderr).toContain(diagnostic)
+      }
+      const old = { ...original, version: 1,
+        candidates: original.candidates.map(({ assessment: _assessment, ...item }) => item),
+      }
+      const legacy = render(old)
+      expect(legacy.status, legacy.stderr).toBe(2)
+      expect(legacy.stderr).toContain("ledger.version")
+      expect(callsOf(state)).toEqual([])
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("recovers retained version-one evidence without allowing a fresh downgrade", () => {
+    const { directory, payload, approval, bin, state } = freshReview("review-scope-legacy-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    const source = path.join(directory, "result.json")
+    const result = structuredResult()
+    try {
+      fs.writeFileSync(source, JSON.stringify(result))
+      expect(renderReview(source, payload, env).status).toBe(0)
+      const value = JSON.parse(fs.readFileSync(payload, "utf8"))
+      const ledger = evidenceLedger(result)
+      const legacy = JSON.stringify({ ...ledger, version: 1,
+        candidates: ledger.candidates.map(({ assessment: _assessment, ...item }) => item),
+      })
+      value.evidence = { version: 1, ledgerSha256: createHash("sha256").update(legacy).digest("hex") }
+      fs.writeFileSync(path.join(directory, `ledger-${value.evidence.ledgerSha256}.json`), legacy)
+      fs.writeFileSync(payload, JSON.stringify(value, null, 2) + "\n")
+      const refused = run(["stamp", payload], env)
+      expect(refused.status, refused.stderr).toBe(2)
+      expect(refused.stderr).toContain("Unretained legacy evidence")
+      writeLegacyPayload(payload, JSON.stringify(value))
+      const original = fs.readFileSync(payload)
+      expect(run(["show", payload], env).status).toBe(0)
+      expect(fs.readFileSync(payload)).toEqual(original)
+      expect(run(["stamp", payload], env).status).toBe(0)
+      expect(approve(payload, approval, env).status).toBe(0)
+      expect(run(["post", payload, approval], env).status).toBe(0)
+      expect(postsOf(state)).toBe(1)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
   it("requires a matching completed ledger and an isolated command result before rendering", () => {
     const { directory, payload, bin, state } = freshReview("review-evidence-render-")
     const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
