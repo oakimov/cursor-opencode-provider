@@ -68,6 +68,12 @@ These are failure lessons shared by both hosts, not a replacement for
   retaining the original selectable label (`host's default sentinel` in
   `test/model-selection-review.test.ts`); distinguish synthetic metadata from
   an observed Cursor catalog entry.
+  A review that passes a tuple directly to the provider resolver still has not
+  tested the host's id selector. Harness-only tests are absent from an older
+  subject archive, so run trusted contract checks against that subject before
+  its own suite (`scripts/review-model-contracts.mjs`,
+  `test/review-model-contracts.test.ts`). Keep that synthetic invariant check
+  distinct from a native host observation and from new defect discovery.
 - **Dynamic discovery must include invocation identity.** The inner schema hid
   required outer `namespace`/`toolName`; server-side wrapper failures may appear
   only in display completion (`test/dynamic-catalog.test.ts`).

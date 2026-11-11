@@ -14,6 +14,7 @@
 ### Changed
 
 - New review ledgers assess candidates at the exact PR head and report fixes on other commits separately. Missing or contradictory head assessments stop rendering; already-retained previews remain recoverable. See the [review procedure](docs/pr-review.md#reviewed-head-and-fixes-elsewhere).
+- Isolated PR checks run harness-owned model catalog contracts against the archived subject before its unit suite, including reserved variant ids and preservation of original choices. A failed contract blocks the live credential handoff even when the PR's older tests omit that case.
 - Re-reviews update the reviewer's existing summary post after a new approved preview, keeping its URL and earlier inline threads. `review-publish.py reviews` inventories target snapshots; changed or unconfirmed updates never fall back to a duplicate post ([#187](https://github.com/oakimov/cursor-opencode-provider/pull/187)).
 - OpenCode variant picker keys are now the delta after the model name (`Extra High`, `No Thinking Low`, `High 500k`) instead of repeating the full Cursor display string; Fast and dedicated context-tier entries (`-500k`, `-1m`) also drop their redundant `Fast` / tier token, and variants are ordered No Thinking → Thinking then Low → Max.
 

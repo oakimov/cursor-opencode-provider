@@ -301,7 +301,16 @@ For every pull request, run the isolated check. It fetches that revision, copies
 scripts/isolated-check.sh <pr-number-or-url>
 ```
 
-A pull URL must name this checkout's origin. The copy has no `.git` directory. Install, build, typecheck, and `bun test` run inside `scripts/isolate-run.sh`. Exit 0 means those checks passed. Exit 1 is a check failure. Exit 2 is a bad invocation or an unavailable isolation mechanism. The log line `Check root:` is private.
+A pull URL must name this checkout's origin. The copy has no `.git` directory. Install, build, typecheck, harness model contracts, and `bun test` run inside `scripts/isolate-run.sh`. Exit 0 means those checks passed. Exit 1 is a check failure. Exit 2 is a bad invocation or an unavailable isolation mechanism. The log line `Check root:` is private.
+
+`MODEL_CONTRACTS` runs the review harness's read-only
+`scripts/review-model-contracts.mjs` against the subject's source and installed
+dependencies. It checks known catalog invariants independently of the subject's
+tests, including host-reserved variant ids and preservation of original tuples.
+Its failure stops the checks and withholds the live credential. Do not replace
+it with a pass from the harness checkout. It uses synthetic metadata and does
+not load a host or call Cursor. It does not replace tracing the receiving
+host's selection behavior or discovering new counterexamples.
 
 Record an `exitCode` for every executed command check in a new result. Capture
 the reviewed command's status, including when saving its output through a

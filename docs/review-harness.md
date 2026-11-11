@@ -40,6 +40,7 @@ That path is not the untrusted-PR boundary.
 | `scripts/review-publish.py` | start → bind → render → stamp → show → approve/deny → post |
 | `scripts/review-ledger.py` | private completion evidence |
 | `scripts/isolated-check.sh` / `isolate-run.sh` | untrusted PR checks |
+| `scripts/review-model-contracts.mjs` | harness-owned catalog invariants, run against the archived PR source |
 | `scripts/complete-resolutions.py` | finish approved thread resolves after a confirmed review |
 | `scripts/cloud-agent-install.sh` | Cloud Agent bootstrap |
 | `eval/review/` | offline detection fixtures and scorer |

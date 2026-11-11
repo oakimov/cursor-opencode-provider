@@ -32,6 +32,7 @@ source "$ROOT/scripts/isolate-run.sh"
 worktree=""
 isolate_home=""
 isolate_tmp=""
+isolate_contracts=""
 pr=""
 pr_slug=""
 origin_slug=""
@@ -49,6 +50,10 @@ check_cleanup() {
   if [[ -n "$isolate_tmp" ]]; then
     rm -rf "$isolate_tmp"
     isolate_tmp=""
+  fi
+  if [[ -n "$isolate_contracts" ]]; then
+    rm -rf "$isolate_contracts"
+    isolate_contracts=""
   fi
 }
 
@@ -216,8 +221,13 @@ check_supervise() {
 
 # Run a command inside the filesystem and process boundary.
 check_run_isolated() {
+  if [[ -z "$isolate_contracts" ]]; then
+    isolate_contracts="$(mktemp -d "${TMPDIR:-/tmp}/cursor-review-contracts.XXXXXX")"
+    cp "$ROOT/scripts/review-model-contracts.mjs" "$isolate_contracts/review-model-contracts.mjs" || return 2
+  fi
   check_supervise --src "${ISOLATE_SRC:-$PWD}" \
-    --tool bun --tool node --tool git --tool python3 -- "$@"
+    --tool bun --tool node --tool git --tool python3 \
+    --ro-bind "$isolate_contracts:/opt/harness/scripts" -- "$@"
 }
 
 # Load the archived tree with this checkout's harness. Tests replace this.
@@ -308,6 +318,9 @@ check_main() {
     check_step BUILD bun run build || checks=$?
     if [[ "$checks" -eq 0 ]]; then
       check_step TYPECHECK bun run typecheck || checks=$?
+    fi
+    if [[ "$checks" -eq 0 ]]; then
+      check_step MODEL_CONTRACTS bun /opt/harness/scripts/review-model-contracts.mjs /src || checks=$?
     fi
     if [[ "$checks" -eq 0 ]]; then
       check_step UNIT_TESTS bun test || checks=$?
