@@ -395,11 +395,16 @@ recovered from the existing post; an unsettled update is not blindly resent.
 
 The review URL remains the same. GitHub retains its original `commit_id` and
 inline anchors, so the updated summary explicitly names the newly reviewed
-head and verdict. A submitted review cannot accept new threads through that
-summary endpoint. The publisher creates new anchored findings with GitHub's
-[native review-comment endpoint](https://docs.github.com/en/rest/pulls/comments#create-a-review-comment-for-a-pull-request),
-using the approved head, path, line and side. These are code threads, not issue
-comments or another summary post. GitHub owns their review-record grouping.
+head and verdict. A finding that is posted inline is omitted from that summary;
+the summary keeps the finding count, the checks, and any finding outside the
+diff. A submitted review cannot accept new threads through the summary update.
+New anchored findings from one re-review go out together as one COMMENT review
+whose body is empty, using the approved head, path, line and side. That review
+is not a second summary. `post` refuses to create another review when its body
+contains summary text and a stamped summary already exists. An owned comment
+whose anchor is still the current head is edited in place. A fixed finding
+resolves its existing thread and leaves that comment; it does not open another
+review.
 
 The `reviews` inventory includes each review's native `comments`, their `id`,
 `user.id`, `commit_id`, anchor and `bodySha256`. For an existing inline finding,

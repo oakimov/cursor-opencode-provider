@@ -545,6 +545,8 @@ def public_review(result: dict, *, inline_updates: bool = False) -> tuple[str, l
             comments.append(comment)
         else:
             outside.append(finding)
+    # Comments carry the finding text. The summary keeps a count and any
+    # finding that has no inline comment, including one outside the diff.
     count = len(result["findings"])
     if result["outcome"] == "clean":
         opening = "No actionable findings."
@@ -1352,6 +1354,51 @@ def inline_targets(payload: dict) -> list[dict]:
     return payload["comments"] if inline_comments_enabled(payload) and "update" in payload else []
 
 
+def refuse_second_summary(body: str, reviews: list[dict], owner: str, repo: str, pull: int) -> None:
+    """One harness summary per pull request. A later review may carry only inline comments."""
+    if not isinstance(body, str) or not body.strip():
+        return
+    for review in reviews:
+        text = review.get("body")
+        if isinstance(text, str) and MARKER.search(text) and review_matches(review, owner, repo, pull):
+            raise SystemExit(
+                "A summary review already exists. Refusing to create another review with summary text. No review was created."
+            )
+
+
+def inline_review_request(payload: dict, expected: list[dict]) -> dict:
+    request = {
+        "commit_id": payload["head"],
+        "body": "",
+        "event": "COMMENT",
+        "comments": [{key: item[key] for key in ("path", "line", "side", "body")} for item in expected],
+    }
+    if request["body"] != "":
+        raise SystemExit("An inline review must not carry summary text. No review was created.")
+    return request
+
+
+def placed_new_comments(payload: dict, comments: list[dict], expected: list[dict]) -> list[dict] | None:
+    """New re-review comments must share one empty-body review that is not the summary."""
+    found = []
+    for item in expected:
+        visible = visible_inline(payload, item, comments)
+        if visible is None:
+            return None
+        found.append(visible)
+    review_ids = {item.get("pull_request_review_id") for item in found}
+    if len(review_ids) != 1:
+        return None
+    review_id = next(iter(review_ids))
+    if type(review_id) is not int or review_id == payload["update"]["review"]:
+        return None
+    review = review_with_id(reviews_of(payload["owner"], payload["repo"], payload["pull"]), review_id)
+    if (review is None or not review_matches(review, payload["owner"], payload["repo"], payload["pull"])
+            or (review.get("body") or "") != ""):
+        return None
+    return found
+
+
 def inline_owned(payload: dict, comment: object) -> bool:
     if not isinstance(comment, dict) or type(comment.get("id")) is not int or comment["id"] < 1:
         return False
@@ -1410,6 +1457,14 @@ def require_inline_complete(payload: dict, journal: dict) -> None:
         raise SystemExit("Inline publication is incomplete; artifacts remain pending. Retry post with the same approved payload.")
 
 
+def remember_inline(journal: dict, states: dict, checkpoint_path: Path, expected: dict, visible: dict) -> None:
+    states[expected["finding"]] = {"state": "posted", "comment_id": visible["id"], "url": visible["html_url"]}
+    journal["comment_ids"] = sorted(set(journal.get("comment_ids", []) + [visible["id"]]))
+    journal["comment_urls"] = sorted(set(journal.get("comment_urls", []) + [visible["html_url"]]))
+    write_checkpoint(checkpoint_path, journal)
+    print(f"COMMENT_URL={visible['html_url']}")
+
+
 def publish_inline_comments(payload_path: Path, approval_path: Path, payload: dict, pinned: tuple, checkpoint_path: Path) -> None:
     targets = inline_targets(payload)
     if not targets:
@@ -1421,6 +1476,8 @@ def publish_inline_comments(payload_path: Path, approval_path: Path, payload: di
     states = journal.setdefault("inline_comments", {})
     if not isinstance(states, dict):
         raise SystemExit("The inline publication journal is unreadable.")
+    creates: list[dict] = []
+    patches: list[tuple[dict, dict]] = []
     for expected in targets:
         identifier = expected["finding"]
         comments = comments_of(owner, repo, pull)
@@ -1429,59 +1486,101 @@ def publish_inline_comments(payload_path: Path, approval_path: Path, payload: di
         previous = states.get(identifier, {})
         if not isinstance(previous, dict):
             raise SystemExit("The inline publication journal is unreadable.")
-        if visible is None:
-            if previous.get("state") in {"sending", "posted"}:
-                raise SystemExit("Inline delivery is unconfirmed, deleted, or changed. No automatic resend; refresh the review.")
-            bound = checked_inline_snapshot(payload, expected, comments)
-            marker = f"<!-- cursor-finding:{identifier} -->"
-            if bound is None and any(inline_owned(payload, item) and item.get("commit_id") == payload["head"]
-                                     and marker in str(item.get("body", "")) for item in comments):
-                raise SystemExit("This finding already has an inline comment. Bind its snapshot instead of creating a duplicate.")
-            # A submitted review only accepts summary edits. Use GitHub's native
-            # line-comment endpoint; never turn the finding into an issue post.
-            updating = bound is not None and inline_anchor(payload, expected, bound)
-            endpoint = f"repos/{owner}/{repo}/pulls/comments/{bound['id']}" if updating else f"repos/{owner}/{repo}/pulls/{pull}/comments"
-            request = {"body": expected["body"]} if updating else {
-                "commit_id": payload["head"], **{key: expected[key] for key in ("path", "line", "side", "body")},
-            }
-            summary = review_with_id(reviews_of(owner, repo, pull), payload["update"]["review"])
-            checked_update_review(payload, summary, delivered=True)
-            # Re-read a bound comment immediately before its mutation too.
-            if bound is not None:
-                checked_inline_snapshot(payload, expected, comments_of(owner, repo, pull))
-            head, base, readable = read_pull(owner, repo, pull)
-            reject_moved_revision(head, base, readable, payload["head"], payload["base"])
-            require_same_operation(payload_path, approval_path, pinned)
-            states[identifier] = {"state": "sending"}
-            write_checkpoint(checkpoint_path, journal)
-            try:
-                require_same_operation(payload_path, approval_path, pinned)
-            except SystemExit:
-                states[identifier] = previous
-                write_checkpoint(checkpoint_path, journal)
-                raise
-            code, raw, detail = gh_api("PATCH" if updating else "POST", endpoint, request, token=_publication_token)
-            require_same_operation(payload_path, approval_path, pinned)
-            if code == 0:
-                created = json_object(raw)
-                if (not inline_owned(payload, created) or not inline_anchor(payload, expected, created)
-                        or created.get("body") != expected["body"] or (updating and created["id"] != bound["id"])):
-                    raise SystemExit("GitHub did not confirm the approved inline target. No automatic resend.")
-            comments = comments_of(owner, repo, pull)
-            require_same_operation(payload_path, approval_path, pinned)
-            visible = visible_inline(payload, expected, comments)
-            if visible is None:
-                if code and PROVEN_REJECTION.search(detail.decode("utf-8", errors="replace")):
-                    states[identifier] = {"state": "rejected"}
-                    write_checkpoint(checkpoint_path, journal)
-                if detail:
-                    print(redact_secret(detail.decode("utf-8", errors="replace")), file=sys.stderr)
-                raise SystemExit("Inline delivery is unconfirmed. The summary is posted; inline publication remains pending.")
-        states[identifier] = {"state": "posted", "comment_id": visible["id"], "url": visible["html_url"]}
-        journal["comment_ids"] = sorted(set(journal.get("comment_ids", []) + [visible["id"]]))
-        journal["comment_urls"] = sorted(set(journal.get("comment_urls", []) + [visible["html_url"]]))
+        if visible is not None:
+            remember_inline(journal, states, checkpoint_path, expected, visible)
+            continue
+        if previous.get("state") in {"sending", "posted"}:
+            raise SystemExit("Inline delivery is unconfirmed, deleted, or changed. No automatic resend; refresh the review.")
+        bound = checked_inline_snapshot(payload, expected, comments)
+        marker = f"<!-- cursor-finding:{identifier} -->"
+        if bound is None and any(inline_owned(payload, item) and item.get("commit_id") == payload["head"]
+                                 and marker in str(item.get("body", "")) for item in comments):
+            raise SystemExit("This finding already has an inline comment. Bind its snapshot instead of creating a duplicate.")
+        if bound is not None and inline_anchor(payload, expected, bound):
+            patches.append((expected, bound))
+        else:
+            creates.append(expected)
+    for expected, bound in patches:
+        identifier = expected["finding"]
+        previous = states.get(identifier, {})
+        summary = review_with_id(reviews_of(owner, repo, pull), payload["update"]["review"])
+        checked_update_review(payload, summary, delivered=True)
+        checked_inline_snapshot(payload, expected, comments_of(owner, repo, pull))
+        head, base, readable = read_pull(owner, repo, pull)
+        reject_moved_revision(head, base, readable, payload["head"], payload["base"])
+        require_same_operation(payload_path, approval_path, pinned)
+        states[identifier] = {"state": "sending"}
         write_checkpoint(checkpoint_path, journal)
-        print(f"COMMENT_URL={visible['html_url']}")
+        try:
+            require_same_operation(payload_path, approval_path, pinned)
+        except SystemExit:
+            states[identifier] = previous
+            write_checkpoint(checkpoint_path, journal)
+            raise
+        code, raw, detail = gh_api(
+            "PATCH", f"repos/{owner}/{repo}/pulls/comments/{bound['id']}", {"body": expected["body"]}, token=_publication_token,
+        )
+        require_same_operation(payload_path, approval_path, pinned)
+        if code == 0:
+            created = json_object(raw)
+            if (not inline_owned(payload, created) or not inline_anchor(payload, expected, created)
+                    or created.get("body") != expected["body"] or created.get("id") != bound["id"]):
+                raise SystemExit("GitHub did not confirm the approved inline target. No automatic resend.")
+        comments = comments_of(owner, repo, pull)
+        require_same_operation(payload_path, approval_path, pinned)
+        visible = visible_inline(payload, expected, comments)
+        if visible is None:
+            if code and PROVEN_REJECTION.search(detail.decode("utf-8", errors="replace")):
+                states[identifier] = {"state": "rejected"}
+                write_checkpoint(checkpoint_path, journal)
+            if detail:
+                print(redact_secret(detail.decode("utf-8", errors="replace")), file=sys.stderr)
+            raise SystemExit("Inline delivery is unconfirmed. The summary is posted; inline publication remains pending.")
+        remember_inline(journal, states, checkpoint_path, expected, visible)
+    if creates:
+        summary = review_with_id(reviews_of(owner, repo, pull), payload["update"]["review"])
+        checked_update_review(payload, summary, delivered=True)
+        head, base, readable = read_pull(owner, repo, pull)
+        reject_moved_revision(head, base, readable, payload["head"], payload["base"])
+        require_same_operation(payload_path, approval_path, pinned)
+        previous_states = {item["finding"]: states.get(item["finding"], {}) for item in creates}
+        for item in creates:
+            states[item["finding"]] = {"state": "sending"}
+        write_checkpoint(checkpoint_path, journal)
+        try:
+            require_same_operation(payload_path, approval_path, pinned)
+        except SystemExit:
+            for item in creates:
+                states[item["finding"]] = previous_states[item["finding"]]
+            write_checkpoint(checkpoint_path, journal)
+            raise
+        # One empty-body review holds every new comment. A submitted summary
+        # cannot gain comments, and one comment POST would open one review each.
+        request = inline_review_request(payload, creates)
+        refuse_second_summary(request["body"], reviews_of(owner, repo, pull), owner, repo, pull)
+        code, raw, detail = gh_api("POST", f"repos/{owner}/{repo}/pulls/{pull}/reviews", request, token=_publication_token)
+        require_same_operation(payload_path, approval_path, pinned)
+        if code == 0:
+            created = json_object(raw)
+            if (not isinstance(created, dict) or created.get("body") != ""
+                    or type(created.get("id")) is not int or created["id"] == payload["update"]["review"]
+                    or not review_matches(created, owner, repo, pull)):
+                raise SystemExit("GitHub did not confirm the inline review. No automatic resend.")
+        fetched_head, fetched_base, fetched_readable = read_pull(owner, repo, pull)
+        reject_moved_revision(fetched_head, fetched_base, fetched_readable, payload["head"], payload["base"])
+        comments = comments_of(owner, repo, pull)
+        require_same_operation(payload_path, approval_path, pinned)
+        placed = placed_new_comments(payload, comments, creates)
+        if placed is None:
+            if code and PROVEN_REJECTION.search(detail.decode("utf-8", errors="replace")):
+                for item in creates:
+                    states[item["finding"]] = {"state": "rejected"}
+                write_checkpoint(checkpoint_path, journal)
+            if detail:
+                print(redact_secret(detail.decode("utf-8", errors="replace")), file=sys.stderr)
+            raise SystemExit("Inline delivery is unconfirmed. The summary is posted; inline publication remains pending.")
+        for expected, visible in zip(creates, placed, strict=True):
+            remember_inline(journal, states, checkpoint_path, expected, visible)
     require_inline_complete(payload, journal)
 
 
@@ -2180,6 +2279,8 @@ def post_locked(
         fetched_head, fetched_base, readable = read_pull(owner, repo, pull)
         reject_moved_revision(fetched_head, fetched_base, readable, approved_head, approved_base)
         require_same_operation(payload_path, approval_path, pinned)
+        if not updating:
+            refuse_second_summary(payload["body"], reviews, owner, repo, pull)
     except SystemExit:
         # The request was not sent. Drop the checkpoint so it is not an unsettled delivery.
         checkpoint_path.unlink(missing_ok=True)

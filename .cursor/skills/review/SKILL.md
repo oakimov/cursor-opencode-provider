@@ -289,23 +289,27 @@ create another summary post, even when the head or verdict changed. Put
 `update: { review, author, bodySha256 }` in the new result, using the existing
 review's `id`, `user.id`, and inventory digest. If multiple own posts exist,
 use the latest stamped COMMENT review; leave other authors' reviews alone.
-The revised summary must state the current verdict, findings, checks and
-reviewed head. Render, show and obtain approval of the exact updated payload
-before `post`; an earlier publication approval does not approve a new verdict.
-Put new findings at verified current-diff locations in `diff` so they render
-as inline comments. `post` reads the pull diff and refuses the update, before
-any write, when a located finding sits in a hunk but not in those comments.
-The publisher updates the one summary and publishes those findings
-as native code threads. It checks their actual anchors on readback. GitHub does
-not move the original review's commit or inline anchors when its summary is edited.
+The revised summary states the current verdict, checks, reviewed head, and
+findings that are not posted inline. An inlined finding stays in its comment;
+the summary may count it and must not repeat its text. Render, show and obtain
+approval of the exact updated payload before `post`; an earlier publication
+approval does not approve a new verdict. Put new findings at verified
+current-diff locations in `diff` so they render as inline comments. `post`
+reads the pull diff and refuses the update, before any write, when a located
+finding sits in a hunk but not in those comments. The publisher updates the
+one summary in place. New comments from that re-review go in one new review
+with an empty body. A second review whose body contains summary text is
+refused. It checks the new anchors on readback. GitHub does not move the
+original review's commit or inline anchors when its summary is edited.
 The `reviews` inventory includes native comments and their body digests. For a
 still-present inline finding, bind its `comment` snapshot (`id`, `author`,
 `bodySha256`, plus `thread` and `repliesSha256` from the matching thread
 inventory) in that finding, retaining its `prior` source. New replies require
 re-review and another preview. The publisher updates
-an owned current-head comment in place, or creates a current-head thread when
-the bound earlier anchor belongs to another commit. Keep the old discussion
-classified. Findings outside the current diff remain in the summary.
+an owned current-head comment in place. When the bound anchor is another
+commit, the new comment joins that re-review's empty review and the old
+discussion stays classified. A fixed finding resolves its thread and keeps the
+old comment. Findings outside the current diff remain in the summary.
 An inline action's failure leaves publication partial even if the summary
 was updated. Retry `post` with the same approved payload; do not resend completed
 actions or replace an uncertain native write with a plain post.
