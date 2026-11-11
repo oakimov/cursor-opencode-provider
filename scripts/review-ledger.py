@@ -20,7 +20,7 @@ REVISION = re.compile(r"^(?:local|[0-9a-f]{40})$")
 ABSOLUTE = re.compile(r"(?:^|[\s\"'`])~?/(?![\s/])")
 LIVE_CLAIM = re.compile(r"production incident|\blive model\b|\bin production\b", re.IGNORECASE)
 
-LEDGER_KEYS = {"version", "revision", "behaviors", "candidates", "omissions", "omissionsNone", "retries", "retriesNone", "passes"}
+LEDGER_KEYS = {"version", "revision", "behaviors", "candidates", "omissions", "omissionsNone", "retries", "retriesNone", "passes", "diagnostics"}
 CONTRACT_KEYS = {"path", "line", "note"}
 SCENARIO_KEYS = {"id", "category", "applicable", "reason", "expected", "observed", "evidence", "downstream"}
 CANDIDATE_KEYS = {
@@ -51,6 +51,7 @@ HEAD_DISPOSITIONS = {
     "not-a-defect": {"refuted", "policy", "operational"},
     "unverified": {"hypothesis"},
 }
+DIAGNOSTIC_KEYS = {"id", "check", "observation", "classification", "basis", "candidates"}
 
 
 def text_field(value: object) -> bool:
@@ -155,7 +156,7 @@ def check_assessment(candidate: dict, revision: str, prefix: str) -> list[str]:
     return problems
 
 
-def check_ledger(ledger: object, *, require_scope: bool = False) -> list[str]:
+def check_ledger(ledger: object, *, require_scope: bool = False, require_diagnostics: bool = False) -> list[str]:
     problems: list[str] = []
     if not isinstance(ledger, dict):
         return ["ledger"]
@@ -163,10 +164,13 @@ def check_ledger(ledger: object, *, require_scope: bool = False) -> list[str]:
     if extra:
         problems.append("ledger.keys")
     version = ledger.get("version", 1)
-    if type(version) is not int or version not in (1, 2) or (require_scope and version != 2):
+    if (type(version) is not int or version not in (1, 2, 3)
+            or (require_scope and version not in (2, 3)) or (require_diagnostics and version != 3)):
         problems.append("ledger.version")
     if not isinstance(ledger.get("revision"), str) or not REVISION.fullmatch(ledger.get("revision", "")):
         problems.append("revision")
+    if version == 3:
+        problems.extend(check_diagnostics(ledger))
     for value in walk_strings(ledger):
         if ABSOLUTE.search(value):
             problems.append("private-path")
@@ -256,11 +260,11 @@ def check_ledger(ledger: object, *, require_scope: bool = False) -> list[str]:
         candidates = []
     for index, candidate in enumerate(candidates):
         prefix = f"candidates[{index}]"
-        expected = CANDIDATE_KEYS | ({"assessment"} if version == 2 else set())
+        expected = CANDIDATE_KEYS | ({"assessment"} if version in (2, 3) else set())
         if not isinstance(candidate, dict) or set(candidate) != expected:
             problems.append(prefix)
             continue
-        if version == 2:
+        if version in (2, 3):
             problems.extend(check_assessment(candidate, ledger.get("revision"), prefix))
         identifier = candidate.get("id")
         if not isinstance(identifier, str) or not TOKEN.fullmatch(identifier) or identifier in candidate_ids:
@@ -388,8 +392,48 @@ def public_text(finding: dict) -> str:
     )
 
 
-def compare_ledger(ledger: object, result: object, *, require_scope: bool = False) -> list[str]:
-    problems = check_ledger(ledger, require_scope=require_scope)
+def check_diagnostics(ledger: dict) -> list[str]:
+    """Validate declared causes, without pretending to discover or verify them."""
+    diagnostics = ledger.get("diagnostics")
+    if not isinstance(diagnostics, list):
+        return ["diagnostics"]
+    candidates = ledger.get("candidates")
+    actionable = {item.get("id") for item in candidates
+                  if isinstance(item, dict) and isinstance(item.get("id"), str)
+                  and item.get("disposition") == "actionable"} if isinstance(candidates, list) else set()
+    problems: list[str] = []
+    seen = set()
+    for index, diagnostic in enumerate(diagnostics):
+        key = f"diagnostics[{index}]"
+        if not isinstance(diagnostic, dict) or set(diagnostic) != DIAGNOSTIC_KEYS:
+            problems.append(key)
+            continue
+        identifier = diagnostic.get("id")
+        if not isinstance(identifier, str) or not TOKEN.fullmatch(identifier) or identifier in seen:
+            problems.append(f"{key}.id")
+        else:
+            seen.add(identifier)
+        for field in ("check", "observation", "basis"):
+            if not text_field(diagnostic.get(field)):
+                problems.append(f"{key}.{field}")
+        classification = diagnostic.get("classification")
+        if classification not in ("defect", "outside-scope", "environment", "unresolved"):
+            problems.append(f"{key}.classification")
+        references = diagnostic.get("candidates")
+        if (not isinstance(references, list) or any(not isinstance(item, str) for item in references)
+                or len(set(item for item in references if isinstance(item, str))) != len(references)):
+            problems.append(f"{key}.candidates")
+            references = []
+        if classification == "defect":
+            if not references or any(item not in actionable for item in references):
+                problems.append(f"{key}.findings")
+        elif references:
+            problems.append(f"{key}.candidates")
+    return problems
+
+
+def compare_ledger(ledger: object, result: object, *, require_scope: bool = False, require_diagnostics: bool = False) -> list[str]:
+    problems = check_ledger(ledger, require_scope=require_scope, require_diagnostics=require_diagnostics)
     if not isinstance(ledger, dict):
         return problems
     if not isinstance(result, dict):
@@ -410,14 +454,15 @@ def compare_ledger(ledger: object, result: object, *, require_scope: bool = Fals
             problems.append(f"findings[{index}].id")
             continue
         finding_ids.append(finding["id"])
+    candidates = ledger.get("candidates")
     actionable = {
         candidate["id"]: candidate
-        for candidate in ledger.get("candidates", [])
+        for candidate in (candidates if isinstance(candidates, list) else [])
         if isinstance(candidate, dict) and candidate.get("disposition") == "actionable" and isinstance(candidate.get("id"), str)
     }
     if set(finding_ids) != set(actionable):
         problems.append("findings.candidates")
-    if ledger.get("version") == 2:
+    if ledger.get("version") in (2, 3):
         expected_fixes = set()
         for identifier, candidate in actionable.items():
             assessment = candidate.get("assessment")
@@ -445,6 +490,28 @@ def compare_ledger(ledger: object, result: object, *, require_scope: bool = Fals
                 recorded_fixes.add(pair)
         if recorded_fixes != expected_fixes:
             problems.append("externalFixes.candidates")
+    if ledger.get("version") == 3:
+        diagnostics = ledger.get("diagnostics")
+        checks = result.get("checks")
+        failed = {item["name"] for item in (checks if isinstance(checks, list) else [])
+                  if isinstance(item, dict) and isinstance(item.get("name"), str) and item.get("status") == "failed"}
+        covered = set()
+        if not isinstance(diagnostics, list):
+            diagnostics = []
+        for index, diagnostic in enumerate(diagnostics):
+            key = f"diagnostics[{index}]"
+            if not isinstance(diagnostic, dict) or set(diagnostic) != DIAGNOSTIC_KEYS:
+                continue
+            check = diagnostic.get("check")
+            if not isinstance(check, str) or check not in failed:
+                problems.append(f"{key}.check")
+            else:
+                covered.add(check)
+            classification = diagnostic.get("classification")
+            if classification == "unresolved" and (outcome != "incomplete" or passes_complete(ledger)):
+                problems.append(f"{key}.incomplete")
+        if covered != failed:
+            problems.append("diagnostics.checks")
     for finding in findings:
         if not isinstance(finding, dict):
             continue

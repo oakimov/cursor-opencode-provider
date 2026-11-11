@@ -83,6 +83,16 @@ These are failure lessons shared by both hosts, not a replacement for
   model ids. Escape emitted keys, retain the wire id, and preserve ordinary
   `constructor`/`toString` variant labels that both hosts already consume
   (`preserves accepted metadata` in `test/model-selection-review.test.ts`).
+  The next bot review left those losses as baseline diagnostics and a full-suite
+  selection failure undiagnosed after isolated reruns passed. Baseline origin
+  does not decide scope; keep failures attached to a causal assessment
+  (`review evidence gate` in `test/review-publish.test.ts`). A deterministic
+  follow-up exposed timestamp-only model caching across distinct roots and
+  atomic replacements. Key metadata by file identity/generation, return the
+  request's own snapshot, and verify the consumed Run independently of suite
+  order (`test/model-selection-run.test.ts`,
+  `scripts/review-model-cache-contract.mjs`). That counterexample does not
+  establish the cause of the earlier bot run without its execution trace.
 - **Dynamic discovery must include invocation identity.** The inner schema hid
   required outer `namespace`/`toolName`; server-side wrapper failures may appear
   only in display completion (`test/dynamic-catalog.test.ts`).

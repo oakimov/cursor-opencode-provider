@@ -41,6 +41,7 @@ That path is not the untrusted-PR boundary.
 | `scripts/review-ledger.py` | private completion evidence |
 | `scripts/isolated-check.sh` / `isolate-run.sh` | untrusted PR checks |
 | `scripts/review-model-contracts.mjs` | harness-owned catalog invariants, run against the archived PR source |
+| `scripts/review-model-cache-contract.mjs` | Node localhost Run capture across cache roots and file generations with equal timestamps |
 | `scripts/review-retention-contracts.mjs` | snapshot boundaries, maintenance, provenance, writer temps and inherited-setting tests on the archived source |
 | `scripts/complete-resolutions.py` | finish approved thread resolves after a confirmed review |
 | `scripts/cloud-agent-install.sh` | Cloud Agent bootstrap |
@@ -56,7 +57,7 @@ Cursor. Passing tests do **not** mean the review skill finds real defects.
 |-------|------|-------|
 | Publication | `test/review-publish.test.ts` | App/PAT auth, preview approval, idempotent post, privacy refusals, artifact retention, thread resolve, evidence/ledger gate |
 | Isolation / live scripts | `test/review-scripts.test.ts` | Cloud install string, isolated-check targets, sandbox PATH/secrets, live-test skip/deadline/cleanup, pid-targeted cancel |
-| Subject contracts | `test/review-model-contracts.test.ts`, `test/review-retention-contracts.test.ts` | upstream tuple preservation, accepted metadata variations, independent phase results, real persistence probes and deliberately broken controls |
+| Subject contracts | `test/review-model-contracts.test.ts`, `test/review-model-cache-contract.test.ts`, `test/review-retention-contracts.test.ts` | upstream tuple preservation, cache identity at the Run boundary, independent phase results, persistence probes and deliberately broken controls |
 | Eval fixtures / scorer | `test/review-eval.test.ts` | Case orchestration fixtures, mount excludes answer keys, ledger compare, score detection vs false positives |
 
 The test preload clears inherited `CURSOR_PROVIDER_CACHE_TTL_MS` so expiry
@@ -65,8 +66,8 @@ to child writers, but must restore it before returning. A leaked override
 fails that test and is cleared before the next one. Subprocess regressions in
 `test/test-isolation.test.ts` exercise inherited settings and that recovery.
 
-After build and typecheck, isolated PR checks run the harness's model and
-retention probes and the subject unit suite independently. A contract failure
+After build and typecheck, isolated PR checks run the harness's catalog,
+model-cache and retention probes and the subject unit suite independently. A contract failure
 stays failed while the other checks run; an unavailable boundary stops them.
 Any failure withholds the live credential. Contract probes use synthetic input,
 and their expected values come from upstream metadata or the retention contract,
@@ -78,7 +79,10 @@ head. A defect declared present must remain a finding even when another
 commit fixes it; that fix appears separately in the summary. Rendering rejects
 missing head assessments and contradictory dispositions. See
 [the revision rules](pr-review.md#reviewed-head-and-fixes-elsewhere) for the
-version 2 ledger/result fields and retained-preview compatibility. These tests
+version 3 ledger/result fields and retained-preview compatibility. Failed checks
+also require a diagnosis beyond baseline provenance: an in-scope defect remains
+a finding; an unknown cause keeps the review incomplete. See
+[failed-check diagnosis](pr-review.md#failed-check-diagnosis). These tests
 verify the gate, not whether an agent's assessment is correct. Maintainers
 still test reviewer behavior before accepting an instruction change.
 

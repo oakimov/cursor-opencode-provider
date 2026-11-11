@@ -514,8 +514,14 @@ function writeLegacyPayload(payload: string, text: string): void {
 
 function evidenceLedger(result: ReturnType<typeof structuredResult>) {
   return {
-    version: 2,
+    version: 3,
     revision: result.head,
+    diagnostics: result.checks.filter(check => check.status === "failed").map((check, index) => ({
+      id: `check-${index}`, check: check.name, observation: check.detail,
+      classification: "failure" in check ? "environment" : "defect",
+      basis: "failure" in check ? "The capability probe establishes the environment cause." : "The command failure is caused by the publication defect below.",
+      candidates: "failure" in check ? [] : result.findings.map(finding => finding.id),
+    })),
     behaviors: [{
       id: "publication", summary: "Synthetic publication fixture",
       contract: [{ path: "scripts/review-publish.py", line: 1, note: "Only the approved review is sent." }],
@@ -3149,6 +3155,66 @@ describe("review thread resolution", () => {
 })
 
 describe("review evidence gate", () => {
+  it("requires failed checks to be adjudicated beyond their baseline provenance", () => {
+    const { directory, payload, bin, state } = freshReview("review-diagnostics-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    const source = path.join(directory, "result.json")
+    const ledgerPath = path.join(directory, "ledger.json")
+    const clean = structuredResult({ outcome: "clean", findings: [] })
+    const checks = [...clean.checks, { name: "model-contracts", status: "failed", exitCode: 1,
+      detail: "Accepted metadata disappears before the changed catalog export.",
+      failure: { cause: "baseline", evidence: "The same accepted input loses the tuple on base and head." },
+    }]
+    const diagnostic = { id: "lost-tuple", check: "model-contracts",
+      observation: "A selectable upstream tuple is missing from the consumer catalog.",
+      classification: "defect", basis: "The changed catalog path still reaches the lossy shared producer.", candidates: [] as string[],
+    }
+    const render = (result: unknown, ledger: unknown) => {
+      fs.rmSync(payload, { force: true })
+      fs.writeFileSync(source, JSON.stringify(result))
+      fs.writeFileSync(ledgerPath, JSON.stringify(ledger))
+      return run(["render", source, payload], env)
+    }
+    const ledger = { ...evidenceLedger(clean), diagnostics: [diagnostic] }
+    try {
+      for (const [diagnostics, expected] of [
+        [[], "diagnostics.checks"],
+        [[{ ...diagnostic, classification: "baseline" }], ".classification"],
+        [[diagnostic], ".findings"],
+        [[{ ...diagnostic, classification: "unresolved" }], ".incomplete"],
+        [[{ ...diagnostic, classification: "outside-scope", basis: "" }], ".basis"],
+        [[{ ...diagnostic, classification: "environment", check: "diff" }], ".check"],
+        [[{ ...diagnostic, classification: "outside-scope", candidates: [null] }], ".candidates"],
+        [[{ ...diagnostic, classification: "environment" }, { ...diagnostic, classification: "environment" }], ".id"],
+      ] as const) {
+        const refused = render({ ...clean, checks }, { ...ledger, diagnostics })
+        expect(refused.status, refused.stderr).toBe(2)
+        expect(refused.stderr).toContain(expected)
+        expect(fs.existsSync(payload)).toBe(false)
+      }
+      // Once in-scope, pre-existing provenance does not erase the finding.
+      const found = structuredResult({ checks })
+      const foundLedger = evidenceLedger(found)
+      foundLedger.candidates[0]!.provenance = "preexisting"
+      expect(render(found, { ...foundLedger, diagnostics: [{ ...diagnostic, candidates: [found.findings[0]!.id] }] }).status).toBe(0)
+      expect(JSON.parse(fs.readFileSync(payload, "utf8")).body).toContain("1 actionable finding.")
+
+      // An unrelated baseline defect can remain outside this PR's behavior scope.
+      const outside = { ...diagnostic, classification: "outside-scope",
+        basis: "This retention-only change never consumes the model catalog; the separate catalog defect is outside its reachable behavior." }
+      expect(render({ ...clean, checks }, { ...ledger, diagnostics: [outside] }).status).toBe(0)
+      // Unknown causes remain explicitly incomplete, even with passing reruns.
+      const incomplete = structuredResult({ outcome: "incomplete", findings: [], checks })
+      expect(render(incomplete, { ...evidenceLedger(incomplete), diagnostics: [{ ...diagnostic,
+        classification: "unresolved", basis: "The isolated case passes but the full suite failure has no established cause yet.",
+      }] }).status).toBe(0)
+      expect(JSON.parse(fs.readFileSync(payload, "utf8")).body).toContain("incomplete")
+      expect(callsOf(state)).toEqual([])
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
   it("keeps a defect on the reviewed head actionable when another revision fixes it", () => {
     const { directory, payload, approval, bin, state } = freshReview("review-revision-scope-")
     const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
@@ -3188,7 +3254,7 @@ describe("review evidence gate", () => {
       const rendered = run(["render", source, payload], env)
       expect(rendered.status, rendered.stderr).toBe(0)
       const value = JSON.parse(fs.readFileSync(payload, "utf8"))
-      expect(value.evidence.version).toBe(2)
+      expect(value.evidence.version).toBe(3)
       expect(value.body).toContain("1 actionable finding.")
       expect(value.body).toContain("outside the reviewed head")
       expect(value.body).toContain(otherHead)
@@ -3252,7 +3318,7 @@ describe("review evidence gate", () => {
     }
   })
 
-  it("recovers retained version-one evidence without allowing a fresh downgrade", () => {
+  it.each([1, 2])("recovers retained version-%i evidence without allowing a fresh downgrade", (version) => {
     const { directory, payload, approval, bin, state } = freshReview("review-scope-legacy-")
     const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
     const source = path.join(directory, "result.json")
@@ -3262,10 +3328,11 @@ describe("review evidence gate", () => {
       expect(renderReview(source, payload, env).status).toBe(0)
       const value = JSON.parse(fs.readFileSync(payload, "utf8"))
       const ledger = evidenceLedger(result)
-      const legacy = JSON.stringify({ ...ledger, version: 1,
-        candidates: ledger.candidates.map(({ assessment: _assessment, ...item }) => item),
+      const { diagnostics: _diagnostics, ...previousLedger } = ledger
+      const legacy = JSON.stringify({ ...previousLedger, version,
+        candidates: version === 1 ? ledger.candidates.map(({ assessment: _assessment, ...item }) => item) : ledger.candidates,
       })
-      value.evidence = { version: 1, ledgerSha256: createHash("sha256").update(legacy).digest("hex") }
+      value.evidence = { version, ledgerSha256: createHash("sha256").update(legacy).digest("hex") }
       fs.writeFileSync(path.join(directory, `ledger-${value.evidence.ledgerSha256}.json`), legacy)
       fs.writeFileSync(payload, JSON.stringify(value, null, 2) + "\n")
       const refused = run(["stamp", payload], env)

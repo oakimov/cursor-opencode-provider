@@ -8,7 +8,7 @@ import { modelsToConfig } from "../src/model-config.js"
 import { modelsToCatalogModelMap } from "../src/opencode2/catalog.js"
 import { setHostCacheDirOverride } from "../src/context/paths.js"
 import { resetTurnStateForTests, settleRunSavesForTests } from "../src/language-model.js"
-import { CURSOR_VARIANT_PARAMETERS_KEY, mapAvailableModelsResponse, writeCache } from "../src/models.js"
+import { CURSOR_VARIANT_PARAMETERS_KEY, cacheFilePath, mapAvailableModelsResponse, writeCache } from "../src/models.js"
 import { resetConversationBindingsForTests } from "../src/protocol/conversation-bind.js"
 import { resetConversationPersistenceForTests } from "../src/protocol/conversation-persistence.js"
 import { resetCheckpointsForTests } from "../src/protocol/checkpoint.js"
@@ -91,6 +91,66 @@ afterAll(async () => {
     const value = savedProxy.get(key)
     if (value === undefined) delete process.env[key]
     else process.env[key] = value
+  }
+})
+
+it("keeps cache roots and atomic generations distinct even when timestamps match", async () => {
+  const directories = await Promise.all([0, 1].map(() => fs.mkdtemp(path.join(os.tmpdir(), "cursor-cache-identity-"))))
+  const timestamp = 1_800_000_000_000
+  const parameters = [{ id: "context", value: "1m" }, { id: "reasoning_effort", value: "high" }, { id: "fast", value: "true" }]
+  const write = async (directory: string, max: boolean) => {
+    const models = mapAvailableModelsResponse({ models: [{ name: "grok-4.7", variants: [{
+      parameterValues: parameters, isMaxMode: max, isDefaultNonMaxConfig: true,
+    }] }] })
+    await writeCache(directory, { models, fetchedAt: Date.now(), schemaVersion: MODEL_CACHE_SCHEMA_VERSION })
+    await fs.utimes(cacheFilePath(directory), new Date(timestamp), new Date(timestamp))
+  }
+  try {
+    await write(directories[0]!, true)
+    await write(directories[1]!, false)
+    const steps = [
+      { directory: directories[0]!, expected: true },
+      { directory: directories[1]!, expected: false },
+      { directory: directories[1]!, expected: false },
+      { directory: directories[1]!, expected: true, update: true },
+      { directory: directories[1]!, expected: false, update: false },
+      // Missing metadata must refuse the explicit pick, not reuse old variants.
+      { directory: directories[1]!, expected: true, remove: true },
+    ]
+    for (const step of steps) {
+      if (step.update !== undefined) await write(step.directory, step.update)
+      if (step.remove) await fs.unlink(cacheFilePath(step.directory))
+      cacheHttp2SessionForTests(origin, client)
+      const model = createCursor({ name: "cursor", accessToken: "example-token", cacheDir: step.directory, agentBaseURL: origin })
+        .languageModel("grok-4.7")
+      const call = {
+        prompt: [{ role: "user" as const, content: [{ type: "text" as const, text: "Hello" }] }],
+        providerOptions: { cursor: { [CURSOR_VARIANT_PARAMETERS_KEY]: parameters } },
+      }
+      if (step.remove) {
+        const count = requests.length
+        await expect(model.doStream(call)).rejects.toMatchObject({
+          cause: expect.objectContaining({ message: expect.stringContaining("no cached variants") }),
+        })
+        expect(requests).toHaveLength(count)
+        continue
+      }
+      const { stream } = await model.doStream(call)
+      const reader = stream.getReader()
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        expect(value.type).not.toBe("error")
+      }
+      expect(requests.at(-1)?.requested_model).toMatchObject({ model_id: "grok-4.7", max_mode: step.expected, parameters })
+      await settleRunSavesForTests()
+      sessionManager.dispose()
+    }
+  } finally {
+    await settleRunSavesForTests()
+    sessionManager.dispose()
+    setHostCacheDirOverride(undefined)
+    await Promise.all(directories.map(directory => fs.rm(directory, { recursive: true, force: true })))
   }
 })
 

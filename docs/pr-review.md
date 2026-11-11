@@ -117,7 +117,7 @@ requires the isolated check to exit zero.
 
 ### Reviewed head and fixes elsewhere
 
-New ledgers use `version: 2`. Every candidate records the assessment at the
+New ledgers use `version: 3`. Every candidate records the assessment at the
 bound PR head, independently of the harness checkout or target branch:
 
 ```json
@@ -149,10 +149,48 @@ head)". The detail is public; use repository-relative evidence and state what
 the separate commit fixes. Another tree's successful tests are not the head's
 test results. A new head containing the repair needs a new review and preview.
 
-Rendering requires the new ledger format and binds evidence version 2 to the
+Rendering requires the new ledger format and binds evidence version 3 to the
 payload. Preview, approval and publication recheck it. Already-retained legacy
-previews remain recoverable with their original bytes and approval flow;
+version 1 and 2 previews remain recoverable with their original bytes and approval flow;
 fresh payloads cannot select legacy evidence to bypass this requirement.
+
+### Failed-check diagnosis
+
+Version 3 adds `diagnostics`, an array with one entry per independent failed
+observation (empty when no checks failed). Read the complete logs first. Each
+entry names a failed check from the result:
+
+```json
+"diagnostics": [{
+  "id": "catalog-loss",
+  "check": "model-contracts",
+  "observation": "An accepted upstream choice disappears before selection.",
+  "classification": "defect",
+  "basis": "Cited source and reproduction show the changed export reaches the lossy producer, including on base.",
+  "candidates": ["lost-choice"]
+}]
+```
+
+`defect` requires actionable candidate ids that also appear in the findings.
+`outside-scope` explains why the failure is unrelated to the changed behavior;
+`environment` requires a capability probe and its causal link. Both have empty
+`candidates`. Baseline provenance alone is not a classification: a pre-existing
+defect on a path the change reaches is still reportable. Keep the failed status,
+exit code and any result `failure` attribution; that attribution does not
+replace adjudication.
+
+Use `unresolved` with empty `candidates` when no cause is established. The
+outcome must remain `incomplete` and at least one completion pass false.
+An isolated rerun or deletion of another test does not diagnose a suite-only
+failure. Trace shared state and capture the consumed result, preserving the
+original failure. Do not claim that a separate reproduction caused an earlier
+run merely because the symptoms match.
+
+`check` validates diagnostic structure; `compare` and publication also require
+coverage of every failed check and consistent findings/completion. The agent
+must split multiple failures within a check. The validator cannot enumerate
+raw-log failures or verify the diagnosis; a structurally valid declaration
+does not establish that all defects were found.
 
 `bind` reads the pull request and records its base and head. When the result file already has a different revision, `bind` stops and leaves the file unchanged. `render` checks the result and writes the payload. `REVIEW_OUTCOME=incomplete` means the analysis did not reach a defensible review: the diff was unreadable, required analysis was unavailable, or the result is malformed. That file can be read and cannot be stamped or posted. Rendering is not publication. Showing the preview is not approval. Approval is not a merge.
 
@@ -484,6 +522,12 @@ tuples and original display-label selections. Inputs vary accepted labels,
 effort values, context/speed partitions and ordering. Expected choices come
 from discovery metadata so agreement between two consumers cannot conceal
 loss in their shared producer.
+`MODEL_CACHE_CONTRACTS` runs the trusted `review-model-cache-contract.mjs`
+under Node against the built provider. A localhost HTTP/2 server captures the
+actual Run request through different cache roots, warm reuse, same-timestamp
+atomic replacements and missing metadata. Expected tuples and `max_mode`
+come from the synthetic discovery input. This check is independent of Bun's
+suite order and test hooks; it neither loads a native host nor contacts Cursor.
 `RETENTION_CONTRACTS` also exercises persistence immediately before, at and
 after expiry through load, maintenance and provenance, plus the fixed
 writer-temp window. It runs an existing default-policy test with long, short

@@ -118,6 +118,7 @@ test("a harness contract failure preserves independent test results and closes t
     expect(result.stdout).toContain("MODEL_CONTRACTS=failed exit=1")
     expect(result.stdout).toContain("LIVE_TEST=skipped")
     expect(result.stdout).toContain("RETENTION_CONTRACTS=passed")
+    expect(result.stdout).toContain("MODEL_CACHE_CONTRACTS=passed")
     expect(result.stdout).toContain("UNIT_TESTS=passed")
     const commands = fs.readFileSync(log, "utf8")
     expect(commands).toContain("bun /opt/harness/scripts/review-model-contracts.mjs /src")
@@ -136,6 +137,8 @@ test.each([
   { model: 1, retention: 0, units: 1, exit: 1, ranUnits: true },
   { model: 2, retention: 0, units: 0, exit: 2, ranUnits: false },
   { model: 1, retention: 2, units: 0, exit: 2, ranUnits: false },
+  { model: 0, cache: 1, retention: 0, units: 0, exit: 1, ranUnits: true },
+  { model: 0, cache: 2, retention: 0, units: 0, exit: 2, ranUnits: false },
 ])("independent failures remain failures and an unavailable boundary stops checks (%j)", (scenario) => {
   const result = spawnSync("bash", ["-c", `
     source scripts/isolated-check.sh
@@ -146,6 +149,7 @@ test.each([
     check_run_isolated() {
       case "$*" in
         *review-model-contracts.mjs*) return "$PROBE_MODEL" ;;
+        *review-model-cache-contract.mjs*) return "$PROBE_CACHE" ;;
         *review-retention-contracts.mjs*) return "$PROBE_RETENTION" ;;
         'bun test') return "$PROBE_UNITS" ;;
       esac
@@ -155,6 +159,7 @@ test.each([
     check_main 156 --live
   `], { cwd: root, encoding: "utf8", env: {
     ...process.env, PROBE_MODEL: String(scenario.model), PROBE_RETENTION: String(scenario.retention),
+    PROBE_CACHE: String("cache" in scenario ? scenario.cache : 0),
     PROBE_UNITS: String(scenario.units), CURSOR_REVIEW_TRUST: "1", CURSOR_REVIEW_TRUST_SHA: "a".repeat(40),
     CURSOR_API_KEY: "test-only-no-credential",
   } })
@@ -162,6 +167,7 @@ test.each([
   expect(result.stdout).not.toContain("UNEXPECTED_LIVE")
   expect(result.stdout.includes("UNIT_TESTS=")).toBe(scenario.ranUnits)
   if (scenario.model === 1) expect(result.stdout).toContain("MODEL_CONTRACTS=failed exit=1")
+  if ("cache" in scenario && scenario.cache === 1) expect(result.stdout).toContain("MODEL_CACHE_CONTRACTS=failed exit=1")
   if (scenario.retention === 1) expect(result.stdout).toContain("RETENTION_CONTRACTS=failed exit=1")
   if (scenario.units === 1) expect(result.stdout).toContain("UNIT_TESTS=failed exit=1")
   const archive = result.stdout.match(/^Check root: (.+)$/m)?.[1]

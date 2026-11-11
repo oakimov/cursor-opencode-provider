@@ -225,6 +225,7 @@ check_run_isolated() {
     isolate_contracts="$(mktemp -d "${TMPDIR:-/tmp}/cursor-review-contracts.XXXXXX")"
     cp "$ROOT/scripts/review-model-contracts.mjs" "$isolate_contracts/review-model-contracts.mjs" || return 2
     cp "$ROOT/scripts/review-retention-contracts.mjs" "$isolate_contracts/review-retention-contracts.mjs" || return 2
+    cp "$ROOT/scripts/review-model-cache-contract.mjs" "$isolate_contracts/review-model-cache-contract.mjs" || return 2
   fi
   check_supervise --src "${ISOLATE_SRC:-$PWD}" \
     --tool bun --tool node --tool git --tool python3 \
@@ -328,6 +329,11 @@ check_main() {
       local phase=0
       check_step MODEL_CONTRACTS bun /opt/harness/scripts/review-model-contracts.mjs /src || phase=$?
       checks="$phase"
+      if [[ "$checks" -ne 2 ]]; then
+        phase=0
+        check_step MODEL_CACHE_CONTRACTS node /opt/harness/scripts/review-model-cache-contract.mjs /src || phase=$?
+        if [[ "$phase" -gt "$checks" ]]; then checks="$phase"; fi
+      fi
       if [[ "$checks" -ne 2 ]]; then
         phase=0
         check_step RETENTION_CONTRACTS bun /opt/harness/scripts/review-retention-contracts.mjs /src || phase=$?

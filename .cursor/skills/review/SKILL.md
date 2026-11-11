@@ -136,7 +136,7 @@ an observation, not by itself a defect. Reproduction proves the behavior you
 exercised. It does not prove that a preferred alternative is correct.
 
 Assess each candidate at the exact bound PR head before classifying it.
-Use ledger `version: 2` and an `assessment` with `head`, `status`, `basis`, and
+Use ledger `version: 3` and an `assessment` with `head`, `status`, `basis`, and
 `elsewhere`. Status is `present` for a contract violation on that head,
 `absent` for a defect verified fixed or unreachable on that head,
 `not-a-defect` for a disproved contract violation or a policy/operational
@@ -159,6 +159,30 @@ encodes a defect, name the independently supported contract it violates. An
 unchanged branch can contain a reportable pre-existing defect. Label that
 provenance and show that the change can reach it. Do not drop it only because
 it predates the pull request.
+
+Adjudicate every failed check before completing the review. Read its full log
+and separate independent failures; for each, record a `diagnostics` entry as
+described in `docs/pr-review.md`. "Also fails on base" establishes provenance,
+not harmlessness. Determine whether the violated contract is reached by the
+changed behavior. A pre-existing defect on that path stays actionable; explain
+why an unrelated defect is outside scope. An environment classification needs
+a capability probe and a causal link, not a passing targeted rerun.
+
+When a full-suite failure disappears in isolation or after removing another
+test, retain the failure and trace shared state across the sequence: global
+caches and overrides, file identity/generation, inherited settings and cleanup.
+Force equal timestamps when testing different files or atomic replacements;
+coarse filesystem times must not determine which metadata a request uses.
+Capture the consumed request, not only the helper's return. Test deletion is
+bisection evidence, never a repair. If the causal path remains unknown, mark
+the diagnostic `unresolved`, leave a completion pass false and the outcome
+`incomplete`. A demonstrated counterexample with a matching symptom still does
+not establish the cause of an earlier run without its execution evidence.
+
+Match each public finding's affected consumers and evidence to the actual
+experiment. A shared rule id does not prove both majors fail. State synthetic
+metadata provenance in the public finding; do not imply it was observed in a
+live catalog.
 
 Separate implementation defects from proposed policy changes, operational
 limitations, and unverified hypotheses. Do not replace documented semantics

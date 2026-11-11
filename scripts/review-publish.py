@@ -1287,7 +1287,7 @@ def evidence_error(message: str) -> None:
     raise SystemExit(2)
 
 
-def compare_evidence(raw: bytes, result: dict, *, require_scope: bool = False) -> None:
+def compare_evidence(raw: bytes, result: dict, *, require_scope: bool = False, require_diagnostics: bool = False) -> None:
     """Use the same validator as the standalone ledger commands; never cache bytecode."""
     try:
         ledger = json.loads(raw)
@@ -1297,7 +1297,7 @@ def compare_evidence(raw: bytes, result: dict, *, require_scope: bool = False) -
             raise ValueError("validator unavailable")
         validator = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(validator)
-        problems = validator.compare_ledger(ledger, result, require_scope=require_scope)
+        problems = validator.compare_ledger(ledger, result, require_scope=require_scope, require_diagnostics=require_diagnostics)
     except (OSError, ValueError, UnicodeError):
         evidence_error("Review evidence is unreadable or its validator is unavailable. GitHub was not called.")
     if problems:
@@ -1308,7 +1308,7 @@ def evidence_name(payload: dict) -> str:
     evidence = payload.get("evidence")
     if (
         not isinstance(evidence, dict) or set(evidence) != {"version", "ledgerSha256"}
-        or type(evidence.get("version")) is not int or evidence["version"] not in (1, 2)
+        or type(evidence.get("version")) is not int or evidence["version"] not in (1, 2, 3)
         or not isinstance(evidence.get("ledgerSha256"), str)
         or not DIGEST.fullmatch(evidence["ledgerSha256"])
     ):
@@ -1333,7 +1333,7 @@ def require_evidence(path: Path, raw: bytes, payload: dict) -> bytes | None:
     if "evidence" not in payload and retained_legacy(raw, payload):
         return None
     name = evidence_name(payload)
-    if payload["evidence"]["version"] == 1 and not retained_legacy(raw, payload):
+    if payload["evidence"]["version"] < 3 and not retained_legacy(raw, payload):
         evidence_error("Unretained legacy evidence cannot bypass head assessment. Render again. GitHub was not called.")
     result = payload.get("result")
     if not isinstance(result, dict):
@@ -1347,7 +1347,8 @@ def require_evidence(path: Path, raw: bytes, payload: dict) -> bytes | None:
         evidence_error("The bound review ledger is missing. Recover it or render again. GitHub was not called.")
     if hashlib.sha256(ledger).hexdigest() != payload["evidence"]["ledgerSha256"]:
         evidence_error("The bound review ledger changed. Render again and approve the new preview. GitHub was not called.")
-    compare_evidence(ledger, result, require_scope=payload["evidence"]["version"] == 2)
+    compare_evidence(ledger, result, require_scope=payload["evidence"]["version"] >= 2,
+                     require_diagnostics=payload["evidence"]["version"] >= 3)
     return ledger
 
 
@@ -1559,7 +1560,7 @@ def stamp(path: Path) -> None:
     text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     refuse_scan(text.encode(), payload)
     path.write_text(text, encoding="utf-8")
-    if ledger is None or payload.get("evidence", {}).get("version") == 1:
+    if ledger is None or payload.get("evidence", {}).get("version", 0) < 3:
         # Carry forward only a legacy snapshot already verified above.
         retain_artifacts(text.encode(), payload, ledger=ledger)
     frozen = preview_path(path)
@@ -1997,7 +1998,7 @@ def render(source: Path, dest: Path, ledger_path: Path | None = None) -> None:
         ledger = (ledger_path or source.with_name("ledger.json")).read_bytes()
     except OSError:
         evidence_error("Review evidence ledger is missing. Complete ledger.json before rendering. GitHub was not called.")
-    compare_evidence(ledger, result, require_scope=True)
+    compare_evidence(ledger, result, require_scope=True, require_diagnostics=True)
     body, comments = public_review(result)
     payload = {
         "owner": result["owner"],
@@ -2010,7 +2011,7 @@ def render(source: Path, dest: Path, ledger_path: Path | None = None) -> None:
         "body": body,
         "comments": comments,
         "result": result,
-        "evidence": {"version": 2, "ledgerSha256": hashlib.sha256(ledger).hexdigest()},
+        "evidence": {"version": 3, "ledgerSha256": hashlib.sha256(ledger).hexdigest()},
     }
     if "update" in result:
         payload["update"] = result["update"]
