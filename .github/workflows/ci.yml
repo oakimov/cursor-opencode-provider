@@ -30,7 +30,9 @@ jobs:
   # checkout default), so a PR that no longer works on current main fails here.
   test:
     name: Typecheck, test, build
-    runs-on: ubuntu-latest
+    # Keep package provisioning on an explicit LTS image; the platform matrix
+    # above still exercises ubuntu-latest as its image changes.
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -121,7 +123,7 @@ jobs:
   coverage:
     name: Coverage
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout PR head
