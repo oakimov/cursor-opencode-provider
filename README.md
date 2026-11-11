@@ -189,6 +189,11 @@ again: OpenCode 1.x sends the entry's default variant meanwhile, and OpenCode
 2.x rejects the prompt as variant-unavailable. A variant with no delta is keyed
 `Standard`, because OpenCode reserves `default` for "no variant".
 
+Model ids that collide with object keys, such as `__proto__` or `constructor`,
+use a `-cursor` suffix (numbered if already taken). Cursor still receives the
+original model id. The variant label `__proto__` becomes `__proto__ Variant`
+so both hosts can select its parameters.
+
 #### Fast variants with distinct prices
 
 When Cursor publishes a different Fast rate for a model (currently Composer and Grok), the plugin emits a separate OpenCode entry `<model-id>-fast` (for example `composer-2.5-fast`) using the same pattern as `-1m`:

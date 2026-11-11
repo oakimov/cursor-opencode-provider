@@ -102,6 +102,13 @@ outside `src/`.
    effects, and failure, then the next retry, use, or restart. Passing
    candidate validation does not mean the omission pass was done, and the
    reverse is also true.
+   Known findings are regression seeds, not a stopping condition. Finish the
+   behavior inventory even after reproducing them. When several consumers use
+   one producer, compare their outputs with the original accepted input as
+   well as with each other: shared data loss can make both consumers agree.
+   Challenge the input domain and transformations, not only examples already
+   named by a prior review or a fix. Keep the experiments and refutations in
+   the ledger so scope completion is reviewable.
 7. Run the failed-work retry check for each relevant stateful operation the
    change touches — records, caches, persisted state, generators, discovery
    or refresh flows. With mocked external services, start from an existing
@@ -301,16 +308,32 @@ For every pull request, run the isolated check. It fetches that revision, copies
 scripts/isolated-check.sh <pr-number-or-url>
 ```
 
-A pull URL must name this checkout's origin. The copy has no `.git` directory. Install, build, typecheck, harness model contracts, and `bun test` run inside `scripts/isolate-run.sh`. Exit 0 means those checks passed. Exit 1 is a check failure. Exit 2 is a bad invocation or an unavailable isolation mechanism. The log line `Check root:` is private.
+A pull URL must name this checkout's origin. The copy has no `.git` directory. Install, build, typecheck, harness model and retention contracts, and `bun test` run inside `scripts/isolate-run.sh`. Exit 0 means those checks passed. Exit 1 is a check failure. Exit 2 is a bad invocation or an unavailable isolation mechanism. The log line `Check root:` is private.
 
 `MODEL_CONTRACTS` runs the review harness's read-only
 `scripts/review-model-contracts.mjs` against the subject's source and installed
 dependencies. It checks known catalog invariants independently of the subject's
-tests, including host-reserved variant ids and preservation of original tuples.
-Its failure stops the checks and withholds the live credential. Do not replace
+tests, including host-reserved variant ids and preservation of upstream tuples
+across accepted labels, effort values, context/speed partitions and input order.
+Expected tuples come from discovery metadata, not a second catalog made by the
+same mapper. Do not replace
 it with a pass from the harness checkout. It uses synthetic metadata and does
 not load a host or call Cursor. It does not replace tracing the receiving
 host's selection behavior or discovering new counterexamples.
+
+`RETENTION_CONTRACTS` runs the harness-owned
+`scripts/review-retention-contracts.mjs`: synthetic persistence boundaries,
+maintenance, provenance and fixed writer-temp cleanup, followed by an existing
+default-policy test with long, short and invalid settings inherited by Bun.
+The probe requires that the selected assertion actually ran. It tests the
+configured window when that subject exports the configurable resolver;
+older subjects retain the fixed baseline contract.
+
+After build and typecheck, contract checks and the subject unit suite collect
+independent results even when another contract fails. An unavailable boundary
+stops them immediately. Every failure remains in the final status and blocks
+the live credential. These checks do not complete the behavior inventory or
+prove general defect discovery.
 
 Record an `exitCode` for every executed command check in a new result. Capture
 the reviewed command's status, including when saving its output through a

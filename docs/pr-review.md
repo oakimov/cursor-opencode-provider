@@ -477,10 +477,22 @@ A number uses this checkout's `origin`. A pull URL must name that same owner and
 
 After typecheck and before the subject's unit suite, `MODEL_CONTRACTS` runs
 the harness-owned `scripts/review-model-contracts.mjs` against the archived
-subject modules. A private copy of the contract script is mounted read-only; the subject's own
+subject modules. Private copies of the contract scripts are mounted read-only; the subject's own
 copy cannot replace this check. It uses synthetic model metadata to check
-both host catalogs for reserved ids, duplicate ids and lost original choices.
-A failed contract stops the wrapper and prevents the live credential handoff.
+both host catalogs for reserved ids, duplicate ids, preservation of upstream
+tuples and original display-label selections. Inputs vary accepted labels,
+effort values, context/speed partitions and ordering. Expected choices come
+from discovery metadata so agreement between two consumers cannot conceal
+loss in their shared producer.
+`RETENTION_CONTRACTS` also exercises persistence immediately before, at and
+after expiry through load, maintenance and provenance, plus the fixed
+writer-temp window. It runs an existing default-policy test with long, short
+and invalid retention settings inherited by Bun and requires an executed
+assertion. Subjects without the configurable resolver use the fixed baseline.
+A failed contract prevents the live credential handoff, while the other
+contracts and unit suite still run to collect independent evidence. An
+unavailable isolation boundary stops immediately; later successes cannot
+replace an earlier failure in the wrapper's exit status.
 The archived source is not patched. Record this check separately from the
 subject's own tests, with both the harness and subject revisions. A new test
 only in the harness checkout would otherwise be absent from an older PR's

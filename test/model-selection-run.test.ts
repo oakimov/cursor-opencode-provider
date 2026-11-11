@@ -7,7 +7,7 @@ import { createCursor } from "../src/index.js"
 import { modelsToConfig } from "../src/model-config.js"
 import { modelsToCatalogModelMap } from "../src/opencode2/catalog.js"
 import { setHostCacheDirOverride } from "../src/context/paths.js"
-import { resetTurnStateForTests } from "../src/language-model.js"
+import { resetTurnStateForTests, settleRunSavesForTests } from "../src/language-model.js"
 import { CURSOR_VARIANT_PARAMETERS_KEY, mapAvailableModelsResponse, writeCache } from "../src/models.js"
 import { resetConversationBindingsForTests } from "../src/protocol/conversation-bind.js"
 import { resetConversationPersistenceForTests } from "../src/protocol/conversation-persistence.js"
@@ -154,6 +154,43 @@ it.each(scenarios)("sends cached selection $context fast=$fast max=$max through 
 })
 
 for (const host of ["classic", "modern"] as const) {
+  it.each(["__proto__", "constructor", "toString"])(`sends an escaped model and variant from the ${host} catalog (%s)`, async (wireId) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-escaped-model-run-"))
+    const parameters = [{ id: "effort", value: "high" }]
+    try {
+      const models = mapAvailableModelsResponse({ models: [{ name: wireId, client_display_name: "Review fixture", variants: [
+        { displayName: "Low", isDefaultNonMaxConfig: true, parameterValues: [{ id: "effort", value: "low" }] },
+        { displayName: "__proto__", parameterValues: parameters },
+      ] }] })
+      const id = `${wireId}-cursor`
+      const classic = modelsToConfig(models)[id]
+      const modern = modelsToCatalogModelMap(models)[id]!
+      const settings = host === "classic" ? classic.variants["__proto__ Variant"]
+        : modern.variants.find((variant) => variant.id === "__proto__ Variant")?.settings
+      expect(settings?.[CURSOR_VARIANT_PARAMETERS_KEY]).toEqual(parameters)
+      await writeCache(directory, { models, fetchedAt: Date.now(), schemaVersion: MODEL_CACHE_SCHEMA_VERSION })
+      cacheHttp2SessionForTests(origin, client)
+      const model = createCursor({ name: "cursor", accessToken: "example-token", cacheDir: directory, agentBaseURL: origin })
+        .languageModel(host === "classic" ? id : modern.modelID)
+      const { stream } = await model.doStream({
+        prompt: [{ role: "user", content: [{ type: "text", text: "Hello" }] }],
+        providerOptions: { cursor: { ...(host === "classic" ? classic.options : modern.settings), ...settings } },
+      })
+      const reader = stream.getReader()
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        expect(value.type).not.toBe("error")
+      }
+      expect(requests).toHaveLength(1)
+      expect(requests[0]?.requested_model).toMatchObject({ model_id: wireId, parameters })
+    } finally {
+      await settleRunSavesForTests()
+      sessionManager.dispose()
+      await fs.rm(directory, { recursive: true, force: true })
+    }
+  })
+
   it.each([false, true])(`sends a saved 500k selection from the ${host} base/Fast catalog (fast=%s)`, async (fast) => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-saved-variant-run-"))
     const parameters = (context: string, speed: boolean) => [

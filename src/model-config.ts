@@ -91,6 +91,11 @@ function paramMap(params: ModelVariant["parameterValues"]): Record<string, strin
 /** OpenCode's persisted "no explicit variant" sentinel (1.x and 2.x). */
 const RESERVED_VARIANT_KEY = "default"
 
+/** Keys that config-object consumers can drop or interpret as object metadata. */
+function needsEscapedCatalogKey(value: string): boolean {
+  return value === "prototype" || Object.hasOwn(Object.prototype, value)
+}
+
 /** Drop a leading model-name prefix from a sanitized variant label. */
 function stripModelPrefix(label: string, prefix: string): string | null {
   if (label === prefix) return ""
@@ -113,7 +118,7 @@ function modelInfoVariants(
   entry: { name: string; fast: boolean; contextTier: ContextTier },
 ): Record<string, Record<string, unknown>> | undefined {
   if (variants.length === 0) return undefined
-  const entries: Record<string, Record<string, unknown>> = {}
+  const entries: Record<string, Record<string, unknown>> = Object.create(null)
   const usedKeys = new Set<string>()
   const modelBase = baseName(mi)
   const entryName = safeLabel(entry.name)
@@ -144,6 +149,7 @@ function modelInfoVariants(
     // Both OpenCode majors reserve the variant id "default" for "no variant
     // override", so a variant keyed "default" would never apply its params.
     if (!label || label === RESERVED_VARIANT_KEY) label = flags || "Standard"
+    if (label === "__proto__") label += " Variant"
 
     let key = label
     if (usedKeys.has(key)) {
@@ -366,9 +372,10 @@ function uniqueCatalogId(usedIds: Set<string>, modelId: string, suffix: string):
 
 export function modelsToConfig(models: ModelInfo[]): Record<string, any> {
   const ambiguous = thinkingSuffixBaseNames(models)
-  const out: Record<string, any> = {}
+  const out: Record<string, any> = Object.create(null)
   const usedIds = new Set(models.map((m) => m.id))
   for (const m of models) {
+    const primaryId = needsEscapedCatalogKey(m.id) ? uniqueCatalogId(usedIds, m.id, "-cursor") : m.id
     const thinkingSuffix = !!m.supportsThinking && ambiguous.has(baseName(m))
     const splitFast = hasCursorFastPricing(m.id)
     const groups: Array<{
@@ -405,9 +412,11 @@ export function modelsToConfig(models: ModelInfo[]): Record<string, any> {
       }
     }
     if (groups.length === 0) {
-      out[m.id] = applyCursorModelCost(
+      const config = modelInfoToConfig(m, { thinkingSuffix, contextTier: "base" })
+      if (primaryId !== m.id) config.options = { [CURSOR_WIRE_MODEL_ID_KEY]: m.id }
+      out[primaryId] = applyCursorModelCost(
         m.id,
-        modelInfoToConfig(m, { thinkingSuffix, contextTier: "base" }),
+        config,
       )
       continue
     }
@@ -416,7 +425,7 @@ export function modelsToConfig(models: ModelInfo[]): Record<string, any> {
     const primary = primaryIndex >= 0 ? primaryIndex : 0
     for (const [index, group] of groups.entries()) {
       const catalogId = index === primary
-        ? m.id
+        ? primaryId
         : uniqueCatalogId(usedIds, m.id, group.suffix || "-fast")
       const pricingId = group.fast ? `${m.id}-fast` : (group.contextTier === "long" ? `${m.id}-1m` : m.id)
       const config = modelInfoToConfig(m, {
@@ -431,6 +440,7 @@ export function modelsToConfig(models: ModelInfo[]): Record<string, any> {
         fast: group.fast,
         contextTier: group.contextTier,
       })
+      if (catalogId !== m.id) config.options = { ...config.options, [CURSOR_WIRE_MODEL_ID_KEY]: m.id }
       out[catalogId] = applyCursorModelCost(pricingId, config)
     }
   }

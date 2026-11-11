@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test"
 import {
   CURSOR_VARIANT_PARAMETERS_KEY,
+  CURSOR_WIRE_MODEL_ID_KEY,
   extractCursorVariantParameters,
   mapAvailableModelsResponse,
   normalizeModelCache,
@@ -29,6 +30,36 @@ function variant(context: string, effort: string, fast = false): ModelVariant {
 }
 
 describe("adversarial model selection", () => {
+  it.each(["__proto__", "constructor", "toString"])(
+    "preserves accepted metadata through selectable serialized catalog keys (%s)",
+    (key) => {
+      const high = [{ id: "effort", value: "high" }]
+      const models = mapAvailableModelsResponse({ models: [{ name: key, clientDisplayName: "Review fixture", variants: [
+        { displayName: "Low", isDefaultNonMaxConfig: true, parameterValues: [{ id: "effort", value: "low" }] },
+        { displayName: key, parameterValues: high },
+      ] }] })
+      expect(models).toHaveLength(1)
+      const classic = JSON.parse(JSON.stringify(modelsToConfig(models)))
+      const modern = JSON.parse(JSON.stringify(modelsToCatalogModelMap(models)))
+      const id = `${key}-cursor`
+      const label = key === "__proto__" ? `${key} Variant` : key
+      expect(Object.hasOwn(classic, key)).toBe(false)
+      expect(Object.hasOwn(modern, key)).toBe(false)
+      expect(classic[id].options[CURSOR_WIRE_MODEL_ID_KEY]).toBe(key)
+      expect(modern[id].modelID).toBe(key)
+      expect(classic[id].variants[label].cursorVariantParameters).toEqual(high)
+      expect(modern[id].variants.find((choice: { id: string }) => choice.id === label)?.settings.cursorVariantParameters).toEqual(high)
+    },
+  )
+
+  it("escapes a prototype model id without colliding with an advertised id", () => {
+    const catalog = modelsToConfig([
+      { id: "__proto__", variants: [] }, { id: "__proto__-cursor", variants: [] },
+    ])
+    expect(Object.keys(catalog)).toEqual(["__proto__-cursor-2", "__proto__-cursor"])
+    expect(catalog["__proto__-cursor-2"].options[CURSOR_WIRE_MODEL_ID_KEY]).toBe("__proto__")
+  })
+
   it.each(["effort", "reasoning", "reasoning_effort"])(
     "keeps the host's default sentinel out of published variant ids (%s)",
     (effort) => {

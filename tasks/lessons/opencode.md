@@ -74,6 +74,15 @@ These are failure lessons shared by both hosts, not a replacement for
   its own suite (`scripts/review-model-contracts.mjs`,
   `test/review-model-contracts.test.ts`). Keep that synthetic invariant check
   distinct from a native host observation and from new defect discovery.
+  The resumed #183 review found a separate pre-existing loss: accepted model
+  ids and labels equal to `__proto__` disappeared from object-backed catalogs.
+  Agreement between the two catalogs was not an independent oracle. Derive
+  expected choices from discovery input and exercise accepted names, values,
+  partitions and ordering. Prototype-free dictionaries kept the bytes but a
+  native 1.x run still dropped the raw variant key and failed with prototype
+  model ids. Escape emitted keys, retain the wire id, and preserve ordinary
+  `constructor`/`toString` variant labels that both hosts already consume
+  (`preserves accepted metadata` in `test/model-selection-review.test.ts`).
 - **Dynamic discovery must include invocation identity.** The inner schema hid
   required outer `namespace`/`toolName`; server-side wrapper failures may appear
   only in display completion (`test/dynamic-catalog.test.ts`).
@@ -904,6 +913,12 @@ These are failure lessons shared by both hosts, not a replacement for
   head and retain separate fixes in the public result; otherwise an
   `operational` label can erase a reproduced violation (`review evidence gate`
   regressions).
+  Stopping after those two known cases left the requested review incomplete.
+  The expanded model probes and retention boundary/inheritance probes use
+  independently defined postconditions and broken/fixed controls. Keep their
+  diagnostic failures while collecting the other independent checks and unit
+  suite; fail-fast contract insertion had suppressed that evidence
+  (`test/review-model-contracts.test.ts`, `test/review-retention-contracts.test.ts`).
   Repair the review harness when that is the requested target,
   using the reviewed defect as evaluation evidence rather than turning the
   repair into a patch to the subject (`docs/pr-review.md`).

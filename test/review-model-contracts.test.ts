@@ -25,16 +25,18 @@ test("the isolated contract uses the trusted harness file and the subject's impl
   fs.writeFileSync(path.join(subject, "scripts/review-model-contracts.mjs"), 'console.log("WRONG_HARNESS"); process.exit(0)\n')
   fs.writeFileSync(path.join(subject, "src/model-config.ts"), `
     export function modelsToConfig(models) {
-      return Object.fromEntries(models.map(model => [model.id, { variants:
+      const safe = id => id === "prototype" || Object.hasOwn(Object.prototype, id) ? id + "-cursor" : id
+      return Object.fromEntries(models.map(model => [safe(model.id), { options: {cursorModelId:model.id}, variants:
         Object.fromEntries(model.variants.map((v, i) => ["label-"+i, {cursorVariantParameters:v.parameterValues}]))
       }]))
     }
   `)
+  fs.writeFileSync(path.join(subject, "src/models.ts"), `export const normalizeModelCache = value => value\n`)
   const catalog = path.join(subject, "src/opencode2/catalog.ts")
   const implementation = (broken: boolean, empty = false) => `
     import { modelsToConfig } from "../model-config.ts"
     export function modelsToCatalogModelMap(models) {
-      return Object.fromEntries(Object.entries(modelsToConfig(models)).map(([id, entry]) => [id, { variants:
+      return Object.fromEntries(Object.entries(modelsToConfig(models)).map(([id, entry]) => [id, { modelID:entry.options.cursorModelId, variants:
         ${empty ? "[]" : `Object.entries(entry.variants).map(([id, settings]) => ({id, settings}))
           ${broken ? '.concat([{id:"default",settings:{cursorVariantParameters:[{id:"effort",value:"default"}]}}])' : ""}`}
       }]))
@@ -58,13 +60,31 @@ test("the isolated contract uses the trusted harness file and the subject's impl
     fs.writeFileSync(catalog, implementation(false, true))
     const empty = run()
     expect(empty.status, empty.stderr).toBe(1)
-    expect(empty.stderr).toContain("lost the original high tuple")
+    expect(empty.stderr).toContain("lost an upstream tuple")
+    for (const [expression, diagnostic] of [
+      ['.map(choice => ({...choice, id: choice.id + "-changed"}))', "changed an original display-label selection"],
+      ['.map(choice => ({...choice, settings: {cursorVariantParameters: [{id:"invented",value:"invented"}]}}))', "published a tuple absent from discovery"],
+      ['.flatMap(choice => [choice, choice])', "invalid or duplicate ids"],
+      ['.map(choice => ({...choice, id:"__proto__"}))', "object-control variant id"],
+    ]) {
+      const valid = implementation(false)
+      const original = "Object.entries(entry.variants).map(([id, settings]) => ({id, settings}))"
+      expect(valid.includes(original)).toBe(true)
+      fs.writeFileSync(catalog, valid.replace(original, original + expression))
+      const mutated = run()
+      expect(mutated.status, mutated.stderr).toBe(1)
+      expect(mutated.stderr).toContain(diagnostic!)
+    }
+    fs.writeFileSync(catalog, implementation(false).replace("modelID:entry.options.cursorModelId", 'modelID:"wrong-wire-id"'))
+    const wire = run()
+    expect(wire.status, wire.stderr).toBe(1)
+    expect(wire.stderr).toContain("changed the wire model id")
   } finally {
     fs.rmSync(directory, { recursive: true, force: true })
   }
 })
 
-test("a harness contract failure stops subject tests and the live credential gate", () => {
+test("a harness contract failure preserves independent test results and closes the live credential gate", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-contract-gate-"))
   const log = path.join(directory, "commands")
   const live = path.join(directory, "live")
@@ -97,10 +117,11 @@ test("a harness contract failure stops subject tests and the live credential gat
     expect(result.status, result.stderr).toBe(1)
     expect(result.stdout).toContain("MODEL_CONTRACTS=failed exit=1")
     expect(result.stdout).toContain("LIVE_TEST=skipped")
-    expect(result.stdout).not.toContain("UNIT_TESTS=")
+    expect(result.stdout).toContain("RETENTION_CONTRACTS=passed")
+    expect(result.stdout).toContain("UNIT_TESTS=passed")
     const commands = fs.readFileSync(log, "utf8")
     expect(commands).toContain("bun /opt/harness/scripts/review-model-contracts.mjs /src")
-    expect(commands).not.toContain("bun test")
+    expect(commands).toContain("bun test")
     expect(fs.existsSync(live)).toBe(false)
     const archive = result.stdout.match(/^Check root: (.+)$/m)?.[1]
     expect(archive).toBeDefined()
@@ -108,4 +129,42 @@ test("a harness contract failure stops subject tests and the live credential gat
   } finally {
     fs.rmSync(directory, { recursive: true, force: true })
   }
+})
+
+test.each([
+  { model: 0, retention: 1, units: 0, exit: 1, ranUnits: true },
+  { model: 1, retention: 0, units: 1, exit: 1, ranUnits: true },
+  { model: 2, retention: 0, units: 0, exit: 2, ranUnits: false },
+  { model: 1, retention: 2, units: 0, exit: 2, ranUnits: false },
+])("independent failures remain failures and an unavailable boundary stops checks (%j)", (scenario) => {
+  const result = spawnSync("bash", ["-c", `
+    source scripts/isolated-check.sh
+    git() {
+      case "$*" in *fetch*|*archive*) return 0 ;; *rev-parse*) printf '%s\\n' "$CURSOR_REVIEW_TRUST_SHA" ;; *) return 1 ;; esac
+    }
+    tar() { return 0; }
+    check_run_isolated() {
+      case "$*" in
+        *review-model-contracts.mjs*) return "$PROBE_MODEL" ;;
+        *review-retention-contracts.mjs*) return "$PROBE_RETENTION" ;;
+        'bun test') return "$PROBE_UNITS" ;;
+      esac
+      return 0
+    }
+    check_run_live() { echo UNEXPECTED_LIVE; }
+    check_main 156 --live
+  `], { cwd: root, encoding: "utf8", env: {
+    ...process.env, PROBE_MODEL: String(scenario.model), PROBE_RETENTION: String(scenario.retention),
+    PROBE_UNITS: String(scenario.units), CURSOR_REVIEW_TRUST: "1", CURSOR_REVIEW_TRUST_SHA: "a".repeat(40),
+    CURSOR_API_KEY: "test-only-no-credential",
+  } })
+  expect(result.status, result.stderr).toBe(scenario.exit)
+  expect(result.stdout).not.toContain("UNEXPECTED_LIVE")
+  expect(result.stdout.includes("UNIT_TESTS=")).toBe(scenario.ranUnits)
+  if (scenario.model === 1) expect(result.stdout).toContain("MODEL_CONTRACTS=failed exit=1")
+  if (scenario.retention === 1) expect(result.stdout).toContain("RETENTION_CONTRACTS=failed exit=1")
+  if (scenario.units === 1) expect(result.stdout).toContain("UNIT_TESTS=failed exit=1")
+  const archive = result.stdout.match(/^Check root: (.+)$/m)?.[1]
+  expect(archive).toBeDefined()
+  expect(fs.existsSync(archive!)).toBe(false)
 })

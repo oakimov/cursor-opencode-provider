@@ -41,6 +41,7 @@ That path is not the untrusted-PR boundary.
 | `scripts/review-ledger.py` | private completion evidence |
 | `scripts/isolated-check.sh` / `isolate-run.sh` | untrusted PR checks |
 | `scripts/review-model-contracts.mjs` | harness-owned catalog invariants, run against the archived PR source |
+| `scripts/review-retention-contracts.mjs` | snapshot boundaries, maintenance, provenance, writer temps and inherited-setting tests on the archived source |
 | `scripts/complete-resolutions.py` | finish approved thread resolves after a confirmed review |
 | `scripts/cloud-agent-install.sh` | Cloud Agent bootstrap |
 | `eval/review/` | offline detection fixtures and scorer |
@@ -55,6 +56,7 @@ Cursor. Passing tests do **not** mean the review skill finds real defects.
 |-------|------|-------|
 | Publication | `test/review-publish.test.ts` | App/PAT auth, preview approval, idempotent post, privacy refusals, artifact retention, thread resolve, evidence/ledger gate |
 | Isolation / live scripts | `test/review-scripts.test.ts` | Cloud install string, isolated-check targets, sandbox PATH/secrets, live-test skip/deadline/cleanup, pid-targeted cancel |
+| Subject contracts | `test/review-model-contracts.test.ts`, `test/review-retention-contracts.test.ts` | upstream tuple preservation, accepted metadata variations, independent phase results, real persistence probes and deliberately broken controls |
 | Eval fixtures / scorer | `test/review-eval.test.ts` | Case orchestration fixtures, mount excludes answer keys, ledger compare, score detection vs false positives |
 
 The test preload clears inherited `CURSOR_PROVIDER_CACHE_TTL_MS` so expiry
@@ -62,6 +64,14 @@ fixtures use the default policy. A test may set its own override and pass it
 to child writers, but must restore it before returning. A leaked override
 fails that test and is cleared before the next one. Subprocess regressions in
 `test/test-isolation.test.ts` exercise inherited settings and that recovery.
+
+After build and typecheck, isolated PR checks run the harness's model and
+retention probes and the subject unit suite independently. A contract failure
+stays failed while the other checks run; an unavailable boundary stops them.
+Any failure withholds the live credential. Contract probes use synthetic input,
+and their expected values come from upstream metadata or the retention contract,
+not another output of the same implementation. They do not measure an agent's
+ability to discover unrelated defects.
 
 New review evidence also records each candidate's status on the exact PR
 head. A defect declared present must remain a finding even when another
