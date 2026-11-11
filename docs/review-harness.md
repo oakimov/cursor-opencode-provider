@@ -56,6 +56,12 @@ Cursor. Passing tests do **not** mean the review skill finds real defects.
 | Isolation / live scripts | `test/review-scripts.test.ts` | Cloud install string, isolated-check targets, sandbox PATH/secrets, live-test skip/deadline/cleanup, pid-targeted cancel |
 | Eval fixtures / scorer | `test/review-eval.test.ts` | Case orchestration fixtures, mount excludes answer keys, ledger compare, score detection vs false positives |
 
+The test preload clears inherited `CURSOR_PROVIDER_CACHE_TTL_MS` so expiry
+fixtures use the default policy. A test may set its own override and pass it
+to child writers, but must restore it before returning. A leaked override
+fails that test and is cleared before the next one. Subprocess regressions in
+`test/test-isolation.test.ts` exercise inherited settings and that recovery.
+
 ### Live OpenCode tests
 
 Unit tests never load a real OpenCode process against Cursor. The live path
@@ -333,13 +339,14 @@ backend. Details of that runner stay in [pr-review.md](pr-review.md#local-checks
 ## What gets posted
 
 Only after `approve` of the exact preview digest does `post` call GitHub. It
-creates **one pull-request review**:
+creates an initial **pull-request review**, or updates that review's summary
+on re-review:
 
 | Piece | Content |
 |-------|---------|
 | Author | App bot (default), or the user account for a `--token-env` PAT |
 | Event | `COMMENT` only — never Approve or Request changes |
-| Commit | the approved `head` SHA |
+| Commit | initial review: the approved `head` SHA; updates keep the original metadata and name the new head in the summary |
 | Summary body | review summary text, plus a stamp `<!-- cursor-review:<digest> -->` used to find the same review on retry |
 | Inline comments | optional; each has repository-relative `path`, diff `line`, `side` (`LEFT`/`RIGHT`), and `body` |
 
@@ -351,7 +358,13 @@ Do **not** post with a PR discussion comment, `gh pr comment`, or the agent's
 chat reply. Those are not a submitted review receipt.
 
 On a re-review, the approved payload may list `resolve` actions for earlier
-threads. Those run only after the COMMENT review is confirmed and the thread
+threads. First use `review-publish.py reviews` to inventory this reviewer's
+existing post and set the result's `update` target as described in
+[re-reviewing](pr-review.md#re-review-and-thread-resolution). Replace its
+summary in place; do not post another top-level review. Updates require a new
+approved preview and put new findings in the summary, preserving old inline
+anchors. Failure to update must not create a replacement post.
+Thread actions run only after the initial review or summary update is confirmed and the thread
 still matches the inventoried snapshot. Reply proposals in the payload are not
 sent. Publication never merges the pull request.
 

@@ -275,6 +275,39 @@ handoff while waiting; a successful `show` is not publication.
 
 ## Re-review and thread resolution
 
+Re-review updates this reviewer's existing summary post in place, including a
+clean-to-findings verdict change on the same head. It must not leave an old
+clean verdict as the apparent current result or create a duplicate top-level
+review. Inventory the posts using the same publishing identity:
+
+```bash
+python3 scripts/review-publish.py reviews owner repo 156 > "$review_dir/reviews.json"
+```
+
+Choose the latest stamped COMMENT review by that reviewer, never another
+author's review. Add this optional field to the structured result, using the
+inventory's review `id`, `user.id`, and exact UTF-8 body digest:
+
+```json
+"update": { "review": 123, "author": 456, "bodySha256": "<64-character-inventory-digest>" }
+```
+
+Use the normal render → stamp → show → approve → post flow. The approval binds
+both the replacement summary and the target review snapshot; old approval does
+not authorize an update. The renderer puts all new findings and their source
+locations in the summary. `post` calls GitHub's
+[update-review endpoint](https://docs.github.com/en/rest/pulls/reviews#update-a-review-for-a-pull-request)
+with the body only. It checks the review id, author, COMMENT state and old body
+digest again before sending, then requires the approved body at that same id
+on readback. A changed/missing target, rejected request or ambiguous delivery
+never falls back to a new review or discussion comment. A lost response is
+recovered from the existing post; an unsettled update is not blindly resent.
+
+The review URL remains the same. GitHub retains its original `commit_id` and
+inline anchors, so the updated summary explicitly names the newly reviewed
+head and verdict. Existing inline threads remain subject to the resolution
+procedure below. No update target means an initial review, created as before.
+
 Read all review threads and their replies, including outdated anchors, before
 classifying earlier findings. The private inventory includes complete paginated
 discussions and a digest of their comment ids, URLs, bodies, and edit timestamps:
@@ -307,7 +340,7 @@ Render, show, and obtain approval of the exact payload as above. The approval
 covers the listed resolutions and their evidence. `post` refuses a structured
 re-review that omits an open thread, verifies each resolution's original comment
 and PR membership, and checks that the discussion still matches the snapshot.
-Only after a confirmed COMMENT review does it resolve the approved threads with
+Only after a confirmed initial review or summary update does it resolve the approved threads with
 the App, using GitHub's [resolveReviewThread mutation](https://docs.github.com/en/graphql/reference/pulls#resolvereviewthread).
 It checks the head, base, and pinned approval before each action, requires the
 correct returned thread id, and reads back `isResolved: true` before printing

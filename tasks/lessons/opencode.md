@@ -828,6 +828,13 @@ These are failure lessons shared by both hosts, not a replacement for
   client version comes from disk, and without one, as in CI, six Run tests
   fetched Cursor's installer page. The preload fixes `CURSOR_CLIENT_VERSION`.
   Look for such callers with a home that has none of the operator's installs.
+  PR #184 made snapshot age configurable, but an inherited seven-day setting
+  bypassed expiry branches and left a quarantine barrier unreachable. Clean CI
+  and tests that scoped their own override missed the caller's environment.
+  The preload clears inherited retention and fails/restores leaked overrides;
+  subprocess fixtures
+  cover long, short and invalid settings while preserving explicit test-owned
+  overrides and child-writer inheritance (`test/test-isolation.test.ts`).
 - **Match CI environments.** Narrow PATH fixtures omitted mkdir. Queued
   publication tests once read Linux's `/proc/locks`, which macOS lacks;
   observe the test contender at the real `flock` call after its approval peek,
@@ -859,6 +866,14 @@ These are failure lessons shared by both hosts, not a replacement for
   workflow rather than in a script the head might not contain. Strip
   temporary module copies from coverage and include Bun editor types
   (`scripts/strip-copied-coverage.ts`).
+  PR #187's jobs stopped before tests because every default Ubuntu archive
+  endpoint failed DNS resolution, also on fresh runners. Diagnose provisioning
+  separately from subject failures. An Ubuntu-registered mirror on an
+  independent domain preserves APT's signed metadata/package validation;
+  reject partial index updates rather than installing against stale indexes.
+  Share that bootstrap between merge and head coverage jobs, including when
+  the checked-out head predates a helper script (`uses the same signed Ubuntu
+  mirror setup` in `test/review-scripts.test.ts`).
 - **A green suite is not a branch audit.** A review missed a generator whose
   failed refresh retained the state that made the next invocation skip its
   promised retry, and it also promoted observations and policy preferences
@@ -928,6 +943,12 @@ These are failure lessons shared by both hosts, not a replacement for
   Parse the `--paginate` JSON stream locally, including later-page receipts,
   and reject partial or malformed output before inferring no prior review
   (`publishes and recovers later-page receipts with gh that has no slurp flag`).
+  A re-review can change the verdict without changing the PR head. Keep the
+  reviewer's existing summary current instead of leaving an earlier clean
+  post beside a newer contradictory one. Bind the replacement to the existing
+  review id, author and body digest, then verify its body at that same id;
+  summary edits retain the original commit/inline anchors, so new findings
+  need source locations in the summary (`review summary updates` regressions).
 - **A code verdict is not a command exit status.** A review labelled an isolated
   check passed while reporting its nonzero exit and failing self-tests. The
   result model also rejected clean code verdicts with established baseline or

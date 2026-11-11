@@ -136,10 +136,10 @@ describe("test run isolation (test/preload.ts)", () => {
 })
 
 /** Run one fixture file in its own `bun test`, under the same preload. */
-function runFixture(name: string): { exitCode: number; output: string; pass: number; fail: number } {
+function runFixture(name: string, env: NodeJS.ProcessEnv = process.env): { exitCode: number; output: string; pass: number; fail: number } {
   const child = Bun.spawnSync([process.execPath, "test", `./test/fixtures/isolation/${name}.fixture.ts`], {
     cwd: path.join(import.meta.dir, ".."),
-    env: process.env,
+    env,
     stdout: "pipe",
     stderr: "pipe",
   })
@@ -149,6 +149,21 @@ function runFixture(name: string): { exitCode: number; output: string; pass: num
 }
 
 describe("a test that breaks isolation", () => {
+  it("ignores inherited snapshot retention while allowing an explicit test override", () => {
+    for (const value of ["604800000", "1", "not-a-number"]) {
+      const run = runFixture("retention", { ...process.env, CURSOR_PROVIDER_CACHE_TTL_MS: value })
+      expect(run.output).not.toContain("Tests left")
+      expect({ pass: run.pass, fail: run.fail, exitCode: run.exitCode }).toEqual({ pass: 3, fail: 0, exitCode: 0 })
+    }
+  }, 30_000)
+
+  it("fails a leaked snapshot-retention override and restores the next test's default", () => {
+    const run = runFixture("retention-leak")
+    expect(run.output).toContain("left CURSOR_PROVIDER_CACHE_TTL_MS changed; restore what the test sets")
+    expect(run.output).toContain("(fail) leaves a retention override behind")
+    expect({ pass: run.pass, fail: run.fail, exitCode: run.exitCode }).toEqual({ pass: 1, fail: 1, exitCode: 1 })
+  }, 30_000)
+
   it("fails when it tried the network, even though the code swallowed the refusal", () => {
     const run = runFixture("network")
     expect(run.output).toContain("tried to reach the network (fetch https://192.0.2.1/models)")

@@ -1298,6 +1298,46 @@ print("SAW=" + str(found))
     expect(publish).toContain("Allow user namespaces")
   })
 
+  it("uses the same signed Ubuntu mirror setup for tests and coverage and stops on update failure", () => {
+    const yaml = fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8")
+    const body = yaml.match(/- &zsh-step\n +name: Install zsh\n +run: \|\n((?: {10}[^\n]*\n|\n)+)/)?.[1]
+    expect(body).toBeDefined()
+    expect(yaml).toContain("- *zsh-step")
+    const step = body!.split("\n").map(line => line.slice(10)).join("\n")
+    expect(step).toContain('mirror_file="/etc/apt/apt-mirrors.txt"')
+    // Substitute only the runner-owned filesystem path. Execute the workflow's
+    // real shell ordering; package installation is the mocked external service.
+    const script = step.replace('mirror_file="/etc/apt/apt-mirrors.txt"', 'mirror_file="$APT_TEST_MIRROR_FILE"')
+    const stub = `
+      sudo() {
+        if [[ "$1" == tee ]]; then shift; command tee "$@"; return; fi
+        [[ "$1" == apt-get ]] || return 99
+        printf '%s\\n' "$*" >> "$APT_TEST_LOG"
+        if [[ "$*" == *' update' && "$APT_TEST_FAIL_UPDATE" == 1 ]]; then return 100; fi
+      }
+      zsh() { printf '%s\\n' "zsh $*" >> "$APT_TEST_LOG"; }
+    `
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ci-zsh-"))
+    const mirror = path.join(directory, "mirrors.txt")
+    const log = path.join(directory, "commands")
+    try {
+      for (const failUpdate of ["0", "1"]) {
+        fs.writeFileSync(mirror, "https://archive.ubuntu.com/ubuntu/\n")
+        fs.writeFileSync(log, "")
+        const result = run("bash", ["-c", stub + script], {
+          env: { ...process.env, APT_TEST_MIRROR_FILE: mirror, APT_TEST_LOG: log, APT_TEST_FAIL_UPDATE: failUpdate },
+        })
+        expect(result.status, result.stderr).toBe(failUpdate === "1" ? 100 : 0)
+        expect(fs.readFileSync(mirror, "utf8")).toBe("https://mirrors.kernel.org/ubuntu/\n")
+        expect(fs.readFileSync(log, "utf8").trim().split("\n")).toEqual(failUpdate === "1"
+          ? ["apt-get -o APT::Update::Error-Mode=any update"]
+          : ["apt-get -o APT::Update::Error-Mode=any update", "apt-get install --no-install-recommends -y zsh", "zsh --version"])
+      }
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
   it("runs a command when no tools or environment names are passed", () => {
     const src = fs.mkdtempSync(path.join(os.tmpdir(), "review-empty-arrays-"))
     try {
