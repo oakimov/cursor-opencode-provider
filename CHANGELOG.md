@@ -8,6 +8,7 @@
 
 ### Added
 
+- `CURSOR_PROVIDER_CACHE_TTL_MS` sets how long a persisted conversation snapshot stays usable (default `86400000`, 24 h). A longer value keeps Cursor's checkpoint reachable across a longer break instead of reseeding the full host transcript on the next turn; abandoned `.tmp` writer files still expire after the fixed 24 h.
 - First-time [review harness setup guide](docs/review-harness.md): supply App credentials or a PAT, run a Cloud Agent or local review, what a published COMMENT review contains, harness architecture (tests, evals, live OpenCode runs, extending scenarios).
 - `review-publish.py post --token-env NAME`, `review-publish.py threads --token-env NAME`, and `complete-resolutions.py --token-env NAME` read a GitHub personal access token (`ghp_` or `github_pat_`) from that environment variable and send it on every `gh` call those commands make. Without the option, those commands use the GitHub App installation token.
 
