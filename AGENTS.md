@@ -215,7 +215,8 @@ The **1.18 v2** API and **OpenCode 2.x** are source-incompatible:
   transport received the frame (`frameArrival`), not when a pump read it: the
   checkpoint after a tool step holds none of that tool result's images.
 - Retention uses persisted application metadata, not filesystem timestamps.
-  Hydrate on demand, expire after 24 h, avoid blocking startup/full-cache decode,
+  Hydrate on demand, expire after `CURSOR_PROVIDER_CACHE_TTL_MS` (24 h by default),
+  avoid blocking startup/full-cache decode,
   preserve concurrent replacement files, and keep soft-evicted state reusable.
 
 ## Run lifecycle and recovery

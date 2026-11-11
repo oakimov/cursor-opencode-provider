@@ -34,7 +34,28 @@ export const MODEL_CACHE_SCHEMA_VERSION = 6
 export const MODEL_CACHE_TTL_MS = 86_400_000
 export const CONVERSATION_CACHE_DIR = "cursor-conversations"
 export const CONVERSATION_CACHE_SCHEMA_VERSION = 4
+/** Default retention for a persisted conversation snapshot (24 h). */
 export const CONVERSATION_CACHE_TTL_MS = 86_400_000
+/**
+ * Operator override for snapshot retention. Snapshots older than this are
+ * treated as expired, so a longer value keeps a conversation warm across a
+ * longer break; abandoned `.tmp` files still expire on the fixed 24 h window
+ * so disk use cannot grow with it.
+ */
+export const CONVERSATION_CACHE_TTL_ENV = "CURSOR_PROVIDER_CACHE_TTL_MS"
+
+/**
+ * Snapshot retention in milliseconds: `CONVERSATION_CACHE_TTL_ENV` when it
+ * holds a positive safe integer, else the 24 h default. Anything else (empty,
+ * non-numeric, zero, negative, unsafe) falls back rather than disabling
+ * retention, and a leading `+`/space or float is not a valid integer.
+ */
+export function resolveConversationCacheTtlMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[CONVERSATION_CACHE_TTL_ENV]?.trim()
+  if (!raw || !/^\d+$/.test(raw)) return CONVERSATION_CACHE_TTL_MS
+  const parsed = Number(raw)
+  return parsed > 0 && Number.isSafeInteger(parsed) ? parsed : CONVERSATION_CACHE_TTL_MS
+}
 export const VERSION_CACHE_FILE = "cursor-client-version.json"
 
 export const CONTENT_TYPE_CONNECT_PROTO = "application/connect+proto"

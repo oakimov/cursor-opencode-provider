@@ -513,6 +513,81 @@ describe("bounded conversation maintenance", () => {
     expect((await stat(freshTemp)).isFile()).toBe(true)
     expect((await stat(partialTemp)).isFile()).toBe(true)
   })
+
+  it("keeps a two-day-old snapshot warm when CURSOR_PROVIDER_CACHE_TTL_MS is seven days", async () => {
+    const cacheDir = await root()
+    const twoDays = 2 * CONVERSATION_CACHE_TTL_MS
+    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - twoDays, "week-warm")))
+    const previous = process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+    process.env.CURSOR_PROVIDER_CACHE_TTL_MS = "604800000"
+    try {
+      await waitForConversationMaintenanceForTests(cacheDir, now)
+      // Maintenance must not collect it, and a warm load must still restore it.
+      expect((await stat(filePath)).isFile()).toBe(true)
+      const loaded = await loadPersistedConversation(cacheDir, sessionKey, now)
+      expect(loaded.status).toBe("restored")
+      expect(loaded.value?.conversationId).toBe("week-warm")
+    } finally {
+      if (previous === undefined) delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+      else process.env.CURSOR_PROVIDER_CACHE_TTL_MS = previous
+    }
+  })
+
+  it("expires the same two-day-old snapshot at the default 24-hour retention", async () => {
+    const cacheDir = await root()
+    const twoDays = 2 * CONVERSATION_CACHE_TTL_MS
+    await snapshot(cacheDir, gzipSync(protobufSnapshot(now - twoDays, "day-cold")))
+    const previous = process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+    delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+    try {
+      resetConversationPersistenceForTests()
+      expect((await loadPersistedConversation(cacheDir, sessionKey, now)).status).toBe("expired")
+      await waitForConversationMaintenanceForTests(cacheDir, now)
+      await expect(stat(conversationCacheFilePath(cacheDir, sessionKey))).rejects.toMatchObject({ code: "ENOENT" })
+    } finally {
+      if (previous !== undefined) process.env.CURSOR_PROVIDER_CACHE_TTL_MS = previous
+    }
+  })
+
+  it("still collects an abandoned writer temp at 24 hours under a seven-day retention", async () => {
+    const cacheDir = await root()
+    const directory = conversationCacheDirectoryPath(cacheDir)
+    const base = path.basename(conversationCacheFilePath(cacheDir, sessionKey))
+    const expiredTemp = path.join(directory, `.${base}.1.expired.tmp`)
+    const twoDayTemp = path.join(directory, `.${base}.2.twoday.tmp`)
+    await writeFile(expiredTemp, gzipSync(protobufSnapshot(now - CONVERSATION_CACHE_TTL_MS - 1)))
+    await writeFile(twoDayTemp, gzipSync(protobufSnapshot(now - 2 * CONVERSATION_CACHE_TTL_MS)))
+    const previous = process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+    process.env.CURSOR_PROVIDER_CACHE_TTL_MS = "604800000"
+    try {
+      resetConversationPersistenceForTests()
+      await waitForConversationMaintenanceForTests(cacheDir, now)
+      // Temp cleanup stays on the fixed window, so a longer retention cannot
+      // strand an interrupted write on disk.
+      for (const temp of [expiredTemp, twoDayTemp]) {
+        await expect(stat(temp)).rejects.toMatchObject({ code: "ENOENT" })
+      }
+    } finally {
+      if (previous === undefined) delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+      else process.env.CURSOR_PROVIDER_CACHE_TTL_MS = previous
+    }
+  })
+
+  it("falls back to 24 hours for an unusable CURSOR_PROVIDER_CACHE_TTL_MS", async () => {
+    const cacheDir = await root()
+    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - 2 * CONVERSATION_CACHE_TTL_MS)))
+    const previous = process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+    process.env.CURSOR_PROVIDER_CACHE_TTL_MS = "not-a-number"
+    try {
+      resetConversationPersistenceForTests()
+      expect((await loadPersistedConversation(cacheDir, sessionKey, now)).status).toBe("expired")
+      await waitForConversationMaintenanceForTests(cacheDir, now)
+      await expect(stat(filePath)).rejects.toMatchObject({ code: "ENOENT" })
+    } finally {
+      if (previous === undefined) delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+      else process.env.CURSOR_PROVIDER_CACHE_TTL_MS = previous
+    }
+  })
 })
 
 describe("streaming snapshot metadata", () => {
