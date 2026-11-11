@@ -4978,24 +4978,23 @@ function appendedInjectionsInRebuild(failed: CursorSession, prompt: LanguageMode
 
 async function loadAvailableModels(): Promise<ModelInfo[] | undefined> {
   const cacheDir = opencodeGlobalCacheDir()
+  const filePath = cacheFilePath(cacheDir)
+  let generation = "missing"
   try {
-    const filePath = cacheFilePath(cacheDir)
-    let generation = "missing"
-    try {
-      const stat = await fs.promises.stat(filePath)
-      generation = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`
-    } catch {
-      // A missing cache must not reuse another root's catalog.
-    }
-    if (availableModelsCache?.filePath === filePath && availableModelsCache.generation === generation) {
-      return availableModelsCache.models
-    }
-    const models = (await readCache(cacheDir))?.models
-    availableModelsCache = { filePath, generation, models }
-    // Return this read's snapshot; another request can load a different root
-    // while this request awaits its agent origin or constructs its context.
-    return models
-  } catch { return undefined }
+    const stat = await fs.promises.stat(filePath)
+    generation = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`
+  } catch {
+    // A missing cache must not reuse another root's catalog.
+  }
+  if (availableModelsCache?.filePath === filePath && availableModelsCache.generation === generation) {
+    return availableModelsCache.models
+  }
+  // readCache handles missing, unreadable and invalid files as absent metadata.
+  const models = (await readCache(cacheDir))?.models
+  availableModelsCache = { filePath, generation, models }
+  // Return this read's snapshot; another request can load a different root
+  // while this request awaits its agent origin or constructs its context.
+  return models
 }
 
 function resolveApiBaseURL(options: CreateCursorOptions): string {

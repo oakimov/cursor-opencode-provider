@@ -114,11 +114,14 @@ it("keeps cache roots and atomic generations distinct even when timestamps match
       { directory: directories[1]!, expected: false },
       { directory: directories[1]!, expected: true, update: true },
       { directory: directories[1]!, expected: false, update: false },
+      { directory: directories[1]!, expected: false, corrupt: true },
+      { directory: directories[1]!, expected: false, update: false },
       // Missing metadata must refuse the explicit pick, not reuse old variants.
       { directory: directories[1]!, expected: true, remove: true },
     ]
     for (const step of steps) {
       if (step.update !== undefined) await write(step.directory, step.update)
+      if (step.corrupt) await fs.writeFile(cacheFilePath(step.directory), "{")
       if (step.remove) await fs.unlink(cacheFilePath(step.directory))
       cacheHttp2SessionForTests(origin, client)
       const model = createCursor({ name: "cursor", accessToken: "example-token", cacheDir: step.directory, agentBaseURL: origin })
@@ -127,7 +130,7 @@ it("keeps cache roots and atomic generations distinct even when timestamps match
         prompt: [{ role: "user" as const, content: [{ type: "text" as const, text: "Hello" }] }],
         providerOptions: { cursor: { [CURSOR_VARIANT_PARAMETERS_KEY]: parameters } },
       }
-      if (step.remove) {
+      if (step.remove || step.corrupt) {
         const count = requests.length
         await expect(model.doStream(call)).rejects.toMatchObject({
           cause: expect.objectContaining({ message: expect.stringContaining("no cached variants") }),
