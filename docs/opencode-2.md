@@ -118,6 +118,27 @@ see [shared model selection](../README.md#select-a-model).
 Saved 500k variants on the original base/Fast entries remain available after
 upgrading. Select the dedicated 500k entry for its full host context budget.
 
+### Short variant ids
+
+OpenCode 2.x addresses a variant as `provider/model#variant` and matches the id
+exactly. Alongside each display label, the inventory also publishes a lowercase
+effort id, so both of these pick the same tuple:
+
+```
+cursor/deepseek-v41-flash-1017#Max
+cursor/deepseek-v41-flash-1017#max
+```
+
+Ids are the effort value (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`,
+`max`) plus a `-1m` / `-500k` context token and/or `-fast` when that entry mixes
+those variants. `extra-high` normalizes to `xhigh`.
+
+A short id is published only when exactly one variant in the entry maps to it.
+`claude-opus-5` lists both `No Thinking High` and `High`, so it keeps only those
+labels and offers no `#high`; picking one for you would silently change whether
+the request thinks. `grok-4.7` mixes context tiers, so it publishes `low`,
+`low-500k`, … and reserves the bare id for the 256k tier.
+
 The plugin supplies its own Cursor SDK even when the host's generic package loader already created one. Each new Run resolves the active integration credential and applies on-demand renewal; a token captured by the generic loader or its options cannot bypass that resolver.
 
 Image copies and generation use `cursor_image_save` with native permission

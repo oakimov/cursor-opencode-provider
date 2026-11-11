@@ -196,7 +196,8 @@ function isSeparateContext(mi: ModelInfo, v: ModelVariant): boolean {
     (v.isMaxMode === true && context !== undefined && context !== mi.maxContext)
 }
 
-function contextSuffix(context: number): string {
+/** `1m`, `500k`, `272k` — the tier token shared by catalog ids and variant ids. */
+export function contextSuffix(context: number): string {
   return context % 1_000_000 === 0 ? `${context / 1_000_000}m` : `${context / 1_000}k`
 }
 

@@ -8,6 +8,7 @@
 
 ### Added
 
+- OpenCode 2.x models publish lowercase effort variant ids (`#high`, `#max`, `#high-fast`, `#high-1m`) alongside the existing display-label ids, so `provider/model#max` resolves the way other 2.x providers do. A short id appears only when it selects exactly one variant in that entry: a model listing both `No Thinking High` and `High` keeps only those labels.
 - First-time [review harness setup guide](docs/review-harness.md): supply App credentials or a PAT, run a Cloud Agent or local review, what a published COMMENT review contains, harness architecture (tests, evals, live OpenCode runs, extending scenarios).
 - `review-publish.py post --token-env NAME`, `review-publish.py threads --token-env NAME`, and `complete-resolutions.py --token-env NAME` read a GitHub personal access token (`ghp_` or `github_pat_`) from that environment variable and send it on every `gh` call those commands make. Without the option, those commands use the GitHub App installation token.
 
