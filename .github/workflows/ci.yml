@@ -32,7 +32,7 @@ jobs:
     name: Typecheck, test, build
     # Keep package provisioning on an explicit LTS image; the platform matrix
     # above still exercises ubuntu-latest as its image changes.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Checkout
@@ -46,8 +46,19 @@ jobs:
 
       # OpenCode's default interactive shell is zsh; shell-timeout's ZDOTDIR
       # injector integration test needs /bin/zsh (absent on stock ubuntu-latest).
-      - name: Install zsh
-        run: sudo apt-get update && sudo apt-get install -y zsh
+      - &zsh-step
+        name: Install zsh
+        run: |
+          set -euo pipefail
+          # Use Ubuntu's registered Kernel.org archive mirror independently of
+          # the runner's ubuntu.com mirror DNS. APT still verifies Ubuntu's
+          # signed repository metadata and package hashes with its own keyring.
+          mirror_file="/etc/apt/apt-mirrors.txt"
+          test -f "$mirror_file"
+          printf '%s\n' 'https://mirrors.kernel.org/ubuntu/' | sudo tee "$mirror_file" >/dev/null
+          sudo apt-get -o APT::Update::Error-Mode=any update
+          sudo apt-get install --no-install-recommends -y zsh
+          zsh --version
 
       # ubuntu-latest denies unprivileged user namespaces. The isolation
       # tests require them and fail closed when unshare cannot create one.
@@ -123,7 +134,7 @@ jobs:
   coverage:
     name: Coverage
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Checkout PR head
@@ -137,8 +148,7 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
-      - name: Install zsh
-        run: sudo apt-get update && sudo apt-get install -y zsh
+      - *zsh-step
 
       - *userns-step
 

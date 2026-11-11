@@ -866,6 +866,14 @@ These are failure lessons shared by both hosts, not a replacement for
   workflow rather than in a script the head might not contain. Strip
   temporary module copies from coverage and include Bun editor types
   (`scripts/strip-copied-coverage.ts`).
+  PR #187's jobs stopped before tests because every default Ubuntu archive
+  endpoint failed DNS resolution, also on fresh runners. Diagnose provisioning
+  separately from subject failures. An Ubuntu-registered mirror on an
+  independent domain preserves APT's signed metadata/package validation;
+  reject partial index updates rather than installing against stale indexes.
+  Share that bootstrap between merge and head coverage jobs, including when
+  the checked-out head predates a helper script (`uses the same signed Ubuntu
+  mirror setup` in `test/review-scripts.test.ts`).
 - **A green suite is not a branch audit.** A review missed a generator whose
   failed refresh retained the state that made the next invocation skip its
   promised retry, and it also promoted observations and policy preferences
