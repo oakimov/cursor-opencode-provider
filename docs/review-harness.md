@@ -56,6 +56,12 @@ Cursor. Passing tests do **not** mean the review skill finds real defects.
 | Isolation / live scripts | `test/review-scripts.test.ts` | Cloud install string, isolated-check targets, sandbox PATH/secrets, live-test skip/deadline/cleanup, pid-targeted cancel |
 | Eval fixtures / scorer | `test/review-eval.test.ts` | Case orchestration fixtures, mount excludes answer keys, ledger compare, score detection vs false positives |
 
+The test preload clears inherited `CURSOR_PROVIDER_CACHE_TTL_MS` so expiry
+fixtures use the default policy. A test may set its own override and pass it
+to child writers, but must restore it before returning. A leaked override
+fails that test and is cleared before the next one. Subprocess regressions in
+`test/test-isolation.test.ts` exercise inherited settings and that recovery.
+
 ### Live OpenCode tests
 
 Unit tests never load a real OpenCode process against Cursor. The live path

@@ -65,6 +65,10 @@ outside `src/`.
    suspected state machine or hand it the expected result. A helper test, an
    immediate exit status, or a mocked transition does not establish the
    behavior the orchestration owns.
+   When fixed behavior becomes configurable, also run the affected test
+   entrypoint with a supported setting inherited from its caller. A clean
+   environment and tests that set their own overrides do not establish that
+   default-policy fixtures remain isolated from operator configuration.
    For an ownership postcondition, challenge the lifecycle paths that apply:
    ordinary completion, nonzero completion, catchable termination of the
    owner, and a leader that exits early (successfully or on TERM) while a

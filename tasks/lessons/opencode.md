@@ -828,6 +828,13 @@ These are failure lessons shared by both hosts, not a replacement for
   client version comes from disk, and without one, as in CI, six Run tests
   fetched Cursor's installer page. The preload fixes `CURSOR_CLIENT_VERSION`.
   Look for such callers with a home that has none of the operator's installs.
+  PR #184 made snapshot age configurable, but an inherited seven-day setting
+  bypassed expiry branches and left a quarantine barrier unreachable. Clean CI
+  and tests that scoped their own override missed the caller's environment.
+  The preload clears inherited retention and fails/restores leaked overrides;
+  subprocess fixtures
+  cover long, short and invalid settings while preserving explicit test-owned
+  overrides and child-writer inheritance (`test/test-isolation.test.ts`).
 - **Match CI environments.** Narrow PATH fixtures omitted mkdir. Queued
   publication tests once read Linux's `/proc/locks`, which macOS lacks;
   observe the test contender at the real `flock` call after its approval peek,
