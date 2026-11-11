@@ -497,6 +497,13 @@ if endpoint.endswith("/reviews"):
             time.sleep(0.05)
     dump([item["review"] for item in reviews])
     raise SystemExit(0)
+if endpoint.endswith("/files"):
+    if os.environ.get("GH_FILES_FAIL") == "1":
+        sys.stderr.write("HTTP 502\\n")
+        raise SystemExit(1)
+    files_path = state / "files.json"
+    dump(json.loads(files_path.read_text(encoding="utf-8")) if files_path.exists() else [])
+    raise SystemExit(0)
 head = (state / "head").read_text(encoding="utf-8").strip()
 base_path = state / "base"
 base = base_path.read_text(encoding="utf-8").strip() if base_path.exists() else "${"a".repeat(40)}"
@@ -2830,6 +2837,134 @@ print(json.dumps({"body":body,"comments":comments}))
       expect(run(["post", f.payload, f.approval], env).status).toBe(1)
       expect(runComplete(env, f.payload, f.approval).stderr).toContain("Inline publication is incomplete")
       expect(postsOf(f.state)).toBe(1)
+      expect(inlineWrites(f.state)).toEqual([])
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  const line44Patch = [
+    "@@ -40,7 +40,7 @@",
+    " context",
+    " context",
+    " context",
+    " context",
+    "-old",
+    "+new",
+    " context",
+    " context",
+  ].join("\n")
+
+  function writePullFiles(state: string, files: Array<Record<string, unknown>>) {
+    fs.writeFileSync(path.join(state, "files.json"), JSON.stringify(files))
+  }
+
+  it("refuses a summary-only update when a located finding is in the pull diff", () => {
+    const f = fixture()
+    try {
+      const result = JSON.parse(fs.readFileSync(f.source, "utf8"))
+      result.diff = [{ path: "src/shared.ts", line: 53, side: "RIGHT" }]
+      fs.writeFileSync(f.source, JSON.stringify(result))
+      expect(renderReview(f.source, f.payload, f.env).status).toBe(0)
+      const rendered = JSON.parse(fs.readFileSync(f.payload, "utf8"))
+      expect(rendered.comments).toEqual([])
+      expect(rendered.body).toContain("Location: scripts/review-publish.py:44 RIGHT")
+      expect(run(["stamp", f.payload], f.env).status).toBe(0)
+      expect(approve(f.payload, f.approval, f.env).status).toBe(0)
+      writePullFiles(f.state, [{ filename: "scripts/review-publish.py", patch: line44Patch }])
+      const refused = run(["post", f.payload, f.approval], f.env)
+      expect(refused.status, refused.stderr).not.toBe(0)
+      expect(refused.stderr).toContain("scripts/review-publish.py:44 RIGHT")
+      expect(refused.stderr).toContain("No review was updated.")
+      expect(puts(f.state)).toBe(0)
+      expect(inlineWrites(f.state)).toEqual([])
+      expect(postsOf(f.state)).toBe(0)
+      const journalDir = path.join(f.directory, ".review-publish")
+      const journals = fs.existsSync(journalDir) ? fs.readdirSync(journalDir).filter(name => name.endsWith(".json")) : []
+      expect(journals).toEqual([])
+
+      result.diff = [{ path: "scripts/review-publish.py", line: 44, side: "RIGHT" }]
+      fs.writeFileSync(f.source, JSON.stringify(result))
+      expect(renderReview(f.source, f.payload, f.env).status).toBe(0)
+      expect(JSON.parse(fs.readFileSync(f.payload, "utf8")).comments).toHaveLength(1)
+      expect(run(["stamp", f.payload], f.env).status).toBe(0)
+      expect(approve(f.payload, f.approval, f.env).status).toBe(0)
+      const posted = run(["post", f.payload, f.approval], f.env)
+      expect(posted.status, posted.stderr).toBe(0)
+      expect(puts(f.state)).toBe(1)
+      expect(inlineWrites(f.state)).toEqual([expect.objectContaining({
+        method: "POST",
+        request: expect.objectContaining({ path: "scripts/review-publish.py", line: 44, side: "RIGHT" }),
+      })])
+      const rows = JSON.parse(fs.readFileSync(path.join(f.state, "reviews.json"), "utf8"))
+      expect(rows.filter((row: { review: { body: string } }) => row.review.body.includes("<!-- cursor-review:"))).toHaveLength(1)
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  it("keeps a located finding in the summary when its line is outside the pull diff", () => {
+    const f = fixture()
+    try {
+      const result = JSON.parse(fs.readFileSync(f.source, "utf8"))
+      result.diff = []
+      result.findings[0].path = "scripts/isolated-check.sh"
+      result.findings[0].line = 4
+      fs.writeFileSync(f.source, JSON.stringify(result))
+      expect(renderReview(f.source, f.payload, f.env).status).toBe(0)
+      const rendered = JSON.parse(fs.readFileSync(f.payload, "utf8"))
+      expect(rendered.comments).toEqual([])
+      expect(rendered.body).toContain("Location: scripts/isolated-check.sh:4 RIGHT")
+      expect(run(["stamp", f.payload], f.env).status).toBe(0)
+      expect(approve(f.payload, f.approval, f.env).status).toBe(0)
+      writePullFiles(f.state, [
+        { filename: "scripts/review-publish.py", patch: line44Patch },
+        { filename: "src/generated.bin" },
+      ])
+      const posted = run(["post", f.payload, f.approval], f.env)
+      expect(posted.status, posted.stderr).toBe(0)
+      expect(puts(f.state)).toBe(1)
+      expect(inlineWrites(f.state)).toEqual([])
+      expect(postsOf(f.state)).toBe(0)
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  it("refuses a summary-only update when the pull diff cannot be read", () => {
+    const f = fixture()
+    try {
+      const result = JSON.parse(fs.readFileSync(f.source, "utf8"))
+      result.diff = [{ path: "src/shared.ts", line: 53, side: "RIGHT" }]
+      fs.writeFileSync(f.source, JSON.stringify(result))
+      expect(renderReview(f.source, f.payload, f.env).status).toBe(0)
+      expect(run(["stamp", f.payload], f.env).status).toBe(0)
+      expect(approve(f.payload, f.approval, f.env).status).toBe(0)
+      const refused = run(["post", f.payload, f.approval], { ...f.env, GH_FILES_FAIL: "1" })
+      expect(refused.status, refused.stderr).not.toBe(0)
+      expect(refused.stderr).toContain("The pull request diff could not be read. No review was updated.")
+      expect(puts(f.state)).toBe(0)
+      expect(inlineWrites(f.state)).toEqual([])
+      expect(postsOf(f.state)).toBe(0)
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  it("refuses a left-side finding on a renamed file when it was left in the summary", () => {
+    const f = fixture()
+    try {
+      const result = JSON.parse(fs.readFileSync(f.source, "utf8"))
+      result.diff = []
+      result.findings[0].path = "scripts/review-publish.py"
+      result.findings[0].line = 12
+      result.findings[0].side = "LEFT"
+      fs.writeFileSync(f.source, JSON.stringify(result))
+      expect(renderReview(f.source, f.payload, f.env).status).toBe(0)
+      expect(JSON.parse(fs.readFileSync(f.payload, "utf8")).comments).toEqual([])
+      expect(run(["stamp", f.payload], f.env).status).toBe(0)
+      expect(approve(f.payload, f.approval, f.env).status).toBe(0)
+      writePullFiles(f.state, [{
+        filename: "scripts/publisher.py",
+        previous_filename: "scripts/review-publish.py",
+        patch: "@@ -12,1 +12,1 @@\n-old\n+new\n",
+      }])
+      const refused = run(["post", f.payload, f.approval], f.env)
+      expect(refused.status, refused.stderr).not.toBe(0)
+      expect(refused.stderr).toContain("scripts/review-publish.py:12 LEFT")
+      expect(puts(f.state)).toBe(0)
       expect(inlineWrites(f.state)).toEqual([])
     } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
   })

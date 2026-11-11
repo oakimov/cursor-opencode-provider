@@ -379,7 +379,12 @@ Use the normal render → stamp → show → approve → post flow. The approval
 the replacement summary, inline findings and target snapshots; old approval
 does not authorize an update. Findings at verified current-diff locations stay
 in the payload's `comments` array and become native inline review threads.
-Findings outside the diff stay in the summary; never invent an anchor.
+List each of those locations in `diff`. `post` reads the pull request's file
+patches and refuses the update, before any write, when a finding's path, line
+and side sit in a hunk but the rendered comments omit them. A missing or
+truncated patch does not prove the line is in the diff, so that finding stays
+in the summary. Findings outside the hunks stay in the summary; never invent
+an anchor.
 `post` calls GitHub's
 [update-review endpoint](https://docs.github.com/en/rest/pulls/reviews#update-a-review-for-a-pull-request)
 with the body only. It checks the review id, author, COMMENT state and old body

@@ -292,8 +292,10 @@ use the latest stamped COMMENT review; leave other authors' reviews alone.
 The revised summary must state the current verdict, findings, checks and
 reviewed head. Render, show and obtain approval of the exact updated payload
 before `post`; an earlier publication approval does not approve a new verdict.
-Put new findings at verified current-diff locations in the rendered inline
-comments. The publisher updates the one summary and publishes those findings
+Put new findings at verified current-diff locations in `diff` so they render
+as inline comments. `post` reads the pull diff and refuses the update, before
+any write, when a located finding sits in a hunk but not in those comments.
+The publisher updates the one summary and publishes those findings
 as native code threads. It checks their actual anchors on readback. GitHub does
 not move the original review's commit or inline anchors when its summary is edited.
 The `reviews` inventory includes native comments and their body digests. For a

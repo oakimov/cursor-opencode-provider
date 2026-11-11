@@ -1008,30 +1008,120 @@ def installation_token(owner: str, repo: str, app_id: str, pem: bytes) -> str:
     return token
 
 
+def decode_pages(stdout: bytes) -> list[dict]:
+    # --paginate is available on the Cloud VM's bundled gh. Parse its adjacent
+    # JSON page documents locally instead of depending on the newer --slurp.
+    # Every page must be complete before a missing receipt can permit a send.
+    raw = stdout.decode("utf-8").strip()
+    if not raw:
+        raise ValueError("empty page stream")
+    decoder = json.JSONDecoder()
+    items: list[dict] = []
+    while raw:
+        page, end = decoder.raw_decode(raw)
+        if not isinstance(page, list) or any(not isinstance(item, dict) for item in page):
+            raise ValueError("expected an array of objects")
+        items.extend(page)
+        raw = raw[end:].lstrip()
+    return items
+
+
 def gh_pages(endpoint: str) -> list[dict]:
     code, stdout, stderr = gh_api("GET", endpoint, paginate=True)
     if code != 0:
         print(stderr.decode("utf-8", errors="replace"), file=sys.stderr)
         raise SystemExit(1)
-    # --paginate is available on the Cloud VM's bundled gh. Parse its adjacent
-    # JSON page documents locally instead of depending on the newer --slurp.
-    # Every page must be complete before a missing receipt can permit a send.
     try:
-        raw = stdout.decode("utf-8").strip()
-        if not raw:
-            raise ValueError("empty page stream")
-        decoder = json.JSONDecoder()
-        items: list[dict] = []
-        while raw:
-            page, end = decoder.raw_decode(raw)
-            if not isinstance(page, list) or any(not isinstance(item, dict) for item in page):
-                raise ValueError("expected an array of objects")
-            items.extend(page)
-            raw = raw[end:].lstrip()
-        return items
+        return decode_pages(stdout)
     except (UnicodeError, ValueError):
         print("GitHub returned an invalid paginated lookup. No missing receipt can be inferred.", file=sys.stderr)
         raise SystemExit(1)
+
+
+HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def patch_anchors(path: str, patch: str, previous: str | None = None) -> set[tuple]:
+    """Lines GitHub will accept as review-comment anchors in one file patch."""
+    anchors: set[tuple] = set()
+    old_line = new_line = None
+    left = previous or path
+    for raw in patch.splitlines():
+        header = HUNK_HEADER.match(raw)
+        if header:
+            old_line = int(header.group(1))
+            new_line = int(header.group(2))
+            continue
+        if old_line is None or new_line is None or not raw:
+            continue
+        marker = raw[0]
+        if marker == " ":
+            anchors.add((path, new_line, "RIGHT"))
+            anchors.add((left, old_line, "LEFT"))
+            old_line += 1
+            new_line += 1
+        elif marker == "+":
+            anchors.add((path, new_line, "RIGHT"))
+            new_line += 1
+        elif marker == "-":
+            anchors.add((left, old_line, "LEFT"))
+            old_line += 1
+    return anchors
+
+
+def pull_diff_anchors(owner: str, repo: str, pull: int) -> set[tuple]:
+    code, stdout, stderr = gh_api("GET", f"repos/{owner}/{repo}/pulls/{pull}/files", paginate=True)
+    if code != 0:
+        print("The pull request diff could not be read. No review was updated.", file=sys.stderr)
+        detail = stderr.decode("utf-8", errors="replace").strip()
+        if detail:
+            print(detail, file=sys.stderr)
+        raise SystemExit(1)
+    try:
+        files = decode_pages(stdout)
+    except (UnicodeError, ValueError):
+        print("The pull request diff could not be read. No review was updated.", file=sys.stderr)
+        raise SystemExit(1)
+    anchors: set[tuple] = set()
+    for item in files:
+        filename = item.get("filename")
+        patch = item.get("patch")
+        if not isinstance(filename, str) or not isinstance(patch, str):
+            continue
+        previous = item.get("previous_filename")
+        anchors |= patch_anchors(filename, patch, previous if isinstance(previous, str) else None)
+    return anchors
+
+
+def require_published_diff_findings(payload: dict) -> None:
+    """A located finding inside the pull diff must be a native comment, not summary text."""
+    if not inline_comments_enabled(payload) or not isinstance(payload.get("result"), dict):
+        return
+    findings = payload["result"].get("findings")
+    if not isinstance(findings, list):
+        return
+    comments = payload.get("comments")
+    published = {
+        (comment.get("path"), comment.get("line"), comment.get("side"))
+        for comment in comments if isinstance(comment, dict)
+    } if isinstance(comments, list) else set()
+    located = []
+    for finding in findings:
+        if not isinstance(finding, dict) or not finding.get("path"):
+            continue
+        key = (finding.get("path"), finding.get("line"), finding.get("side"))
+        if key not in published:
+            located.append((finding, key))
+    if not located:
+        return
+    anchors = pull_diff_anchors(payload["owner"], payload["repo"], payload["pull"])
+    omitted = [f"{path}:{line} {side}" for _finding, (path, line, side) in located if (path, line, side) in anchors]
+    if omitted:
+        raise SystemExit(
+            "A finding on the current diff was left in the summary ("
+            + ", ".join(omitted)
+            + "). Add its path, line, and side to diff and render again. No review was updated."
+        )
 
 
 def reviews_of(owner: str, repo: str, pull: int) -> list[dict]:
@@ -2012,6 +2102,9 @@ def post(payload_path: Path, approval_path: Path, token_env: str | None = None) 
             require_same_operation(payload_path, approval_path, pinned)
             for expected in inline_targets(payload):
                 checked_inline_snapshot(payload, expected, comments)
+        require_same_operation(payload_path, approval_path, pinned)
+        require_published_diff_findings(payload)
+        require_same_operation(payload_path, approval_path, pinned)
         post_locked(payload_path, approval_path, payload, approval, digest, pinned, checkpoint_path, token_env)
         publish_inline_comments(payload_path, approval_path, payload, pinned, checkpoint_path)
         resolve_threads(payload_path, approval_path, payload, pinned, checkpoint_path, token_env)
