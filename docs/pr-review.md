@@ -113,7 +113,9 @@ the causal link to the failure. Attribution cannot replace `diff` or
 make an unknown or subject-caused failure support a clean outcome. The public
 review shows the failure, exit code, cause and evidence. A code verdict is not
 a passing test result or merge approval, and the live credential gate still
-requires the isolated check to exit zero.
+requires the isolated check to exit zero. A harness contract failure whose
+diagnostics already fail on the merge base does not fail that exit; the
+summary reports it as pre-existing, not as a finding against the pull request.
 
 ### Reviewed head and fixes elsewhere
 
@@ -591,10 +593,21 @@ after expiry through load, maintenance and provenance, plus the fixed
 writer-temp window. It runs an existing default-policy test with long, short
 and invalid retention settings inherited by Bun and requires an executed
 assertion. Subjects without the configurable resolver use the fixed baseline.
-A failed contract prevents the live credential handoff, while the other
-contracts and unit suite still run to collect independent evidence. An
-unavailable isolation boundary stops immediately; later successes cannot
-replace an earlier failure in the wrapper's exit status.
+Each contract also runs on the merge base of the archived head and the pull
+request's base. That base tree is installed and built inside the same
+secret-free boundary. A head failure whose diagnostic signatures already fail
+there is logged as `pre-existing`, with the head and base statuses. The
+summary reports it as pre-existing and not as a finding against the pull
+request, and it does not withhold the live credential. A signature only on
+the head, a nonzero result with no signature, or a base that cannot be
+prepared is a new failure and withholds the key, as do install, build,
+typecheck, and unit-test failures. The other contracts and the unit suite
+still run after a contract failure. An unavailable isolation boundary stops
+immediately; later successes cannot replace an earlier new failure in the
+wrapper's exit status. Exit 0 means there is no new check failure. The log
+names each contract `passed`, `pre-existing exit=N`, or `failed exit=N`, and
+`CHECK_SUMMARY` includes `new_contracts`, `preexisting_contracts`, and
+`blocking`.
 The archived source is not patched. Record this check separately from the
 subject's own tests, with both the harness and subject revisions. A new test
 only in the harness checkout would otherwise be absent from an older PR's

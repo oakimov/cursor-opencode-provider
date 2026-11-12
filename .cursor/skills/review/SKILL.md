@@ -376,9 +376,16 @@ older subjects retain the fixed baseline contract.
 
 After build and typecheck, contract checks and the subject unit suite collect
 independent results even when another contract fails. An unavailable boundary
-stops them immediately. Every failure remains in the final status and blocks
-the live credential. These checks do not complete the behavior inventory or
-prove general defect discovery.
+stops them immediately. Each contract also runs on the merge base of the
+reviewed head and the pull request's base, in the same secret-free boundary.
+A head failure whose diagnostic signatures already fail on that base is
+`pre-existing`: the log and `CHECK_SUMMARY` say so, the summary reports it as
+pre-existing rather than a finding against this pull request, and it does not
+block the live credential. A signature only on the head, a nonzero contract
+result with no signature, or a base that cannot be prepared is a new failure
+and blocks. Install, build, typecheck, and unit-test failures also block.
+These checks do not complete the behavior inventory or prove general defect
+discovery.
 
 Record an `exitCode` for every executed command check in a new result. Capture
 the reviewed command's status, including when saving its output through a
@@ -403,9 +410,12 @@ link to the failing check. A failed check may carry `failure` with `cause`
 `baseline` or `environment` and concrete `evidence`, as `docs/pr-review.md`
 describes. It still renders as failed. Attribution does not excuse an
 actionable pre-existing bug or substitute for required analysis. Unknown or
-subject-caused failures cannot support a clean outcome. Neither attribution
-nor a clean code verdict bypasses the live credential gate or establishes
-merge readiness. Never relabel the wrapper as passed to publish a review.
+subject-caused failures cannot support a clean outcome. The live credential
+gate is the isolated check's own exit. That exit stays zero when the only
+contract failures are the pre-existing signatures above. A new contract
+failure, or an install, build, typecheck, or unit-test failure, makes it
+nonzero and withholds the key. Do not relabel the wrapper as passed, and do
+not treat a pre-existing contract note as merge approval.
 
 On your own checkout, run `bun run build`, `bun run typecheck`, and `bun test` directly. That is not a review of someone else's pull request.
 
@@ -415,7 +425,7 @@ Run a live OpenCode test when the diff changes plugin behavior: the provider, pr
 
 Skip it when the diff is docs, rules, or a refactor the unit tests already cover. Say why you skipped it.
 
-Passing the checks is not permission to pass `CURSOR_API_KEY`. Set `CURSOR_REVIEW_TRUST=1` and `CURSOR_REVIEW_TRUST_SHA` to the commit you decided to trust, then pass `--live`. The fetched head must be that commit, and the archive is that commit id. A failed check does not receive the key. The revision's shell is not run. The harness writes a private OpenCode 2 config that loads `dist/plugin-opencode2.js` from the copy, through one `plugins/cursor` directory. Before the prompt, `opencode plugin list` must log `CURSOR_REVIEW_PLUGIN=` once. The run must log `CURSOR_REVIEW_PLUGIN_INIT count=1` once. Keep the copy path, the plugin path, the version, and the init count in the private log. On a cloud agent, `opencode` is the current OpenCode release from the environment install.
+Passing the checks is not permission to pass `CURSOR_API_KEY`. Set `CURSOR_REVIEW_TRUST=1` and `CURSOR_REVIEW_TRUST_SHA` to the commit you decided to trust, then pass `--live`. The fetched head must be that commit, and the archive is that commit id. A new check failure does not receive the key. A contract failure classified `pre-existing` does not close that gate. The revision's shell is not run. The harness writes a private OpenCode 2 config that loads `dist/plugin-opencode2.js` from the copy, through one `plugins/cursor` directory. Before the prompt, `opencode plugin list` must log `CURSOR_REVIEW_PLUGIN=` once. The run must log `CURSOR_REVIEW_PLUGIN_INIT count=1` once. Keep the copy path, the plugin path, the version, and the init count in the private log. On a cloud agent, `opencode` is the current OpenCode release from the environment install.
 
 ```bash
 CURSOR_REVIEW_TRUST=1 CURSOR_REVIEW_TRUST_SHA=<commit> scripts/isolated-check.sh <pr-number-or-url> --live

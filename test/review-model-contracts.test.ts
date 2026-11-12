@@ -183,3 +183,155 @@ test.each([
   expect(archive).toBeDefined()
   expect(fs.existsSync(archive!)).toBe(false)
 })
+
+const inheritedCatalog = [
+  "MODEL_CONTRACT=effort:failed cases=1",
+  "OpenCode 1.x lost an upstream tuple; count=2; example=model=__proto__",
+  "OpenCode 1.x published an object-control model id; count=1; example=model=__proto__",
+  "OpenCode 1.x published invalid catalog rates; count=1; example=label",
+].join("\n")
+
+function gateScript(body: string) {
+  return `
+    source scripts/isolated-check.sh
+    git() {
+      case "$*" in
+        *fetch*) return 0 ;;
+        *rev-parse*) printf '%s\\n' "$CURSOR_REVIEW_TRUST_SHA" ;;
+        *archive*) return 0 ;;
+        *) return 1 ;;
+      esac
+    }
+    tar() { return 0; }
+    ${body}
+    check_main 156 --live
+  `
+}
+
+test("a contract failure that already fails on the merge base opens the live credential gate", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-contract-inherited-"))
+  const live = path.join(directory, "live")
+  try {
+    const result = spawnSync("bash", ["-c", gateScript(`
+      check_prepare_base() {
+        if [[ "\${base_ready:-0}" -eq 1 ]]; then return 0; fi
+        base_ready=1
+        base_tree="$(mktemp -d "\${TMPDIR:-/tmp}/cursor-pr-base.XXXXXX")"
+        echo "BASE_TREE=prepared commit=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        return 0
+      }
+      check_run_isolated() {
+        printf '%s\\n' "$CHECK_TREE $*" >> "$PROBE_LOG"
+        case "$*" in
+          *review-model-contracts.mjs*|*review-model-cache-contract.mjs*|*review-retention-contracts.mjs*)
+            printf '%s\\n' "$INHERITED"
+            return 1
+            ;;
+        esac
+        return 0
+      }
+      check_run_live() {
+        if [[ -n "\${CURSOR_API_KEY:-}" ]]; then echo "KEY_PRESENT=1"; fi
+        echo LIVE_INVOKED > "$PROBE_LIVE"
+        return 0
+      }
+    `)], { cwd: root, encoding: "utf8", env: {
+      ...process.env, PROBE_LOG: path.join(directory, "commands"), PROBE_LIVE: live,
+      INHERITED: inheritedCatalog,
+      CURSOR_REVIEW_TRUST: "1", CURSOR_REVIEW_TRUST_SHA: "a".repeat(40),
+      CURSOR_API_KEY: "test-only-no-credential",
+    } })
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0)
+    expect(result.stdout).toContain("MODEL_CONTRACTS=pre-existing exit=1")
+    expect(result.stdout).toContain("MODEL_CACHE_CONTRACTS=pre-existing exit=1")
+    expect(result.stdout).toContain("RETENTION_CONTRACTS=pre-existing exit=1")
+    expect(result.stdout).toContain("MODEL_CONTRACTS_PREEXISTING=MODEL_CONTRACT=effort|OpenCode 1.x lost an upstream tuple")
+    expect(result.stdout).toContain("MODEL_CONTRACTS_NEW=none")
+    expect(result.stdout).not.toContain("MODEL_CONTRACTS=failed")
+    expect(result.stdout).toContain("CHECK_SUMMARY pr=156 checks=0 new_contracts=0 preexisting_contracts=3 blocking=none live_exit=0")
+    expect(result.stdout).toContain("KEY_PRESENT=1")
+    expect(result.stdout).not.toContain("test-only-no-credential")
+    expect(result.stdout).not.toContain("Checks failed")
+    expect(fs.readFileSync(live, "utf8")).toBe("LIVE_INVOKED\n")
+    const commands = fs.readFileSync(path.join(directory, "commands"), "utf8")
+    expect(commands).toContain("head bun /opt/harness/scripts/review-model-contracts.mjs /src")
+    expect(commands).toContain("base bun /opt/harness/scripts/review-model-contracts.mjs /src")
+    const archive = result.stdout.match(/^Check root: (.+)$/m)?.[1]
+    expect(archive).toBeDefined()
+    expect(fs.existsSync(archive!)).toBe(false)
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test("a contract failure the merge base does not have still blocks the live credential", () => {
+  const result = spawnSync("bash", ["-c", gateScript(`
+    check_prepare_base() {
+      if [[ "\${base_ready:-0}" -eq 1 ]]; then return 0; fi
+      base_ready=1
+      base_tree="$(mktemp -d "\${TMPDIR:-/tmp}/cursor-pr-base.XXXXXX")"
+      echo "BASE_TREE=prepared commit=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      return 0
+    }
+    check_run_isolated() {
+      case "$*" in
+        *review-model-contracts.mjs*)
+          printf '%s\\n' "$INHERITED"
+          if [[ "$CHECK_TREE" == head ]]; then
+            echo "OpenCode 2.x advertises the reserved default id; count=1; example=sentinel"
+          fi
+          return 1
+          ;;
+        *review-model-cache-contract.mjs*|*review-retention-contracts.mjs*) return 0 ;;
+      esac
+      return 0
+    }
+    check_run_live() { echo UNEXPECTED_LIVE; }
+  `)], { cwd: root, encoding: "utf8", env: {
+    ...process.env, INHERITED: inheritedCatalog,
+    CURSOR_REVIEW_TRUST: "1", CURSOR_REVIEW_TRUST_SHA: "a".repeat(40),
+    CURSOR_API_KEY: "test-only-no-credential",
+  } })
+  expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1)
+  expect(result.stdout).toContain("MODEL_CONTRACTS=failed exit=1")
+  expect(result.stdout).toContain("MODEL_CONTRACTS_NEW=MODEL_CONTRACT=effort|OpenCode 2.x advertises the reserved default id")
+  expect(result.stdout).toContain("MODEL_CONTRACTS_PREEXISTING=MODEL_CONTRACT=effort|OpenCode 1.x lost an upstream tuple")
+  expect(result.stdout).toContain("blocking=MODEL_CONTRACTS")
+  expect(result.stdout).toContain("LIVE_TEST=skipped")
+  expect(result.stdout).not.toContain("UNEXPECTED_LIVE")
+  expect(result.stdout).not.toContain("test-only-no-credential")
+  const archive = result.stdout.match(/^Check root: (.+)$/m)?.[1]
+  expect(archive).toBeDefined()
+  expect(fs.existsSync(archive!)).toBe(false)
+})
+
+test.each(["bun run build", "bun run typecheck", "bun test"])("%s failure still blocks the live credential", (command) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-contract-block-"))
+  const prepared = path.join(directory, "prepared")
+  try {
+    const result = spawnSync("bash", ["-c", gateScript(`
+      check_prepare_base() { echo prepared > "$PROBE_PREPARED"; return 1; }
+      check_run_isolated() {
+        if [[ "$*" == "$BLOCK_COMMAND" ]]; then return 1; fi
+        return 0
+      }
+      check_run_live() { echo UNEXPECTED_LIVE; }
+    `)], { cwd: root, encoding: "utf8", env: {
+      ...process.env, BLOCK_COMMAND: command, PROBE_PREPARED: prepared,
+      CURSOR_REVIEW_TRUST: "1", CURSOR_REVIEW_TRUST_SHA: "a".repeat(40),
+      CURSOR_API_KEY: "test-only-no-credential",
+    } })
+    const label = command === "bun test" ? "UNIT_TESTS" : command === "bun run build" ? "BUILD" : "TYPECHECK"
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1)
+    expect(result.stdout).toContain(`${label}=failed exit=1`)
+    expect(result.stdout).toContain(`blocking=${label}`)
+    expect(result.stdout).toContain("LIVE_TEST=skipped")
+    expect(result.stdout).toContain("Checks failed, so the live test did not run")
+    expect(result.stdout).not.toContain("UNEXPECTED_LIVE")
+    expect(result.stdout).not.toContain("test-only-no-credential")
+    // Build and typecheck fail before any contract, so the merge base is not prepared.
+    expect(fs.existsSync(prepared)).toBe(command === "bun test")
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
+})

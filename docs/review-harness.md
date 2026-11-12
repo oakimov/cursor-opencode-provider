@@ -68,8 +68,11 @@ fails that test and is cleared before the next one. Subprocess regressions in
 
 After build and typecheck, isolated PR checks run the harness's catalog,
 model-cache and retention probes and the subject unit suite independently. A contract failure
-stays failed while the other checks run; an unavailable boundary stops them.
-Any failure withholds the live credential. Contract probes use synthetic input,
+stays visible while the other checks run; an unavailable boundary stops them.
+Each contract also runs on the merge base. A failure whose diagnostics already
+fail there is pre-existing: it is reported, not attributed to the pull request,
+and it does not withhold the live credential. A new contract failure, or an
+install, build, typecheck, or unit-test failure, does. Contract probes use synthetic input,
 and their expected values come from upstream metadata or the retention contract,
 not another output of the same implementation. They do not measure an agent's
 ability to discover unrelated defects.
