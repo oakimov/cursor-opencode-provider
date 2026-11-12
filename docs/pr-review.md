@@ -598,9 +598,11 @@ request's base. That base tree is installed and built inside the same
 secret-free boundary. A head failure whose diagnostic signatures already fail
 there is logged as `pre-existing`, with the head and base statuses. The
 summary reports it as pre-existing and not as a finding against the pull
-request, and it does not withhold the live credential. A signature only on
-the head, a nonzero result with no signature, or a base that cannot be
-prepared is a new failure and withholds the key, as do install, build,
+request, and it does not withhold the live credential. A failure line the
+base does not have withholds the key, including a catalog message that does
+not start with `OpenCode` and an `error:` line the structured prefixes do not
+name. A nonzero result with no signature, or a base that cannot be prepared,
+is a new failure and withholds the key, as do install, build,
 typecheck, and unit-test failures. The other contracts and the unit suite
 still run after a contract failure. An unavailable isolation boundary stops
 immediately; later successes cannot replace an earlier new failure in the

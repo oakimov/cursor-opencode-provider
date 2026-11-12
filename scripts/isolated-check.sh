@@ -354,29 +354,41 @@ check_prepare_base() {
 }
 
 # Diagnostic identity, without counts or observed values. The same message on
-# the head and the merge base is one inherited failure.
+# the head and the merge base is one inherited failure. Every catalog message
+# is kept, not only lines that start with "OpenCode", and so is an error line
+# the structured prefixes do not name. Detail under a retention failure belongs
+# to that named failure.
 check_write_signatures() {
   local source="$1" dest="$2"
   : >"$dest"
   [[ -f "$source" ]] || return 0
   awk '
     /^MODEL_CONTRACT=[^[:space:]]+:(failed|passed)/ {
+      verbose = 0
       header = $1
       sub(/:.*/, "", header)
       next
     }
-    /^OpenCode / {
+    /^MODEL_CACHE_CONTRACT=[^[:space:]]+:failed/ { verbose = 0; print $1; next }
+    /^MODEL_CACHE_CONTRACT=[^[:space:]]+:passed/ { verbose = 0; next }
+    /^RETENTION_CONTRACT=[^[:space:]]+:failed/ || /^RETENTION_TEMP=[^[:space:]]+:failed/ || /^RETENTION_ENV=[^[:space:]]+:failed/ {
+      verbose = 1
+      print $1
+      next
+    }
+    /^RETENTION_CLEANUP=failed([[:space:]]|$)/ { verbose = 1; print "RETENTION_CLEANUP=failed"; next }
+    /^RETENTION_/ { verbose = 0; next }
+    /; count=/ {
       line = $0
       sub(/; count=.*/, "", line)
       if (header != "") print header "|" line
       else print line
       next
     }
-    /^MODEL_CACHE_CONTRACT=[^[:space:]]+:failed/ { print $1; next }
-    /^RETENTION_CONTRACT=[^[:space:]]+:failed/ { print $1; next }
-    /^RETENTION_TEMP=[^[:space:]]+:failed/ { print $1; next }
-    /^RETENTION_ENV=[^[:space:]]+:failed/ { print $1; next }
-    /^RETENTION_CLEANUP=failed([[:space:]]|$)/ { print "RETENTION_CLEANUP=failed"; next }
+    /^error:/ || /^Error:/ {
+      if (!verbose) print $0
+      next
+    }
   ' "$source" | LC_ALL=C sort -u >"$dest"
 }
 

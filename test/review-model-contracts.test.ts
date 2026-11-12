@@ -305,6 +305,72 @@ test("a contract failure the merge base does not have still blocks the live cred
   expect(fs.existsSync(archive!)).toBe(false)
 })
 
+test("an unrecognized catalog failure still blocks when older signatures match the base", () => {
+  const result = spawnSync("bash", ["-c", gateScript(`
+    check_prepare_base() {
+      if [[ "\${base_ready:-0}" -eq 1 ]]; then return 0; fi
+      base_ready=1
+      base_tree="$(mktemp -d "\${TMPDIR:-/tmp}/cursor-pr-base.XXXXXX")"
+      return 0
+    }
+    check_run_isolated() {
+      case "$*" in
+        *review-model-contracts.mjs*)
+          printf '%s\\n' "$INHERITED"
+          if [[ "$CHECK_TREE" == head ]]; then
+            echo "review metadata was rejected by discovery; count=1; example=sentinel"
+          fi
+          return 1
+          ;;
+      esac
+      return 0
+    }
+    check_run_live() { echo UNEXPECTED_LIVE; }
+  `)], { cwd: root, encoding: "utf8", env: {
+    ...process.env, INHERITED: inheritedCatalog,
+    CURSOR_REVIEW_TRUST: "1", CURSOR_REVIEW_TRUST_SHA: "a".repeat(40),
+    CURSOR_API_KEY: "test-only-no-credential",
+  } })
+  expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1)
+  expect(result.stdout).toContain("MODEL_CONTRACTS=failed exit=1")
+  expect(result.stdout).toContain("MODEL_CONTRACTS_NEW=MODEL_CONTRACT=effort|review metadata was rejected by discovery")
+  expect(result.stdout).toContain("LIVE_TEST=skipped")
+  expect(result.stdout).not.toContain("UNEXPECTED_LIVE")
+  expect(result.stdout).not.toContain("test-only-no-credential")
+})
+
+test("an unrecognized error blocks when the named failures already exist on the base", () => {
+  const result = spawnSync("bash", ["-c", gateScript(`
+    check_prepare_base() {
+      if [[ "\${base_ready:-0}" -eq 1 ]]; then return 0; fi
+      base_ready=1
+      base_tree="$(mktemp -d "\${TMPDIR:-/tmp}/cursor-pr-base.XXXXXX")"
+      return 0
+    }
+    check_run_isolated() {
+      case "$*" in
+        *review-model-contracts.mjs*)
+          printf '%s\\n' "$INHERITED"
+          if [[ "$CHECK_TREE" == head ]]; then echo "error: review metadata was rejected by discovery"; fi
+          return 1
+          ;;
+      esac
+      return 0
+    }
+    check_run_live() { echo UNEXPECTED_LIVE; }
+  `)], { cwd: root, encoding: "utf8", env: {
+    ...process.env, INHERITED: inheritedCatalog,
+    CURSOR_REVIEW_TRUST: "1", CURSOR_REVIEW_TRUST_SHA: "a".repeat(40),
+    CURSOR_API_KEY: "test-only-no-credential",
+  } })
+  expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1)
+  expect(result.stdout).toContain("MODEL_CONTRACTS=failed exit=1")
+  expect(result.stdout).toContain("MODEL_CONTRACTS_NEW=error: review metadata was rejected by discovery")
+  expect(result.stdout).toContain("MODEL_CONTRACTS_PREEXISTING=MODEL_CONTRACT=effort|OpenCode 1.x lost an upstream tuple")
+  expect(result.stdout).toContain("LIVE_TEST=skipped")
+  expect(result.stdout).not.toContain("UNEXPECTED_LIVE")
+})
+
 test.each(["bun run build", "bun run typecheck", "bun test"])("%s failure still blocks the live credential", (command) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "review-contract-block-"))
   const prepared = path.join(directory, "prepared")

@@ -381,9 +381,12 @@ reviewed head and the pull request's base, in the same secret-free boundary.
 A head failure whose diagnostic signatures already fail on that base is
 `pre-existing`: the log and `CHECK_SUMMARY` say so, the summary reports it as
 pre-existing rather than a finding against this pull request, and it does not
-block the live credential. A signature only on the head, a nonzero contract
-result with no signature, or a base that cannot be prepared is a new failure
-and blocks. Install, build, typecheck, and unit-test failures also block.
+block the live credential. A failure line the base does not have blocks,
+including a catalog message that does not start with `OpenCode` and an
+`error:` line the structured prefixes do not name. A nonzero contract
+result with no signature, or a base that cannot be prepared, is a new
+failure and blocks. Install, build, typecheck, and unit-test failures
+also block.
 These checks do not complete the behavior inventory or prove general defect
 discovery.
 

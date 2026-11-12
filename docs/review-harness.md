@@ -71,7 +71,9 @@ model-cache and retention probes and the subject unit suite independently. A con
 stays visible while the other checks run; an unavailable boundary stops them.
 Each contract also runs on the merge base. A failure whose diagnostics already
 fail there is pre-existing: it is reported, not attributed to the pull request,
-and it does not withhold the live credential. A new contract failure, or an
+and it does not withhold the live credential. A failure line the base does
+not have, including a catalog message that does not start with `OpenCode`,
+is a new contract failure. A new contract failure, or an
 install, build, typecheck, or unit-test failure, does. Contract probes use synthetic input,
 and their expected values come from upstream metadata or the retention contract,
 not another output of the same implementation. They do not measure an agent's
