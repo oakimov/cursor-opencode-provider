@@ -299,8 +299,9 @@ reads the pull diff and refuses the update, before any write, when a located
 finding sits in a hunk but not in those comments. The publisher updates the
 one summary in place. New comments from that re-review go in one new review
 with an empty body. A second review whose body contains summary text is
-refused when this publishing identity already has a stamped summary. Another
-author's summary does not block the first post. The publisher checks the new anchors on readback. GitHub does not move the
+refused when this publishing identity already has a stamped summary. The App
+uses its `<slug>[bot]` login from `GET /app`; a personal access token uses
+`GET /user`. Another author's summary does not block the first post. The publisher checks the new anchors on readback. GitHub does not move the
 original review's commit or inline anchors when its summary is edited.
 The `reviews` inventory includes native comments and their body digests. For a
 still-present inline finding, bind its `comment` snapshot (`id`, `author`,

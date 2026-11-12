@@ -733,6 +733,7 @@ _hidden_env: set[str] = set()
 # the App installation token. None until begin_publication selects it.
 _publication_token: str | None = None
 _publication_required = False
+_publication_is_pat = False
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PERSONAL_ACCESS_TOKEN = re.compile(r"^(?:ghp_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+)$")
 
@@ -1252,8 +1253,9 @@ def publication_token(owner: str, repo: str, token_env: str | None) -> str:
 
 def begin_publication(owner: str, repo: str, token_env: str | None) -> str:
     """Select the one credential for every later gh call in this process."""
-    global _publication_token, _publication_required
+    global _publication_token, _publication_required, _publication_is_pat
     _publication_required = True
+    _publication_is_pat = token_env is not None
     _publication_token = publication_token(owner, repo, token_env)
     return _publication_token
 
@@ -1364,15 +1366,57 @@ def review_author(review: dict) -> int | None:
     return author
 
 
-def publication_user() -> int:
-    code, stdout, stderr = gh_api("GET", "user", token=_publication_token)
-    user = json_object(stdout) if code == 0 else None
-    author = user.get("id") if isinstance(user, dict) else None
-    if isinstance(author, bool) or type(author) is not int or author < 1:
+APP_SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def review_login(review: dict) -> str | None:
+    user = review.get("user")
+    if not isinstance(user, dict):
+        return None
+    login = user.get("login")
+    if not isinstance(login, str) or not login or login != login.strip() or len(login) > 100:
+        return None
+    return login
+
+
+def publication_identity() -> dict:
+    """The account that will own the review. An installation token cannot call GET /user."""
+    if _publication_is_pat:
+        code, stdout, stderr = gh_api("GET", "user", token=_publication_token)
+        user = json_object(stdout) if code == 0 else None
+        author = user.get("id") if isinstance(user, dict) else None
+        if isinstance(author, bool) or type(author) is not int or author < 1:
+            if stderr:
+                print(redact_secret(stderr.decode("utf-8", errors="replace")), file=sys.stderr)
+            raise SystemExit("The publishing identity could not be read. No review was created.")
+        identity = {"id": author}
+        login = user.get("login") if isinstance(user, dict) else None
+        if isinstance(login, str) and login == login.strip() and login:
+            identity["login"] = login
+        return identity
+    app_id, pem = load_app_material()
+    code, stdout, stderr = app_api("GET", "app", sign_app_jwt(app_id, pem))
+    app = json_object(stdout) if code == 0 else None
+    slug = app.get("slug") if isinstance(app, dict) else None
+    if not isinstance(slug, str) or APP_SLUG.fullmatch(slug) is None:
         if stderr:
             print(redact_secret(stderr.decode("utf-8", errors="replace")), file=sys.stderr)
         raise SystemExit("The publishing identity could not be read. No review was created.")
-    return author
+    return {"login": f"{slug}[bot]"}
+
+
+def belongs_to_someone_else(review: dict, identity: dict) -> bool:
+    author = review_author(review)
+    login = review_login(review)
+    same_id = identity.get("id") is not None and author == identity["id"]
+    same_login = bool(identity.get("login")) and login == identity["login"]
+    if same_id or same_login:
+        return False
+    if identity.get("id") is not None and author is not None and author != identity["id"]:
+        return True
+    if identity.get("login") and login is not None and login != identity["login"]:
+        return True
+    return False
 
 
 def refuse_second_summary(body: str, reviews: list[dict], owner: str, repo: str, pull: int) -> None:
@@ -1385,10 +1429,9 @@ def refuse_second_summary(body: str, reviews: list[dict], owner: str, repo: str,
     ]
     if not stamped:
         return
-    publisher = publication_user()
+    publisher = publication_identity()
     for review in stamped:
-        author = review_author(review)
-        if author is None or author == publisher:
+        if not belongs_to_someone_else(review, publisher):
             raise SystemExit(
                 "A summary review already exists. Refusing to create another review with summary text. No review was created."
             )
