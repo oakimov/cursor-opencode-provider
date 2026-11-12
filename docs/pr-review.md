@@ -113,7 +113,86 @@ the causal link to the failure. Attribution cannot replace `diff` or
 make an unknown or subject-caused failure support a clean outcome. The public
 review shows the failure, exit code, cause and evidence. A code verdict is not
 a passing test result or merge approval, and the live credential gate still
-requires the isolated check to exit zero.
+requires the isolated check to exit zero. A harness contract failure whose
+diagnostics already fail on the merge base does not fail that exit; the
+summary reports it as pre-existing, not as a finding against the pull request.
+
+### Reviewed head and fixes elsewhere
+
+New ledgers use `version: 3`. Every candidate records the assessment at the
+bound PR head, independently of the harness checkout or target branch:
+
+```json
+"assessment": {
+  "head": "<full-reviewed-head-sha>",
+  "status": "present",
+  "basis": "Source and experiment showing the contract violation on this head.",
+  "elsewhere": [{
+    "revision": "<full-other-commit-sha>",
+    "status": "fixed",
+    "basis": "Source and regression establishing the separate repair."
+  }]
+}
+```
+
+`present` requires an actionable finding. `absent` requires `refuted` and
+evidence that the defect is fixed or unreachable on the reviewed head.
+`not-a-defect` permits a refutation, policy proposal or operational limitation;
+`unverified` is a hypothesis. These declarations must follow the contract and
+observations; schema validation cannot determine whether their reasoning is
+correct. A missing tool or an expected fail-closed response can still be a
+legitimate non-defect.
+
+A separate repair cannot turn a head defect into an operational dismissal.
+Keep that finding and add `externalFixes` to the result, with one
+`{ finding, revision, detail }` per pinned `fixed` comparison for it. The
+publisher renders these under "Fixes on other revisions (outside the reviewed
+head)". The detail is public; use repository-relative evidence and state what
+the separate commit fixes. Another tree's successful tests are not the head's
+test results. A new head containing the repair needs a new review and preview.
+
+Rendering requires the version 3 ledger and binds evidence version 4 to the
+payload. Preview, approval and publication recheck it. Already-retained legacy
+version 1, 2 and 3 previews remain recoverable with their original bytes and approval flow;
+fresh payloads cannot select legacy evidence to bypass this requirement.
+
+### Failed-check diagnosis
+
+Version 3 adds `diagnostics`, an array with one entry per independent failed
+observation (empty when no checks failed). Read the complete logs first. Each
+entry names a failed check from the result:
+
+```json
+"diagnostics": [{
+  "id": "catalog-loss",
+  "check": "model-contracts",
+  "observation": "An accepted upstream choice disappears before selection.",
+  "classification": "defect",
+  "basis": "Cited source and reproduction show the changed export reaches the lossy producer, including on base.",
+  "candidates": ["lost-choice"]
+}]
+```
+
+`defect` requires actionable candidate ids that also appear in the findings.
+`outside-scope` explains why the failure is unrelated to the changed behavior;
+`environment` requires a capability probe and its causal link. Both have empty
+`candidates`. Baseline provenance alone is not a classification: a pre-existing
+defect on a path the change reaches is still reportable. Keep the failed status,
+exit code and any result `failure` attribution; that attribution does not
+replace adjudication.
+
+Use `unresolved` with empty `candidates` when no cause is established. The
+outcome must remain `incomplete` and at least one completion pass false.
+An isolated rerun or deletion of another test does not diagnose a suite-only
+failure. Trace shared state and capture the consumed result, preserving the
+original failure. Do not claim that a separate reproduction caused an earlier
+run merely because the symptoms match.
+
+`check` validates diagnostic structure; `compare` and publication also require
+coverage of every failed check and consistent findings/completion. The agent
+must split multiple failures within a check. The validator cannot enumerate
+raw-log failures or verify the diagnosis; a structurally valid declaration
+does not establish that all defects were found.
 
 `bind` reads the pull request and records its base and head. When the result file already has a different revision, `bind` stops and leaves the file unchanged. `render` checks the result and writes the payload. `REVIEW_OUTCOME=incomplete` means the analysis did not reach a defensible review: the diff was unreadable, required analysis was unavailable, or the result is malformed. That file can be read and cannot be stamped or posted. Rendering is not publication. Showing the preview is not approval. Approval is not a merge.
 
@@ -162,6 +241,12 @@ the orchestration that owns a later retry or consumer is still wrong. A live
 `pong` covers plugin loading and the reply path only. Missing optional live
 evidence is a limitation. Required analysis that could not be performed is an
 incomplete review.
+
+When a change generates ids or aliases, verify the receiving host's reserved
+values and selection behavior. Exercise schema-valid input beyond the current
+catalog sample, and compare the generated choice with its original label at
+the consumed settings or request. The review skill describes that experiment;
+`test/model-selection-review.test.ts` guards the host's `default` sentinel.
 
 A behavior that acquires, starts, delegates, or cleans up a resource also
 records its ownership postconditions: an `ownership` entry naming the owner,
@@ -277,8 +362,8 @@ handoff while waiting; a successful `show` is not publication.
 
 Re-review updates this reviewer's existing summary post in place, including a
 clean-to-findings verdict change on the same head. It must not leave an old
-clean verdict as the apparent current result or create a duplicate top-level
-review. Inventory the posts using the same publishing identity:
+clean verdict as the apparent current result or create a duplicate summary
+post. Inventory the posts using the same publishing identity:
 
 ```bash
 python3 scripts/review-publish.py reviews owner repo 156 > "$review_dir/reviews.json"
@@ -293,9 +378,16 @@ inventory's review `id`, `user.id`, and exact UTF-8 body digest:
 ```
 
 Use the normal render → stamp → show → approve → post flow. The approval binds
-both the replacement summary and the target review snapshot; old approval does
-not authorize an update. The renderer puts all new findings and their source
-locations in the summary. `post` calls GitHub's
+the replacement summary, inline findings and target snapshots; old approval
+does not authorize an update. Findings at verified current-diff locations stay
+in the payload's `comments` array and become native inline review threads.
+List each of those locations in `diff`. `post` reads the pull request's file
+patches and refuses the update, before any write, when a finding's path, line
+and side sit in a hunk but the rendered comments omit them. A missing or
+truncated patch does not prove the line is in the diff, so that finding stays
+in the summary. Findings outside the hunks stay in the summary; never invent
+an anchor.
+`post` calls GitHub's
 [update-review endpoint](https://docs.github.com/en/rest/pulls/reviews#update-a-review-for-a-pull-request)
 with the body only. It checks the review id, author, COMMENT state and old body
 digest again before sending, then requires the approved body at that same id
@@ -305,8 +397,59 @@ recovered from the existing post; an unsettled update is not blindly resent.
 
 The review URL remains the same. GitHub retains its original `commit_id` and
 inline anchors, so the updated summary explicitly names the newly reviewed
-head and verdict. Existing inline threads remain subject to the resolution
-procedure below. No update target means an initial review, created as before.
+head and verdict. A finding that is posted inline is omitted from that summary;
+the summary keeps the finding count, the checks, and any finding outside the
+diff. A submitted review cannot accept new threads through the summary update.
+New anchored findings from one re-review go out together as one COMMENT review
+whose body is empty, using the approved head, path, line and side. That review
+is not a second summary. `post` refuses to create another review when its body
+contains summary text and this publishing identity already has a stamped summary.
+The App identity is the `<slug>[bot]` login from `GET /app` with the App JWT.
+A `--token-env` personal access token still uses `GET /user`. Another author's
+summary does not block the first post. An owned comment
+whose anchor is still the current head is edited in place. A fixed finding
+resolves its existing thread and leaves that comment; it does not open another
+review.
+
+The `reviews` inventory includes each review's native `comments`, their `id`,
+`user.id`, `commit_id`, anchor and `bodySha256`. For an existing inline finding,
+keep its id in `prior` and add this snapshot to the corresponding finding:
+
+```json
+"comment": {
+  "id": 789, "author": 456,
+  "bodySha256": "<64-character-comment-body-digest>",
+  "thread": "PRRT_thread-id-from-inventory",
+  "repliesSha256": "<64-character-replies-digest-from-thread-inventory>"
+}
+```
+
+Match the comment URL with the `threads` inventory to copy its thread id and
+`repliesSha256`. The publisher verifies the reviewer's root comment on this PR
+and rejects added, edited or removed replies after the preview.
+If its anchor still matches the approved head/location, it updates that
+comment's body in place. If it belongs to an earlier commit, it creates a
+thread at the new verified anchor and preserves the old discussion. A changed
+body, author or current-head anchor requires another review and preview.
+Do not drop the binding to create a duplicate of a still-present finding.
+
+Each native write has a durable receipt separate from the summary receipt.
+Readback must match the actual body, commit, path, line and side. A lost response
+may be recovered from that exact comment; an ambiguous missing result is never
+automatically resent. A proven rejection can be retried with the same approved
+payload. `post` resumes partial inline publication without re-sending the
+summary or completed comments. Recheck head and approval before each write.
+Those reads are not atomic with GitHub's write; a change after the final read
+can still race the send.
+Artifacts stay pending and thread resolutions do not start until every approved
+inline action is confirmed. `complete-resolutions.py` never creates comments;
+finish missing inline actions through `post` first.
+
+Evidence version 4 selects these publication semantics. Retained older previews
+keep their original summary-only updates and bytes; their earlier approval
+does not authorize new inline writes. No update target means an initial review,
+created with native inline comments as before, with anchor readback verified.
+Existing inline threads remain subject to the resolution procedure below.
 
 Read all review threads and their replies, including outdated anchors, before
 classifying earlier findings. The private inventory includes complete paginated
@@ -430,7 +573,50 @@ A number uses this checkout's `origin`. A pull URL must name that same owner and
 
 `scripts/isolate-run.sh` runs the install, build, typecheck, and unit tests. On Linux it requires user, mount, and pid namespaces (`unshare`) and `pivot_root`. The calling user is mapped to UID/GID 1000 inside the namespace. `--keep-caps` preserves capabilities for setup only; before the command runs, setup drops all effective, permitted, inheritable, bounding and ambient capabilities and sets `no_new_privs`. The non-root identity lets the archived suite create its own user namespaces without retaining privileges in its parent. Mapping parent UID 0 after its capability drop would require `CAP_SETFCAP` under [Linux UID mapping rules](https://man7.org/linux/man-pages/man7/user_namespaces.7.html). PID 1 stays a reaper: it runs the command in its own session, collects orphaned zombies, and forwards termination signals to that session. The command is not PID 1, so a killed grandchild does not remain visible to `kill -0`. A read-only bind of a file the user owns cannot then be remounted writable. On macOS it requires `sandbox-exec`. The profile allows the dynamic linker, a read of the root directory itself, the source directory, the private home and temp, and the selected tool files. It does not allow a tool's parent directory or every file read. Writes are limited to the source directory, the private home and temp, and `/dev/null`. Rules name resolved paths, because `sandbox-exec` matches those and macOS's default temp directory is a symlink into `/private`. Linux paths such as `/src`, `/tmp`, `/home/reviewer`, `/opt/tools`, and `--ro-bind` destinations are translated to those private directories. If that mechanism is unavailable the script exits 2. It does not fall back to `env -i`. Ubuntu's AppArmor restriction on unprivileged user namespaces makes `unshare` fail. CI clears `kernel.apparmor_restrict_unprivileged_userns` from the workflow itself, because the coverage job checks out the pull request head and that head may not contain `scripts/ci-enable-userns.sh`. A developer machine with that restriction needs the same change, or the isolation tests fail closed. `scripts/ci-enable-userns.sh` is the local copy of that probe.
 
-Inside the boundary the command can see read-only `/usr` and `/etc`, the named tool binaries, and the archive at `/src` (read-write). A fresh tmpfs is `/tmp` and `/home/reviewer`. Host home, host temp, the parent checkout, agent sockets, and git metadata are not mounted. The environment starts empty except `PATH`, `HOME`, `TMPDIR`, `USER`, `LOGNAME`, `LANG`, and `CI`. Its Linux `PATH` is `/opt/tools:/usr/bin:/bin:/usr/sbin`, including the system `pivot_root` needed by nested sandbox tests. Network stays available because install needs it. Review-posting credentials, including `REVIEW_APP_PRIVATE_KEY` and `REVIEW_APP_PRIVATE_KEY_FILE`, are not in the environment and their files are not mounted. Exit 0 means those checks passed. Exit 1 is a check failure. `Check root:` and `Check commit:` are private and stay out of the public review.
+After typecheck and before the subject's unit suite, `MODEL_CONTRACTS` runs
+the harness-owned `scripts/review-model-contracts.mjs` against the archived
+subject modules. Private copies of the contract scripts are mounted read-only; the subject's own
+copy cannot replace this check. It uses synthetic model metadata to check
+both host catalogs for reserved ids, duplicate ids, preservation of upstream
+tuples and original display-label selections. Inputs vary accepted labels,
+effort values, context/speed partitions and ordering. Expected choices come
+from discovery metadata so agreement between two consumers cannot conceal
+loss in their shared producer.
+`MODEL_CACHE_CONTRACTS` runs the trusted `review-model-cache-contract.mjs`
+under Node against the built provider. A localhost HTTP/2 server captures the
+actual Run request through different cache roots, warm reuse, same-timestamp
+atomic replacements and missing metadata. Expected tuples and `max_mode`
+come from the synthetic discovery input. This check is independent of Bun's
+suite order and test hooks; it neither loads a native host nor contacts Cursor.
+`RETENTION_CONTRACTS` also exercises persistence immediately before, at and
+after expiry through load, maintenance and provenance, plus the fixed
+writer-temp window. It runs an existing default-policy test with long, short
+and invalid retention settings inherited by Bun and requires an executed
+assertion. Subjects without the configurable resolver use the fixed baseline.
+Each contract also runs on the merge base of the archived head and the pull
+request's base. That base tree is installed and built inside the same
+secret-free boundary. A head failure whose diagnostic signatures already fail
+there is logged as `pre-existing`, with the head and base statuses. The
+summary reports it as pre-existing and not as a finding against the pull
+request, and it does not withhold the live credential. A failure line the
+base does not have withholds the key, including a catalog message that does
+not start with `OpenCode` and an `error:` line the structured prefixes do not
+name. A nonzero result with no signature, or a base that cannot be prepared,
+is a new failure and withholds the key, as do install, build,
+typecheck, and unit-test failures. The other contracts and the unit suite
+still run after a contract failure. An unavailable isolation boundary stops
+immediately; later successes cannot replace an earlier new failure in the
+wrapper's exit status. Exit 0 means there is no new check failure. The log
+names each contract `passed`, `pre-existing exit=N`, or `failed exit=N`, and
+`CHECK_SUMMARY` includes `new_contracts`, `preexisting_contracts`, and
+`blocking`.
+The archived source is not patched. Record this check separately from the
+subject's own tests, with both the harness and subject revisions. A new test
+only in the harness checkout would otherwise be absent from an older PR's
+archived suite. These known invariants are not live host validation and do
+not establish that all consumer behavior was reviewed.
+
+Inside the boundary the command can see read-only `/usr` and `/etc`, the named tool binaries, the read-only contract script, and the archive at `/src` (read-write). A fresh tmpfs is `/tmp` and `/home/reviewer`. Host home, host temp, the parent checkout, agent sockets, and git metadata are not mounted. The environment starts empty except `PATH`, `HOME`, `TMPDIR`, `USER`, `LOGNAME`, `LANG`, and `CI`. Its Linux `PATH` is `/opt/tools:/usr/bin:/bin:/usr/sbin`, including the system `pivot_root` needed by nested sandbox tests. Network stays available because install needs it. Review-posting credentials, including `REVIEW_APP_PRIVATE_KEY` and `REVIEW_APP_PRIVATE_KEY_FILE`, are not in the environment and their files are not mounted. Exit 0 means those checks passed. Exit 1 is a check failure. `Check root:` and `Check commit:` are private and stay out of the public review.
 
 `--live` runs only after those checks pass and only when `CURSOR_REVIEW_TRUST=1` and `CURSOR_REVIEW_TRUST_SHA` is the commit that was reviewed. The script fetches `pull/<n>/head`, prints that commit, and refuses to archive a different one. The archive uses that recorded commit id. It compares the commit again immediately before the key is passed. A new head needs a new trust decision. A failed check does not receive the key, and a passed check does not set the variables. The revision's shell is not run, including a `scripts/live-test.sh` in the pull request. This checkout's harness is mounted read-only and writes a private OpenCode config under the boundary's temp directory. The live `PATH` contains `opencode` and the tools the boundary mounted, not the reviewer's home `bin`. A tool linked from `/usr/local` is placed on that PATH as its real file. The directory holding the file stays outside the boundary.
 

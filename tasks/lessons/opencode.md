@@ -61,6 +61,38 @@ These are failure lessons shared by both hosts, not a replacement for
 - **Aliases need execution mappings and capability flags.** Wording alone did
   not prevent native web/resource collisions. Unknown underscore names are not
   MCP server ids (`resolveToolServerIdentity`, `test/tools.test.ts`).
+  Producer-local uniqueness also misses host control ids. PR #183's short
+  effort aliases admitted the schema-valid value `default`, which both hosts
+  interpret as no explicit variant. Its equal-settings assertions never
+  selected that id through the host. Keep the sentinel unavailable while
+  retaining the original selectable label (`host's default sentinel` in
+  `test/model-selection-review.test.ts`); distinguish synthetic metadata from
+  an observed Cursor catalog entry.
+  A review that passes a tuple directly to the provider resolver still has not
+  tested the host's id selector. Harness-only tests are absent from an older
+  subject archive, so run trusted contract checks against that subject before
+  its own suite (`scripts/review-model-contracts.mjs`,
+  `test/review-model-contracts.test.ts`). Keep that synthetic invariant check
+  distinct from a native host observation and from new defect discovery.
+  The resumed #183 review found a separate pre-existing loss: accepted model
+  ids and labels equal to `__proto__` disappeared from object-backed catalogs.
+  Agreement between the two catalogs was not an independent oracle. Derive
+  expected choices from discovery input and exercise accepted names, values,
+  partitions and ordering. Prototype-free dictionaries kept the bytes but a
+  native 1.x run still dropped the raw variant key and failed with prototype
+  model ids. Escape emitted keys, retain the wire id, and preserve ordinary
+  `constructor`/`toString` variant labels that both hosts already consume
+  (`preserves accepted metadata` in `test/model-selection-review.test.ts`).
+  The next bot review left those losses as baseline diagnostics and a full-suite
+  selection failure undiagnosed after isolated reruns passed. Baseline origin
+  does not decide scope; keep failures attached to a causal assessment
+  (`review evidence gate` in `test/review-publish.test.ts`). A deterministic
+  follow-up exposed timestamp-only model caching across distinct roots and
+  atomic replacements. Key metadata by file identity/generation, return the
+  request's own snapshot, and verify the consumed Run independently of suite
+  order (`test/model-selection-run.test.ts`,
+  `scripts/review-model-cache-contract.mjs`). That counterexample does not
+  establish the cause of the earlier bot run without its execution trace.
 - **Dynamic discovery must include invocation identity.** The inner schema hid
   required outer `namespace`/`toolName`; server-side wrapper failures may appear
   only in display completion (`test/dynamic-catalog.test.ts`).
@@ -871,9 +903,13 @@ These are failure lessons shared by both hosts, not a replacement for
   separately from subject failures. An Ubuntu-registered mirror on an
   independent domain preserves APT's signed metadata/package validation;
   reject partial index updates rather than installing against stale indexes.
+  A later #188 run could not reach the pinned mirror over IPv4 while IPv6 was
+  unreachable. A single independent mirror still has one failure point;
+  supply several registered mirrors for APT's native file failover, with
+  bounded transport timeouts/retries and the same fail-closed index check.
   Share that bootstrap between merge and head coverage jobs, including when
-  the checked-out head predates a helper script (`uses the same signed Ubuntu
-  mirror setup` in `test/review-scripts.test.ts`).
+  the checked-out head predates a helper script (`shares independent signed
+  Ubuntu mirrors` in `test/review-scripts.test.ts`).
 - **A green suite is not a branch audit.** A review missed a generator whose
   failed refresh retained the state that made the next invocation skip its
   promised retry, and it also promoted observations and policy preferences
@@ -883,7 +919,21 @@ These are failure lessons shared by both hosts, not a replacement for
   An `adversarial` label and a well-formed private ledger only attest to that
   work. Measure detection with the manual pairs in `eval/review/`, including
   held-out cases and false-positive controls, and say so when no fresh
-  reviewer ran. Repair the review harness when that is the requested target,
+  reviewer ran. PR #187's deterministic retention and publication regressions
+  establish those mechanics only; keep instruction changes experimental until
+  matched reviewer runs establish detection and false-positive results.
+  A head defect can also disappear at adjudication when a separate revision's
+  repair is used to dismiss it. Bind each candidate's assessment to the reviewed
+  head and retain separate fixes in the public result; otherwise an
+  `operational` label can erase a reproduced violation (`review evidence gate`
+  regressions).
+  Stopping after those two known cases left the requested review incomplete.
+  The expanded model probes and retention boundary/inheritance probes use
+  independently defined postconditions and broken/fixed controls. Keep their
+  diagnostic failures while collecting the other independent checks and unit
+  suite; fail-fast contract insertion had suppressed that evidence
+  (`test/review-model-contracts.test.ts`, `test/review-retention-contracts.test.ts`).
+  Repair the review harness when that is the requested target,
   using the reviewed defect as evaluation evidence rather than turning the
   repair into a patch to the subject (`docs/pr-review.md`).
   The #166 audit then rendered a synthetic clean verdict with only `diff` and
@@ -947,8 +997,14 @@ These are failure lessons shared by both hosts, not a replacement for
   reviewer's existing summary current instead of leaving an earlier clean
   post beside a newer contradictory one. Bind the replacement to the existing
   review id, author and body digest, then verify its body at that same id;
-  summary edits retain the original commit/inline anchors, so new findings
-  need source locations in the summary (`review summary updates` regressions).
+  Summary-only edits then flattened anchored findings into prose: the updated
+  #183/#184 payloads had empty inline arrays. Keep current-diff findings as
+  native code comments, bind existing comment snapshots, and track/read back
+  their anchors separately from the summary receipt. A submitted review's
+  body edit cannot create a thread. Recover partial native actions without
+  duplicating the summary or treating a missing response as an unsent comment
+  (`review summary updates` regressions). Retain older preview semantics so
+  their exact approval cannot silently authorize new native writes.
 - **A code verdict is not a command exit status.** A review labelled an isolated
   check passed while reporting its nonzero exit and failing self-tests. The
   result model also rejected clean code verdicts with established baseline or

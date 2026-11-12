@@ -114,7 +114,7 @@ export function modelConfigEntryToInfo(id: string, entry: Record<string, any>): 
 /** Full model map for the in-memory provider inventory. */
 export function modelsToCatalogModelMap(models: ModelInfo[]): Record<string, CatalogModelInfo> {
   const config = modelsToConfig(models)
-  const out: Record<string, CatalogModelInfo> = {}
+  const out: Record<string, CatalogModelInfo> = Object.create(null)
   for (const [id, entry] of Object.entries(config)) {
     out[id] = modelConfigEntryToInfo(id, entry as Record<string, any>)
   }

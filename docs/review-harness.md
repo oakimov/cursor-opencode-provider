@@ -40,6 +40,9 @@ That path is not the untrusted-PR boundary.
 | `scripts/review-publish.py` | start → bind → render → stamp → show → approve/deny → post |
 | `scripts/review-ledger.py` | private completion evidence |
 | `scripts/isolated-check.sh` / `isolate-run.sh` | untrusted PR checks |
+| `scripts/review-model-contracts.mjs` | harness-owned catalog invariants, run against the archived PR source |
+| `scripts/review-model-cache-contract.mjs` | Node localhost Run capture across cache roots and file generations with equal timestamps |
+| `scripts/review-retention-contracts.mjs` | snapshot boundaries, maintenance, provenance, writer temps and inherited-setting tests on the archived source |
 | `scripts/complete-resolutions.py` | finish approved thread resolves after a confirmed review |
 | `scripts/cloud-agent-install.sh` | Cloud Agent bootstrap |
 | `eval/review/` | offline detection fixtures and scorer |
@@ -52,8 +55,9 @@ Cursor. Passing tests do **not** mean the review skill finds real defects.
 
 | Suite | File | Focus |
 |-------|------|-------|
-| Publication | `test/review-publish.test.ts` | App/PAT auth, preview approval, idempotent post, privacy refusals, artifact retention, thread resolve, evidence/ledger gate |
+| Publication | `test/review-publish.test.ts` | App/PAT auth, preview approval, native inline re-review anchors and recovery, privacy refusals, artifact retention, thread resolve, evidence/ledger gate |
 | Isolation / live scripts | `test/review-scripts.test.ts` | Cloud install string, isolated-check targets, sandbox PATH/secrets, live-test skip/deadline/cleanup, pid-targeted cancel |
+| Subject contracts | `test/review-model-contracts.test.ts`, `test/review-model-cache-contract.test.ts`, `test/review-retention-contracts.test.ts` | upstream tuple preservation, cache identity at the Run boundary, independent phase results, persistence probes and deliberately broken controls |
 | Eval fixtures / scorer | `test/review-eval.test.ts` | Case orchestration fixtures, mount excludes answer keys, ledger compare, score detection vs false positives |
 
 The test preload clears inherited `CURSOR_PROVIDER_CACHE_TTL_MS` so expiry
@@ -61,6 +65,38 @@ fixtures use the default policy. A test may set its own override and pass it
 to child writers, but must restore it before returning. A leaked override
 fails that test and is cleared before the next one. Subprocess regressions in
 `test/test-isolation.test.ts` exercise inherited settings and that recovery.
+
+After build and typecheck, isolated PR checks run the harness's catalog,
+model-cache and retention probes and the subject unit suite independently. A contract failure
+stays visible while the other checks run; an unavailable boundary stops them.
+Each contract also runs on the merge base. A failure whose diagnostics already
+fail there is pre-existing: it is reported, not attributed to the pull request,
+and it does not withhold the live credential. A failure line the base does
+not have, including a catalog message that does not start with `OpenCode`,
+is a new contract failure. A new contract failure, or an
+install, build, typecheck, or unit-test failure, does. Contract probes use synthetic input,
+and their expected values come from upstream metadata or the retention contract,
+not another output of the same implementation. They do not measure an agent's
+ability to discover unrelated defects.
+
+New review evidence also records each candidate's status on the exact PR
+head. A defect declared present must remain a finding even when another
+commit fixes it; that fix appears separately in the summary. Rendering rejects
+missing head assessments and contradictory dispositions. See
+[the revision rules](pr-review.md#reviewed-head-and-fixes-elsewhere) for the
+version 3 ledger/result fields and retained-preview compatibility. Failed checks
+also require a diagnosis beyond baseline provenance: an in-scope defect remains
+a finding; an unknown cause keeps the review incomplete. See
+[failed-check diagnosis](pr-review.md#failed-check-diagnosis). These tests
+verify the gate, not whether an agent's assessment is correct. Maintainers
+still test reviewer behavior before accepting an instruction change.
+
+Re-review keeps one summary post and publishes current-diff findings as native
+code threads. Existing inline findings bind their comment snapshots so their
+bodies can be updated without duplication. A summary receipt alone does not
+complete publication: every approved inline anchor needs readback, and partial
+or uncertain writes remain pending. See
+[re-review publication](pr-review.md#re-review-and-thread-resolution).
 
 ### Live OpenCode tests
 

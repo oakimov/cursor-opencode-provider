@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test"
 import {
   CURSOR_VARIANT_PARAMETERS_KEY,
+  CURSOR_WIRE_MODEL_ID_KEY,
+  extractCursorVariantParameters,
   mapAvailableModelsResponse,
   normalizeModelCache,
   resolveVariantMaxMode,
@@ -28,6 +30,70 @@ function variant(context: string, effort: string, fast = false): ModelVariant {
 }
 
 describe("adversarial model selection", () => {
+  it.each(["__proto__", "constructor", "toString"])(
+    "preserves accepted metadata through selectable serialized catalog keys (%s)",
+    (key) => {
+      const high = [{ id: "effort", value: "high" }]
+      const models = mapAvailableModelsResponse({ models: [{ name: key, clientDisplayName: "Review fixture", variants: [
+        { displayName: "Low", isDefaultNonMaxConfig: true, parameterValues: [{ id: "effort", value: "low" }] },
+        { displayName: key, parameterValues: high },
+      ] }] })
+      expect(models).toHaveLength(1)
+      const classic = JSON.parse(JSON.stringify(modelsToConfig(models)))
+      const modern = JSON.parse(JSON.stringify(modelsToCatalogModelMap(models)))
+      const id = `${key}-cursor`
+      const label = key === "__proto__" ? `${key} Variant` : key
+      expect(Object.hasOwn(classic, key)).toBe(false)
+      expect(Object.hasOwn(modern, key)).toBe(false)
+      expect(classic[id].options[CURSOR_WIRE_MODEL_ID_KEY]).toBe(key)
+      expect(modern[id].modelID).toBe(key)
+      expect(classic[id].variants[label].cursorVariantParameters).toEqual(high)
+      expect(modern[id].variants.find((choice: { id: string }) => choice.id === label)?.settings.cursorVariantParameters).toEqual(high)
+    },
+  )
+
+  it("escapes a prototype model id without colliding with an advertised id", () => {
+    const catalog = modelsToConfig([
+      { id: "__proto__", variants: [] }, { id: "__proto__-cursor", variants: [] },
+    ])
+    expect(Object.keys(catalog)).toEqual(["__proto__-cursor-2", "__proto__-cursor"])
+    expect(catalog["__proto__-cursor-2"].options[CURSOR_WIRE_MODEL_ID_KEY]).toBe("__proto__")
+  })
+
+  it.each(["effort", "reasoning", "reasoning_effort"])(
+    "keeps the host's default sentinel out of published variant ids (%s)",
+    (effort) => {
+      // AvailableModels parameters are strings. A valid upstream value can
+      // collide with a host control id even when its display label is safe.
+      const models = mapAvailableModelsResponse({ models: [{ name: "sentinel-fixture", variants: [
+        { displayName: "High", isDefaultNonMaxConfig: true,
+          parameterValues: [{ id: effort, value: "high" }] },
+        { displayName: "Provider Default",
+          parameterValues: [{ id: effort, value: "default" }] },
+        { displayName: "default",
+          parameterValues: [{ id: effort, value: "low" }] },
+      ] }] })
+      const expected = ["high", "default", "low"].map((value) => [{ id: effort, value }])
+      const classic = modelsToConfig(models)["sentinel-fixture"]
+      const modern = modelsToCatalogModelMap(models)["sentinel-fixture"]!
+
+      // Both hosts interpret `default` as no explicit override, so advertising
+      // it as a selectable tuple would silently select another variant.
+      expect(Object.hasOwn(classic.variants, "default")).toBe(false)
+      expect(modern.variants.some((choice) => choice.id === "default")).toBe(false)
+      for (const [index, label] of ["High", "Provider Default", "Standard"].entries()) {
+        const parameters = expected[index]!
+        expect(extractCursorVariantParameters(classic.variants[label])).toEqual(parameters)
+        const choice = modern.variants.find((item) => item.id === label)
+        expect(choice).toBeDefined()
+        const picked = extractCursorVariantParameters(choice?.settings)
+        expect(picked).toEqual(parameters)
+        expect(resolveVariantParameters(models[0], { picked })).toEqual(parameters)
+      }
+      expect(resolveVariantParameters(models[0])).toEqual(expected[0]!)
+    },
+  )
+
   it("advertises recorded image input for every context/Fast entry on both hosts despite a false live flag", () => {
     const [model] = mapAvailableModelsResponse({ models: [{
       name: "grok-4.7", supportsImages: false,

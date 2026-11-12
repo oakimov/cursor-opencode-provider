@@ -6,6 +6,11 @@ A review reports findings. It does not approve or merge the pull request. The ma
 
 Cite `file:line`. State the concrete consequence. Confirm the finding is in the diff or in a file you read. Say what you could not check. Do not praise. Do not pad. If nothing is wrong, say so.
 
+The verdict applies to the bound PR head. Assess a fix on main or another
+revision separately; it cannot silently remove a defect still present on
+that head. The procedure's versioned ledger and `externalFixes` record this
+distinction in the evidence and public summary.
+
 Pending review artifacts belong in the persistent, gitignored review store.
 Keep them through approval waits and failures. Delete them only after confirmed
 publication or an explicit discard instruction; routine cleanup and denial of
@@ -13,7 +18,9 @@ publication do not authorize deletion. See [artifact retention](pr-review.md#art
 
 On re-review, read earlier threads and replies and verify them against the
 current head. Update this reviewer's existing summary post with the current
-verdict and reviewed head; do not add a duplicate top-level review. The exact
+verdict and reviewed head; do not add a duplicate summary post. Current-diff
+findings must remain native inline code threads, with their anchors verified
+on readback. The exact
 replacement and existing-post target need a new approved preview, as the
 review procedure describes. Fixed or refuted inline findings must have approved resolution
 actions and confirmed resolved readback, as [the review procedure](pr-review.md#re-review-and-thread-resolution)

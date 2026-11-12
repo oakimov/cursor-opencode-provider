@@ -118,10 +118,11 @@ function asMutableCost(value: OpenCodeModelCost): OpenCodeModelCost {
  */
 export function getCursorModelCost(modelId: string): OpenCodeModelCost | undefined {
   const costs = CURSOR_MODEL_COSTS as Record<string, OpenCodeModelCost>
+  const baseId = wireModelIdForPricing(modelId).baseId
   // A priced wire id wins over suffix stripping (`-<n>k` / `-<n>m` may be real).
   const found = Object.hasOwn(costs, modelId)
     ? costs[modelId]
-    : costs[wireModelIdForPricing(modelId).baseId]
+    : Object.hasOwn(costs, baseId) ? costs[baseId] : undefined
   if (!found) return undefined
   return asMutableCost(found)
 }

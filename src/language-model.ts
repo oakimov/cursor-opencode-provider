@@ -414,10 +414,13 @@ import {
 /** Unknown frame layouts already traced in this process; each is logged once. */
 const unknownFrameLayouts = new Set<string>()
 
-let _availableModels: ModelInfo[] | undefined
-// mtime of the cache file the last time we loaded it. Compared on each call
-// so discoverModels' background refresh is picked up without a process restart.
-let _availableModelsMtimeMs = -1
+// A timestamp belongs to one file generation, not every host cache root.
+// Atomic discovery refreshes can retain the same mtime but replace the inode.
+let availableModelsCache: {
+  filePath: string
+  generation: string
+  models: ModelInfo[] | undefined
+} | undefined
 
 // OpenCode omits tools from compaction calls. Keep the last real catalog per
 // session so the new Cursor conversation is still born with tool definitions;
@@ -2403,7 +2406,7 @@ async function startSession(
       })
     }
   }
-  await loadAvailableModels()
+  const availableModels = await loadAvailableModels()
 
   // Resolve the region-specific Run stream origin once per process (memoized
   // in agent-url.ts). Explicit agent host overrides skip GetServerConfig but
@@ -2425,7 +2428,7 @@ async function startSession(
     : undefined
   const hintMaxMode = !!(providerOptions?.maxMode ?? false)
 
-  const modelInfo = _availableModels?.find((m) => m.id === cursorModelId)
+  const modelInfo = availableModels?.find((m) => m.id === cursorModelId)
   // A Run without a checkpoint (new, reset, rebased or compacted conversation) sends every image.
   const heldImages = sessionKey && !ephemeralRun && conversationState
     ? heldHistoryImageHashes(sessionKey, conversationId, conversationState)
@@ -2568,7 +2571,7 @@ async function startSession(
       `maxMode=${maxMode} cursorMode=${cursorMode ?? "-"} systemPromptLen=${systemPrompt?.length ?? 0} ` +
       `tools=${tools.length} incomingTools=${incomingTools.length} compaction=${isCompaction} ` +
       `hooks=${hooksCtx ? hooksCtx.split("\n").length : 0} ` +
-      `availableModels=${_availableModels?.length ?? 0} userTextLen=${userText.length} ` +
+      `availableModels=${availableModels?.length ?? 0} userTextLen=${userText.length} ` +
       `images=${images.length} imageBytes=${images.reduce((total, image) => total + image.data.length, 0)} ` +
       `historyMsgs=${history.length} historyChars=${historyChars} ` +
       `checkpointLen=${conversationState?.length ?? 0} checkpointBlobCount=${checkpointGraph.count} ` +
@@ -4973,24 +4976,25 @@ function appendedInjectionsInRebuild(failed: CursorSession, prompt: LanguageMode
   return true
 }
 
-async function loadAvailableModels(): Promise<void> {
+async function loadAvailableModels(): Promise<ModelInfo[] | undefined> {
   const cacheDir = opencodeGlobalCacheDir()
+  const filePath = cacheFilePath(cacheDir)
+  let generation = "missing"
   try {
-    const filePath = cacheFilePath(cacheDir)
-    let mtime = 0
-    try {
-      const stat = await fs.promises.stat(filePath)
-      mtime = stat.mtimeMs
-    } catch {
-      // file missing — fall through with mtime=0
-    }
-    // Re-read when the file changed (discoverModels background refresh).
-    if (mtime !== _availableModelsMtimeMs) {
-      const cached = await readCache(cacheDir)
-      _availableModels = cached?.models
-      _availableModelsMtimeMs = mtime
-    }
-  } catch { /* ignore */ }
+    const stat = await fs.promises.stat(filePath)
+    generation = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`
+  } catch {
+    // A missing cache must not reuse another root's catalog.
+  }
+  if (availableModelsCache?.filePath === filePath && availableModelsCache.generation === generation) {
+    return availableModelsCache.models
+  }
+  // readCache handles missing, unreadable and invalid files as absent metadata.
+  const models = (await readCache(cacheDir))?.models
+  availableModelsCache = { filePath, generation, models }
+  // Return this read's snapshot; another request can load a different root
+  // while this request awaits its agent origin or constructs its context.
+  return models
 }
 
 function resolveApiBaseURL(options: CreateCursorOptions): string {

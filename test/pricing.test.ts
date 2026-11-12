@@ -20,6 +20,17 @@ import {
 import { CURSOR_MODEL_COSTS } from "../src/pricing-data.js"
 
 describe("pricing", () => {
+  it("keeps inherited object keys unpriced, including synthetic context suffixes", () => {
+    for (const key of ["__proto__", "constructor", "toString"]) {
+      for (const suffix of ["", "-500k", "-1m"]) {
+        const id = key + suffix
+        expect(getCursorModelCost(id)).toBeUndefined()
+        expect(applyCursorModelCost(id, { name: id })).toEqual({ name: id })
+        expect(checkCursorPricingCoverage([id])).toEqual({ priced: [], missing: [id] })
+      }
+    }
+  })
+
   it("maps third-party Cursor docs rates onto wire model ids", () => {
     expect(getCursorModelCost("claude-sonnet-4-5")).toEqual({
       input: 3,

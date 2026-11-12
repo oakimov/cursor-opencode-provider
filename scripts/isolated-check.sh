@@ -17,12 +17,15 @@
 # The key is then given to this checkout's scripts/live-test.sh and the
 # built plugin, still inside the boundary. The revision's shell is not run.
 #
-# Exit 0 when the checks pass, 1 when a check fails, 2 when the invocation
-# or the isolation mechanism is unusable, and 128 plus the signal number when
-# TERM, INT, HUP, or QUIT cancels a check or the live test. A cancelled run
-# waits for the boundary to stop before it removes the archive. SIGKILL
-# cannot be forwarded: killing this script that way can leave the boundary
-# running, on the --live path with CURSOR_API_KEY.
+# Exit 0 when install, build, typecheck, unit tests, and any contract failure
+# the pull request introduces all pass. A contract diagnostic that already
+# fails on the merge base is pre-existing: it is logged and does not withhold
+# the live credential. Exit 1 when a check the pull request introduces fails,
+# 2 when the invocation or the isolation mechanism is unusable, and 128 plus
+# the signal number when TERM, INT, HUP, or QUIT cancels a check or the live
+# test. A cancelled run waits for the boundary to stop before it removes the
+# archive. SIGKILL cannot be forwarded: killing this script that way can leave
+# the boundary running, on the --live path with CURSOR_API_KEY.
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,8 +33,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/isolate-run.sh"
 
 worktree=""
+base_tree=""
+base_ready=0
+base_attempted=0
+compare_dir=""
+check_fetched=""
+check_new=0
+check_preexisting=0
+check_blocking=""
 isolate_home=""
 isolate_tmp=""
+isolate_contracts=""
 pr=""
 pr_slug=""
 origin_slug=""
@@ -42,6 +54,14 @@ check_cleanup() {
     rm -rf "$worktree"
     worktree=""
   fi
+  if [[ -n "$base_tree" ]]; then
+    rm -rf "$base_tree"
+    base_tree=""
+  fi
+  if [[ -n "$compare_dir" ]]; then
+    rm -rf "$compare_dir"
+    compare_dir=""
+  fi
   if [[ -n "$isolate_home" ]]; then
     rm -rf "$isolate_home"
     isolate_home=""
@@ -49,6 +69,10 @@ check_cleanup() {
   if [[ -n "$isolate_tmp" ]]; then
     rm -rf "$isolate_tmp"
     isolate_tmp=""
+  fi
+  if [[ -n "$isolate_contracts" ]]; then
+    rm -rf "$isolate_contracts"
+    isolate_contracts=""
   fi
 }
 
@@ -216,8 +240,15 @@ check_supervise() {
 
 # Run a command inside the filesystem and process boundary.
 check_run_isolated() {
+  if [[ -z "$isolate_contracts" ]]; then
+    isolate_contracts="$(mktemp -d "${TMPDIR:-/tmp}/cursor-review-contracts.XXXXXX")"
+    cp "$ROOT/scripts/review-model-contracts.mjs" "$isolate_contracts/review-model-contracts.mjs" || return 2
+    cp "$ROOT/scripts/review-retention-contracts.mjs" "$isolate_contracts/review-retention-contracts.mjs" || return 2
+    cp "$ROOT/scripts/review-model-cache-contract.mjs" "$isolate_contracts/review-model-cache-contract.mjs" || return 2
+  fi
   check_supervise --src "${ISOLATE_SRC:-$PWD}" \
-    --tool bun --tool node --tool git --tool python3 -- "$@"
+    --tool bun --tool node --tool git --tool python3 \
+    --ro-bind "$isolate_contracts:/opt/harness/scripts" -- "$@"
 }
 
 # Load the archived tree with this checkout's harness. Tests replace this.
@@ -235,12 +266,254 @@ check_run_live() {
     -- bash /opt/harness/scripts/live-test.sh
 }
 
-check_step() {
+check_note_blocking() {
+  local label="$1"
+  case ",${check_blocking}," in
+    *",${label},"*) ;;
+    *) check_blocking="${check_blocking:+$check_blocking,}${label}" ;;
+  esac
+}
+
+# The merge-base object has to exist locally before GitHub is asked for the
+# pull request's base. A stubbed git that cannot answer this probe makes the
+# base unavailable without a network call.
+check_pr_base_sha() {
+  local slug sha
+  if [[ -z "$origin_slug" ]]; then
+    check_origin_slug || return 1
+  fi
+  slug="$origin_slug"
+  sha="$(gh pr view "$pr" --repo "$slug" --json baseRefOid --jq .baseRefOid 2>/dev/null || true)"
+  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+  printf '%s\n' "$sha"
+}
+
+# Archive the merge base and install plus build it in the same secret-free
+# boundary as the head. A failure here cannot prove a head failure is old.
+check_prepare_base() {
+  local head="$1" base_sha merge code=0
+  if [[ "$base_attempted" -eq 1 ]]; then
+    [[ "$base_ready" -eq 1 ]]
+    return
+  fi
+  base_attempted=1
+  base_ready=0
+  if [[ ! "$head" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "BASE_TREE=unavailable"
+    return 1
+  fi
+  if ! git -C "$ROOT" merge-base --is-ancestor "$head" "$head" >/dev/null 2>&1; then
+    echo "BASE_TREE=unavailable"
+    return 1
+  fi
+  if ! base_sha="$(check_pr_base_sha)"; then
+    echo "BASE_TREE=unavailable"
+    return 1
+  fi
+  if ! git -C "$ROOT" fetch --no-tags origin "$base_sha"; then
+    echo "BASE_TREE=unavailable"
+    return 1
+  fi
+  merge="$(git -C "$ROOT" merge-base "$head" FETCH_HEAD 2>/dev/null || true)"
+  if [[ ! "$merge" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "BASE_TREE=unavailable"
+    return 1
+  fi
+  echo "Base commit: $merge"
+  base_tree="$(mktemp -d "${TMPDIR:-/tmp}/cursor-pr-base-${pr}.XXXXXX")"
+  if ! git -C "$ROOT" archive "$merge" | tar -x -C "$base_tree"; then
+    echo "BASE_TREE=unavailable"
+    return 1
+  fi
+  if [[ -e "$base_tree/.git" ]]; then
+    echo "The merge base contains git metadata. It cannot classify contract failures." >&2
+    echo "BASE_TREE=unavailable"
+    return 1
+  fi
+  set +e
+  CHECK_TREE=base ISOLATE_SRC="$base_tree" check_run_isolated bun install --frozen-lockfile --ignore-scripts
+  code=$?
+  set -e
+  if [[ "$code" -ne 0 ]]; then
+    echo "BASE_BUILD=failed exit=${code}"
+    echo "BASE_TREE=unavailable"
+    return 1
+  fi
+  set +e
+  CHECK_TREE=base ISOLATE_SRC="$base_tree" check_run_isolated bun run build
+  code=$?
+  set -e
+  if [[ "$code" -ne 0 ]]; then
+    echo "BASE_BUILD=failed exit=${code}"
+    echo "BASE_TREE=unavailable"
+    return 1
+  fi
+  echo "BASE_TREE=prepared commit=${merge}"
+  base_ready=1
+  return 0
+}
+
+# Diagnostic identity, without counts or observed values. The same message on
+# the head and the merge base is one inherited failure. Every catalog message
+# is kept, not only lines that start with "OpenCode", and so is an error line
+# the structured prefixes do not name. Detail under a retention failure belongs
+# to that named failure.
+check_write_signatures() {
+  local source="$1" dest="$2"
+  : >"$dest"
+  [[ -f "$source" ]] || return 0
+  awk '
+    /^MODEL_CONTRACT=[^[:space:]]+:(failed|passed)/ {
+      verbose = 0
+      header = $1
+      sub(/:.*/, "", header)
+      next
+    }
+    /^MODEL_CACHE_CONTRACT=[^[:space:]]+:failed/ { verbose = 0; print $1; next }
+    /^MODEL_CACHE_CONTRACT=[^[:space:]]+:passed/ { verbose = 0; next }
+    /^RETENTION_CONTRACT=[^[:space:]]+:failed/ || /^RETENTION_TEMP=[^[:space:]]+:failed/ || /^RETENTION_ENV=[^[:space:]]+:failed/ {
+      verbose = 1
+      print $1
+      next
+    }
+    /^RETENTION_CLEANUP=failed([[:space:]]|$)/ { verbose = 1; print "RETENTION_CLEANUP=failed"; next }
+    /^RETENTION_/ { verbose = 0; next }
+    /; count=/ {
+      line = $0
+      sub(/; count=.*/, "", line)
+      if (header != "") print header "|" line
+      else print line
+      next
+    }
+    /^error:/ || /^Error:/ {
+      if (!verbose) print $0
+      next
+    }
+  ' "$source" | LC_ALL=C sort -u >"$dest"
+}
+
+check_print_signatures() {
+  local prefix="$1" file="$2" line
+  if [[ ! -s "$file" ]]; then
+    echo "${prefix}=none"
+    return 0
+  fi
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    echo "${prefix}=${line}"
+  done <"$file"
+}
+
+check_log_status() {
+  local label="$1" code="$2"
+  if [[ "$code" -eq 0 ]]; then
+    echo "${label}=passed"
+  elif [[ "$code" -eq 2 ]]; then
+    echo "${label}=unavailable"
+  else
+    echo "${label}=failed exit=${code}"
+  fi
+}
+
+# Run one harness contract on the archived head and, when the merge base
+# prepared, on that base. Both runs are secret-free. Only a head failure that
+# is not already on the base blocks the live credential.
+check_contract_pair() {
   local label="$1"
   shift
-  local code=0
+  local head_log base_log head_code=0 base_code=0 head_sigs base_sigs new_sigs old_sigs
+  check_prepare_base "$check_fetched" || true
+  mkdir -p "$compare_dir"
+  head_log="$compare_dir/${label}.head"
+  base_log="$compare_dir/${label}.base"
+  head_sigs="$compare_dir/${label}.head.sig"
+  base_sigs="$compare_dir/${label}.base.sig"
+  new_sigs="$compare_dir/${label}.new"
+  old_sigs="$compare_dir/${label}.old"
   set +e
-  check_run_isolated "$@"
+  CHECK_TREE=head ISOLATE_SRC="${worktree:-$PWD}" check_run_isolated "$@" >"$head_log" 2>&1
+  head_code=$?
+  set -e
+  echo "${label}_HEAD_BEGIN"
+  cat "$head_log"
+  echo "${label}_HEAD_END"
+  if [[ "$head_code" -eq 2 ]]; then
+    echo "${label}=unavailable"
+    check_note_blocking "$label"
+    return 2
+  fi
+  base_code=2
+  if [[ "$base_ready" -eq 1 ]]; then
+    set +e
+    CHECK_TREE=base ISOLATE_SRC="$base_tree" check_run_isolated "$@" >"$base_log" 2>&1
+    base_code=$?
+    set -e
+    echo "${label}_BASE_BEGIN"
+    cat "$base_log"
+    echo "${label}_BASE_END"
+  fi
+  if [[ "$head_code" -eq 0 ]]; then
+    echo "${label}=passed"
+    if [[ "$base_ready" -eq 1 ]]; then
+      check_log_status "${label}_BASE" "$base_code"
+    else
+      echo "${label}_BASE=unavailable"
+    fi
+    return 0
+  fi
+  check_write_signatures "$head_log" "$head_sigs"
+  if [[ "$base_ready" -eq 1 && "$base_code" -ne 2 ]]; then
+    check_write_signatures "$base_log" "$base_sigs"
+    LC_ALL=C comm -13 "$base_sigs" "$head_sigs" >"$new_sigs"
+    LC_ALL=C comm -12 "$base_sigs" "$head_sigs" >"$old_sigs"
+  else
+    : >"$base_sigs"
+    cp "$head_sigs" "$new_sigs"
+    : >"$old_sigs"
+  fi
+  echo "${label}_HEAD=failed exit=${head_code}"
+  if [[ "$base_ready" -ne 1 || "$base_code" -eq 2 ]]; then
+    echo "${label}_BASE=unavailable"
+  else
+    check_log_status "${label}_BASE" "$base_code"
+  fi
+  # A nonzero result with no diagnostic is not proof that the base failed the
+  # same way. An empty new-signature file is pre-existing only when the head
+  # actually named its failures and each of those names is on the base.
+  if [[ -s "$head_sigs" && ! -s "$new_sigs" ]]; then
+    echo "${label}=pre-existing exit=${head_code}"
+    check_print_signatures "${label}_NEW" "$new_sigs"
+    check_print_signatures "${label}_PREEXISTING" "$old_sigs"
+    check_preexisting=$((check_preexisting + 1))
+    return 0
+  fi
+  echo "${label}=failed exit=${head_code}"
+  if [[ -s "$head_sigs" ]]; then
+    check_print_signatures "${label}_NEW" "$new_sigs"
+    check_print_signatures "${label}_PREEXISTING" "$old_sigs"
+  else
+    echo "${label}_NEW=unclassified"
+    echo "${label}_PREEXISTING=none"
+  fi
+  check_new=$((check_new + 1))
+  check_note_blocking "$label"
+  return 1
+}
+
+check_step() {
+  local label="$1" code=0
+  shift
+  case "$label" in
+    MODEL_CONTRACTS|MODEL_CACHE_CONTRACTS|RETENTION_CONTRACTS)
+      set +e
+      check_contract_pair "$label" "$@"
+      code=$?
+      set -e
+      return "$code"
+      ;;
+  esac
+  set +e
+  CHECK_TREE=head ISOLATE_SRC="${worktree:-$PWD}" check_run_isolated "$@"
   code=$?
   set -e
   if [[ "$code" -eq 0 ]]; then
@@ -249,9 +522,11 @@ check_step() {
   fi
   if [[ "$code" -eq 2 ]]; then
     echo "${label}=unavailable"
+    check_note_blocking "$label"
     return 2
   fi
   echo "${label}=failed exit=${code}"
+  check_note_blocking "$label"
   return 1
 }
 
@@ -276,6 +551,7 @@ check_main() {
   git fetch --no-tags origin "pull/${pr}/head"
   local fetched
   fetched="$(git -C "$ROOT" rev-parse --verify FETCH_HEAD)"
+  check_fetched="$fetched"
   echo "Check commit: $fetched"
   if [[ -n "${CURSOR_REVIEW_TRUST_SHA:-}" ]]; then
     if [[ ! "${CURSOR_REVIEW_TRUST_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
@@ -298,6 +574,7 @@ check_main() {
 
   echo "Check root: $worktree"
   echo "Pull request: $pr"
+  compare_dir="$(mktemp -d "${TMPDIR:-/tmp}/cursor-pr-compare-${pr}.XXXXXX")"
   local checks=0
   check_step INSTALL bun install --frozen-lockfile --ignore-scripts || checks=$?
   if [[ "$checks" -eq 2 ]]; then
@@ -310,7 +587,30 @@ check_main() {
       check_step TYPECHECK bun run typecheck || checks=$?
     fi
     if [[ "$checks" -eq 0 ]]; then
-      check_step UNIT_TESTS bun test || checks=$?
+      # These checks are independent once the subject builds. Preserve every
+      # new failure while still collecting the other contracts and unit results.
+      # An unavailable boundary still stops immediately. A contract failure
+      # whose diagnostics already fail on the merge base does not close the
+      # live credential gate. Install, build, typecheck, unit tests, and a
+      # new contract failure do.
+      local phase=0
+      check_step MODEL_CONTRACTS bun /opt/harness/scripts/review-model-contracts.mjs /src || phase=$?
+      checks="$phase"
+      if [[ "$checks" -ne 2 ]]; then
+        phase=0
+        check_step MODEL_CACHE_CONTRACTS node /opt/harness/scripts/review-model-cache-contract.mjs /src || phase=$?
+        if [[ "$phase" -gt "$checks" ]]; then checks="$phase"; fi
+      fi
+      if [[ "$checks" -ne 2 ]]; then
+        phase=0
+        check_step RETENTION_CONTRACTS bun /opt/harness/scripts/review-retention-contracts.mjs /src || phase=$?
+        if [[ "$phase" -gt "$checks" ]]; then checks="$phase"; fi
+      fi
+      if [[ "$checks" -ne 2 ]]; then
+        phase=0
+        check_step UNIT_TESTS bun test || phase=$?
+        if [[ "$phase" -gt "$checks" ]]; then checks="$phase"; fi
+      fi
     fi
     if [[ "$checks" -eq 2 ]]; then
       echo "ISOLATION=unavailable"
@@ -336,6 +636,9 @@ check_main() {
     run)
       echo "Loading /src/dist/plugin.js with opencode1 and /src/dist/plugin-opencode2.js with opencode."
       echo "CURSOR_REVIEW_TRUST=1 was set separately from the check result."
+      # Classifying the merge base fetches that commit and moves FETCH_HEAD.
+      # Fetch the reviewed head again so a concurrent push is still refused.
+      git fetch --no-tags origin "pull/${pr}/head"
       check_refuse_moved_commit "$fetched"
       set +e
       check_run_live "$worktree"
@@ -348,7 +651,7 @@ check_main() {
       ;;
   esac
 
-  echo "CHECK_SUMMARY pr=${pr} checks=${checks} live_exit=${live_code}"
+  echo "CHECK_SUMMARY pr=${pr} checks=${checks} new_contracts=${check_new} preexisting_contracts=${check_preexisting} blocking=${check_blocking:-none} live_exit=${live_code}"
   if [[ "$checks" -ne 0 || "$live_code" -ne 0 ]]; then
     exit 1
   fi
