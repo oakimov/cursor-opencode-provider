@@ -139,6 +139,11 @@ labels and offers no `#high`; picking one for you would silently change whether
 the request thinks. `grok-4.7` mixes context tiers, so it publishes `low`,
 `low-500k`, … and reserves the bare id for the 256k tier.
 
+`default` is never published: both OpenCode majors read it as "no variant
+override", so a tuple under that id could not be selected. An entry whose only
+effort value is `default` keeps its display label (`Standard`) and gains no
+short id.
+
 The plugin supplies its own Cursor SDK even when the host's generic package loader already created one. Each new Run resolves the active integration credential and applies on-demand renewal; a token captured by the generic loader or its options cannot bypass that resolver.
 
 Image copies and generation use `cursor_image_save` with native permission

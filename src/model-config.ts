@@ -89,7 +89,7 @@ function paramMap(params: ModelVariant["parameterValues"]): Record<string, strin
 }
 
 /** OpenCode's persisted "no explicit variant" sentinel (1.x and 2.x). */
-const RESERVED_VARIANT_KEY = "default"
+export const RESERVED_VARIANT_KEY = "default"
 
 /** Drop a leading model-name prefix from a sanitized variant label. */
 function stripModelPrefix(label: string, prefix: string): string | null {

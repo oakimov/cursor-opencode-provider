@@ -9,7 +9,7 @@ import {
   type ModelInfo,
   type ModelParameterValue,
 } from "../models.js"
-import { contextSuffix, modelsToConfig } from "../model-config.js"
+import { contextSuffix, modelsToConfig, RESERVED_VARIANT_KEY } from "../model-config.js"
 import { toOpenCode2Costs, type OpenCode2ModelCost, type OpenCodeModelCost } from "../pricing.js"
 import type { ConnectionInfo, ModelVariantInfo, ProviderEditor } from "./types.js"
 
@@ -105,6 +105,9 @@ function contextTierToken(
  * Both ids stay in `model.variants`, so a picker shows `High` and `high` for
  * the same choice. Replacing the display ids instead would break every saved
  * 2.x pick, as #176 did for the pre-delta keys.
+ *
+ * OpenCode's reserved `default` sentinel is never published, matching the
+ * display-label path: `default` means "no variant override" on both majors.
  */
 function variantInfosWithShortEffortIds(
   entries: Array<[string, Record<string, unknown>]>,
@@ -143,6 +146,10 @@ function variantInfosWithShortEffortIds(
     // written differently, and a short id must not vary by that spelling.
     const effortId = value === "extra-high" || value === "extra high" ? "xhigh" : value
     if (!/^[a-z][a-z0-9]*$/.test(effortId)) return undefined
+    // OpenCode reserves `default` for "no override" on both majors: it rewrites
+    // a requested `default` to undefined before lookup, so publishing it would
+    // only advertise a tuple nothing can select.
+    if (effortId === RESERVED_VARIANT_KEY) return undefined
     const context = contextOf(params)
     const contextToken = contextTierToken(context, baseContext, spansTiers)
     const fastToken = isFast(params) && hasFast && hasNonFast ? "-fast" : ""

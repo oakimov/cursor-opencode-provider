@@ -557,6 +557,43 @@ describe("opencode2 provider inventory", () => {
     expect(labelled.variants.map((variant) => variant.id)).toEqual(["high", "Low", "low"])
   })
 
+  test("never publishes OpenCode's reserved default variant id", () => {
+    // Both majors treat `default` as "no variant override": 2.x rewrites a
+    // requested `default` to undefined before lookup, so a published tuple
+    // under that id could never be selected. The display-label path already
+    // rewrites it to `Standard`; the short-id path must not republish it.
+    const viaReasoningEffort = modelConfigEntryToInfo("synthetic-default", {
+      name: "Synthetic",
+      variants: {
+        Standard: { cursorVariantParameters: [{ id: "reasoning_effort", value: "default" }] },
+        High: { cursorVariantParameters: [{ id: "reasoning_effort", value: "high" }] },
+      },
+    })
+    expect(viaReasoningEffort.variants.map((variant) => variant.id)).toEqual(["Standard", "High", "high"])
+
+    // Each effort spelling, including a mixed-tier entry where the collision
+    // would otherwise be suffixed rather than dropped.
+    for (const parameter of ["effort", "reasoning", "reasoning_effort"]) {
+      const info = modelConfigEntryToInfo("synthetic-default", {
+        name: "Synthetic",
+        variants: {
+          Default: { cursorVariantParameters: [{ id: parameter, value: "default" }] },
+          "High 500k": {
+            cursorVariantParameters: [
+              { id: parameter, value: "high" },
+              { id: "context", value: "500k" },
+            ],
+          },
+        },
+      })
+      const ids = info.variants.map((variant) => variant.id)
+      expect(ids).not.toContain("default")
+      expect(ids.some((id) => id.startsWith("default-"))).toBe(false)
+      // The tuple the reserved id would have named is still reachable by label.
+      expect(ids).toContain("Default")
+    }
+  })
+
   test("re-applying is idempotent (host replays transforms on reload)", () => {
     const { editor, models, providers } = fakeProviderEditor()
     applyCursorProviderInventory(editor, [baseModel])
