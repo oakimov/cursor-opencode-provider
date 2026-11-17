@@ -71,12 +71,7 @@ export type CatalogModelInfo = {
   settings?: Record<string, unknown>
 }
 
-/**
- * Context token for a short variant id. Only an entry that spans tiers needs
- * one: the bare id is the base tier (the implicit tier when any variant omits
- * `context`, else the smallest advertised one). A single-tier entry names its
- * tier in the catalog id (`-500k`, `-1m`) and adds no token here.
- */
+/** Tier suffix for a short variant id; empty for the base tier of a multi-tier entry. */
 function contextTierToken(
   context: number | undefined,
   baseContext: number | undefined,
@@ -130,9 +125,6 @@ function variantInfosWithShortEffortIds(
   const tiers = new Set(contexts)
   const hasFast = parameters.some(isFast)
   const hasNonFast = parameters.some((params) => !isFast(params))
-  // The bare id belongs to the base tier; only the other tiers are suffixed.
-  // An entry with one tier needs no token at all — its catalog id (`-500k`,
-  // `-1m`) already names that tier.
   const spansTiers = tiers.size > 1
   const baseContext = tiers.has(undefined)
     ? undefined
