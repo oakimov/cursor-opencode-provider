@@ -47,6 +47,13 @@ delete process.env.OPENCODE_AUTH_CONTENT
  */
 process.env.CURSOR_CLIENT_VERSION = "cli-test"
 
+/**
+ * Retention tests assert the default age policy unless they set an override
+ * themselves. An operator's longer window must not disable their expiry and
+ * quarantine branches, including the barriers those tests wait for.
+ */
+delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+
 /** Nothing a test does reaches Cursor or any other host (`test/network-guard.ts`). */
 installNetworkGuard()
 
@@ -83,6 +90,10 @@ afterEach(() => {
     process.env.XDG_DATA_HOME = hostDataHome
     delete process.env.OPENCODE_AUTH_CONTENT
     failures.push("left XDG_DATA_HOME or OPENCODE_AUTH_CONTENT changed; restore what the test sets")
+  }
+  if (process.env.CURSOR_PROVIDER_CACHE_TTL_MS !== undefined) {
+    delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+    failures.push("left CURSOR_PROVIDER_CACHE_TTL_MS changed; restore what the test sets")
   }
   const failed = failures.filter((failure) => failure !== undefined)
   if (failed.length > 0) throw new Error(`This test ${failed.join(", and ")}.`)

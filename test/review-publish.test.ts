@@ -297,7 +297,7 @@ if endpoint.endswith("/installation"):
     verify_jwt(token)
     json.dump({"id": 67890}, sys.stdout)
     raise SystemExit(0)
-if method == "POST" and endpoint.endswith("/reviews"):
+if (method == "POST" and endpoint.endswith("/reviews")) or (method == "PUT" and "/reviews/" in endpoint):
     expected = "ghs_12345_synthetic.Header-with_dash.signature" if os.environ.get("GH_STATELESS") == "1" else "ghs_testinstallationtoken"
     pat = token.startswith("ghp_") or token.startswith("github_pat_")
     if pat:
@@ -317,6 +317,36 @@ reviews_path = state / "reviews.json"
 comments_path = state / "comments.json"
 reviews = json.loads(reviews_path.read_text(encoding="utf-8") or "[]")
 comments = json.loads(comments_path.read_text(encoding="utf-8")) if comments_path.exists() else []
+if "/reviews/" in endpoint and method in ("GET", "PUT"):
+    review_id = int(endpoint.rsplit("/", 1)[1])
+    entry = next((item for item in reviews if item["review"]["id"] == review_id), None)
+    if entry is None:
+        sys.stderr.write("HTTP 404\\n")
+        raise SystemExit(1)
+    if method == "GET":
+        if os.environ.get("GH_UPDATE_CHANGED") == "1":
+            entry["review"]["body"] += "\\nConcurrent edit"
+            reviews_path.write_text(json.dumps(reviews))
+        json.dump(entry["review"], sys.stdout)
+        raise SystemExit(0)
+    request = json.load(sys.stdin)
+    assert set(request) == {"body"}
+    with (state / "put-bodies").open("a") as handle:
+        handle.write(json.dumps(request) + "\\n")
+    if os.environ.get("GH_UPDATE_REJECT") == "1":
+        sys.stderr.write("HTTP 403 Resource not accessible by integration\\n")
+        raise SystemExit(1)
+    changed = dict(entry["review"], body=request["body"])
+    if os.environ.get("GH_UPDATE_FAIL") != "1" or os.environ.get("GH_UPDATE_COMMIT") == "1":
+        if os.environ.get("GH_UPDATE_NO_APPLY") != "1":
+            entry["review"] = changed
+            reviews_path.write_text(json.dumps(reviews))
+    if os.environ.get("GH_UPDATE_FAIL") == "1":
+        sys.stderr.write("connection reset\\n")
+        raise SystemExit(1)
+    if os.environ.get("GH_UPDATE_WRONG_ID") == "1": changed["id"] += 1
+    json.dump(changed, sys.stdout)
+    raise SystemExit(0)
 if method == "POST":
     if os.environ.get("GH_FORBIDDEN") == "1":
         sys.stdin.read()
@@ -1804,6 +1834,7 @@ describe("review publication", () => {
       'python3 scripts/review-publish.py deny "$review_dir/approval.json"',
       'python3 scripts/review-publish.py cleanup "$review_dir"',
       'python3 scripts/review-publish.py cleanup "$review_dir" --discard-instruction "Discard this review."',
+      'python3 scripts/review-publish.py reviews owner repo 156 > "$review_dir/reviews.json"',
       'python3 scripts/review-publish.py threads owner repo 156 > "$review_dir/threads.json"',
     ])
     const { directory, bin, state } = freshReview("review-documented-")
@@ -1984,7 +2015,7 @@ describe("review publication", () => {
     expect(help.stdout.replaceAll(/\s+/g, " ")).toContain("do not pass the token")
     const elsewhere = run(["show", "--token-env", "REVIEW_PUBLISH_TOKEN"], { REVIEW_APP_UNCONFIGURED: "1" })
     expect(elsewhere.status).not.toBe(0)
-    expect(elsewhere.stderr).toContain("--token-env is only valid with post and threads")
+    expect(elsewhere.stderr).toContain("--token-env is only valid with post, threads and reviews")
     expect(elsewhere.stdout + elsewhere.stderr).not.toContain("REVIEW_PUBLISH_TOKEN=")
   })
 
@@ -2470,6 +2501,172 @@ function structuredResult(overrides: Record<string, unknown> = {}) {
     ...overrides,
   }
 }
+
+describe("review summary updates", () => {
+  function fixture() {
+    const f = freshReview("review-update-")
+    const env = { PATH: `${f.bin}:/usr/bin:/bin`, GH_STATE: f.state }
+    const original = {
+      id: 7, state: "COMMENTED", user: { id: 77, login: "reviewer[bot]" },
+      body: `No actionable findings.\n\n<!-- cursor-review:${"d".repeat(64)} -->\n`,
+      html_url: "https://github.com/oakimov/cursor-opencode-provider/pull/156#pullrequestreview-7",
+      commit_id: "a".repeat(40),
+    }
+    fs.writeFileSync(path.join(f.state, "reviews.json"), JSON.stringify([{ request: {}, review: original }]))
+    const listed = run(["reviews", "oakimov", "cursor-opencode-provider", "156"], env)
+    expect(listed.status, listed.stderr).toBe(0)
+    const [snapshot] = JSON.parse(listed.stdout)
+    expect(snapshot.bodySha256).toBe(createHash("sha256").update(original.body).digest("hex"))
+    const source = path.join(f.directory, "result.json")
+    fs.writeFileSync(source, JSON.stringify({
+      ...structuredResult(),
+      update: { review: snapshot.id, author: snapshot.user.id, bodySha256: snapshot.bodySha256 },
+    }))
+    expect(renderReview(source, f.payload, env).status).toBe(0)
+    expect(run(["stamp", f.payload], env).status).toBe(0)
+    expect(approve(f.payload, f.approval, env).status).toBe(0)
+    return { ...f, env, source, original }
+  }
+
+  const puts = (state: string) => callsOf(state).filter(line => line.startsWith("PUT ")).length
+
+  it("updates the original post with the current verdict and head, preserving its URL and old inline anchors", () => {
+    const f = fixture()
+    try {
+      const payload = JSON.parse(fs.readFileSync(f.payload, "utf8"))
+      expect(payload.comments).toEqual([])
+      expect(payload.body).toContain("1 actionable finding.")
+      expect(payload.body).toContain("Location: scripts/review-publish.py:44 RIGHT")
+      expect(payload.body).toContain(`at ${head}`)
+      const posted = run(["post", f.payload, f.approval], f.env)
+      expect(posted.status, posted.stderr).toBe(0)
+      expect(posted.stdout).toContain(f.original.html_url)
+      const rows = JSON.parse(fs.readFileSync(path.join(f.state, "reviews.json"), "utf8"))
+      expect(rows).toHaveLength(1)
+      expect(rows[0].review).toEqual({ ...f.original, body: payload.body })
+      expect(postsOf(f.state)).toBe(0)
+      expect(puts(f.state)).toBe(1)
+      expect(run(["post", f.payload, f.approval], f.env).status).toBe(0)
+      expect(puts(f.state)).toBe(1)
+      const later = `A later verdict.\n<!-- cursor-review:${"e".repeat(64)} -->\n`
+      rows[0].review.body = later
+      fs.writeFileSync(path.join(f.state, "reviews.json"), JSON.stringify(rows))
+      expect(run(["post", f.payload, f.approval], f.env).status).toBe(0)
+      expect(JSON.parse(fs.readFileSync(path.join(f.state, "reviews.json"), "utf8"))[0].review.body).toBe(later)
+      expect(puts(f.state)).toBe(1)
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  it("refuses a changed body, changed author, missing target or wrong state without creating another post", () => {
+    for (const change of ["body", "author", "missing", "state", "unstamped"]) {
+      const f = fixture()
+      try {
+        const review = { ...f.original }
+        if (change === "body") review.body += "Concurrent edit"
+        if (change === "author") review.user = { id: 78, login: "other-reviewer[bot]" }
+        if (change === "state") review.state = "APPROVED"
+        if (change === "unstamped") review.body = "Unrelated review"
+        fs.writeFileSync(path.join(f.state, "reviews.json"), JSON.stringify(change === "missing" ? [] : [{ request: {}, review }]))
+        expect(run(["post", f.payload, f.approval], f.env).status).not.toBe(0)
+        expect(postsOf(f.state)).toBe(0)
+        expect(puts(f.state)).toBe(0)
+      } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+    }
+  })
+
+  it("pins the update target in the approved bytes and rechecks the remote body immediately before sending", () => {
+    for (const mode of ["target", "head", "denial", "concurrent"]) {
+      const f = fixture()
+      try {
+        if (mode === "target") {
+          const payload = JSON.parse(fs.readFileSync(f.payload, "utf8"))
+          payload.update.review = 8
+          payload.result.update.review = 8
+          fs.writeFileSync(f.payload, JSON.stringify(payload))
+        }
+        if (mode === "head") fs.writeFileSync(path.join(f.state, "head"), otherHead)
+        if (mode === "denial") expect(run(["deny", f.approval], f.env).status).toBe(0)
+        const result = run(["post", f.payload, f.approval], { ...f.env, ...(mode === "concurrent" ? { GH_UPDATE_CHANGED: "1" } : {}) })
+        expect(result.status).not.toBe(0)
+        expect(postsOf(f.state)).toBe(0)
+        expect(puts(f.state)).toBe(0)
+      } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+    }
+  })
+
+  it("recovers a delivered update whose response was lost without sending it again", () => {
+    const f = fixture()
+    try {
+      const lost = run(["post", f.payload, f.approval], { ...f.env, GH_UPDATE_FAIL: "1", GH_UPDATE_COMMIT: "1" })
+      expect(lost.status, lost.stderr).toBe(0)
+      expect(run(["post", f.payload, f.approval], f.env).status).toBe(0)
+      expect(puts(f.state)).toBe(1)
+      expect(postsOf(f.state)).toBe(0)
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  it("keeps an ambiguous update unsettled and retries only a proven rejection", () => {
+    for (const reject of [false, true]) {
+      const f = fixture()
+      try {
+        const failed = run(["post", f.payload, f.approval], {
+          ...f.env, ...(reject ? { GH_UPDATE_REJECT: "1" } : { GH_UPDATE_FAIL: "1" }),
+        })
+        expect(failed.status).not.toBe(0)
+        expect(JSON.parse(fs.readFileSync(path.join(f.state, "reviews.json"), "utf8"))[0].review.body).toBe(f.original.body)
+        const retried = run(["post", f.payload, f.approval], f.env)
+        expect(retried.status).toBe(reject ? 0 : 1)
+        expect(puts(f.state)).toBe(reject ? 2 : 1)
+        expect(postsOf(f.state)).toBe(0)
+      } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+    }
+  })
+
+  it("requires the correct receipt and actual body readback before confirming an update", () => {
+    for (const fault of ["GH_UPDATE_WRONG_ID", "GH_UPDATE_NO_APPLY"]) {
+      const f = fixture()
+      try {
+        expect(run(["post", f.payload, f.approval], { ...f.env, [fault]: "1" }).status).not.toBe(0)
+        expect(postsOf(f.state)).toBe(0)
+        expect(puts(f.state)).toBe(1)
+      } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+    }
+  })
+
+  it("rejects malformed update targets before rendering a publishable preview", () => {
+    const f = fixture()
+    try {
+      const result = JSON.parse(fs.readFileSync(f.source, "utf8"))
+      for (const update of [{ ...result.update, review: true }, { ...result.update, author: 0 }, { ...result.update, bodySha256: "bad" }]) {
+        fs.writeFileSync(f.source, JSON.stringify({ ...result, update }))
+        expect(renderReview(f.source, f.payload, f.env).status).toBe(2)
+      }
+      expect(puts(f.state)).toBe(0)
+      expect(postsOf(f.state)).toBe(0)
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+
+  it("resolves approved earlier threads only after updating the same summary and preserves completion recovery", () => {
+    const f = fixture()
+    try {
+      const target = JSON.parse(fs.readFileSync(f.payload, "utf8")).update
+      const d = resolutionDraft(f)
+      fs.writeFileSync(d.source, JSON.stringify({ ...d.result, update: target }))
+      expect(renderReview(d.source, f.payload, d.env).status).toBe(0)
+      expect(run(["stamp", f.payload], d.env).status).toBe(0)
+      expect(approve(f.payload, f.approval, d.env).status).toBe(0)
+      const posted = run(["post", f.payload, f.approval], d.env)
+      expect(posted.status, posted.stderr).toBe(0)
+      expect(posted.stdout).toContain("THREAD_RESOLVED=PRRT_fixture0")
+      expect(puts(f.state)).toBe(1)
+      expect(postsOf(f.state)).toBe(0)
+      const finished = runComplete(d.env, f.payload, f.approval)
+      expect(finished.status, finished.stderr).toBe(0)
+      expect(puts(f.state)).toBe(1)
+      expect(fs.readFileSync(path.join(f.state, "resolves"), "utf8").trim().split("\n")).toEqual(["PRRT_fixture0"])
+    } finally { fs.rmSync(f.directory, { recursive: true, force: true }) }
+  })
+})
 
 function resolutionDraft(fixture: ReturnType<typeof freshReview>, statuses = ["fixed"], extra: NodeJS.ProcessEnv = {}) {
   const { directory, payload, bin, state } = fixture
