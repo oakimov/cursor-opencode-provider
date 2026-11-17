@@ -491,6 +491,69 @@ fs.createReadStream(job + "/pipe").on("data", chunk => fs.writeSync(fd, chunk))
     expect(await waitDone(terminal)).toContain("exit_code: 0")
   }, 15_000)
 
+  it("runs no program while a command runs when bash 4.2+ supervises it", async () => {
+    const bash = Bun.which("bash")
+    if (!bash) return
+    const version = Bun.spawnSync([bash, "-c", "echo $(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] ))"]).stdout.toString()
+    if (Number(version) < 402) return
+    // Every program the supervisor runs by name logs itself first.
+    const bin = fs.mkdtempSync(path.join(root, "bin-"))
+    const log = path.join(root, "programs.log")
+    for (const name of ["sleep", "date", "cat", "wc", "tr", "rm", "mkfifo", "setsid", "head", "tail", "ps"]) {
+      const real = Bun.which(name)
+      if (real) fs.writeFileSync(path.join(bin, name), `#!/bin/sh\nprintf '%s\\n' "${name} $*" >>${JSON.stringify(log)}\nexec ${JSON.stringify(real)} "$@"\n`, { mode: 0o755 })
+    }
+    const terminal = job(`${JSON.stringify(Bun.which("sleep"))} 6`, { backgroundSpawn: true })
+    await launch(terminal, "/bin/sh", { ...process.env, PATH: `${bin}:${process.env.PATH}` })
+    const programs = () => fs.readFileSync(log, "utf8").split("\n").filter(Boolean)
+    // The updater and the long nap start after `ready`; the nap comes last.
+    expect(await waitFor(() => programs().includes("sleep 30"))).toBe(true)
+    const settled = programs().length
+    await Bun.sleep(3000)
+    expect(programs().slice(settled)).toEqual([])
+    const record = fs.readFileSync(terminal.file, "utf8")
+    expect(Number(/running_for_ms: (\d+)/.exec(record)![1])).toBeGreaterThanOrEqual(2000)
+    expect(await waitDone(terminal)).toContain("exit_code: 0")
+  }, 20_000)
+
+  it("wakes the supervisor's nap but leaves a PID it no longer owns alone", async () => {
+    if (!fs.existsSync("/proc/self/stat")) return
+    const terminal = createManagedTerminal({ command: "true", workingDirectory: root, timeoutMs: 0, timeoutBehavior: 0, backgroundSpawn: true }, root)
+    const runner = fs.readFileSync(path.join(terminal.directory, "runner.sh"), "utf8")
+    const wake = /\nwake\(\) \{\n[\s\S]*?\n\}\n/.exec(runner)![0]
+    const stranger = Bun.spawn(["sleep", "30"])
+    try {
+      const proc = Bun.spawn(["/bin/sh", "-c", [
+        "supervisor=$$", wake,
+        `napper=${stranger.pid}; wake`,
+        'sleep 30 & napper=$!; wake; wait "$napper"; echo "own=$?"',
+      ].join("\n")], { stdout: "pipe", stderr: "pipe" })
+      expect((await new Response(proc.stdout).text()).trim()).toBe("own=137")
+      expect(await proc.exited).toBe(0)
+      expect(alive(stranger.pid)).toBe(true)
+    } finally {
+      stranger.kill("SIGKILL")
+      releaseUnstartedTerminal(terminal.directory)
+    }
+  })
+
+  // The command's exit signal lands while the injected foreground sleep runs,
+  // so its trap has run before the nap's wait starts.
+  it.each([
+    ["before the nap checks the command again", 'sleep "$1" 4>&- & napper=$!\n', (gap: string) => `sleep "$1" 4>&- & napper=$!\n  ${gap}\n`],
+    ["after that check", 'if "$2"; then wait "$napper"', (gap: string) => `if "$2"; then ${gap}; wait "$napper"`],
+  ])("finishes a command that exits just %s, before the long nap's wait", async (_name, anchor, gapped) => {
+    const terminal = job("sleep 0.3", { backgroundSpawn: true })
+    const runner = path.join(terminal.directory, "runner.sh")
+    const script = fs.readFileSync(runner, "utf8")
+    expect(script.split(anchor)).toHaveLength(2)
+    fs.writeFileSync(runner, script.replace(anchor, gapped('[ "$1" = 0.1 ] || sleep 1')))
+    const started = Date.now()
+    await launch(terminal)
+    expect(await waitDone(terminal)).toContain("exit_code: 0")
+    expect(Date.now() - started).toBeLessThan(6000)
+  }, 15_000)
+
   it("soft-hands off to the same terminal and captures descendant output without losing the exit code", async () => {
     const terminal = job("(sleep 0.5; printf tail) & printf front; exit 3", { timeoutMs: 100 })
     expect((await launch(terminal)).stdout).toContain("__CURSOR_SHELL_BACKGROUND__")
