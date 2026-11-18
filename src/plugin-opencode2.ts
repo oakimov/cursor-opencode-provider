@@ -32,7 +32,7 @@ import {
   releaseCursorShellEnv,
   sanitizeRegisteredCursorShellOutput,
 } from "./shell-timeout.js"
-import { applyCursorProviderInventory, CURSOR_INTEGRATION_ID } from "./opencode2/catalog.js"
+import { applyCursorProviderInventory, CURSOR_INTEGRATION_ID, shortVariantAliases } from "./opencode2/catalog.js"
 import {
   applyCursorIntegration,
   requireCursorAccessToken,
@@ -282,6 +282,29 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
 
     // ── Credentials ─────────────────────────────────────────
     await track(ctx.integration.transform(applyCursorIntegration))
+
+    // Keep the picker and saved labels unchanged. Resolve aliases against the
+    // host's effective catalog so an explicit variant in config takes priority.
+    const hostModels = ctx.model
+    if (hostModels) {
+      try {
+        await track(ctx.session.hook("experimental.model.resolve", async (event) => {
+          const ref = event.model
+          if (ref.providerID !== CURSOR_PROVIDER_ID || !ref.variant || !/^[a-z][a-z0-9.-]*$/.test(ref.variant)) return
+          const listed = await hostModels.list().catch((error: unknown) => {
+            trace(`opencode2 variants: model lookup failed: ${String(error)}`)
+            return undefined
+          })
+          const model = listed?.data.find(({ providerID, id }) => providerID === ref.providerID && id === ref.id)
+          if (!model) return
+          const variant = shortVariantAliases(model.variants, model.limit.context).get(ref.variant)
+          if (variant) event.model = { ...ref, variant }
+        }, { providerID: CURSOR_PROVIDER_ID }))
+      } catch (error) {
+        // Earlier hosts can still select the display IDs.
+        trace(`opencode2 variants: model resolve hook unavailable: ${String(error)}`)
+      }
+    }
 
     // ── Provider inventory (in-memory `editor.add`) ─────────────────────
     // Transform replays on provider.reload(). Skip while `models` is empty so

@@ -120,9 +120,9 @@ upgrading. Select the dedicated 500k entry for its full host context budget.
 
 ### Short variant ids
 
-OpenCode 2.x addresses a variant as `provider/model#variant` and matches the id
-exactly. Alongside each display label, the inventory also publishes a lowercase
-effort id, so both of these pick the same tuple:
+The picker shows one entry per variant, using the original display label.
+Native OpenCode 2.x session runs also accept an unambiguous short id through
+the host's model resolution hook. For example, both of these pick the same tuple:
 
 ```
 cursor/deepseek-v41-flash-1017#Max
@@ -131,18 +131,25 @@ cursor/deepseek-v41-flash-1017#max
 
 Ids are the effort value (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`,
 `max`) plus a `-1m` / `-500k` context token and/or `-fast` when that entry mixes
-those variants. `extra-high` normalizes to `xhigh`.
+those variants. On a mixed-tier entry the bare id uses the entry's own
+context tier. An omitted context counts as that tier. `extra-high` normalizes to
+`xhigh`.
 
-A short id is published only when exactly one variant in the entry maps to it.
+A short id resolves only when exactly one variant in the effective model
+catalog maps to it. Exact variant IDs from the catalog take precedence. A
+variant with conflicting effort fields keeps its label and gains no short id.
 `claude-opus-5` lists both `No Thinking High` and `High`, so it keeps only those
 labels and offers no `#high`; picking one for you would silently change whether
-the request thinks. `grok-4.7` mixes context tiers, so it publishes `low`,
+the request thinks. `grok-4.7` mixes context tiers, so it accepts `low`,
 `low-500k`, … and reserves the bare id for the 256k tier.
 
 `default` is never published: both OpenCode majors read it as "no variant
-override", so a tuple under that id could not be selected. An entry whose only
-effort value is `default` keeps its display label (`Standard`) and gains no
-short id.
+override", so a tuple under that id could not be selected. A variant with an
+effort value of `default` keeps its display label and gains no short id.
+
+Use the display label with ACP effort selectors, which validate catalog IDs
+before the session model resolution hook runs. Older OpenCode versions without
+that hook also require the display label.
 
 The plugin supplies its own Cursor SDK even when the host's generic package loader already created one. Each new Run resolves the active integration credential and applies on-demand renewal; a token captured by the generic loader or its options cannot bypass that resolver.
 

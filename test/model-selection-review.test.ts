@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test"
 import {
   CURSOR_VARIANT_PARAMETERS_KEY,
+  CURSOR_WIRE_MODEL_ID_KEY,
   mapAvailableModelsResponse,
   normalizeModelCache,
   resolveVariantMaxMode,
@@ -10,7 +11,7 @@ import {
 } from "../src/models.js"
 import { modelsToConfig } from "../src/model-config.js"
 import { getCursorModelCost, wireModelIdForPricing } from "../src/pricing.js"
-import { modelsToCatalogModelMap } from "../src/opencode2/catalog.js"
+import { modelsToCatalogModelMap, shortVariantAliases } from "../src/opencode2/catalog.js"
 
 function variant(context: string, effort: string, fast = false): ModelVariant {
   return {
@@ -28,6 +29,85 @@ function variant(context: string, effort: string, fast = false): ModelVariant {
 }
 
 describe("adversarial model selection", () => {
+  it.each(["__proto__", "constructor", "toString"])(
+    "preserves accepted metadata through selectable catalog keys (%s)",
+    (key) => {
+      const high = [{ id: "effort", value: "high" }]
+      const models = mapAvailableModelsResponse({ models: [{ name: key, clientDisplayName: "Review fixture", variants: [
+        { displayName: "Low", isDefaultNonMaxConfig: true, parameterValues: [{ id: "effort", value: "low" }] },
+        { displayName: key, parameterValues: high },
+      ] }] })
+      const classic = modelsToConfig(models)
+      const modern = modelsToCatalogModelMap(models)
+      const id = `${key}-cursor`
+      const label = key === "__proto__" ? `${key} Variant` : key
+      expect(Object.hasOwn(classic, key)).toBe(false)
+      expect(Object.hasOwn(modern, key)).toBe(false)
+      expect(classic[id].options[CURSOR_WIRE_MODEL_ID_KEY]).toBe(key)
+      expect(modern[id]?.modelID).toBe(key)
+      expect(classic[id].variants[label][CURSOR_VARIANT_PARAMETERS_KEY]).toEqual(high)
+      expect(modern[id]?.variants.find((choice) => choice.id === label)?.settings?.[CURSOR_VARIANT_PARAMETERS_KEY])
+        .toEqual(high)
+    },
+  )
+
+  it("escapes a prototype model id without colliding with an advertised id", () => {
+    const catalog = modelsToConfig([
+      { id: "__proto__", variants: [] }, { id: "__proto__-cursor", variants: [] },
+    ])
+    expect(Object.keys(catalog)).toEqual(["__proto__-cursor-2", "__proto__-cursor"])
+    expect(catalog["__proto__-cursor-2"].options[CURSOR_WIRE_MODEL_ID_KEY]).toBe("__proto__")
+  })
+
+  it("keeps the catalog's declared context tier bare even with a smaller tier", () => {
+    const models = mapAvailableModelsResponse({ models: [{ name: "tiered", variants: [
+      { ...variant("128k", "low"), isMaxMode: false, displayName: "Small Low" },
+      { ...variant("256k", "high"), isDefaultNonMaxConfig: true, displayName: "High" },
+      { ...variant("500k", "high"), displayName: "High 500k" },
+    ] }] })
+    const classic = modelsToConfig(models).tiered
+    const modern = modelsToCatalogModelMap(models).tiered!
+    expect(modern.limit.context).toBe(256_000)
+    expect(modern.variants.map(({ id }) => id)).toEqual(Object.keys(classic.variants))
+    expect(Object.fromEntries(shortVariantAliases(modern.variants, modern.limit.context))).toEqual({
+      "low-128k": "Small Low", high: "High", "high-500k": "High 500k",
+    })
+  })
+
+  it("counts explicit and implicit base context variants together for alias ambiguity", () => {
+    const explicit = variant("256k", "high").parameterValues
+    const implicit = explicit.filter(({ id }) => id !== "context")
+    const models = mapAvailableModelsResponse({ models: [{ name: "tiered", variants: [
+      { displayName: "Implicit High", parameterValues: implicit },
+      { displayName: "Explicit High", parameterValues: explicit, isDefaultNonMaxConfig: true },
+      { ...variant("500k", "high"), displayName: "High 500k" },
+    ] }] })
+    const { variants: choices, limit } = modelsToCatalogModelMap(models).tiered!
+    const settings = Object.fromEntries(choices.map(({ id, settings }) => [id, settings?.[CURSOR_VARIANT_PARAMETERS_KEY]]))
+    expect(settings).toEqual({
+      "Implicit High": implicit,
+      "Explicit High": explicit,
+      "High 500k": variant("500k", "high").parameterValues,
+    })
+    expect(Object.fromEntries(shortVariantAliases(choices, limit.context))).toEqual({ "high-500k": "High 500k" })
+  })
+
+  it("does not infer an effort alias from conflicting parameters in either order", () => {
+    const tuple = [{ id: "effort", value: "high" }, { id: "reasoning_effort", value: "low" }]
+    for (const parameterValues of [tuple, [...tuple].reverse()]) {
+      const models = mapAvailableModelsResponse({ models: [{ name: "efforts", variants: [
+        { displayName: "Conflicting", parameterValues },
+        { displayName: "Extra High", parameterValues: [{ id: "reasoning", value: "extra-high" }] },
+      ] }] })
+      const { variants: choices, limit } = modelsToCatalogModelMap(models).efforts!
+      expect(choices.map(({ id }) => id).sort()).toEqual(["Conflicting", "Extra High"])
+      const aliases = shortVariantAliases(choices, limit.context)
+      expect(Object.fromEntries(aliases)).toEqual({ xhigh: "Extra High" })
+      expect(choices.find(({ id }) => id === aliases.get("xhigh"))?.settings?.[CURSOR_VARIANT_PARAMETERS_KEY])
+        .toEqual([{ id: "reasoning", value: "extra-high" }])
+    }
+  })
+
   it("advertises recorded image input for every context/Fast entry on both hosts despite a false live flag", () => {
     const [model] = mapAvailableModelsResponse({ models: [{
       name: "grok-4.7", supportsImages: false,

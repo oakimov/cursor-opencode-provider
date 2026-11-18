@@ -71,93 +71,59 @@ export type CatalogModelInfo = {
   settings?: Record<string, unknown>
 }
 
-/** Tier suffix for a short variant id; empty for the base tier of a multi-tier entry. */
-function contextTierToken(
-  context: number | undefined,
-  baseContext: number | undefined,
-  spansTiers: boolean,
-): string {
-  if (!spansTiers || context === undefined || context === baseContext) return ""
-  return `-${contextSuffix(context)}`
+function shortEffortId(params: ModelParameterValue[]): string | undefined {
+  const efforts = new Set(params.filter(({ id }) => isEffortParameter(id)).map(({ value }) => {
+    const effort = value.trim().toLowerCase()
+    return effort === "extra-high" || effort === "extra high" ? "xhigh" : effort
+  }))
+  // Several effort fields can agree, but their order must never pick a winner.
+  if (efforts.size !== 1) return undefined
+  const [effort] = efforts
+  return effort && effort !== RESERVED_VARIANT_KEY && /^[a-z][a-z0-9]*$/.test(effort)
+    ? effort
+    : undefined
 }
 
-/**
- * Short, lowercase variant ids (`high`, `max`, `high-fast`) that OpenCode 2
- * users type as `model#variant`, next to Cursor's display-label ids (`High`,
- * `Max`, `High Fast`).
- *
- * OpenCode 2 matches a variant id exactly, and Cursor's display deltas are
- * capitalized, so `cursor/deepseek-v41-flash-1017#max` misses `Max` and fails
- * the prompt with `VariantUnavailableError`. Other 2.x providers expose the
- * lowercase effort names, which is what this adds.
- *
- * Unambiguous ids only. The id is the effort value with a context tier
- * (`-1m`, `-500k`) and/or a speed (`-fast`) suffix, and it is published only
- * when exactly one variant in the entry maps to it. A model that lists both
- * `No Thinking High` and `High` gets no bare `high`: one id cannot pick
- * between two tuples, and silently binding one would change the request.
- *
- * Both ids stay in `model.variants`, so a picker shows `High` and `high` for
- * the same choice. Replacing the display ids instead would break every saved
- * 2.x pick, as #176 did for the pre-delta keys.
- *
- * OpenCode's reserved `default` sentinel is never published, matching the
- * display-label path: `default` means "no variant override" on both majors.
- */
-function variantInfosWithShortEffortIds(
-  entries: Array<[string, Record<string, unknown>]>,
-): ModelVariantInfo[] {
-  const variants: ModelVariantInfo[] = entries.map(([id, settings]) => ({
-    id,
-    settings: { ...settings },
-  }))
-  const parameters = entries.map(([, settings]) => {
-    const parsed = normalizeModelParameterValues(settings[CURSOR_VARIANT_PARAMETERS_KEY])
+/** Map unambiguous short IDs to the existing visible labels. */
+export function shortVariantAliases(
+  variants: readonly ModelVariantInfo[],
+  baseContext: number,
+): Map<string, string> {
+  const parameters = variants.map(({ settings }) => {
+    const parsed = normalizeModelParameterValues(settings?.[CURSOR_VARIANT_PARAMETERS_KEY])
     return parsed ?? []
   })
+  // An omitted context leaves the choice on the entry's own tier.
   const contextOf = (params: ModelParameterValue[]) => parseCursorContextLimit(
     params.find((parameter) => parameter.id === "context")?.value,
-  )
+  ) ?? baseContext
   const isFast = (params: ModelParameterValue[]) =>
     params.find((parameter) => parameter.id === "fast")?.value === "true"
   // A tier/speed suffix only disambiguates something the entry actually mixes.
   const contexts = parameters.map(contextOf)
   const tiers = new Set(contexts)
-  const hasFast = parameters.some(isFast)
-  const hasNonFast = parameters.some((params) => !isFast(params))
+  const speeds = parameters.map(isFast)
+  const spansSpeeds = speeds.includes(true) && speeds.includes(false)
   const spansTiers = tiers.size > 1
-  const baseContext = tiers.has(undefined)
-    ? undefined
-    : Math.min(...[...tiers].filter((context): context is number => context !== undefined))
 
-  const shortIds = parameters.map((params) => {
-    const effort = params.find((parameter) => isEffortParameter(parameter.id))
-    const value = effort?.value.trim().toLowerCase()
-    if (!value) return undefined
-    // Cursor publishes `xhigh`; `extra-high`/`extra high` are the same level
-    // written differently, and a short id must not vary by that spelling.
-    const effortId = value === "extra-high" || value === "extra high" ? "xhigh" : value
-    if (!/^[a-z][a-z0-9]*$/.test(effortId)) return undefined
-    // OpenCode reserves `default` for "no override" on both majors: it rewrites
-    // a requested `default` to undefined before lookup, so publishing it would
-    // only advertise a tuple nothing can select.
-    if (effortId === RESERVED_VARIANT_KEY) return undefined
-    const context = contextOf(params)
-    const contextToken = contextTierToken(context, baseContext, spansTiers)
-    const fastToken = isFast(params) && hasFast && hasNonFast ? "-fast" : ""
+  const shortIds = parameters.map((params, index) => {
+    const effortId = shortEffortId(params)
+    if (!effortId) return undefined
+    const context = contexts[index]!
+    const contextToken = spansTiers && context !== baseContext ? `-${contextSuffix(context)}` : ""
+    const fastToken = speeds[index] && spansSpeeds ? "-fast" : ""
     return `${effortId}${contextToken}${fastToken}`
   })
 
   const counts = new Map<string, number>()
   for (const id of shortIds) if (id) counts.set(id, (counts.get(id) ?? 0) + 1)
-  const taken = new Set(entries.map(([id]) => id))
+  const taken = new Set(variants.map(({ id }) => id))
+  const aliases = new Map<string, string>()
   for (const [index, id] of shortIds.entries()) {
-    // Ambiguous (two variants, one id) or already published as a label.
     if (!id || counts.get(id) !== 1 || taken.has(id)) continue
-    taken.add(id)
-    variants.push({ id, settings: { ...entries[index]![1] } })
+    aliases.set(id, variants[index]!.id)
   }
-  return variants
+  return aliases
 }
 
 /** Translate one `modelsToConfig` entry into the 2.0 `Model.Info` shape. */
@@ -172,9 +138,10 @@ export function modelConfigEntryToInfo(id: string, entry: Record<string, any>): 
       ? (options[CURSOR_WIRE_MODEL_ID_KEY] as string)
       : id
 
-  const variants = variantInfosWithShortEffortIds(
-    Object.entries((entry.variants ?? {}) as Record<string, Record<string, unknown>>),
-  )
+  const context = entry.limit?.context ?? 200_000
+  const variants = Object.entries(
+    (entry.variants ?? {}) as Record<string, Record<string, unknown>>,
+  ).map(([id, settings]) => ({ id, settings: { ...settings } }))
 
   const inputModalities = Array.isArray(entry.modalities?.input)
     ? entry.modalities.input.filter((modality: unknown): modality is string => typeof modality === "string")
@@ -194,7 +161,7 @@ export function modelConfigEntryToInfo(id: string, entry: Record<string, any>): 
       output: outputModalities,
     },
     limit: {
-      context: entry.limit?.context ?? 200_000,
+      context,
       output: entry.limit?.output ?? 8192,
     },
     variants,
@@ -211,7 +178,7 @@ export function modelConfigEntryToInfo(id: string, entry: Record<string, any>): 
 /** Full model map for the in-memory provider inventory. */
 export function modelsToCatalogModelMap(models: ModelInfo[]): Record<string, CatalogModelInfo> {
   const config = modelsToConfig(models)
-  const out: Record<string, CatalogModelInfo> = {}
+  const out: Record<string, CatalogModelInfo> = Object.create(null)
   for (const [id, entry] of Object.entries(config)) {
     out[id] = modelConfigEntryToInfo(id, entry as Record<string, any>)
   }
