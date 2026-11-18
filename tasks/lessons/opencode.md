@@ -803,7 +803,9 @@ These are failure lessons shared by both hosts, not a replacement for
   Bind the model snapshot to the Run's cache root and file generation and
   verify the selected max-mode bit on the request (`test/model-selection-run.test.ts`).
 - **Inspect generator inputs before changing mappings.** Pricing and model
-  metadata came from distinct markdown endpoints. Run the live pricing gate
+  metadata came from distinct markdown endpoints. An added US data residency
+  column hid the long-context surcharge. Read Notes by header and test a row
+  whose note changes the rates (`test/pricing.test.ts`). Run the live pricing gate
   before a bump; the v0.6.4 failure forced a retag ([release gate](../../AGENTS.md#hard-stop--release--version-bump--tag-gate-non-optional)).
 - **Make tests capable of failing.** Type guards once sat outside tsc's include;
   root ignored permission fixtures. Use real usages, deterministic faults and

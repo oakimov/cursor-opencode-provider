@@ -37,8 +37,8 @@ gemini-3.7-flash
 gemini-3.8-flash
 gemini-4-argon
 glm-5.2
-glm-5.3
-glm-5.3-flash
+glm-5p3
+glm-5p3-flash
 gpt-5-mini
 gpt-5.1
 gpt-5.2
