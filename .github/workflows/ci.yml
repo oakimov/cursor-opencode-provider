@@ -50,14 +50,19 @@ jobs:
         name: Install zsh
         run: |
           set -euo pipefail
-          # Use Ubuntu's registered Kernel.org archive mirror independently of
-          # the runner's ubuntu.com mirror DNS. APT still verifies Ubuntu's
-          # signed repository metadata and package hashes with its own keyring.
+          # Independent Ubuntu-registered mirrors avoid a single DNS or route
+          # outage. apt-transport-mirror tries another mirror on file failure;
+          # APT still verifies Ubuntu's signed metadata and package hashes.
+          # https://manpages.ubuntu.com/manpages/resolute/man1/apt-transport-mirror.1.html
           mirror_file="/etc/apt/apt-mirrors.txt"
           test -f "$mirror_file"
-          printf '%s\n' 'https://mirrors.kernel.org/ubuntu/' | sudo tee "$mirror_file" >/dev/null
-          sudo apt-get -o APT::Update::Error-Mode=any update
-          sudo apt-get install --no-install-recommends -y zsh
+          printf '%s\n' \
+            'https://mirror.math.princeton.edu/pub/ubuntu/' \
+            'https://ubuntu.osuosl.org/ubuntu/' \
+            'https://mirrors.kernel.org/ubuntu/' | sudo tee "$mirror_file" >/dev/null
+          apt_options=(-o Acquire::https::Timeout=15 -o Acquire::Retries=2)
+          sudo apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update
+          sudo apt-get "${apt_options[@]}" install --no-install-recommends -y zsh
           zsh --version
 
       # ubuntu-latest denies unprivileged user namespaces. The isolation

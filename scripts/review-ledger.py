@@ -20,7 +20,7 @@ REVISION = re.compile(r"^(?:local|[0-9a-f]{40})$")
 ABSOLUTE = re.compile(r"(?:^|[\s\"'`])~?/(?![\s/])")
 LIVE_CLAIM = re.compile(r"production incident|\blive model\b|\bin production\b", re.IGNORECASE)
 
-LEDGER_KEYS = {"revision", "behaviors", "candidates", "omissions", "omissionsNone", "retries", "retriesNone", "passes"}
+LEDGER_KEYS = {"version", "revision", "behaviors", "candidates", "omissions", "omissionsNone", "retries", "retriesNone", "passes", "diagnostics"}
 CONTRACT_KEYS = {"path", "line", "note"}
 SCENARIO_KEYS = {"id", "category", "applicable", "reason", "expected", "observed", "evidence", "downstream"}
 CANDIDATE_KEYS = {
@@ -45,6 +45,13 @@ INDIRECT_EVIDENCE = {"source", "mocked", "unverified"}
 KINDS = {"synthetic", "source", "native", "live", "unverified"}
 SETUPS = {"synthetic", "source", "native", "live"}
 PROVENANCE = {"introduced", "preexisting", "unchanged-consumer", "not-applicable"}
+HEAD_DISPOSITIONS = {
+    "present": {"actionable"},
+    "absent": {"refuted"},
+    "not-a-defect": {"refuted", "policy", "operational"},
+    "unverified": {"hypothesis"},
+}
+DIAGNOSTIC_KEYS = {"id", "check", "observation", "classification", "basis", "candidates"}
 
 
 def text_field(value: object) -> bool:
@@ -107,15 +114,63 @@ def check_ownership(ownership: object, scenarios: list, uncovered: list, prefix:
     return problems
 
 
-def check_ledger(ledger: object) -> list[str]:
+def check_assessment(candidate: dict, revision: str, prefix: str) -> list[str]:
+    assessment = candidate.get("assessment")
+    if not isinstance(assessment, dict) or set(assessment) != {"head", "status", "basis", "elsewhere"}:
+        return [f"{prefix}.assessment"]
+    problems: list[str] = []
+    if assessment.get("head") != revision:
+        problems.append(f"{prefix}.assessment.head")
+    status = assessment.get("status")
+    allowed = HEAD_DISPOSITIONS.get(status) if isinstance(status, str) else None
+    if allowed is None:
+        problems.append(f"{prefix}.assessment.status")
+    elif candidate.get("disposition") not in allowed:
+        problems.append(f"{prefix}.assessment.disposition")
+    if not text_field(assessment.get("basis")):
+        problems.append(f"{prefix}.assessment.basis")
+    elsewhere = assessment.get("elsewhere")
+    if not isinstance(elsewhere, list):
+        return [*problems, f"{prefix}.assessment.elsewhere"]
+    seen: set[str] = set()
+    for index, comparison in enumerate(elsewhere):
+        key = f"{prefix}.assessment.elsewhere[{index}]"
+        if not isinstance(comparison, dict) or set(comparison) != {"revision", "status", "basis"}:
+            problems.append(key)
+            continue
+        other = comparison.get("revision")
+        if (not isinstance(other, str) or not re.fullmatch(r"[0-9a-f]{40}", other)
+                or other == revision or other in seen):
+            problems.append(f"{key}.revision")
+        else:
+            seen.add(other)
+        comparison_status = comparison.get("status")
+        if not isinstance(comparison_status, str) or comparison_status not in {"fixed", "present", "unverified"}:
+            problems.append(f"{key}.status")
+        if not text_field(comparison.get("basis")):
+            problems.append(f"{key}.basis")
+        # A fix implies a defect. An operational/policy dismissal must not
+        # substitute another tree's repair for assessing the reviewed head.
+        if comparison_status == "fixed" and (not isinstance(status, str) or status not in {"present", "absent"}):
+            problems.append(f"{key}.head-status")
+    return problems
+
+
+def check_ledger(ledger: object, *, require_scope: bool = False, require_diagnostics: bool = False) -> list[str]:
     problems: list[str] = []
     if not isinstance(ledger, dict):
         return ["ledger"]
     extra = sorted(set(ledger) - LEDGER_KEYS)
     if extra:
         problems.append("ledger.keys")
+    version = ledger.get("version", 1)
+    if (type(version) is not int or version not in (1, 2, 3)
+            or (require_scope and version not in (2, 3)) or (require_diagnostics and version != 3)):
+        problems.append("ledger.version")
     if not isinstance(ledger.get("revision"), str) or not REVISION.fullmatch(ledger.get("revision", "")):
         problems.append("revision")
+    if version == 3:
+        problems.extend(check_diagnostics(ledger))
     for value in walk_strings(ledger):
         if ABSOLUTE.search(value):
             problems.append("private-path")
@@ -205,9 +260,12 @@ def check_ledger(ledger: object) -> list[str]:
         candidates = []
     for index, candidate in enumerate(candidates):
         prefix = f"candidates[{index}]"
-        if not isinstance(candidate, dict) or set(candidate) != CANDIDATE_KEYS:
+        expected = CANDIDATE_KEYS | ({"assessment"} if version in (2, 3) else set())
+        if not isinstance(candidate, dict) or set(candidate) != expected:
             problems.append(prefix)
             continue
+        if version in (2, 3):
+            problems.extend(check_assessment(candidate, ledger.get("revision"), prefix))
         identifier = candidate.get("id")
         if not isinstance(identifier, str) or not TOKEN.fullmatch(identifier) or identifier in candidate_ids:
             problems.append(f"{prefix}.id")
@@ -334,8 +392,48 @@ def public_text(finding: dict) -> str:
     )
 
 
-def compare_ledger(ledger: object, result: object) -> list[str]:
-    problems = check_ledger(ledger)
+def check_diagnostics(ledger: dict) -> list[str]:
+    """Validate declared causes, without pretending to discover or verify them."""
+    diagnostics = ledger.get("diagnostics")
+    if not isinstance(diagnostics, list):
+        return ["diagnostics"]
+    candidates = ledger.get("candidates")
+    actionable = {item.get("id") for item in candidates
+                  if isinstance(item, dict) and isinstance(item.get("id"), str)
+                  and item.get("disposition") == "actionable"} if isinstance(candidates, list) else set()
+    problems: list[str] = []
+    seen = set()
+    for index, diagnostic in enumerate(diagnostics):
+        key = f"diagnostics[{index}]"
+        if not isinstance(diagnostic, dict) or set(diagnostic) != DIAGNOSTIC_KEYS:
+            problems.append(key)
+            continue
+        identifier = diagnostic.get("id")
+        if not isinstance(identifier, str) or not TOKEN.fullmatch(identifier) or identifier in seen:
+            problems.append(f"{key}.id")
+        else:
+            seen.add(identifier)
+        for field in ("check", "observation", "basis"):
+            if not text_field(diagnostic.get(field)):
+                problems.append(f"{key}.{field}")
+        classification = diagnostic.get("classification")
+        if classification not in ("defect", "outside-scope", "environment", "unresolved"):
+            problems.append(f"{key}.classification")
+        references = diagnostic.get("candidates")
+        if (not isinstance(references, list) or any(not isinstance(item, str) for item in references)
+                or len(set(item for item in references if isinstance(item, str))) != len(references)):
+            problems.append(f"{key}.candidates")
+            references = []
+        if classification == "defect":
+            if not references or any(item not in actionable for item in references):
+                problems.append(f"{key}.findings")
+        elif references:
+            problems.append(f"{key}.candidates")
+    return problems
+
+
+def compare_ledger(ledger: object, result: object, *, require_scope: bool = False, require_diagnostics: bool = False) -> list[str]:
+    problems = check_ledger(ledger, require_scope=require_scope, require_diagnostics=require_diagnostics)
     if not isinstance(ledger, dict):
         return problems
     if not isinstance(result, dict):
@@ -356,13 +454,64 @@ def compare_ledger(ledger: object, result: object) -> list[str]:
             problems.append(f"findings[{index}].id")
             continue
         finding_ids.append(finding["id"])
+    candidates = ledger.get("candidates")
     actionable = {
         candidate["id"]: candidate
-        for candidate in ledger.get("candidates", [])
+        for candidate in (candidates if isinstance(candidates, list) else [])
         if isinstance(candidate, dict) and candidate.get("disposition") == "actionable" and isinstance(candidate.get("id"), str)
     }
     if set(finding_ids) != set(actionable):
         problems.append("findings.candidates")
+    if ledger.get("version") in (2, 3):
+        expected_fixes = set()
+        for identifier, candidate in actionable.items():
+            assessment = candidate.get("assessment")
+            if not isinstance(assessment, dict) or not isinstance(assessment.get("elsewhere"), list):
+                continue
+            for comparison in assessment["elsewhere"]:
+                if isinstance(comparison, dict) and comparison.get("status") == "fixed":
+                    other = comparison.get("revision")
+                    if isinstance(other, str):
+                        expected_fixes.add((identifier, other))
+        external_fixes = result.get("externalFixes", [])
+        recorded_fixes = set()
+        if not isinstance(external_fixes, list):
+            problems.append("externalFixes")
+        else:
+            for fix in external_fixes:
+                if (not isinstance(fix, dict) or set(fix) != {"finding", "revision", "detail"}
+                        or not isinstance(fix.get("finding"), str)
+                        or not isinstance(fix.get("revision"), str) or not text_field(fix.get("detail"))):
+                    problems.append("externalFixes")
+                    continue
+                pair = (fix["finding"], fix["revision"])
+                if pair in recorded_fixes:
+                    problems.append("externalFixes.duplicate")
+                recorded_fixes.add(pair)
+        if recorded_fixes != expected_fixes:
+            problems.append("externalFixes.candidates")
+    if ledger.get("version") == 3:
+        diagnostics = ledger.get("diagnostics")
+        checks = result.get("checks")
+        failed = {item["name"] for item in (checks if isinstance(checks, list) else [])
+                  if isinstance(item, dict) and isinstance(item.get("name"), str) and item.get("status") == "failed"}
+        covered = set()
+        if not isinstance(diagnostics, list):
+            diagnostics = []
+        for index, diagnostic in enumerate(diagnostics):
+            key = f"diagnostics[{index}]"
+            if not isinstance(diagnostic, dict) or set(diagnostic) != DIAGNOSTIC_KEYS:
+                continue
+            check = diagnostic.get("check")
+            if not isinstance(check, str) or check not in failed:
+                problems.append(f"{key}.check")
+            else:
+                covered.add(check)
+            classification = diagnostic.get("classification")
+            if classification == "unresolved" and (outcome != "incomplete" or passes_complete(ledger)):
+                problems.append(f"{key}.incomplete")
+        if covered != failed:
+            problems.append("diagnostics.checks")
     for finding in findings:
         if not isinstance(finding, dict):
             continue
