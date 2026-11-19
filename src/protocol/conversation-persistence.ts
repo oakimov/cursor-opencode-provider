@@ -11,6 +11,7 @@ import {
   CONVERSATION_CACHE_DIR,
   CONVERSATION_CACHE_SCHEMA_VERSION,
   CONVERSATION_CACHE_TTL_MS,
+  resolveConversationCacheTtlMs,
 } from "../shared.js"
 import { decodeMessageSparse, encodeMessage } from "./messages.js"
 import type { ConversationBlobSnapshot } from "./blob-store.js"
@@ -510,8 +511,17 @@ function decodeProtobuf(data: Uint8Array): PersistedConversation {
   }
 }
 
-function isFresh(value: { updatedAt: number }, now: number): boolean {
-  return now - value.updatedAt <= CONVERSATION_CACHE_TTL_MS
+/**
+ * Snapshot retention. `ttlMs` defaults to the configured
+ * `CURSOR_PROVIDER_CACHE_TTL_MS`; callers that must keep the fixed 24 h window
+ * (abandoned writer temps) pass `CONVERSATION_CACHE_TTL_MS` explicitly.
+ */
+function isFresh(
+  value: { updatedAt: number },
+  now: number,
+  ttlMs = resolveConversationCacheTtlMs(),
+): boolean {
+  return now - value.updatedAt <= ttlMs
 }
 
 /** Recover only this session's moved generations; never scan the conversation root. */
@@ -810,10 +820,12 @@ function queueDelete(store: ConversationStore, expectedConversationId?: string):
 }
 
 async function recoverQuarantine(filePath: string, now: number, signal: AbortSignal): Promise<void> {
-  for await (const entry of removableDirectoryEntries(quarantineDirectory(filePath))) {
+  const directory = quarantineDirectory(filePath)
+  let newest: { path: string, updatedAt: number } | undefined
+  for await (const entry of removableDirectoryEntries(directory)) {
     signal.throwIfAborted()
     if (!entry.isFile() || !entry.name.endsWith(".snapshot")) continue
-    const candidate = path.join(quarantineDirectory(filePath), entry.name)
+    const candidate = path.join(directory, entry.name)
     let handle
     try {
       handle = await openSnapshot(candidate)
@@ -822,25 +834,46 @@ async function recoverQuarantine(filePath: string, now: number, signal: AbortSig
       throw error
     }
     let status: "invalid" | "expired" | undefined
+    let updatedAt = -Infinity
     try {
       const header = await readConversationCacheHeader(handle, signal)
       if (header.status === "invalid") status = "invalid"
-      else if (header.status === "metadata" && !isFresh(header.value, now)) status = "expired"
+      else if (header.status === "metadata") {
+        if (!isFresh(header.value, now)) status = "expired"
+        else updatedAt = header.value.updatedAt
+      }
     } finally {
       await handle.close()
     }
     signal.throwIfAborted()
-    if (!status) {
-      await link(candidate, filePath).catch((error) => {
-        if (errorCode(error) !== "EEXIST" && errorCode(error) !== "ENOENT") throw error
-      })
+
+    // A wider retention window can make several crash leftovers fresh. Match
+    // the on-demand reader's ordering and keep the newest for promotion.
+    let discarded: string | undefined = candidate
+    if (!status && (!newest || updatedAt > newest.updatedAt)) {
+      discarded = newest?.path
+      newest = { path: candidate, updatedAt }
     }
-    await unlink(candidate).catch((error) => {
+    if (!discarded) continue
+    await unlink(discarded).catch((error) => {
       if (errorCode(error) !== "ENOENT") throw error
     })
     if (status) recordStartupDiscard(path.dirname(path.dirname(filePath)), path.basename(filePath), status)
   }
-  await rmdir(quarantineDirectory(filePath)).catch((error) => {
+
+  if (newest) {
+    signal.throwIfAborted()
+    // A live publication still wins. Leave the candidate for a later pass on
+    // any other link failure.
+    await link(newest.path, filePath).catch((error) => {
+      if (errorCode(error) !== "EEXIST" && errorCode(error) !== "ENOENT") throw error
+    })
+    await unlink(newest.path).catch((error) => {
+      if (errorCode(error) !== "ENOENT") throw error
+    })
+  }
+
+  await rmdir(directory).catch((error) => {
     if (errorCode(error) !== "ENOENT" && errorCode(error) !== "ENOTEMPTY") throw error
   })
 }
@@ -922,6 +955,10 @@ async function maintainEntry(
  * A writer killed between writeFile and rename leaves its temp file behind.
  * An in-flight writer's temp always carries a fresh timestamp, so only a
  * readable expired prefix proves abandonment; unreadable temps are kept.
+ *
+ * This window stays at the fixed `CONVERSATION_CACHE_TTL_MS` (24 h) even when
+ * `CURSOR_PROVIDER_CACHE_TTL_MS` raises snapshot retention: temp files are
+ * never read back, so a longer window would only grow disk use.
  */
 async function collectWriterTemp(filePath: string, now: number, signal: AbortSignal): Promise<void> {
   let handle
@@ -935,7 +972,7 @@ async function collectWriterTemp(filePath: string, now: number, signal: AbortSig
   try {
     if (!(await handle.stat()).isFile()) return
     const header = await readConversationCacheHeader(handle, signal)
-    expired = header.status === "metadata" && !isFresh(header.value, now)
+    expired = header.status === "metadata" && !isFresh(header.value, now, CONVERSATION_CACHE_TTL_MS)
   } finally {
     await handle.close()
   }
@@ -1131,7 +1168,7 @@ export async function getPersistedTurnProvenance(
   return { conversationId: head.conversationId, turnProvenance: head.turnProvenance }
 }
 
-/** Replace one session's durable snapshot and refresh its 24-hour lease. */
+/** Replace one session's durable snapshot and refresh its retention lease. */
 export async function persistConversation(
   cacheDir: string,
   value: Omit<PersistedConversation, "updatedAt" | "postCompactionRebase" | "toolCatalog"> & {

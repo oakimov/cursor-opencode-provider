@@ -579,6 +579,33 @@ describe("conversation restart persistence", () => {
     expect((await stat(conversationCacheFilePath(boundaryRoot, value.sessionKey))).isFile()).toBe(true)
   })
 
+  it("keeps a snapshot warm past 24 hours when CURSOR_PROVIDER_CACHE_TTL_MS is seven days", async () => {
+    const root = await cacheRoot()
+    const writtenAt = 1_900_000_000_000
+    const value = {
+      sessionKey: "ses_week",
+      conversationId: "week-conversation",
+      blobs: [],
+      requestContext: { rules_info_complete: true },
+    }
+    const previous = process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+    process.env.CURSOR_PROVIDER_CACHE_TTL_MS = "604800000"
+    try {
+      await persistConversation(root, value, writtenAt)
+      clearMemory()
+      // Two days later is past the default window but inside the configured one.
+      const readAt = writtenAt + 2 * CONVERSATION_CACHE_TTL_MS
+      expect(await getPersistedConversation(root, value.sessionKey, readAt)).toMatchObject({
+        conversationId: value.conversationId,
+      })
+      await waitForConversationMaintenanceForTests(root, readAt)
+      expect((await stat(conversationCacheFilePath(root, value.sessionKey))).isFile()).toBe(true)
+    } finally {
+      if (previous === undefined) delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+      else process.env.CURSOR_PROVIDER_CACHE_TTL_MS = previous
+    }
+  })
+
   it("serializes overlapping updates without losing either session", async () => {
     const root = await cacheRoot()
     const requestContext = { rules_info_complete: true }

@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test"
-import { mkdir, mkdtemp, open, readFile, rename, rm, stat, symlink, truncate, utimes, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, open, opendir, readFile, rename, rm, stat, symlink, truncate, utimes, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { gzipSync } from "node:zlib"
@@ -261,6 +261,76 @@ describe("bounded conversation maintenance", () => {
     await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" })
   })
 
+  it("recovers the newest quarantined snapshot when increasing retention", async () => {
+    const cacheDir = await root()
+    const filePath = conversationCacheFilePath(cacheDir, sessionKey)
+    const directory = path.join(conversationCacheDirectoryPath(cacheDir), ".gc", path.basename(filePath))
+    await mkdir(directory, { recursive: true })
+    await writeFile(path.join(directory, "first.snapshot"), "")
+    await writeFile(path.join(directory, "second.snapshot"), "")
+    // Put the older generation first in the filesystem's traversal order.
+    const entries = await opendir(directory)
+    let index = 0
+    for await (const entry of entries) {
+      const older = index++ === 0
+      await writeFile(path.join(directory, entry.name), gzipSync(protobufSnapshot(
+        older ? now - 2 * CONVERSATION_CACHE_TTL_MS : now,
+        older ? "old" : "replacement",
+      )))
+    }
+
+    process.env.CURSOR_PROVIDER_CACHE_TTL_MS = "604800000"
+    try {
+      await waitForConversationMaintenanceForTests(cacheDir, now)
+      expect((await loadPersistedConversation(cacheDir, sessionKey, now)).value?.conversationId)
+        .toBe("replacement")
+      await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" })
+    } finally {
+      delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+    }
+  })
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "retries promotion of the newest quarantined snapshot after a link failure",
+    async () => {
+      const cacheDir = await root()
+      const cacheDirectory = conversationCacheDirectoryPath(cacheDir)
+      const filePath = conversationCacheFilePath(cacheDir, sessionKey)
+      await waitForConversationMaintenanceForTests(cacheDir, now)
+      const directory = path.join(cacheDirectory, ".gc", path.basename(filePath))
+      const older = path.join(directory, "older.snapshot")
+      const replacement = path.join(directory, "replacement.snapshot")
+      await mkdir(directory, { recursive: true })
+      await writeFile(older, gzipSync(protobufSnapshot(now - 1, "old")))
+      await writeFile(replacement, gzipSync(protobufSnapshot(now, "replacement")))
+
+      // Deny creation at the live name while leaving quarantine writable.
+      await chmod(cacheDirectory, 0o500)
+      try {
+        await waitForConversationMaintenanceForTests(cacheDir, now)
+        await expect(stat(filePath)).rejects.toMatchObject({ code: "ENOENT" })
+        expect((await stat(replacement)).isFile()).toBe(true)
+      } finally {
+        await chmod(cacheDirectory, 0o700)
+      }
+
+      // Promotion can succeed while removal of the quarantine link is denied.
+      await chmod(directory, 0o500)
+      try {
+        await waitForConversationMaintenanceForTests(cacheDir, now)
+        expect((await stat(filePath)).isFile()).toBe(true)
+        expect((await stat(replacement)).isFile()).toBe(true)
+      } finally {
+        await chmod(directory, 0o700)
+      }
+
+      await waitForConversationMaintenanceForTests(cacheDir, now)
+      expect((await loadPersistedConversation(cacheDir, sessionKey, now)).value?.conversationId)
+        .toBe("replacement")
+      await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" })
+    },
+  )
+
   it("does not delete a newer binding published by another process", async () => {
     const cacheDir = await root()
     await persistConversation(cacheDir, {
@@ -512,6 +582,81 @@ describe("bounded conversation maintenance", () => {
     await expect(stat(expiredTemp)).rejects.toMatchObject({ code: "ENOENT" })
     expect((await stat(freshTemp)).isFile()).toBe(true)
     expect((await stat(partialTemp)).isFile()).toBe(true)
+  })
+
+  it("keeps a two-day-old snapshot warm when CURSOR_PROVIDER_CACHE_TTL_MS is seven days", async () => {
+    const cacheDir = await root()
+    const twoDays = 2 * CONVERSATION_CACHE_TTL_MS
+    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - twoDays, "week-warm")))
+    const previous = process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+    process.env.CURSOR_PROVIDER_CACHE_TTL_MS = "604800000"
+    try {
+      await waitForConversationMaintenanceForTests(cacheDir, now)
+      // Maintenance must not collect it, and a warm load must still restore it.
+      expect((await stat(filePath)).isFile()).toBe(true)
+      const loaded = await loadPersistedConversation(cacheDir, sessionKey, now)
+      expect(loaded.status).toBe("restored")
+      expect(loaded.value?.conversationId).toBe("week-warm")
+    } finally {
+      if (previous === undefined) delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+      else process.env.CURSOR_PROVIDER_CACHE_TTL_MS = previous
+    }
+  })
+
+  it("expires the same two-day-old snapshot at the default 24-hour retention", async () => {
+    const cacheDir = await root()
+    const twoDays = 2 * CONVERSATION_CACHE_TTL_MS
+    await snapshot(cacheDir, gzipSync(protobufSnapshot(now - twoDays, "day-cold")))
+    const previous = process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+    delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+    try {
+      resetConversationPersistenceForTests()
+      expect((await loadPersistedConversation(cacheDir, sessionKey, now)).status).toBe("expired")
+      await waitForConversationMaintenanceForTests(cacheDir, now)
+      await expect(stat(conversationCacheFilePath(cacheDir, sessionKey))).rejects.toMatchObject({ code: "ENOENT" })
+    } finally {
+      if (previous !== undefined) process.env.CURSOR_PROVIDER_CACHE_TTL_MS = previous
+    }
+  })
+
+  it("still collects an abandoned writer temp at 24 hours under a seven-day retention", async () => {
+    const cacheDir = await root()
+    const directory = conversationCacheDirectoryPath(cacheDir)
+    const base = path.basename(conversationCacheFilePath(cacheDir, sessionKey))
+    const expiredTemp = path.join(directory, `.${base}.1.expired.tmp`)
+    const twoDayTemp = path.join(directory, `.${base}.2.twoday.tmp`)
+    await writeFile(expiredTemp, gzipSync(protobufSnapshot(now - CONVERSATION_CACHE_TTL_MS - 1)))
+    await writeFile(twoDayTemp, gzipSync(protobufSnapshot(now - 2 * CONVERSATION_CACHE_TTL_MS)))
+    const previous = process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+    process.env.CURSOR_PROVIDER_CACHE_TTL_MS = "604800000"
+    try {
+      resetConversationPersistenceForTests()
+      await waitForConversationMaintenanceForTests(cacheDir, now)
+      // Temp cleanup stays on the fixed window, so a longer retention cannot
+      // strand an interrupted write on disk.
+      for (const temp of [expiredTemp, twoDayTemp]) {
+        await expect(stat(temp)).rejects.toMatchObject({ code: "ENOENT" })
+      }
+    } finally {
+      if (previous === undefined) delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+      else process.env.CURSOR_PROVIDER_CACHE_TTL_MS = previous
+    }
+  })
+
+  it("falls back to 24 hours for an unusable CURSOR_PROVIDER_CACHE_TTL_MS", async () => {
+    const cacheDir = await root()
+    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - 2 * CONVERSATION_CACHE_TTL_MS)))
+    const previous = process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+    process.env.CURSOR_PROVIDER_CACHE_TTL_MS = "not-a-number"
+    try {
+      resetConversationPersistenceForTests()
+      expect((await loadPersistedConversation(cacheDir, sessionKey, now)).status).toBe("expired")
+      await waitForConversationMaintenanceForTests(cacheDir, now)
+      await expect(stat(filePath)).rejects.toMatchObject({ code: "ENOENT" })
+    } finally {
+      if (previous === undefined) delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+      else process.env.CURSOR_PROVIDER_CACHE_TTL_MS = previous
+    }
   })
 })
 
