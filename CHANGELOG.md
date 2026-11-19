@@ -8,6 +8,7 @@
 
 ### Added
 
+- `CURSOR_PROVIDER_CACHE_TTL_MS` sets how long a persisted conversation snapshot stays eligible for reuse (24 h by default). Abandoned writer temps still expire after 24 h ([#184](https://github.com/oakimov/cursor-opencode-provider/pull/184), @adonm).
 - Native OpenCode 2.x session runs accept short effort aliases such as `#max` and `#high-fast` when they identify one choice. The picker keeps one entry under its original display label. ACP effort selectors use that label ([#183](https://github.com/oakimov/cursor-opencode-provider/pull/183), @adonm).
 - First-time [review harness setup guide](docs/review-harness.md): supply App credentials or a PAT, run a Cloud Agent or local review, what a published COMMENT review contains, harness architecture (tests, evals, live OpenCode runs, extending scenarios).
 - `review-publish.py post --token-env NAME`, `review-publish.py threads --token-env NAME`, and `complete-resolutions.py --token-env NAME` read a GitHub personal access token (`ghp_` or `github_pat_`) from that environment variable and send it on every `gh` call those commands make. Without the option, those commands use the GitHub App installation token.

@@ -627,7 +627,10 @@ These are failure lessons shared by both hosts, not a replacement for
 - **Atomic replacement does not prevent lost writers.** Partition by host
   session; gzip protobuf bytes rather than base64 JSON. Revalidate cleanup
   candidates, expire loaded sessions too, and avoid decoded snapshot duplicates
-  (`test/conversation-maintenance.test.ts`).
+  (`test/conversation-maintenance.test.ts`). In #184 a longer retention window
+  made multiple quarantined generations fresh. Recover by newest persisted
+  timestamp, as on-demand readers do. The first directory entry can be older
+  than a replacement it would otherwise cause maintenance to discard.
 - **A failed save leaves a stale snapshot, not an old-but-valid one.** The
   atomic rename keeps the previous file, whose checkpoint lacks the turns since;
   an in-memory "unsaved" mark is lost on restart or record eviction (#135).

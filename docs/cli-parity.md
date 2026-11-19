@@ -75,7 +75,7 @@ Parity target is interactive `cursor-agent` (`Run` client: TUI and `--print`). `
 |---|---|---|---|
 | Checkpoint handling | Full read/write (agent-kv); soft-reuse incomplete/large | Decode + reachable-blob export graph; warn on >100 MiB / incomplete, never remint | ✅ |
 | KV blobs | sqlite blob store + AES-GCM encryption + merkle tree | In-memory blobs plus gzip protobuf restart snapshots; reachability and backpressured writes, without CLI storage encryption | 🔶 |
-| Conversation restart/resume | store.db, resume.tsx, fork-chat-session, export | `conversation-persistence.ts` (atomic pb.gz snapshot, 24h expiry, compaction rotation); uncheckpointed request carryover and steer receipts survive restart | 🔶 |
+| Conversation restart/resume | store.db, resume.tsx, fork-chat-session, export | `conversation-persistence.ts` (atomic pb.gz snapshot, configurable retention with a 24 h default, compaction rotation). Uncheckpointed request carryover and steer receipts survive restart. | 🔶 |
 | Token details (used/max/category breakdown) | `ConversationStateStructure.tokenDetails` → UI tray | `token-details.ts` → `providerMetadata.cursor.context`; AI SDK usage = authoritative total | ✅ |
 | Session lifecycle (superseded, cap) | Managed by CLI | Held-Run KV/control reader, pending-exec heartbeats, activity-renewed leases and `maxOpenSessions` backstop; idle HTTP/2 sessions unref, direct/proxy session memory is 256 MB ([transport](../src/transport/connect.ts), [sessions](../src/session.ts)) | ✅ |
 
