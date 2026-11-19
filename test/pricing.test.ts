@@ -481,6 +481,56 @@ describe("pricing", () => {
     )
   })
 
+  it("prices long-context notes at the published threshold and leaves Fast unmentioned", () => {
+    const markdown = `
+| Model | Provider | Input | Cache write | Cache read | Output | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| GPT-5.5 | OpenAI | $5 | $0.5 | $0.5 | $30 | Above 272k input tokens use 2x input pricing |
+| GPT-5.4 | OpenAI | $2.5 | - | $0.25 | $15 | Long context supports up to 1M tokens with 2x input pricing |
+| Claude Haiku 5.5 | Anthropic | $0.1 | $0.125 | $0.01 | $0.5 | Requests above 100k input tokens bill at 5x the standard rates ($0.50/M input, $0.625/M cache write, $0.05/M cache read, $2.50/M output) |
+`
+    expect(buildPricing(markdown, { "GPT-5.4": 272_000 })).toEqual({
+      costs: {
+        "claude-haiku-5-5": {
+          input: 0.1,
+          output: 0.5,
+          cache_read: 0.01,
+          cache_write: 0.125,
+          tiers: [{
+            tier: { type: "context", size: 100_000 },
+            input: 0.5,
+            output: 2.5,
+            cache_read: 0.05,
+            cache_write: 0.625,
+          }],
+        },
+        "gpt-5.4": {
+          input: 2.5,
+          output: 15,
+          cache_read: 0.25,
+          tiers: [{ tier: { type: "context", size: 272_000 }, input: 5, output: 15, cache_read: 0.25 }],
+        },
+        "gpt-5.5": {
+          input: 5,
+          output: 30,
+          cache_read: 0.5,
+          cache_write: 0.5,
+          tiers: [{
+            tier: { type: "context", size: 272_000 },
+            input: 10,
+            output: 30,
+            cache_read: 0.5,
+            cache_write: 0.5,
+          }],
+        },
+      },
+      unpriced: {
+        default: "Cursor publishes no numeric Auto rate",
+      },
+    })
+    expect(() => buildPricing(markdown)).toThrow(/No long-context threshold for "GPT-5.4"/)
+  })
+
   it("leaves Auto unpriced when docs omit an Auto-specific rate", () => {
     expect(getCursorModelCost("default")).toBeUndefined()
     expect(applyCursorModelCost("default", { name: "Auto" })).toEqual({ name: "Auto" })
@@ -549,12 +599,30 @@ describe("pricing", () => {
         input: 1,
         output: -1,
         context_over_200k: { input: 2 },
+        tiers: "no",
       }),
     ).toEqual({
       valid: false,
       errors: [
         "cost.output must be a non-negative finite number",
         "cost.context_over_200k.output must be a non-negative finite number",
+        "cost.tiers must be an array",
+      ],
+    })
+    expect(
+      validateOpenCodeModelCost({
+        input: 1,
+        output: 1,
+        tiers: [
+          null,
+          { input: 1, output: 1, tier: { type: "tokens", size: 0 } },
+        ],
+      }),
+    ).toEqual({
+      valid: false,
+      errors: [
+        "cost.tiers[0] must be an object",
+        "cost.tiers[1].tier must be { type: \"context\", size: positive integer }",
       ],
     })
   })
