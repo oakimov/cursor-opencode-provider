@@ -1298,7 +1298,7 @@ print("SAW=" + str(found))
     expect(publish).toContain("Allow user namespaces")
   })
 
-  it("uses the same signed Ubuntu mirror setup for tests and coverage and stops on update failure", () => {
+  it("shares independent signed Ubuntu mirrors between tests and coverage and stops on update failure", () => {
     const yaml = fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8")
     const body = yaml.match(/- &zsh-step\n +name: Install zsh\n +run: \|\n((?: {10}[^\n]*\n|\n)+)/)?.[1]
     expect(body).toBeDefined()
@@ -1328,10 +1328,15 @@ print("SAW=" + str(found))
           env: { ...process.env, APT_TEST_MIRROR_FILE: mirror, APT_TEST_LOG: log, APT_TEST_FAIL_UPDATE: failUpdate },
         })
         expect(result.status, result.stderr).toBe(failUpdate === "1" ? 100 : 0)
-        expect(fs.readFileSync(mirror, "utf8")).toBe("https://mirrors.kernel.org/ubuntu/\n")
+        expect(fs.readFileSync(mirror, "utf8").trim().split("\n")).toEqual([
+          "https://mirror.math.princeton.edu/pub/ubuntu/",
+          "https://ubuntu.osuosl.org/ubuntu/",
+          "https://mirrors.kernel.org/ubuntu/",
+        ])
+        const options = "-o Acquire::https::Timeout=15 -o Acquire::Retries=2"
         expect(fs.readFileSync(log, "utf8").trim().split("\n")).toEqual(failUpdate === "1"
-          ? ["apt-get -o APT::Update::Error-Mode=any update"]
-          : ["apt-get -o APT::Update::Error-Mode=any update", "apt-get install --no-install-recommends -y zsh", "zsh --version"])
+          ? [`apt-get ${options} -o APT::Update::Error-Mode=any update`]
+          : [`apt-get ${options} -o APT::Update::Error-Mode=any update`, `apt-get ${options} install --no-install-recommends -y zsh`, "zsh --version"])
       }
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
