@@ -353,8 +353,12 @@ const SUPERVISOR = String.raw`
 # bash 4.2 and later read the clock without starting a date process.
 if [ -n "$BASH_VERSION" ] && printf -v now '%(%s)T' -1 2>/dev/null && [ -n "$now" ]; then
   clock() { printf -v now '%(%s)T' -1; }
+  builtin_wait=1
+  nap_seconds=30
 else
   clock() { now=$(date +%s); }
+  builtin_wait=0
+  nap_seconds=1
 fi
 clock
 started=$now
@@ -368,7 +372,7 @@ aborted=0
 group_stopped=0
 group_mode=""
 napper=""
-tick_sleeps=""
+group_lost=0
 fail() { printf '%s\n' "$1" >"$job/error"; exit 1; }
 safe_dirs() { [ ! -L "$root" ] && [ ! -L "$terminals" ] && [ ! -L "$job" ] && [ -d "$job" ]; }
 # Every field has a fixed width, so the header is rewritten in place and
@@ -417,44 +421,57 @@ stop_job() {
 }
 # A trapped signal interrupts a wait that has begun, but one that arrives just
 # before the wait would leave its change to the full nap, so it also ends the
-# nap's sleep. A wait that has just reaped the sleep frees its PID, so procfs
-# must still show it as this shell's child; reading it starts no process.
+# nap. Check ownership even after an interrupted wait, which may have reaped
+# the child already. Read the named PPid field because a process name in
+# /proc/PID/stat can contain whitespace and parentheses.
 wake() {
   [ -n "$napper" ] || return 0
   if [ -d /proc/self ]; then
-    read -r nap_pid nap_name nap_state nap_parent nap_rest <"/proc/$napper/stat" 2>/dev/null || return 0
-    [ "$nap_parent" = "$supervisor" ] || return 0
+    nap_parent=""
+    while read -r nap_field nap_value nap_rest; do
+      [ "$nap_field" = PPid: ] || continue
+      nap_parent=$nap_value
+      break
+    done 2>/dev/null <"/proc/$napper/status"
+  else
+    nap_parent=$(ps -p "$napper" -o ppid= 2>/dev/null) || return 0
+    nap_parent=${"$"}{nap_parent##* }
   fi
-  kill -KILL "$napper" 2>/dev/null
+  [ "$nap_parent" = "$supervisor" ] || return 0
+  kill -KILL "$napper" 2>/dev/null || :
 }
 on_signal() { aborted=1; wake; stop_group; }
 trap on_signal TERM INT HUP
 # group.sh and the collector send USR1 when there is something to observe.
 trap wake USR1
-# Sleep in a child so a trapped signal interrupts the wait at once, instead
-# of forking a short sleep many times per second for the job's whole life.
+# Wait in a child so a trapped signal interrupts the supervisor's wait.
+# A long nap must also end on lifeline EOF when the supervisor dies. Older
+# shells cannot do a timed read, so keep their sleep bounded to one second.
 # Senders write their state before they signal, so the condition "$2" is
 # checked again once the child exists, for a signal that came before $!.
 nap() {
-  sleep "$1" 4>&- & napper=$!
-  if "$2"; then wait "$napper" 2>/dev/null || kill -KILL "$napper" 2>/dev/null
-  else kill -KILL "$napper" 2>/dev/null; wait "$napper" 2>/dev/null; fi
+  if [ "$builtin_wait" = 1 ]; then
+    (read -r -t "$1" -u 6 unused || :) 6<"$job/lifeline" 4>&- &
+  else
+    sleep "$1" 4>&- &
+  fi
+  napper=$!
+  if "$2"; then wait "$napper" 2>/dev/null || wake
+  else wake; wait "$napper" 2>/dev/null; fi
   napper=""
 }
 starting() { [ ! -f "$job/group-ready" ] && [ "$aborted" = 0 ] && kill -0 "$command_pid" 2>/dev/null; }
 running() { [ "$aborted" = 0 ] && [ ! -f "$job/command-exit" ] && [ ! -f "$job/error" ] && kill -0 "$command_pid" 2>/dev/null; }
-# The header updater's one-second wait. Under bash it reads the lifeline on
-# fd 6 instead of starting a sleep: nothing writes to the lifeline while the
-# updater runs, and its EOF is the supervisor's exit. Any read that does not
-# time out (EOF, or bash 3.2, whose timeout looks the same) falls back to sleep.
+# Refresh only after a timeout. EOF means the supervisor has closed its end
+# of the lifeline, so enter helper cleanup without writing another header.
 tick() {
-  if [ "$group_mode" = bash ] && [ -z "$tick_sleeps" ]; then
-    read -r -t 1 -u 6 tick_line
-    [ "$?" -le 128 ] || return 0
-    tick_sleeps=1
-    kill -0 "$supervisor" 2>/dev/null || return 0
+  if [ "$builtin_wait" = 1 ]; then
+    read -r -t 1 -u 6 unused
+    [ "$?" -gt 128 ]
+  else
+    sleep 1
+    kill -0 "$supervisor" 2>/dev/null
   fi
-  sleep 1
 }
 safe_dirs || fail 'Runtime terminal directory is unavailable'
 cd -- "$workdir" || fail 'Background command working directory is unavailable'
@@ -510,8 +527,14 @@ if [ "$hard_seconds" != 0 ]; then
   watchdog=$!
 fi
 (
-  while [ ! -f "$job/finishing" ] && kill -0 "$supervisor" 2>/dev/null; do
-    tick
+  while [ ! -f "$job/finishing" ] && tick && [ ! -f "$job/finishing" ]; do
+    # Losing a leader to SIGKILL does not send USR1. Notice the loss on
+    # this existing tick so it does not wait out the supervisor's long nap.
+    if ! kill -0 "$command_pid" 2>/dev/null; then
+      is_ours "$supervisor" "$job/runner.sh" || break
+      kill -USR1 "$supervisor" 2>/dev/null
+      exit 0
+    fi
     write_header running && continue
     printf 'Terminal output storage failed\n' >"$job/error"
     if is_ours "$supervisor" "$job/runner.sh"; then kill -TERM "$supervisor"; exit 1; fi
@@ -532,7 +555,7 @@ updater=$!
 # long a group leader that dies without reporting goes unnoticed.
 while [ "$aborted" = 0 ] && [ ! -f "$job/command-exit" ] && kill -0 "$command_pid" 2>/dev/null; do
   if [ -f "$job/error" ]; then on_signal; break; fi
-  nap 30 running
+  nap "$nap_seconds" running
 done
 if [ "$aborted" = 1 ]; then stop_group; code=143
 elif [ -f "$job/command-exit" ]; then code=$(cat "$job/command-exit")
@@ -543,6 +566,12 @@ if [ "$aborted" = 1 ]; then stop_group; code=143; fi
 : >"$job/finishing"
 stop_job "$updater"
 stop_job "$watchdog"
+# Without a leader or a reported payload exit, let the in-group lifeline
+# watcher stop the surviving payload before draining its output.
+if [ ! -f "$job/command-exit" ] && ! kill -0 "$command_pid" 2>/dev/null; then
+  group_lost=1
+  exec 4>&-
+fi
 # Descendants can still hold stdout after the command exits. Give them a
 # bounded drain window. Normal completion must preserve deliberately detached
 # daemons; only cancellation or an unexpected owner exit stops their group.
@@ -573,7 +602,7 @@ printf '%s\n' '---' >>"$terminal" || fail 'Could not finalize terminal record'
 printf '%s\n' "$code" >"$job/done"
 # Disarm the FIFO watcher before releasing the leader. The explicit message
 # survives immediate cleanup of job/done by a result consumer.
-printf 'completed\n' >&4
+[ "$group_lost" = 1 ] || printf 'completed\n' >&4
 wait "$command_pid" 2>/dev/null || true
 rm -f "$job/pipe" "$job/lifeline" "$job/command.sh" "$job/group.sh" "$job/collector.cjs" "$job/runner.sh" "$job/command-exit" "$job/group-ready" "$job/finishing" "$job/collected"
 exit 0

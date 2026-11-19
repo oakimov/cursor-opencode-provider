@@ -679,8 +679,11 @@ These are failure lessons shared by both hosts, not a replacement for
   atomic claim; repeated release may remove only truly unstarted jobs
   (`releaseUnstartedTerminal`).
 - **Detached helpers need bounded owner-death cleanup.** A FIFO detects even
-  SIGKILL; descendants can hold output open forever. Disarm on success so an
-  explicitly detached daemon survives (`test/terminal-runner.test.ts`).
+  SIGKILL; descendants can hold output open forever. Make long idle waits exit
+  on that same EOF. If a group leader dies before reporting, close the lifeline
+  so the in-group watcher stops the surviving payload. Normal completion still
+  disarms it so an explicitly detached daemon survives. Assert cleanup using
+  captured job-owned PIDs (`test/terminal-runner.test.ts`).
 - **A PID is not ownership.** Keep the group leader alive through drain and
   verify identity before signalling either a child group or its supervisor.
 - **Prove streaming and bounds while running.** BSD head/dd buffered output;
