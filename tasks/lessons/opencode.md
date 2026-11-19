@@ -828,42 +828,41 @@ These are failure lessons shared by both hosts, not a replacement for
   the long-context surcharge. Read Notes by header and test a row whose note
   changes the rates (`test/pricing.test.ts`). Run the live pricing gate before a
   bump; the v0.6.4 failure forced a retag ([release gate](../../AGENTS.md#hard-stop--release--version-bump--tag-gate-non-optional)).
-  The main pricing markdown lists base rows and notes. Each model's rendered
-  page, `https://cursor.com/docs/models/<slug>`, has the full table in HTML;
-  the raw `.md` omits it. That table is the price. Do not infer a rate from a
-  note such as "2x input pricing" when the page has a table: the note can name
-  only some of the cells the table changes. Verified 19 Nov 2026, GPT-5.5's
-  page is standard $5 / – / $0.50 / $30, Fast $12.50 / – / $1.25 / $75, and
-  long context above 272k $10 / – / $1 / $45 (input, cache write, cache read,
-  output). Long context raises cache read and output, not input alone.
-  Claude Opus 5 Fast is $10 / $12.50 / $1 / $50 and Claude Opus 5.5 Fast is
-  $8 / $10 / $0.40 / $40. The main table is the fallback only for a row the
-  page does not publish (Claude Opus 4.7 Fast, Claude 4 Sonnet 1M). GPT-5.4's
-  page has no Fast or long-context row. Its prose is the derivation: Fast is
-  2× the standard row ($5 / – / $0.50 / $30), and above 272k input doubles and
-  output is 1.5× ($5 / – / $0.25 / $22.50). Cache read stays $0.25 because the
-  page does not state a cache change. Fast above 272k is not selectable, so
-  that combination is not priced. A page that states Fast long-context ratios
-  and omits the combined row scales the Fast row by the page's long-context
-  ratios (`test/fixtures/model-page-*.html`). Auto (`default`) has no docs
-  per-1M rate. Cursor staff stated $1.25/M input, $0.25/M cache read, and
-  $6/M output: @deanrie, 2026-03-11,
+  The pricing markdown is the price for every row it publishes. Context
+  windows come from `https://cursor.com/docs.md`. A note is not a price.
+  Fetch `https://cursor.com/docs/models/<slug>` only for a selectable model
+  or variant that has no markdown row, and do not let that page replace a
+  markdown row. If the two disagree on a row the markdown has, keep the
+  markdown number and report the difference. Verified 19 Nov 2026, the pages
+  and the markdown rows agreed. Pages supply the gaps: GPT-5.5 Fast
+  $12.50 / – / $1.25 / $75 and long context above 272k $10 / – / $1 / $45;
+  Claude Opus 5 Fast $10 / $12.50 / $1 / $50; Claude Opus 5.5 Fast
+  $8 / $10 / $0.40 / $40; GPT-5.6 fast and long rows; Claude Haiku 5.5 above
+  100k. GPT-5.4's page has no Fast or long-context row. Its prose fills those
+  gaps: Fast is 2× the standard row ($5 / – / $0.50 / $30), and above 272k
+  input doubles and output is 1.5× ($5 / – / $0.25 / $22.50). Cache read stays
+  $0.25 because the page does not state a cache change. Fast above 272k is
+  not selectable. Claude Opus 4.7 Fast and Claude 4 Sonnet 1M are markdown
+  rows. Auto (`default`) is the hand-edited staff constant, not a fetched
+  row: $1.25/M input, $0.25/M cache read, $6/M output. @deanrie, 2026-03-11,
   https://forum.cursor.com/t/how-do-the-auto-cursor-1-5-tokens-work/154514
   (all three); @kevinn, 2026-05-04,
   https://forum.cursor.com/t/gpt-5-5-medium-is-too-costly/159707
-  (input and output). That is the Auto price, cited in the generator.
-  Gemini 3.1 Pro's page says rates increase above 200k and points at a table
-  that has no second row; the main table has none either, so the only
-  published numbers are the base row. CodexBar
-  (github.com/steipete/CodexBar @1f6da9b) has no Cursor price table for these
-  ids. It reads per-event cost from `POST https://cursor.com/api/dashboard/get-filtered-usage-events`
+  (input and output). Generation fails and writes nothing if any selectable
+  model is unpriced. `check:pricing` requires every selectable entry to have
+  a price and an empty unpriced list. The live refresh stays a manual step
+  before a version bump; there is no scheduled pricing job.
+  Gemini 3.1 Pro's markdown has one row. Its page says rates increase above
+  200k and the table has no second row, so the base row is the only published
+  price. CodexBar (github.com/steipete/CodexBar @1f6da9b) has no Cursor price
+  table for these ids. It reads per-event cost from
+  `POST https://cursor.com/api/dashboard/get-filtered-usage-events`
   (`tokenUsage.totalCents` / `chargedCents`) and is not a pricing source.
   Every selectable entry must resolve to a price
   (`test/selectable-pricing.test.ts`).
-  `--from-file` together with `--context-from-file` does not fetch model
-  pages. Pass `--pages-from-dir` with `<model-id>.html` copies. A model in
-  the pricing markdown whose page file is missing fails the run; it is not
-  downloaded (`test/fixtures/pricing-offline`).
+  `--from-file` together with `--context-from-file` makes no network request.
+  A gap's page must be `<model-id>.html` in `--pages-from-dir`. A missing
+  file fails the run and names the id (`test/fixtures/pricing-offline`).
 - **Make tests capable of failing.** Type guards once sat outside tsc's include;
   root ignored permission fixtures. Use real usages, deterministic faults and
   independent host/frame evidence (`test/workspace-facts.test.ts`).

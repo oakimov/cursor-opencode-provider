@@ -47,13 +47,10 @@ export type CursorPricingCoverage = {
 }
 
 /**
- * Models we expose that Cursor does not currently publish numeric rates for.
- * Auto is billed at the routed model's list price. A Fast mode the docs name
- * without a figure is listed here so it is not billed at the base rate.
+ * Selectable ids with no price. Generation fails instead of adding one, so
+ * this list stays empty.
  */
 export const CURSOR_UNPRICED_MODEL_IDS = Object.keys(CURSOR_UNPRICED_MODEL_REASONS)
-
-const UNPRICED = new Set<string>(CURSOR_UNPRICED_MODEL_IDS)
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -270,15 +267,14 @@ export function toOpenCode2Costs(cost: OpenCodeModelCost | undefined): OpenCode2
 }
 
 /**
- * Coverage helper for CI / maintainer checks.
- * Intentionally unpriced first-party ids are counted as priced (covered).
+ * Coverage helper for maintainer checks.
+ * Every id must resolve to a price. The unpriced map does not count as coverage.
  */
 export function checkCursorPricingCoverage(modelIds: string[]): CursorPricingCoverage {
   const priced: string[] = []
   const missing: string[] = []
   for (const modelId of modelIds) {
-    const { baseId } = wireModelIdForPricing(modelId)
-    if (UNPRICED.has(baseId) || getCursorModelCost(modelId)) priced.push(modelId)
+    if (getCursorModelCost(modelId)) priced.push(modelId)
     else missing.push(modelId)
   }
   return { priced, missing }

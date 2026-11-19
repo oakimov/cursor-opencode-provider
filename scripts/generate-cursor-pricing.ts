@@ -3,25 +3,23 @@
  * Fetch Cursor's models-and-pricing markdown and regenerate src/pricing-data.ts
  * with published pricing and context-window metadata.
  *
- * Sources of truth, in order:
- *   - each model's rendered page https://cursor.com/docs/models/<slug>
- *     (the raw `.md` omits the pricing table)
- *   - the main tables https://cursor.com/docs/models-and-pricing.md
- *     for a row the model page does not publish
- *   - context windows: https://cursor.com/docs.md
- * A main-table note such as "2x input pricing" is not a price when that
- * model's page has a table. Fast rows become synthetic `<id>-fast` ids.
- * Auto (`default`) uses the fixed rate Cursor staff stated on the forum;
- * the docs publish no Auto per-1M rate.
+ * The pricing markdown is the price for every row it publishes. Context
+ * windows come from https://cursor.com/docs.md. A note is not a price.
+ * A rendered model page, https://cursor.com/docs/models/<slug>, is fetched
+ * only for a selectable model or variant that has no markdown row. A page
+ * never replaces a markdown row. Fast rows become synthetic `<id>-fast` ids.
+ * Auto (`default`) is the hand-edited `CURSOR_STAFF_AUTO_RATE` constant.
+ * Generation fails, and writes nothing, when a selectable model has no price.
+ * The live refresh stays a manual step before a version bump.
  *
  * Usage:
  *   bun run generate:pricing
  *   bun run generate:pricing -- --from-file pricing.md --context-from-file docs.md --pages-from-dir pages
  *   bun run generate:pricing -- --check   # exit 1 if committed data is stale
  *
- * Both markdown file flags require `--pages-from-dir`. That run reads
- * `<model-id>.html` for every model in the pricing markdown and makes no
- * network request. A missing page fails the run; it is not fetched.
+ * `--from-file` together with `--context-from-file` makes no network request.
+ * A page needed for a gap must be `<model-id>.html` in `--pages-from-dir`.
+ * A missing file fails the run and names the id. It is not fetched.
  *
  * Also runs automatically before npm publish (GitHub Actions publish.yml and
  * package.json prepublishOnly) so released packages carry current docs rates.
@@ -155,19 +153,13 @@ const SKIP_DISPLAY_NAMES = new Set([
  * https://forum.cursor.com/t/how-do-the-auto-cursor-1-5-tokens-work/154514
  * @kevinn, 2026-05-04, restates input and output:
  * https://forum.cursor.com/t/gpt-5-5-medium-is-too-costly/159707
- * Not a lab price and not inferred from another model's rate.
+ * Not a lab price. Generation copies this constant. A docs row does not replace it.
  */
 export const CURSOR_STAFF_AUTO_RATE: OpenCodeModelCost = {
   input: 1.25,
   output: 6,
   cache_read: 0.25,
 }
-
-/**
- * Manual rates for models Cursor does not publish in any pricing table.
- * Auto is applied in `applyCursorStaffAutoRate` so a future docs row wins.
- */
-const CURSOR_PRICING_OVERRIDES: Record<string, OpenCodeModelCost> = {}
 
 /**
  * Wire id → docs slug. Dots become dashes. A few older Claude and Cursor
@@ -266,15 +258,16 @@ export function parseArgs(argv: string[]): Options {
   return options
 }
 
-/** Where model-page tables come from. Local markdown never fetches pages. */
-export function modelPageSource(options: Options): "directory" | "refused" | "live" {
+/**
+ * Where model-page HTML comes from.
+ * `offline` is both markdown file flags and no pages directory: no network,
+ * and a later gap check fails if a page is required.
+ */
+export function modelPageSource(options: Options): "directory" | "offline" | "live" {
   if (options.pagesFromDir) return "directory"
-  if (options.fromFile && options.contextFromFile) return "refused"
+  if (options.fromFile && options.contextFromFile) return "offline"
   return "live"
 }
-
-export const LOCAL_PAGES_REQUIRED =
-  "Refusing to fetch model pages. Pass --pages-from-dir with a <model-id>.html file for every model in the pricing markdown."
 
 function stripMarkdownLink(value: string): string {
   return value.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").trim()
@@ -386,11 +379,6 @@ function scaleAll(base: OpenCodeModelCost, factor: number): OpenCodeModelCost {
   )
 }
 
-/** "2x input pricing" doubles input and leaves cache and output alone. */
-function scaleInput(base: OpenCodeModelCost, factor: number): OpenCodeModelCost {
-  return cost(roundRate(base.input * factor), base.output, base.cache_read, base.cache_write)
-}
-
 /**
  * Attach a long-context rate at the threshold the docs state.
  * 200k uses `context_over_200k` because that is the only threshold that field
@@ -410,91 +398,6 @@ function withThreshold(
   if (longContext.cache_read !== undefined) tier.cache_read = longContext.cache_read
   if (longContext.cache_write !== undefined) tier.cache_write = longContext.cache_write
   return { ...base, tiers: [tier] }
-}
-
-function noteForbidsLongSurcharge(notes: string): boolean {
-  return /no long-context surcharge|same per-token rates/i.test(notes)
-}
-
-/** Note-only long context that doubles input, with no separate table row. */
-function noteDoublesInputOnly(notes: string): boolean {
-  if (noteForbidsLongSurcharge(notes)) return false
-  return /2x input pricing/i.test(notes)
-}
-
-/**
- * "above 100k … 5x the standard rates ($0.50/M input, …)" publishes every
- * component. The parenthetical numbers are the rate; the factor is a check.
- */
-function pricedMultipleFromNote(notes: string, base: OpenCodeModelCost): OpenCodeModelCost | undefined {
-  const match = /above\s+(\d+)\s*k input tokens bill at\s+(\d+(?:\.\d+)?)x the standard rates(?:\s+\(([^)]+)\))?/i.exec(notes)
-  if (!match) return undefined
-  const factor = Number(match[2])
-  const paren = match[3]
-  if (!paren) return scaleAll(base, factor)
-  const money = (label: string) => {
-    const found = new RegExp(`\\$([0-9]+(?:\\.[0-9]+)?)\\s*/\\s*M\\s+${label}`, "i").exec(paren)
-    return found ? Number(found[1]) : undefined
-  }
-  const input = money("input")
-  const output = money("output")
-  const cacheRead = money("cache read")
-  const cacheWrite = money("cache write")
-  if (input === undefined || output === undefined) {
-    throw new Error(`Long-context note is missing input or output: ${notes}`)
-  }
-  const expected = scaleAll(base, factor)
-  const mismatch = (label: string, published: number | undefined, scaled: number | undefined) =>
-    published !== undefined && scaled !== undefined && published !== scaled
-      ? `${label} ${published} is not ${factor}x ${label === "input" ? base.input : label === "output" ? base.output : label === "cache read" ? base.cache_read : base.cache_write}`
-      : undefined
-  const problems = [
-    mismatch("input", input, expected.input),
-    mismatch("output", output, expected.output),
-    mismatch("cache read", cacheRead, expected.cache_read),
-    mismatch("cache write", cacheWrite, expected.cache_write),
-  ].filter((problem): problem is string => problem !== undefined)
-  if (problems.length > 0) {
-    throw new Error(`Published long-context rates disagree with the stated factor: ${problems.join("; ")}`)
-  }
-  return cost(input, output, cacheRead, cacheWrite)
-}
-
-type FastNote =
-  | { kind: "multiply" }
-  | { kind: "unpriced"; reason: string }
-  | { kind: "opus47FastDividedBy3" }
-
-/**
- * A Fast price the docs state in prose, when the table has no Fast row.
- * "2x pricing" scales every published component. "Higher rates" and a named
- * Fast id with no figure stay unpriced.
- */
-export function fastNote(notes: string): FastNote | undefined {
-  if (/fast mode is available at higher rates/i.test(notes)) {
-    return {
-      kind: "unpriced",
-      reason: "Cursor's pricing note says Fast mode is available at higher rates and publishes no rate",
-    }
-  }
-  if (/3x lower per-token pricing than opus 4\.7 fast mode/i.test(notes)) {
-    return { kind: "opus47FastDividedBy3" }
-  }
-  if (/fast mode is (?:15% faster with |available at )?2x pricing/i.test(notes)) {
-    return { kind: "multiply" }
-  }
-  const named = /fast mode \(\\?`([^`\\]+)\\?`\)/i.exec(notes)
-  if (named) {
-    return {
-      kind: "unpriced",
-      reason: `Cursor names Fast mode \`${named[1]}\` and publishes no Fast rate`,
-    }
-  }
-  return undefined
-}
-
-function fastLongDoublesFastInput(notes: string): boolean {
-  return /2x fast input pricing/i.test(notes)
 }
 
 function fastModeBaseName(displayName: string): string | undefined {
@@ -586,12 +489,32 @@ function parsePricingTables(markdown: string): ParsedRow[] {
   return rows
 }
 
-const AUTO_UNPRICED_REASON = "Cursor publishes no numeric Auto rate"
+export type PriceDisagreement = {
+  id: string
+  part: "base" | "fast" | "long" | "fast-long"
+  kept: OpenCodeModelCost
+  other: OpenCodeModelCost
+  keptSource: "markdown" | "manual"
+  otherSource: "page" | "markdown"
+}
 
 export type PricingBuild = {
   costs: Record<string, OpenCodeModelCost>
-  /** Catalog ids whose docs name a variant and publish no number. */
+  /** Always empty. A selectable model with no price fails generation. */
   unpriced: Record<string, string>
+  /** Markdown row for Auto, when one exists. The manual constant replaces it. */
+  markdownDefault?: OpenCodeModelCost
+  disagreements: PriceDisagreement[]
+}
+
+/** A recorded AvailableModels entry. Generation uses it to find pricing gaps. */
+export type SelectableCatalogModel = {
+  id: string
+  maxContext?: number
+  variants?: ReadonlyArray<{
+    isMaxMode?: boolean
+    parameterValues?: ReadonlyArray<{ id: string; value: string }>
+  }>
 }
 
 /**
@@ -607,12 +530,15 @@ export function defaultContextByDisplayName(markdown: string): Record<string, nu
   return contexts
 }
 
-function requireThreshold(notes: string, displayName: string, defaults: Readonly<Record<string, number>>): number {
-  const threshold = longContextThreshold(notes) ?? defaults[displayName]
+function contextWindowForRow(displayName: string, defaults: Readonly<Record<string, number>>): number {
+  const baseName = displayName
+    .replace(/\s+\((?:fast mode|Fast)\)$/i, "")
+    .replace(/\s+(?:1M|500k)$/i, "")
+  const threshold = defaults[baseName]
   if (!threshold) {
     throw new Error(
-      `No long-context threshold for ${JSON.stringify(displayName)}. ` +
-        `The note has no above/exceeds Nk figure and the context table has no default context.`,
+      `No context window for ${JSON.stringify(displayName)}. ` +
+        `An explicit long-context row uses the default window from the context table.`,
     )
   }
   return threshold
@@ -626,17 +552,103 @@ function fastModeModelId(displayName: string): string | undefined {
   return DISPLAY_NAME_TO_MODEL_ID[base]
 }
 
-/** Models in the pricing markdown that have a rendered docs page. */
-export function requiredModelPageIds(markdown: string): string[] {
-  const ids = new Set<string>()
-  for (const row of parsePricingTables(markdown)) {
-    if (SKIP_DISPLAY_NAMES.has(row.displayName)) continue
-    const modelId = fastModeModelId(row.displayName) ?? catalogIdForPricingDisplayName(row.displayName)
-    if (!modelId) continue
-    const base = modelId.endsWith("-fast") ? modelId.slice(0, -"-fast".length) : modelId
-    if (Object.hasOwn(MODEL_PAGE_SLUG, base)) ids.add(base)
+function catalogContext(value: string | undefined): number | undefined {
+  if (!value) return undefined
+  const match = /^(\d+(?:\.\d+)?)\s*([km])$/i.exec(value.trim())
+  if (!match) return undefined
+  const limit = Number(match[1]) * (match[2]!.toLowerCase() === "k" ? 1_000 : 1_000_000)
+  return Number.isSafeInteger(limit) && limit > 0 ? limit : undefined
+}
+
+function variantRequestsFast(model: SelectableCatalogModel): boolean {
+  return (model.variants ?? []).some((variant) =>
+    variant.parameterValues?.some((parameter) => parameter.id === "fast" && parameter.value === "true"),
+  )
+}
+
+function variantRequestsSeparateContext(model: SelectableCatalogModel): boolean {
+  return (model.variants ?? []).some((variant) => {
+    const context = catalogContext(variant.parameterValues?.find((parameter) => parameter.id === "context")?.value)
+    if (context === 1_000_000) return true
+    return variant.isMaxMode === true && context !== undefined && context !== model.maxContext
+  })
+}
+
+/** Selectable models whose markdown rows do not cover a base, Fast, or long-context price. */
+export function pageIdsForSelectableGaps(
+  markdown: string,
+  contextMarkdown: string,
+  catalog: readonly SelectableCatalogModel[],
+): string[] {
+  const pricing = buildPricing(markdown, defaultContextByDisplayName(contextMarkdown))
+  const ids: string[] = []
+  for (const model of catalog) {
+    if (model.id === "default") continue
+    const base = pricing.costs[model.id]
+    const needsBase = !base
+    const needsFast = variantRequestsFast(model) && !pricing.costs[`${model.id}-fast`]
+    const needsLong = variantRequestsSeparateContext(model) && !longPart(base) && !longPart(pricing.costs[`${model.id}-fast`])
+    if (!needsBase && !needsFast && !needsLong) continue
+    if (!Object.hasOwn(MODEL_PAGE_SLUG, model.id)) {
+      throw new Error(
+        `Selectable model ${model.id} has no pricing-markdown row for ` +
+          `${[needsBase ? "its base rate" : "", needsFast ? "Fast" : "", needsLong ? "long context" : ""].filter(Boolean).join(", ")} ` +
+          `and has no docs page slug.`,
+      )
+    }
+    ids.push(model.id)
   }
-  return [...ids].sort()
+  return ids.sort()
+}
+
+export function missingSavedPagesMessage(ids: readonly string[]): string {
+  const lines = ids.map((id) => `${id}: ${pageUrl(id)} (saved as ${id}.html)`)
+  return `Refusing to fetch model pages. A selectable price is missing from the pricing markdown:\n${lines.join("\n")}`
+}
+
+function pricingResolves(id: string, costs: Readonly<Record<string, OpenCodeModelCost>>): boolean {
+  if (Object.hasOwn(costs, id)) return true
+  const match = /^(.*)-\d+(?:\.\d+)?[km](?:-\d+)?(-fast)?$/.exec(id)
+  if (!match) return false
+  return Object.hasOwn(costs, `${match[1]!}${match[2] ?? ""}`)
+}
+
+function contextSuffixFor(context: number): string {
+  return context % 1_000_000 === 0 ? `${context / 1_000_000}m` : `${context / 1_000}k`
+}
+
+/** Fail when a selectable catalog entry has no price. Does not write. */
+export function assertSelectablePriced(
+  catalog: readonly SelectableCatalogModel[],
+  costs: Readonly<Record<string, OpenCodeModelCost>>,
+): void {
+  const missing: string[] = []
+  for (const model of catalog) {
+    const ids = new Set<string>([model.id])
+    let long = false
+    const separate = new Set<number>()
+    for (const variant of model.variants ?? []) {
+      const context = catalogContext(variant.parameterValues?.find((parameter) => parameter.id === "context")?.value)
+      if (context === 1_000_000) long = true
+      else if (variant.isMaxMode === true && context !== undefined && context !== model.maxContext) separate.add(context)
+    }
+    if (long) ids.add(`${model.id}-1m`)
+    for (const context of separate) ids.add(`${model.id}-${contextSuffixFor(context)}`)
+    if (Object.hasOwn(costs, `${model.id}-fast`)) {
+      ids.add(`${model.id}-fast`)
+      if (long) ids.add(`${model.id}-1m-fast`)
+      for (const context of separate) ids.add(`${model.id}-${contextSuffixFor(context)}-fast`)
+    }
+    for (const id of ids) {
+      if (!pricingResolves(id, costs)) missing.push(id)
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `Unpriced selectable model${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}. ` +
+        `Generation writes nothing.`,
+    )
+  }
 }
 
 export type ModelPageInput = {
@@ -871,10 +883,26 @@ function longPart(entry: OpenCodeModelCost | undefined): { threshold: number; co
   }
 }
 
+function flatCostOf(entry: OpenCodeModelCost): OpenCodeModelCost {
+  return cost(entry.input, entry.output, entry.cache_read, entry.cache_write)
+}
+
+function sameFlat(left: OpenCodeModelCost, right: OpenCodeModelCost): boolean {
+  return left.input === right.input
+    && left.output === right.output
+    && left.cache_read === right.cache_read
+    && left.cache_write === right.cache_write
+}
+
+function pageUrl(modelId: string): string {
+  return `${CURSOR_MODEL_PAGE_URL}/${MODEL_PAGE_SLUG[modelId] ?? modelId}`
+}
+
 /**
- * Replace main-table prices for models whose rendered page has a pricing
- * table. A page row wins. A page sentence fills only a variant the table
- * does not list. An explicit main-table row fills what the page leaves out.
+ * Fill prices the markdown does not have. A markdown row is kept. When the
+ * page states a different number for that row, the difference is recorded
+ * and the markdown value stays. Page prose fills a gap only when the page
+ * table has no row for it.
  */
 export function priceFromModelPages(
   pricing: PricingBuild,
@@ -884,12 +912,8 @@ export function priceFromModelPages(
   const derived: DerivedModelPrice[] = []
   for (const page of pages) {
     const rows = parseModelPagePricing(page.html)
-    if (rows.length === 0) {
-      throw new Error(`No pricing table on the ${page.modelId} model page`)
-    }
     const text = pageText(page.html)
     const base = oneRow(rows.filter((row) => !row.fast && !row.longContext), "standard", page.modelId)
-    if (!base) throw new Error(`No standard pricing row on the ${page.modelId} model page`)
     const longContext = oneRow(
       rows.filter((row) => !row.fast && row.longContext),
       "long-context",
@@ -902,42 +926,100 @@ export function priceFromModelPages(
       page.modelId,
     )
     const fastId = `${page.modelId}-fast`
-    let next = base.cost
-    if (longContext) {
-      next = withThreshold(next, pageThreshold(longContext, page.modelId, defaultContexts), longContext.cost)
-    } else {
+    const markdownBase = pricing.costs[page.modelId]
+    const keptBase = markdownBase ? flatCostOf(markdownBase) : base?.cost
+    if (base && markdownBase && !sameFlat(flatCostOf(markdownBase), base.cost)) {
+      pricing.disagreements.push({
+        id: page.modelId,
+        part: "base",
+        kept: flatCostOf(markdownBase),
+        other: base.cost,
+        keptSource: "markdown",
+        otherSource: "page",
+      })
+    } else if (base && !markdownBase) {
+      pricing.costs[page.modelId] = base.cost
+    }
+
+    const markdownLong = longPart(markdownBase)
+    if (markdownLong && longContext) {
+      const pageLong = {
+        threshold: pageThreshold(longContext, page.modelId, defaultContexts),
+        cost: longContext.cost,
+      }
+      if (markdownLong.threshold !== pageLong.threshold || !sameFlat(markdownLong.cost, pageLong.cost)) {
+        pricing.disagreements.push({
+          id: page.modelId,
+          part: "long",
+          kept: markdownLong.cost,
+          other: pageLong.cost,
+          keptSource: "markdown",
+          otherSource: "page",
+        })
+      }
+    } else if (!markdownLong && pricing.costs[page.modelId] && longContext) {
+      pricing.costs[page.modelId] = withThreshold(
+        flatCostOf(pricing.costs[page.modelId]!),
+        pageThreshold(longContext, page.modelId, defaultContexts),
+        longContext.cost,
+      )
+    } else if (!markdownLong && keptBase && !longContext) {
       const stated = /input exceeds\s+(\d+)\s*k tokens \(long context\), input pricing doubles and output pricing is 1\.5x the standard rate/i.exec(text)
       if (stated) {
-        const tier = scaleComponents(base.cost, { input: 2, output: 1.5, cache: 1 })
+        const tier = scaleComponents(keptBase, { input: 2, output: 1.5, cache: 1 })
         const threshold = Number(stated[1]) * 1_000
-        next = withThreshold(next, threshold, tier)
+        pricing.costs[page.modelId] = withThreshold(flatCostOf(pricing.costs[page.modelId] ?? keptBase), threshold, tier)
         derived.push({
           id: page.modelId,
           cost: tier,
           formula:
-            `${CURSOR_MODEL_PAGE_URL}/${MODEL_PAGE_SLUG[page.modelId] ?? page.modelId} ` +
-            `has no long-context row. Its prose says that above ${threshold} input tokens, ` +
-            `input doubles and output is 1.5x the standard row. Cache is unchanged because ` +
-            `the page does not state a cache change.`,
+            `${pageUrl(page.modelId)} has no long-context row. Its prose says that above ` +
+            `${threshold} input tokens, input doubles and output is 1.5x the standard row. ` +
+            `Cache is unchanged because the page does not state a cache change.`,
         })
-      } else {
-        const published = longPart(pricing.costs[page.modelId])
-        if (published) next = withThreshold(next, published.threshold, published.cost)
       }
     }
-    pricing.costs[page.modelId] = next
 
-    delete pricing.unpriced[fastId]
-    if (fast) {
+    const markdownFast = pricing.costs[fastId]
+    if (markdownFast && fast && !sameFlat(flatCostOf(markdownFast), fast.cost)) {
+      pricing.disagreements.push({
+        id: fastId,
+        part: "fast",
+        kept: flatCostOf(markdownFast),
+        other: fast.cost,
+        keptSource: "markdown",
+        otherSource: "page",
+      })
+    }
+    const markdownFastLong = longPart(markdownFast)
+    if (markdownFastLong && fastLong) {
+      const pageFastLong = {
+        threshold: pageThreshold(fastLong, page.modelId, defaultContexts),
+        cost: fastLong.cost,
+      }
+      if (markdownFastLong.threshold !== pageFastLong.threshold || !sameFlat(markdownFastLong.cost, pageFastLong.cost)) {
+        pricing.disagreements.push({
+          id: fastId,
+          part: "fast-long",
+          kept: markdownFastLong.cost,
+          other: pageFastLong.cost,
+          keptSource: "markdown",
+          otherSource: "page",
+        })
+      }
+    }
+
+    if (!markdownFast && fast) {
       let fastCost = fast.cost
-      if (fastLong) {
+      if (!markdownFastLong && fastLong) {
         fastCost = withThreshold(
           fastCost,
           pageThreshold(fastLong, page.modelId, defaultContexts),
           fastLong.cost,
         )
       } else if (
-        /long-context requests bill at 2x the Fast input, cache write, and cache read rates, and 1\.5x the Fast output rate/i.test(text)
+        !markdownFastLong
+        && /long-context requests bill at 2x the Fast input, cache write, and cache read rates, and 1\.5x the Fast output rate/i.test(text)
       ) {
         const threshold = longContext
           ? pageThreshold(longContext, page.modelId, defaultContexts)
@@ -945,31 +1027,37 @@ export function priceFromModelPages(
         if (!threshold) {
           throw new Error(`${page.modelId} states Fast long-context pricing without a threshold`)
         }
+        const ratioBase = base?.cost ?? keptBase
+        if (!ratioBase) throw new Error(`${page.modelId} states Fast long-context pricing without a standard row`)
         const tier = longContext
-          ? scaleComponents(fast.cost, longContextFactors(base.cost, longContext.cost))
+          ? scaleComponents(fast.cost, longContextFactors(ratioBase, longContext.cost))
           : scaleComponents(fast.cost, { input: 2, output: 1.5, cache: 2 })
         fastCost = withThreshold(fastCost, threshold, tier)
         derived.push({
           id: fastId,
           cost: tier,
           formula:
-            `${CURSOR_MODEL_PAGE_URL}/${MODEL_PAGE_SLUG[page.modelId] ?? page.modelId} ` +
-            `has no combined Fast long-context row. Above ${threshold}, the Fast row is ` +
-            `scaled by the page's long-context ratios.`,
+            `${pageUrl(page.modelId)} has no combined Fast long-context row. Above ${threshold}, ` +
+            `the Fast row is scaled by the page's long-context ratios.`,
         })
       }
       pricing.costs[fastId] = fastCost
-    } else if (/2x the standard (?:price|rates)/i.test(text)) {
-      const fastCost = scaleAll(base.cost, 2)
+    } else if (!markdownFast && keptBase && /2x the standard (?:price|rates)/i.test(text)) {
+      const fastCost = scaleAll(keptBase, 2)
       pricing.costs[fastId] = fastCost
       derived.push({
         id: fastId,
         cost: fastCost,
         formula:
-          `${CURSOR_MODEL_PAGE_URL}/${MODEL_PAGE_SLUG[page.modelId] ?? page.modelId} ` +
-          `has no Fast row. Its prose says Fast is 2x the standard price, so every ` +
-          `component of the standard row is doubled.`,
+          `${pageUrl(page.modelId)} has no Fast row. Its prose says Fast is 2x the standard price, ` +
+          `so every component of the standard row is doubled.`,
       })
+    } else if (markdownFast && !markdownFastLong && fastLong) {
+      pricing.costs[fastId] = withThreshold(
+        flatCostOf(markdownFast),
+        pageThreshold(fastLong, page.modelId, defaultContexts),
+        fastLong.cost,
+      )
     }
   }
   pricing.costs = sortRecord(pricing.costs)
@@ -978,13 +1066,24 @@ export function priceFromModelPages(
 }
 
 /**
- * Docs publish no Auto rate. Use the Cursor staff forum rate unless a docs
- * row already priced `default`.
+ * Auto is the hand-edited staff rate. A markdown row for `default` does not
+ * replace it. A difference is recorded.
  */
 export function applyCursorStaffAutoRate(pricing: PricingBuild): void {
-  if (pricing.costs.default) return
+  const manual = { ...CURSOR_STAFF_AUTO_RATE }
+  if (pricing.markdownDefault && !sameFlat(pricing.markdownDefault, manual)) {
+    pricing.disagreements.push({
+      id: "default",
+      part: "base",
+      kept: manual,
+      other: pricing.markdownDefault,
+      keptSource: "manual",
+      otherSource: "markdown",
+    })
+  }
+  delete pricing.costs.default
   delete pricing.unpriced.default
-  pricing.costs.default = { ...CURSOR_STAFF_AUTO_RATE }
+  pricing.costs.default = manual
   pricing.costs = sortRecord(pricing.costs)
   pricing.unpriced = sortRecord(pricing.unpriced)
 }
@@ -994,28 +1093,23 @@ function sortRecord<T>(record: Record<string, T>): Record<string, T> {
 }
 
 /**
- * Prices from the main docs tables and, where a model page is absent, notes.
- * An explicit long-context row wins over a note. A note that only says
- * "2x input pricing" doubles input. "2x pricing" on Fast doubles every
- * component. A Fast long-context note that says "2x Fast input pricing"
- * doubles that Fast input again and leaves Fast cache and output in place.
- * `skipNoteModels` are priced from their own pages instead.
+ * Prices from pricing-table cells only. A note is not a price. An explicit
+ * `1M` or `500k` row becomes a tier at the context table's default window.
+ * `(Fast)` and `(fast mode)` rows become `<id>-fast`. Auto is not priced here.
  */
 export function buildPricing(
   markdown: string,
   defaultContexts: Readonly<Record<string, number>> = {},
-  options: { skipNoteModels?: ReadonlySet<string> } = {},
 ): PricingBuild {
-  const costs: Record<string, OpenCodeModelCost> = { ...CURSOR_PRICING_OVERRIDES }
-  const unpriced: Record<string, string> = { default: AUTO_UNPRICED_REASON }
-  const explicitLong = new Map<string, { cost: OpenCodeModelCost; notes: string }>()
+  const costs: Record<string, OpenCodeModelCost> = {}
+  const explicitLong = new Map<string, { cost: OpenCodeModelCost; displayName: string }>()
   const explicitFast = new Map<string, OpenCodeModelCost>()
   const baseRows: Array<{
     displayName: string
     modelId: string
     entry: OpenCodeModelCost
-    notes: string
   }> = []
+  let markdownDefault: OpenCodeModelCost | undefined
 
   for (const row of parsePricingTables(markdown)) {
     const fastModeId = fastModeModelId(row.displayName)
@@ -1034,79 +1128,35 @@ export function buildPricing(
     }
 
     const entry = cost(row.input, row.output, row.cacheRead, row.cacheWrite)
-    if (row.isExplicitLongContextRow) {
-      explicitLong.set(modelId, { cost: entry, notes: row.notes })
+    if (modelId === "default") {
+      markdownDefault = entry
       continue
     }
-    baseRows.push({ displayName: row.displayName, modelId, entry, notes: row.notes })
+    if (row.isExplicitLongContextRow) {
+      explicitLong.set(modelId, { cost: entry, displayName: row.displayName })
+      continue
+    }
+    baseRows.push({ displayName: row.displayName, modelId, entry })
   }
-
-  const explicitFastIds = new Set<string>([
-    ...baseRows.filter((row) => row.modelId.endsWith("-fast")).map((row) => row.modelId),
-    ...[...explicitFast.keys()].map((id) => `${id}-fast`),
-  ])
 
   for (const row of baseRows) {
     const publishedLong = explicitLong.get(row.modelId)
-    const skipNotes = options.skipNoteModels?.has(row.modelId.replace(/-fast$/, "")) === true
-    let priced = row.entry
-    if (publishedLong) {
-      priced = withThreshold(
-        row.entry,
-        requireThreshold(`${publishedLong.notes}\n${row.notes}`, row.displayName, defaultContexts),
-        publishedLong.cost,
-      )
-    } else if (!skipNotes) {
-      const multiple = pricedMultipleFromNote(row.notes, row.entry)
-      if (multiple) {
-        priced = withThreshold(
+    costs[row.modelId] = publishedLong
+      ? withThreshold(
           row.entry,
-          requireThreshold(row.notes, row.displayName, defaultContexts),
-          multiple,
+          contextWindowForRow(publishedLong.displayName, defaultContexts),
+          publishedLong.cost,
         )
-      } else if (noteDoublesInputOnly(row.notes)) {
-        priced = withThreshold(
-          row.entry,
-          requireThreshold(row.notes, row.displayName, defaultContexts),
-          scaleInput(row.entry, 2),
-        )
-      }
-    }
-    costs[row.modelId] = priced
+      : row.entry
+  }
 
-    if (row.modelId.endsWith("-fast")) continue
-    const fastId = `${row.modelId}-fast`
-    if (explicitFastIds.has(fastId)) {
-      const published = explicitFast.get(row.modelId)
-      if (published) costs[fastId] = published
-      continue
-    }
-    if (skipNotes) continue
-
-    const fast = fastNote(row.notes)
-    if (!fast) continue
-    if (fast.kind === "unpriced") {
-      unpriced[fastId] = fast.reason
-      continue
-    }
-    if (fast.kind === "opus47FastDividedBy3") {
-      const source = explicitFast.get("claude-opus-4-7")
-      if (!source) {
-        throw new Error("Claude Opus 4.7 (fast mode) row is required to price Claude Opus 4.8 Fast")
-      }
-      costs[fastId] = scaleAll(source, 1 / 3)
-      continue
-    }
-
-    let fastCost = scaleAll(row.entry, 2)
-    if (fastLongDoublesFastInput(row.notes)) {
-      fastCost = withThreshold(
-        fastCost,
-        requireThreshold(row.notes, row.displayName, defaultContexts),
-        scaleInput(fastCost, 2),
-      )
-    }
-    costs[fastId] = fastCost
+  for (const [modelId, published] of explicitFast) {
+    const fastId = `${modelId}-fast`
+    if (costs[fastId]) continue
+    const fastLong = explicitLong.get(fastId)
+    costs[fastId] = fastLong
+      ? withThreshold(published, contextWindowForRow(fastLong.displayName, defaultContexts), fastLong.cost)
+      : published
   }
 
   for (const [modelId, publishedLong] of explicitLong) {
@@ -1115,8 +1165,10 @@ export function buildPricing(
   }
 
   return {
-    costs: Object.fromEntries(Object.entries(costs).sort(([a], [b]) => a.localeCompare(b))),
-    unpriced: Object.fromEntries(Object.entries(unpriced).sort(([a], [b]) => a.localeCompare(b))),
+    costs: sortRecord(costs),
+    unpriced: {},
+    markdownDefault,
+    disagreements: [],
   }
 }
 
@@ -1179,10 +1231,11 @@ function renderPricingDataModule(
   // Keep this module free of imports so it cannot cycle with pricing.ts.
   return `/**
  * AUTO-GENERATED by scripts/generate-cursor-pricing.ts — do not edit by hand.
- * Pricing source: each https://cursor.com/docs/models/<slug> table (rendered HTML).
- * The main table (${pricingSource}) fills a row the model page does not publish.
+ * Pricing source: markdown rows in ${pricingSource}.
+ * A model page fills a selectable variant that has no markdown row.
  * Context source: ${contextSource}
- * Auto (\`default\`) is not a docs rate. Cursor staff stated $1.25/M input,
+ * Auto (\`default\`) is the hand-edited staff rate, not a fetched docs row.
+ * Cursor staff stated $1.25/M input,
  * $0.25/M cache read, $6/M output (@deanrie, 2026-03-11,
  * https://forum.cursor.com/t/how-do-the-auto-cursor-1-5-tokens-work/154514;
  * @kevinn, 2026-05-04, restated input and output,
@@ -1195,7 +1248,7 @@ export const CURSOR_CONTEXT_SOURCE = ${JSON.stringify(contextSource)} as const
 
 export const CURSOR_MODEL_COSTS = ${pricingBody} as const
 
-/** Catalog ids the docs name without a numeric rate. Keys are the unpriced ids. */
+/** Empty. Generation fails instead of recording an unpriced selectable model. */
 export const CURSOR_UNPRICED_MODEL_REASONS = ${unpricedBody} as const
 
 export const CURSOR_MODEL_CONTEXTS = ${contextBody} as const
@@ -1256,49 +1309,68 @@ export function loadSavedModelPages(dir: string, requiredIds: readonly string[] 
   return [...pages.values()]
 }
 
-export function assemblePricing(
-  pricingMarkdown: string,
-  contextMarkdown: string,
-  pages: readonly ModelPageInput[],
-): {
+export type PricingAssembly = {
   costs: Record<string, OpenCodeModelCost>
   unpriced: Record<string, string>
   contexts: Record<string, CursorModelContext>
   derived: DerivedModelPrice[]
-} {
+  disagreements: PriceDisagreement[]
+  pageIds: string[]
+}
+
+export function assemblePricing(
+  pricingMarkdown: string,
+  contextMarkdown: string,
+  pages: readonly ModelPageInput[],
+  catalog?: readonly SelectableCatalogModel[],
+): PricingAssembly {
   const defaultContexts = defaultContextByDisplayName(contextMarkdown)
-  const pricing = buildPricing(pricingMarkdown, defaultContexts, {
-    skipNoteModels: new Set(pages.map((page) => page.modelId)),
-  })
+  const pricing = buildPricing(pricingMarkdown, defaultContexts)
   const derived = priceFromModelPages(pricing, pages, defaultContexts)
   applyCursorStaffAutoRate(pricing)
+  if (catalog) assertSelectablePriced(catalog, pricing.costs)
   return {
     costs: pricing.costs,
     unpriced: pricing.unpriced,
     contexts: buildContextTable(contextMarkdown),
     derived,
+    disagreements: pricing.disagreements,
+    pageIds: pages.map((page) => page.modelId).sort(),
   }
 }
 
-/** Read the three local inputs and price them. Does not fetch. */
+export function selectableCatalogPath(): string {
+  return path.join(repoRoot(), "test", "fixtures", "selectable-catalog.json")
+}
+
+export function loadSelectableCatalog(file = selectableCatalogPath()): SelectableCatalogModel[] {
+  const parsed: unknown = JSON.parse(readFileSync(file, "utf8"))
+  if (!Array.isArray(parsed)) throw new Error(`Selectable catalog ${file} is not a list`)
+  return parsed as SelectableCatalogModel[]
+}
+
+/** Read local markdown and only the pages selectable gaps need. Does not fetch. */
 export function loadOfflinePricing(paths: {
   pricingFile: string
   contextFile: string
-  pagesDir: string
-}): {
-  costs: Record<string, OpenCodeModelCost>
-  unpriced: Record<string, string>
-  contexts: Record<string, CursorModelContext>
-  derived: DerivedModelPrice[]
-} {
+  pagesDir?: string
+  catalogFile?: string
+}): PricingAssembly {
   const pricingMarkdown = readFileSync(paths.pricingFile, "utf8")
   const contextMarkdown = readFileSync(paths.contextFile, "utf8")
-  const pages = loadSavedModelPages(paths.pagesDir, requiredModelPageIds(pricingMarkdown))
-  return assemblePricing(pricingMarkdown, contextMarkdown, pages)
+  const catalog = loadSelectableCatalog(paths.catalogFile)
+  const pageIds = pageIdsForSelectableGaps(pricingMarkdown, contextMarkdown, catalog)
+  if (pageIds.length > 0 && !paths.pagesDir) {
+    throw new Error(missingSavedPagesMessage(pageIds))
+  }
+  const pages = pageIds.length === 0 || !paths.pagesDir
+    ? []
+    : loadSavedModelPages(paths.pagesDir, pageIds)
+  return assemblePricing(pricingMarkdown, contextMarkdown, pages, catalog)
 }
 
-async function loadModelPages(): Promise<ModelPageInput[]> {
-  const entries = Object.entries(MODEL_PAGE_SLUG)
+async function loadModelPages(modelIds: readonly string[]): Promise<ModelPageInput[]> {
+  const entries = modelIds.map((modelId) => [modelId, MODEL_PAGE_SLUG[modelId]!] as const)
   const pages: ModelPageInput[] = []
   const pending = [...entries]
   const worker = async () => {
@@ -1318,14 +1390,22 @@ async function loadModelPages(): Promise<ModelPageInput[]> {
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2))
-  const pageSource = modelPageSource(options)
-  if (pageSource === "refused") throw new Error(LOCAL_PAGES_REQUIRED)
+  const offline = Boolean(options.fromFile && options.contextFromFile)
   const pricingDoc = await loadMarkdown(CURSOR_PRICING_DOC_URL, options.fromFile)
   const contextDoc = await loadMarkdown(CURSOR_CONTEXT_DOC_URL, options.contextFromFile)
-  const pages = options.pagesFromDir
-    ? loadSavedModelPages(options.pagesFromDir, requiredModelPageIds(pricingDoc.text))
-    : await loadModelPages()
-  const assembled = assemblePricing(pricingDoc.text, contextDoc.text, pages)
+  const catalog = loadSelectableCatalog()
+  const pageIds = pageIdsForSelectableGaps(pricingDoc.text, contextDoc.text, catalog)
+  let pages: ModelPageInput[]
+  if (pageIds.length === 0) {
+    pages = []
+  } else if (options.pagesFromDir) {
+    pages = loadSavedModelPages(options.pagesFromDir, pageIds)
+  } else if (offline) {
+    throw new Error(missingSavedPagesMessage(pageIds))
+  } else {
+    pages = await loadModelPages(pageIds)
+  }
+  const assembled = assemblePricing(pricingDoc.text, contextDoc.text, pages, catalog)
   const derived = assembled.derived
   const pricingTable = assembled.costs
   const contextTable = assembled.contexts
@@ -1337,15 +1417,23 @@ async function main(): Promise<void> {
     contextDoc.source,
   )
   const dest = outputPath()
-  console.log(
-    options.pagesFromDir
-      ? `Model pages: ${pages.length} from ${options.pagesFromDir}`
-      : `Model pages: ${pages.length}`,
-  )
+  console.log(`Model pages: ${pages.length}${options.pagesFromDir ? ` from ${options.pagesFromDir}` : ""}`)
+  if (pageIds.length > 0) console.log(`Page gaps: ${pageIds.join(", ")}`)
   console.log(`Derived prices: ${derived.length}`)
   for (const price of derived) {
     console.log(`  ${price.id}: ${JSON.stringify(price.cost)}`)
     console.log(`    ${price.formula}`)
+  }
+  if (assembled.disagreements.length === 0) {
+    console.log("Markdown/page disagreements: none")
+  } else {
+    console.log(`Markdown/page disagreements: ${assembled.disagreements.length}`)
+    for (const disagreement of assembled.disagreements) {
+      console.log(
+        `  ${disagreement.id} ${disagreement.part}: keep ${disagreement.keptSource} ${JSON.stringify(disagreement.kept)}; ` +
+          `${disagreement.otherSource} says ${JSON.stringify(disagreement.other)}`,
+      )
+    }
   }
 
   if (options.check) {

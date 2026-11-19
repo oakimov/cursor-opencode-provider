@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { modelsToConfig } from "../src/model-config.js"
@@ -17,6 +17,7 @@ import {
 } from "../src/pricing.js"
 import {
   applyCursorStaffAutoRate,
+  assertSelectablePriced,
   buildContextTable,
   buildPricing,
   buildPricingTable,
@@ -24,9 +25,11 @@ import {
   loadOfflinePricing,
   loadSavedModelPages,
   modelPageSource,
+  pageIdsForSelectableGaps,
   parseArgs,
   priceFromModelPages,
   type PricingBuild,
+  type SelectableCatalogModel,
 } from "../scripts/generate-cursor-pricing.js"
 import { takeNetworkAttempts } from "./network-guard.js"
 import { getDocumentedCursorModelContext } from "../src/model-metadata.js"
@@ -389,7 +392,7 @@ describe("pricing", () => {
     }
   })
 
-  it("reads the long-context surcharge from the Notes column after data residency", () => {
+  it("does not infer a long-context price from a markdown note", () => {
     const markdown = `
 | Model | Provider | Input | Cache write | Cache read | Output | US data residency | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -400,9 +403,7 @@ describe("pricing", () => {
       input: 2.5,
       output: 15,
       cache_read: 0.25,
-      tiers: [{ tier: { type: "context", size: 272_000 }, input: 5, output: 15, cache_read: 0.25 }],
     })
-    expect(() => buildPricingTable(markdown)).toThrow(/No long-context threshold/)
   })
 
   it("imports Fast rows from the Cursor Models table without folding them into Other Models", () => {
@@ -440,14 +441,12 @@ describe("pricing", () => {
     })
   })
 
-  it("prices Fast notes from the docs prose and keeps an explicit Fast row", () => {
+  it("prices explicit Fast rows and ignores Fast notes", () => {
     const markdown = `
 | Model | Provider | Input | Cache write | Cache read | Output | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | GPT-5.4 | OpenAI | $2.5 | - | $0.25 | $15 | Fast mode is 15% faster with 2x pricing |
-| GPT-5.4 Mini | OpenAI | $0.75 | - | $0.075 | $4.5 | Fast mode is available at 2x pricing |
 | GPT-5.5 | OpenAI | $5 | - | $0.5 | $30 | Fast mode is available at higher rates |
-| GPT-5.6 Sol | OpenAI | $4 | $5 | $0.4 | $20 | Fast mode is 2x pricing. Fast mode for long context (>272k) at 2x Fast input pricing |
 | Claude Opus 5 | Anthropic | $10 | $12.5 | $1 | $50 | Fast mode (\`claude-opus-5-fast\`) |
 | Claude 4.7 Opus | Anthropic | $10 | $12.5 | $1 | $50 | Fast mode is available at 2x pricing |
 | Claude Opus 4.7 (fast mode) | Anthropic | $30 | $37.5 | $3 | $150 | |
@@ -455,56 +454,37 @@ describe("pricing", () => {
 | Composer 2.5 | Cursor | $0.5 | - | $0.2 | $2.5 | Fast mode is available at 2x pricing |
 | Composer 2.5 (Fast) | Cursor | $3 | - | $0.5 | $15 | |
 `
-
-    expect(buildPricing(markdown)).toEqual({
-      costs: {
-        "claude-opus-4-7": { input: 10, output: 50, cache_read: 1, cache_write: 12.5 },
-        "claude-opus-4-7-fast": { input: 30, output: 150, cache_read: 3, cache_write: 37.5 },
-        "claude-opus-4-8": { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 },
-        "claude-opus-4-8-fast": { input: 10, output: 50, cache_read: 1, cache_write: 12.5 },
-        "claude-opus-5": { input: 10, output: 50, cache_read: 1, cache_write: 12.5 },
-        "composer-2.5": { input: 0.5, output: 2.5, cache_read: 0.2 },
-        "composer-2.5-fast": { input: 3, output: 15, cache_read: 0.5 },
-        "gpt-5.4": { input: 2.5, output: 15, cache_read: 0.25 },
-        "gpt-5.4-fast": { input: 5, output: 30, cache_read: 0.5 },
-        "gpt-5.4-mini": { input: 0.75, output: 4.5, cache_read: 0.075 },
-        "gpt-5.4-mini-fast": { input: 1.5, output: 9, cache_read: 0.15 },
-        "gpt-5.5": { input: 5, output: 30, cache_read: 0.5 },
-        "gpt-5.6-sol": { input: 4, output: 20, cache_read: 0.4, cache_write: 5 },
-        "gpt-5.6-sol-fast": {
-          input: 8,
-          output: 40,
-          cache_read: 0.8,
-          cache_write: 10,
-          tiers: [{
-            tier: { type: "context", size: 272_000 },
-            input: 16,
-            output: 40,
-            cache_read: 0.8,
-            cache_write: 10,
-          }],
-        },
-      },
-      unpriced: {
-        "claude-opus-5-fast": "Cursor names Fast mode `claude-opus-5-fast` and publishes no Fast rate",
-        default: "Cursor publishes no numeric Auto rate",
-        "gpt-5.5-fast": "Cursor's pricing note says Fast mode is available at higher rates and publishes no rate",
-      },
+    const pricing = buildPricing(markdown)
+    expect(pricing.costs["composer-2.5-fast"]).toEqual({ input: 3, output: 15, cache_read: 0.5 })
+    expect(pricing.costs["claude-opus-4-7-fast"]).toEqual({
+      input: 30,
+      output: 150,
+      cache_read: 3,
+      cache_write: 37.5,
     })
+    expect(pricing.costs["gpt-5.4-fast"]).toBeUndefined()
+    expect(pricing.costs["claude-opus-4-8-fast"]).toBeUndefined()
+    expect(pricing.costs["claude-opus-5-fast"]).toBeUndefined()
+    expect(pricing.unpriced).toEqual({})
   })
 
-  it("refuses to price Opus 4.8 Fast without the Opus 4.7 fast-mode row", () => {
+  it("does not derive Opus 4.8 Fast from the Opus 4.7 note", () => {
     const markdown = `
 | Model | Provider | Input | Cache write | Cache read | Output | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | Claude Opus 4.8 | Anthropic | $5 | $6.25 | $0.5 | $25 | Fast mode is 3x lower per-token pricing than Opus 4.7 fast mode |
 `
-    expect(() => buildPricing(markdown)).toThrow(
-      "Claude Opus 4.7 (fast mode) row is required to price Claude Opus 4.8 Fast",
-    )
+    const pricing = buildPricing(markdown)
+    expect(pricing.costs["claude-opus-4-8"]).toEqual({
+      input: 5,
+      output: 25,
+      cache_read: 0.5,
+      cache_write: 6.25,
+    })
+    expect(pricing.costs["claude-opus-4-8-fast"]).toBeUndefined()
   })
 
-  it("prices long-context notes at the published threshold and leaves Fast unmentioned", () => {
+  it("does not price a long-context tier from a markdown note", () => {
     const markdown = `
 | Model | Provider | Input | Cache write | Cache read | Output | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -512,62 +492,34 @@ describe("pricing", () => {
 | GPT-5.4 | OpenAI | $2.5 | - | $0.25 | $15 | Long context supports up to 1M tokens with 2x input pricing |
 | Claude Haiku 5.5 | Anthropic | $0.1 | $0.125 | $0.01 | $0.5 | Requests above 100k input tokens bill at 5x the standard rates ($0.50/M input, $0.625/M cache write, $0.05/M cache read, $2.50/M output) |
 `
-    expect(buildPricing(markdown, { "GPT-5.4": 272_000 })).toEqual({
-      costs: {
-        "claude-haiku-5-5": {
-          input: 0.1,
-          output: 0.5,
-          cache_read: 0.01,
-          cache_write: 0.125,
-          tiers: [{
-            tier: { type: "context", size: 100_000 },
-            input: 0.5,
-            output: 2.5,
-            cache_read: 0.05,
-            cache_write: 0.625,
-          }],
-        },
-        "gpt-5.4": {
-          input: 2.5,
-          output: 15,
-          cache_read: 0.25,
-          tiers: [{ tier: { type: "context", size: 272_000 }, input: 5, output: 15, cache_read: 0.25 }],
-        },
-        "gpt-5.5": {
-          input: 5,
-          output: 30,
-          cache_read: 0.5,
-          cache_write: 0.5,
-          tiers: [{
-            tier: { type: "context", size: 272_000 },
-            input: 10,
-            output: 30,
-            cache_read: 0.5,
-            cache_write: 0.5,
-          }],
-        },
-      },
-      unpriced: {
-        default: "Cursor publishes no numeric Auto rate",
-      },
-    })
-    expect(() => buildPricing(markdown)).toThrow(/No long-context threshold for "GPT-5.4"/)
+    const pricing = buildPricing(markdown, { "GPT-5.4": 272_000 })
+    expect(pricing.costs["gpt-5.4"]?.tiers).toBeUndefined()
+    expect(pricing.costs["gpt-5.5"]?.tiers).toBeUndefined()
+    expect(pricing.costs["claude-haiku-5-5"]?.tiers).toBeUndefined()
+    expect(pricing.unpriced).toEqual({})
   })
 
-  it("prices Auto at the Cursor staff forum rate", () => {
+  it("keeps Auto at the manual staff rate", () => {
     const auto = { input: 1.25, output: 6, cache_read: 0.25 }
     expect(getCursorModelCost("default")).toEqual(auto)
     expect(applyCursorModelCost("default", { name: "Auto" })).toEqual({ name: "Auto", cost: auto })
-    const pricing: PricingBuild = { costs: {}, unpriced: { default: "docs publish no rate" } }
-    applyCursorStaffAutoRate(pricing)
-    expect(pricing.unpriced.default).toBeUndefined()
-    expect(pricing.costs.default).toEqual(auto)
-    const published: PricingBuild = {
+    const pricing: PricingBuild = {
       costs: { default: { input: 9, output: 9 } },
-      unpriced: {},
+      unpriced: { default: "docs publish no rate" },
+      markdownDefault: { input: 9, output: 9 },
+      disagreements: [],
     }
-    applyCursorStaffAutoRate(published)
-    expect(published.costs.default).toEqual({ input: 9, output: 9 })
+    applyCursorStaffAutoRate(pricing)
+    expect(pricing.costs.default).toEqual(auto)
+    expect(pricing.unpriced.default).toBeUndefined()
+    expect(pricing.disagreements).toEqual([{
+      id: "default",
+      part: "base",
+      kept: auto,
+      other: { input: 9, output: 9 },
+      keptSource: "manual",
+      otherSource: "markdown",
+    }])
   })
 
   it("preserves entry fields while adding cost", () => {
@@ -703,9 +655,7 @@ describe("pricing", () => {
 | Grok 4.7 | Cursor | $2 | - | $0.5 | $6 | Fast mode is available at 2x pricing |
 `
     const contexts = { "GPT-5.4": 272_000, "GPT-5.5": 272_000, "GPT-5.6 Sol": 272_000, "Grok 4.7": 256_000 }
-    const pricing = buildPricing(markdown, contexts, {
-      skipNoteModels: new Set(["gpt-5.5", "gpt-5.4", "gpt-5.6-sol", "grok-4.7"]),
-    })
+    const pricing = buildPricing(markdown, contexts)
     const derived = priceFromModelPages(pricing, [
       { modelId: "gpt-5.5", html: page("model-page-gpt-5-5.html") },
       { modelId: "gpt-5.4", html: page("model-page-gpt-5-4.html") },
@@ -746,9 +696,7 @@ describe("pricing", () => {
 | --- | --- | --- | --- | --- | --- | --- |
 | GPT-5.6 Sol | OpenAI | $4 | $5 | $0.4 | $20 | |
 `
-    const pricing = buildPricing(markdown, { "GPT-5.6 Sol": 272_000 }, {
-      skipNoteModels: new Set(["gpt-5.6-sol"]),
-    })
+    const pricing = buildPricing(markdown, { "GPT-5.6 Sol": 272_000 })
     const derived = priceFromModelPages(pricing, [{ modelId: "gpt-5.6-sol", html }], {
       "GPT-5.6 Sol": 272_000,
     })
@@ -780,9 +728,7 @@ describe("pricing", () => {
 | --- | --- | --- | --- | --- | --- | --- |
 | GPT-5.4 | OpenAI | $2.5 | - | $0.25 | $15 | |
 `
-    const pricing = buildPricing(markdown, { "GPT-5.4": 272_000 }, {
-      skipNoteModels: new Set(["gpt-5.4"]),
-    })
+    const pricing = buildPricing(markdown, { "GPT-5.4": 272_000 })
     const derived = priceFromModelPages(pricing, [{ modelId: "gpt-5.4", html }], {
       "GPT-5.4": 272_000,
     })
@@ -791,11 +737,60 @@ describe("pricing", () => {
     expect(pricing.costs["gpt-5.4"]?.tiers).toBeUndefined()
   })
 
+  it("keeps a markdown row when the page disagrees and fills only the missing Fast price", () => {
+    const markdown = `
+| Model | Provider | Input | Cache write | Cache read | Output | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| GPT-5.5 | OpenAI | $5 | - | $0.5 | $30 | Fast mode is available at higher rates |
+| Composer 2.5 | Cursor | $0.5 | - | $0.2 | $2.5 | |
+| Composer 2.5 (Fast) | Cursor | $3 | - | $0.5 | $15 | |
+`
+    const context = `
+| Model | Provider | Default context | Max context | Capabilities | Notes |
+| --- | --- | --- | --- | --- | --- |
+| GPT-5.5 | OpenAI | 272k | 1M | Agent | |
+| Composer 2.5 | Cursor | 200k | - | Agent | |
+`
+    const catalog: SelectableCatalogModel[] = [
+      {
+        id: "gpt-5.5",
+        maxContext: 272_000,
+        variants: [{ parameterValues: [{ id: "fast", value: "true" }, { id: "context", value: "1m" }], isMaxMode: true }],
+      },
+      {
+        id: "composer-2.5",
+        maxContext: 200_000,
+        variants: [{ parameterValues: [{ id: "fast", value: "true" }] }],
+      },
+    ]
+    expect(pageIdsForSelectableGaps(markdown, context, catalog)).toEqual(["gpt-5.5"])
+    const pricing = buildPricing(markdown, { "GPT-5.5": 272_000, "Composer 2.5": 200_000 })
+    const html = `
+<table>
+<tr><th>Name</th><th>Input</th><th>Cache write</th><th>Cache read</th><th>Output</th></tr>
+<tr><td>GPT-5.5</td><td>$9</td><td>-</td><td>$0.9</td><td>$40</td></tr>
+<tr><td>GPT-5.5 Fast</td><td>$12.5</td><td>-</td><td>$1.25</td><td>$75</td></tr>
+</table>
+`
+    priceFromModelPages(pricing, [{ modelId: "gpt-5.5", html }], { "GPT-5.5": 272_000 })
+    expect(pricing.costs["gpt-5.5"]).toEqual({ input: 5, output: 30, cache_read: 0.5 })
+    expect(pricing.costs["gpt-5.5-fast"]).toEqual({ input: 12.5, output: 75, cache_read: 1.25 })
+    expect(pricing.costs["composer-2.5-fast"]).toEqual({ input: 3, output: 15, cache_read: 0.5 })
+    expect(pricing.disagreements).toEqual([{
+      id: "gpt-5.5",
+      part: "base",
+      kept: { input: 5, output: 30, cache_read: 0.5 },
+      other: { input: 9, output: 40, cache_read: 0.9 },
+      keptSource: "markdown",
+      otherSource: "page",
+    }])
+  })
+
   it("prices saved model pages without fetching, and keeps local markdown offline", () => {
     expect(modelPageSource(parseArgs([
       "--from-file", "pricing.md",
       "--context-from-file", "docs.md",
-    ]))).toBe("refused")
+    ]))).toBe("offline")
     expect(modelPageSource(parseArgs(["--check"]))).toBe("live")
     const dir = mkdtempSync(join(tmpdir(), "pricing-pages-"))
     try {
@@ -822,12 +817,32 @@ describe("pricing", () => {
 | --- | --- | --- | --- | --- | --- | --- |
 | GPT-5.5 | OpenAI | $5 | - | $0.5 | $30 | Long context supports up to 1M tokens with 2x input pricing |
 `
-      const pricing = buildPricing(markdown, { "GPT-5.5": 272_000 }, {
-        skipNoteModels: new Set(pages.map((page) => page.modelId)),
-      })
+      const pricing = buildPricing(markdown, { "GPT-5.5": 272_000 })
       priceFromModelPages(pricing, pages, { "GPT-5.5": 272_000 })
+      expect(pricing.costs["gpt-5.5"].input).toBe(5)
       expect(pricing.costs["gpt-5.5-fast"]).toEqual({ input: 12.5, output: 75, cache_read: 1.25 })
       expect(pricing.costs["gpt-5.5"]?.tiers?.[0]?.output).toBe(45)
+      expect(takeNetworkAttempts()).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("fails generation when a selectable model has no price and writes nothing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pricing-out-"))
+    const dest = join(dir, "pricing-data.ts")
+    const catalog: SelectableCatalogModel[] = [{ id: "gpt-5.5", variants: [] }]
+    const pricing = buildPricing(`
+| Model | Provider | Input | Cache write | Cache read | Output | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| GPT-5.4 | OpenAI | $2.5 | - | $0.25 | $15 | |
+`)
+    try {
+      expect(() => {
+        assertSelectablePriced(catalog, pricing.costs)
+        writeFileSync(dest, "should not be written")
+      }).toThrow(/Unpriced selectable model: gpt-5\.5/)
+      expect(existsSync(dest)).toBe(false)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -844,6 +859,13 @@ describe("pricing", () => {
     expect(priced.costs).toEqual(CURSOR_MODEL_COSTS as unknown as typeof priced.costs)
     expect(priced.unpriced).toEqual(CURSOR_UNPRICED_MODEL_REASONS)
     expect(priced.contexts).toEqual(CURSOR_MODEL_CONTEXTS as unknown as typeof priced.contexts)
+    expect(priced.pageIds).not.toContain("grok-4.7")
+    expect(priced.pageIds).toContain("gpt-5.5")
+    expect(() => loadOfflinePricing({
+      pricingFile: join(root, "pricing.md"),
+      contextFile: join(root, "context.md"),
+    })).toThrow(/Refusing to fetch[\s\S]*gpt-5\.5/)
+    expect(takeNetworkAttempts()).toEqual([])
     const incomplete = mkdtempSync(join(tmpdir(), "pricing-pages-"))
     try {
       cpSync(join(root, "pages"), incomplete, { recursive: true })
