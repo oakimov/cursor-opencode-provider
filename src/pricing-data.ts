@@ -37,7 +37,19 @@ export const CURSOR_MODEL_COSTS = {
     "input": 0.1,
     "output": 0.5,
     "cache_read": 0.01,
-    "cache_write": 0.125
+    "cache_write": 0.125,
+    "tiers": [
+      {
+        "tier": {
+          "type": "context",
+          "size": 100000
+        },
+        "input": 0.5,
+        "output": 2.5,
+        "cache_read": 0.05,
+        "cache_write": 0.625
+      }
+    ]
   },
   "claude-opus-4-5": {
     "input": 5,
@@ -57,11 +69,23 @@ export const CURSOR_MODEL_COSTS = {
     "cache_read": 0.5,
     "cache_write": 6.25
   },
+  "claude-opus-4-7-fast": {
+    "input": 30,
+    "output": 150,
+    "cache_read": 3,
+    "cache_write": 37.5
+  },
   "claude-opus-4-8": {
     "input": 5,
     "output": 25,
     "cache_read": 0.5,
     "cache_write": 6.25
+  },
+  "claude-opus-4-8-fast": {
+    "input": 10,
+    "output": 50,
+    "cache_read": 1,
+    "cache_write": 12.5
   },
   "claude-opus-5": {
     "input": 5,
@@ -220,11 +244,22 @@ export const CURSOR_MODEL_COSTS = {
     "input": 2.5,
     "output": 15,
     "cache_read": 0.25,
-    "context_over_200k": {
-      "input": 5,
-      "output": 15,
-      "cache_read": 0.5
-    }
+    "tiers": [
+      {
+        "tier": {
+          "type": "context",
+          "size": 272000
+        },
+        "input": 5,
+        "output": 15,
+        "cache_read": 0.25
+      }
+    ]
+  },
+  "gpt-5.4-fast": {
+    "input": 5,
+    "output": 30,
+    "cache_read": 0.5
   },
   "gpt-5.4-mini": {
     "input": 0.75,
@@ -240,47 +275,125 @@ export const CURSOR_MODEL_COSTS = {
     "input": 5,
     "output": 30,
     "cache_read": 0.5,
-    "context_over_200k": {
-      "input": 10,
-      "output": 30,
-      "cache_read": 1
-    }
+    "tiers": [
+      {
+        "tier": {
+          "type": "context",
+          "size": 272000
+        },
+        "input": 10,
+        "output": 30,
+        "cache_read": 0.5
+      }
+    ]
   },
   "gpt-5.6-luna": {
     "input": 0.2,
     "output": 1.2,
     "cache_read": 0.02,
     "cache_write": 0.25,
-    "context_over_200k": {
-      "input": 0.4,
-      "output": 1.2,
-      "cache_read": 0.04,
-      "cache_write": 0.5
-    }
+    "tiers": [
+      {
+        "tier": {
+          "type": "context",
+          "size": 272000
+        },
+        "input": 0.4,
+        "output": 1.2,
+        "cache_read": 0.02,
+        "cache_write": 0.25
+      }
+    ]
+  },
+  "gpt-5.6-luna-fast": {
+    "input": 0.4,
+    "output": 2.4,
+    "cache_read": 0.04,
+    "cache_write": 0.5,
+    "tiers": [
+      {
+        "tier": {
+          "type": "context",
+          "size": 272000
+        },
+        "input": 0.8,
+        "output": 2.4,
+        "cache_read": 0.04,
+        "cache_write": 0.5
+      }
+    ]
   },
   "gpt-5.6-sol": {
     "input": 4,
     "output": 20,
     "cache_read": 0.4,
     "cache_write": 5,
-    "context_over_200k": {
-      "input": 8,
-      "output": 20,
-      "cache_read": 0.8,
-      "cache_write": 10
-    }
+    "tiers": [
+      {
+        "tier": {
+          "type": "context",
+          "size": 272000
+        },
+        "input": 8,
+        "output": 20,
+        "cache_read": 0.4,
+        "cache_write": 5
+      }
+    ]
+  },
+  "gpt-5.6-sol-fast": {
+    "input": 8,
+    "output": 40,
+    "cache_read": 0.8,
+    "cache_write": 10,
+    "tiers": [
+      {
+        "tier": {
+          "type": "context",
+          "size": 272000
+        },
+        "input": 16,
+        "output": 40,
+        "cache_read": 0.8,
+        "cache_write": 10
+      }
+    ]
   },
   "gpt-5.6-terra": {
     "input": 2,
     "output": 12,
     "cache_read": 0.2,
     "cache_write": 2.5,
-    "context_over_200k": {
-      "input": 4,
-      "output": 12,
-      "cache_read": 0.4,
-      "cache_write": 5
-    }
+    "tiers": [
+      {
+        "tier": {
+          "type": "context",
+          "size": 272000
+        },
+        "input": 4,
+        "output": 12,
+        "cache_read": 0.2,
+        "cache_write": 2.5
+      }
+    ]
+  },
+  "gpt-5.6-terra-fast": {
+    "input": 4,
+    "output": 24,
+    "cache_read": 0.4,
+    "cache_write": 5,
+    "tiers": [
+      {
+        "tier": {
+          "type": "context",
+          "size": 272000
+        },
+        "input": 8,
+        "output": 24,
+        "cache_read": 0.4,
+        "cache_write": 5
+      }
+    ]
   },
   "grok-4.5": {
     "input": 2,
@@ -306,21 +419,33 @@ export const CURSOR_MODEL_COSTS = {
     "input": 2,
     "output": 6,
     "cache_read": 0.5,
-    "context_over_200k": {
-      "input": 4,
-      "output": 12,
-      "cache_read": 1
-    }
+    "tiers": [
+      {
+        "tier": {
+          "type": "context",
+          "size": 256000
+        },
+        "input": 4,
+        "output": 12,
+        "cache_read": 1
+      }
+    ]
   },
   "grok-4.7-fast": {
     "input": 4,
     "output": 12,
     "cache_read": 1,
-    "context_over_200k": {
-      "input": 6,
-      "output": 18,
-      "cache_read": 1.5
-    }
+    "tiers": [
+      {
+        "tier": {
+          "type": "context",
+          "size": 256000
+        },
+        "input": 6,
+        "output": 18,
+        "cache_read": 1.5
+      }
+    ]
   },
   "kimi-k2.7-code": {
     "input": 0.95,
@@ -342,6 +467,14 @@ export const CURSOR_MODEL_COSTS = {
     "output": 20,
     "cache_read": 0.2
   }
+} as const
+
+/** Catalog ids the docs name without a numeric rate. Keys are the unpriced ids. */
+export const CURSOR_UNPRICED_MODEL_REASONS = {
+  "claude-opus-5-5-fast": "Cursor names Fast mode `claude-opus-5-5-fast` and publishes no Fast rate",
+  "claude-opus-5-fast": "Cursor names Fast mode `claude-opus-5-fast` and publishes no Fast rate",
+  "default": "Cursor publishes no numeric Auto rate",
+  "gpt-5.5-fast": "Cursor's pricing note says Fast mode is available at higher rates and publishes no rate"
 } as const
 
 export const CURSOR_MODEL_CONTEXTS = {

@@ -6,6 +6,7 @@ import type { ModelInfo } from "../src/models.js"
 import {
   applyCursorModelCost,
   checkCursorPricingCoverage,
+  costForPrompt,
   getCursorModelCost,
   hasCursorFastPricing,
   isOpenCodeModelCost,
@@ -77,36 +78,70 @@ describe("pricing", () => {
       input: 2.5,
       output: 15,
       cache_read: 0.25,
-      context_over_200k: { input: 5, output: 15, cache_read: 0.5 },
+      tiers: [{ tier: { type: "context", size: 272_000 }, input: 5, output: 15, cache_read: 0.25 }],
     })
     expect(getCursorModelCost("gpt-5.5")).toEqual({
       input: 5,
       output: 30,
       cache_read: 0.5,
-      context_over_200k: { input: 10, output: 30, cache_read: 1 },
+      tiers: [{ tier: { type: "context", size: 272_000 }, input: 10, output: 30, cache_read: 0.5 }],
     })
     expect(getCursorModelCost("gpt-5.6-luna")).toEqual({
       input: 0.2,
       output: 1.2,
       cache_read: 0.02,
       cache_write: 0.25,
-      context_over_200k: { input: 0.4, output: 1.2, cache_read: 0.04, cache_write: 0.5 },
+      tiers: [{
+        tier: { type: "context", size: 272_000 },
+        input: 0.4,
+        output: 1.2,
+        cache_read: 0.02,
+        cache_write: 0.25,
+      }],
     })
     expect(getCursorModelCost("gpt-5.6-sol")).toEqual({
       input: 4,
       output: 20,
       cache_read: 0.4,
       cache_write: 5,
-      context_over_200k: { input: 8, output: 20, cache_read: 0.8, cache_write: 10 },
+      tiers: [{
+        tier: { type: "context", size: 272_000 },
+        input: 8,
+        output: 20,
+        cache_read: 0.4,
+        cache_write: 5,
+      }],
     })
     expect(getCursorModelCost("gpt-5.6-terra")).toEqual({
       input: 2,
       output: 12,
       cache_read: 0.2,
       cache_write: 2.5,
-      context_over_200k: { input: 4, output: 12, cache_read: 0.4, cache_write: 5 },
+      tiers: [{
+        tier: { type: "context", size: 272_000 },
+        input: 4,
+        output: 12,
+        cache_read: 0.2,
+        cache_write: 2.5,
+      }],
     })
+    expect(getCursorModelCost("gpt-5.4-mini")?.tiers).toBeUndefined()
     expect(getCursorModelCost("gpt-5.4-mini")?.context_over_200k).toBeUndefined()
+    // A prompt of exactly 272k stays on the standard rate. The next token
+    // doubles input only.
+    expect(costForPrompt(getCursorModelCost("gpt-5.4")!, 272_000).input).toBe(2.5)
+    expect(costForPrompt(getCursorModelCost("gpt-5.4")!, 272_001)).toEqual({
+      input: 5,
+      output: 15,
+      cache_read: 0.25,
+    })
+    expect(costForPrompt(getCursorModelCost("claude-haiku-5-5")!, 100_000).input).toBe(0.1)
+    expect(costForPrompt(getCursorModelCost("claude-haiku-5-5")!, 100_001)).toEqual({
+      input: 0.5,
+      output: 2.5,
+      cache_read: 0.05,
+      cache_write: 0.625,
+    })
   })
 
   it("maps Gemini 4 Carbon, Hydrogen, and Neon onto served catalog ids", () => {
@@ -150,21 +185,23 @@ describe("pricing", () => {
       input: 2,
       output: 6,
       cache_read: 0.5,
-      context_over_200k: {
+      tiers: [{
+        tier: { type: "context", size: 256_000 },
         input: 4,
         output: 12,
         cache_read: 1,
-      },
+      }],
     })
     expect(getCursorModelCost("grok-4.7-fast")).toEqual({
       input: 4,
       output: 12,
       cache_read: 1,
-      context_over_200k: {
+      tiers: [{
+        tier: { type: "context", size: 256_000 },
         input: 6,
         output: 18,
         cache_read: 1.5,
-      },
+      }],
     })
     expect(getCursorModelCost("composer-2.5")).toEqual({
       input: 0.5,
@@ -217,8 +254,37 @@ describe("pricing", () => {
     expect(hasCursorFastPricing("grok-4.5")).toBe(true)
     expect(hasCursorFastPricing("grok-4.6")).toBe(true)
     expect(hasCursorFastPricing("grok-4.7")).toBe(true)
-    expect(hasCursorFastPricing("claude-opus-4-8")).toBe(false)
+    expect(hasCursorFastPricing("claude-opus-4-7")).toBe(true)
+    expect(hasCursorFastPricing("claude-opus-4-8")).toBe(true)
+    expect(hasCursorFastPricing("claude-opus-5")).toBe(true)
+    expect(hasCursorFastPricing("claude-opus-5-5")).toBe(true)
+    expect(hasCursorFastPricing("gpt-5.4")).toBe(true)
+    expect(hasCursorFastPricing("gpt-5.5")).toBe(true)
+    expect(hasCursorFastPricing("gpt-5.6-sol")).toBe(true)
     expect(hasCursorFastPricing("claude-sonnet-4-5")).toBe(false)
+    expect(hasCursorFastPricing("claude-fable-5-2")).toBe(false)
+    expect(getCursorModelCost("claude-opus-4-7-fast")).toEqual({
+      input: 30,
+      output: 150,
+      cache_read: 3,
+      cache_write: 37.5,
+    })
+    expect(getCursorModelCost("claude-opus-4-8-fast")).toEqual({
+      input: 10,
+      output: 50,
+      cache_read: 1,
+      cache_write: 12.5,
+    })
+    expect(getCursorModelCost("gpt-5.4-fast")).toEqual({ input: 5, output: 30, cache_read: 0.5 })
+    expect(costForPrompt(getCursorModelCost("gpt-5.6-sol-fast")!, 272_001)).toEqual({
+      input: 16,
+      output: 40,
+      cache_read: 0.8,
+      cache_write: 10,
+    })
+    expect(getCursorModelCost("gpt-5.5-fast")).toBeUndefined()
+    expect(getCursorModelCost("claude-opus-5-fast")).toBeUndefined()
+    expect(getCursorModelCost("claude-opus-5-5-fast")).toBeUndefined()
   })
 
   it("maps Cursor Models (Fast) display names onto synthetic catalog ids", () => {
@@ -306,12 +372,13 @@ describe("pricing", () => {
 | GPT-5.4 | OpenAI | $2.5 | - | $0.25 | $15 | Yes | Long context supports up to 1M tokens with 2x input pricing |
 `
 
-    expect(buildPricingTable(markdown)["gpt-5.4"]).toEqual({
+    expect(buildPricingTable(markdown, { "GPT-5.4": 272_000 })["gpt-5.4"]).toEqual({
       input: 2.5,
       output: 15,
       cache_read: 0.25,
-      context_over_200k: { input: 5, output: 15, cache_read: 0.5 },
+      tiers: [{ tier: { type: "context", size: 272_000 }, input: 5, output: 15, cache_read: 0.25 }],
     })
+    expect(() => buildPricingTable(markdown)).toThrow(/No long-context threshold/)
   })
 
   it("imports Fast rows from the Cursor Models table without folding them into Other Models", () => {
@@ -338,7 +405,6 @@ describe("pricing", () => {
 | Model | Provider | Input | Cache write | Cache read | Output | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | Claude 4 Sonnet | Anthropic | $3 | $3.75 | $0.3 | $15 | |
-| Claude 4.7 Opus (fast mode) | Anthropic | $10 | $12.5 | $1 | $50 | skip |
 `
 
     expect(buildPricingTable(markdown)).toEqual({
@@ -373,6 +439,15 @@ describe("pricing", () => {
   })
 
   it("converts classic cost into OpenCode 2.0 cost tiers", () => {
+    expect(toOpenCode2Costs(getCursorModelCost("gpt-5.4"))).toEqual([
+      { input: 2.5, output: 15, cache: { read: 0.25, write: 0 } },
+      {
+        tier: { type: "context", size: 272_000 },
+        input: 5,
+        output: 15,
+        cache: { read: 0.25, write: 0 },
+      },
+    ])
     expect(toOpenCode2Costs(getCursorModelCost("claude-sonnet-4"))).toEqual([
       {
         input: 3,

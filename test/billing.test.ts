@@ -70,12 +70,24 @@ describe("pricing a Run", () => {
     expect(cursorPricingId("grok-4.7", [])).toBe("grok-4.7")
     expect(cursorPricingId("no-such-model", [{ id: "fast", value: "true" }])).toBe("no-such-model")
     expect(getCursorModelCost(cursorPricingId("grok-4.7", [{ id: "fast", value: "true" }]))?.input).toBe(4)
+    expect(cursorPricingId("gpt-5.5", [{ id: "fast", value: "true" }])).toBe("gpt-5.5-fast")
+    expect(getCursorModelCost("gpt-5.5-fast")).toBeUndefined()
+    expect(getCursorModelCost(cursorPricingId("claude-opus-4-8", [{ id: "fast", value: "true" }]))?.input).toBe(10)
   })
 
   it("prices a step at the tier its prompt size selects, unpriced cache categories at nothing", () => {
     expect(hostStepPrices(GROK, 200_000)).toEqual({ input: 2e-6, output: 6e-6, cacheRead: 5e-7, cacheWrite: 0 })
     expect(hostStepPrices(GROK, 200_001)).toEqual({ input: 4e-6, output: 12e-6, cacheRead: 1e-6, cacheWrite: 0 })
     expect(hostStepPrices(undefined, 10)).toBeUndefined()
+    const gpt = getCursorModelCost("gpt-5.4")!
+    expect(hostStepPrices(gpt, 200_001)).toEqual(hostStepPrices(gpt, 272_000))
+    expect(hostStepPrices(gpt, 272_000)).toEqual({ input: 2.5e-6, output: 15e-6, cacheRead: 0.25e-6, cacheWrite: 0 })
+    expect(hostStepPrices(gpt, 272_001)).toEqual({ input: 5e-6, output: 15e-6, cacheRead: 0.25e-6, cacheWrite: 0 })
+    const haiku = getCursorModelCost("claude-haiku-5-5")!
+    expect(hostStepPrices(haiku, 100_001)?.input).toBe(0.5e-6)
+    const grok = getCursorModelCost("grok-4.7")!
+    expect(hostStepPrices(grok, 256_000)?.input).toBe(2e-6)
+    expect(hostStepPrices(grok, 256_001)?.input).toBe(4e-6)
   })
 
   it("computes what Cursor billed for a Run from TurnEnded", () => {

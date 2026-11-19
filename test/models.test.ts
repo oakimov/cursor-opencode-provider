@@ -660,7 +660,34 @@ describe("modelsToConfig (context-tier materialization)", () => {
     expect(config["composer-2.5"].options[CURSOR_WIRE_MODEL_ID_KEY]).toBe("composer-2.5")
   })
 
-  it("does not split Claude Fast variants when Cursor publishes one price", () => {
+  it("does not split a Fast variant when Cursor publishes one price", () => {
+    const fable = {
+      ...model,
+      id: "claude-fable-5-2",
+      variants: [
+        ...model.variants,
+        {
+          key: "claude-fable-5-2",
+          displayName: "Opus 4.8 Fast",
+          isDefaultNonMax: false,
+          isDefaultMax: false,
+          parameterValues: [
+            { id: "context", value: "300k" },
+            { id: "fast", value: "true" },
+          ],
+        },
+      ],
+    }
+
+    const config = modelsToConfig([fable])
+    expect(Object.keys(config)).toEqual(["claude-fable-5-2", "claude-fable-5-2-1m"])
+    expect(Object.keys(config["claude-fable-5-2"].variants)).toEqual([
+      "Fast",
+      "High",
+    ])
+  })
+
+  it("splits Opus 4.8 Fast onto its published rate", () => {
     const opus = {
       ...model,
       variants: [
@@ -679,11 +706,18 @@ describe("modelsToConfig (context-tier materialization)", () => {
     }
 
     const config = modelsToConfig([opus])
-    expect(Object.keys(config)).toEqual(["claude-opus-4-8", "claude-opus-4-8-1m"])
-    expect(Object.keys(config["claude-opus-4-8"].variants)).toEqual([
-      "Fast",
-      "High",
+    expect(Object.keys(config)).toEqual([
+      "claude-opus-4-8",
+      "claude-opus-4-8-fast",
+      "claude-opus-4-8-1m",
     ])
+    expect(Object.keys(config["claude-opus-4-8"].variants)).toEqual(["High"])
+    expect(config["claude-opus-4-8-fast"].cost).toEqual({
+      input: 10,
+      output: 50,
+      cache_read: 1,
+      cache_write: 12.5,
+    })
   })
 
   it("combines Fast and 1M into a -1m-fast catalog id", () => {

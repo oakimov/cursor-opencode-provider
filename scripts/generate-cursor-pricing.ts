@@ -30,12 +30,26 @@ export const CURSOR_CONTEXT_DOC_URL = "https://cursor.com/docs.md"
 export const CURSOR_CONTEXT_DOC_HTML_URL = "https://cursor.com/docs"
 
 /** Classic OpenCode / models.dev cost shape (plugin config). */
+export type OpenCodeCostTier = {
+  tier: { type: "context"; size: number }
+  input: number
+  output: number
+  cache_read?: number
+  cache_write?: number
+}
+
 export type OpenCodeModelCost = {
   input: number
   output: number
   cache_read?: number
   cache_write?: number
+  /**
+   * OpenCode maps this field to a threshold of exactly 200k tokens.
+   * Any other threshold is `tiers`, which OpenCode 1.19.6 and 2.3.2 both
+   * select when the prompt is larger than `tier.size`.
+   */
   context_over_200k?: OpenCodeModelCost
+  tiers?: OpenCodeCostTier[]
 }
 
 export type CursorModelContext = {
@@ -256,23 +270,143 @@ function cost(
   return entry
 }
 
-function withLongContext(base: OpenCodeModelCost, longContext: OpenCodeModelCost): OpenCodeModelCost {
-  return { ...base, context_over_200k: longContext }
+/** The first "above/>/exceeds Nk" threshold in a pricing note. */
+export function longContextThreshold(notes: string): number | undefined {
+  const match = /(?:above|>|exceeds)\s*(\d+)\s*k\b/i.exec(notes)
+  if (!match) return undefined
+  const tokens = Number(match[1]) * 1_000
+  if (!Number.isSafeInteger(tokens) || tokens <= 0) {
+    throw new Error(`Invalid long-context threshold in notes: ${notes}`)
+  }
+  return tokens
 }
 
-/** Double input-side rates for notes that say long context is "2x input pricing". */
-function doubleInputSide(base: OpenCodeModelCost): OpenCodeModelCost {
-  const long = cost(base.input * 2, base.output, base.cache_read !== undefined ? base.cache_read * 2 : undefined, base.cache_write !== undefined ? base.cache_write * 2 : undefined)
-  return long
+function roundRate(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000
 }
 
-function notesImplyInput2xLongContext(notes: string): boolean {
-  const lower = notes.toLowerCase()
-  if (/no long-context surcharge|same per-token rates/.test(lower)) return false
-  return (
-    /2x (?:when (?:the )?input exceeds 200k|input pricing)/i.test(notes) ||
-    /long context supports up to 1m tokens with 2x input pricing/i.test(notes)
+function scaleAll(base: OpenCodeModelCost, factor: number): OpenCodeModelCost {
+  return cost(
+    roundRate(base.input * factor),
+    roundRate(base.output * factor),
+    base.cache_read !== undefined ? roundRate(base.cache_read * factor) : undefined,
+    base.cache_write !== undefined ? roundRate(base.cache_write * factor) : undefined,
   )
+}
+
+/** "2x input pricing" doubles input and leaves cache and output alone. */
+function scaleInput(base: OpenCodeModelCost, factor: number): OpenCodeModelCost {
+  return cost(roundRate(base.input * factor), base.output, base.cache_read, base.cache_write)
+}
+
+/**
+ * Attach a long-context rate at the threshold the docs state.
+ * 200k uses `context_over_200k` because that is the only threshold that field
+ * means. Every other threshold is a `tiers` entry.
+ */
+function withThreshold(
+  base: OpenCodeModelCost,
+  threshold: number,
+  longContext: OpenCodeModelCost,
+): OpenCodeModelCost {
+  if (threshold === 200_000) return { ...base, context_over_200k: longContext }
+  const tier: OpenCodeCostTier = {
+    tier: { type: "context", size: threshold },
+    input: longContext.input,
+    output: longContext.output,
+  }
+  if (longContext.cache_read !== undefined) tier.cache_read = longContext.cache_read
+  if (longContext.cache_write !== undefined) tier.cache_write = longContext.cache_write
+  return { ...base, tiers: [tier] }
+}
+
+function noteForbidsLongSurcharge(notes: string): boolean {
+  return /no long-context surcharge|same per-token rates/i.test(notes)
+}
+
+/** Note-only long context that doubles input, with no separate table row. */
+function noteDoublesInputOnly(notes: string): boolean {
+  if (noteForbidsLongSurcharge(notes)) return false
+  return /2x input pricing/i.test(notes)
+}
+
+/**
+ * "above 100k … 5x the standard rates ($0.50/M input, …)" publishes every
+ * component. The parenthetical numbers are the rate; the factor is a check.
+ */
+function pricedMultipleFromNote(notes: string, base: OpenCodeModelCost): OpenCodeModelCost | undefined {
+  const match = /above\s+(\d+)\s*k input tokens bill at\s+(\d+(?:\.\d+)?)x the standard rates(?:\s+\(([^)]+)\))?/i.exec(notes)
+  if (!match) return undefined
+  const factor = Number(match[2])
+  const paren = match[3]
+  if (!paren) return scaleAll(base, factor)
+  const money = (label: string) => {
+    const found = new RegExp(`\\$([0-9]+(?:\\.[0-9]+)?)\\s*/\\s*M\\s+${label}`, "i").exec(paren)
+    return found ? Number(found[1]) : undefined
+  }
+  const input = money("input")
+  const output = money("output")
+  const cacheRead = money("cache read")
+  const cacheWrite = money("cache write")
+  if (input === undefined || output === undefined) {
+    throw new Error(`Long-context note is missing input or output: ${notes}`)
+  }
+  const expected = scaleAll(base, factor)
+  const mismatch = (label: string, published: number | undefined, scaled: number | undefined) =>
+    published !== undefined && scaled !== undefined && published !== scaled
+      ? `${label} ${published} is not ${factor}x ${label === "input" ? base.input : label === "output" ? base.output : label === "cache read" ? base.cache_read : base.cache_write}`
+      : undefined
+  const problems = [
+    mismatch("input", input, expected.input),
+    mismatch("output", output, expected.output),
+    mismatch("cache read", cacheRead, expected.cache_read),
+    mismatch("cache write", cacheWrite, expected.cache_write),
+  ].filter((problem): problem is string => problem !== undefined)
+  if (problems.length > 0) {
+    throw new Error(`Published long-context rates disagree with the stated factor: ${problems.join("; ")}`)
+  }
+  return cost(input, output, cacheRead, cacheWrite)
+}
+
+type FastNote =
+  | { kind: "multiply" }
+  | { kind: "unpriced"; reason: string }
+  | { kind: "opus47FastDividedBy3" }
+
+/**
+ * A Fast price the docs state in prose, when the table has no Fast row.
+ * "2x pricing" scales every published component. "Higher rates" and a named
+ * Fast id with no figure stay unpriced.
+ */
+export function fastNote(notes: string): FastNote | undefined {
+  if (/fast mode is available at higher rates/i.test(notes)) {
+    return {
+      kind: "unpriced",
+      reason: "Cursor's pricing note says Fast mode is available at higher rates and publishes no rate",
+    }
+  }
+  if (/3x lower per-token pricing than opus 4\.7 fast mode/i.test(notes)) {
+    return { kind: "opus47FastDividedBy3" }
+  }
+  if (/fast mode is (?:15% faster with |available at )?2x pricing/i.test(notes)) {
+    return { kind: "multiply" }
+  }
+  const named = /fast mode \(\\?`([^`\\]+)\\?`\)/i.exec(notes)
+  if (named) {
+    return {
+      kind: "unpriced",
+      reason: `Cursor names Fast mode \`${named[1]}\` and publishes no Fast rate`,
+    }
+  }
+  return undefined
+}
+
+function fastLongDoublesFastInput(notes: string): boolean {
+  return /2x fast input pricing/i.test(notes)
+}
+
+function fastModeBaseName(displayName: string): string | undefined {
+  return /^(.*) \(fast mode\)$/i.exec(displayName)?.[1]
 }
 
 function isPricingTableHeader(cells: string[]): boolean {
@@ -360,13 +494,75 @@ function parsePricingTables(markdown: string): ParsedRow[] {
   return rows
 }
 
-export function buildPricingTable(markdown: string): Record<string, OpenCodeModelCost> {
-  const table: Record<string, OpenCodeModelCost> = { ...CURSOR_PRICING_OVERRIDES }
-  const longContextById = new Map<string, OpenCodeModelCost>()
+const AUTO_UNPRICED_REASON = "Cursor publishes no numeric Auto rate"
+
+export type PricingBuild = {
+  costs: Record<string, OpenCodeModelCost>
+  /** Catalog ids whose docs name a variant and publish no number. */
+  unpriced: Record<string, string>
+}
+
+/**
+ * Default context window from the model-context table, keyed by display name.
+ * A "2x input pricing" note that does not name its own threshold starts at
+ * this window (GPT-5.4 is 272k). Missing both is an error, never 200k.
+ */
+export function defaultContextByDisplayName(markdown: string): Record<string, number> {
+  const contexts: Record<string, number> = {}
+  for (const row of parseContextTable(markdown)) {
+    if (row.maxContext !== undefined) contexts[row.displayName] = row.maxContext
+  }
+  return contexts
+}
+
+function requireThreshold(notes: string, displayName: string, defaults: Readonly<Record<string, number>>): number {
+  const threshold = longContextThreshold(notes) ?? defaults[displayName]
+  if (!threshold) {
+    throw new Error(
+      `No long-context threshold for ${JSON.stringify(displayName)}. ` +
+        `The note has no above/exceeds Nk figure and the context table has no default context.`,
+    )
+  }
+  return threshold
+}
+
+function fastModeModelId(displayName: string): string | undefined {
+  const base = fastModeBaseName(displayName)
+  if (!base) return undefined
+  // The base row is "Claude 4.7 Opus"; the fast-mode row says "Claude Opus 4.7".
+  if (base === "Claude Opus 4.7") return "claude-opus-4-7"
+  return DISPLAY_NAME_TO_MODEL_ID[base]
+}
+
+/**
+ * Prices from the docs tables and notes.
+ * An explicit long-context row wins over a note. A note that only says
+ * "2x input pricing" doubles input. "2x pricing" on Fast doubles every
+ * component. A Fast long-context note that says "2x Fast input pricing"
+ * doubles that Fast input again and leaves Fast cache and output in place.
+ */
+export function buildPricing(
+  markdown: string,
+  defaultContexts: Readonly<Record<string, number>> = {},
+): PricingBuild {
+  const costs: Record<string, OpenCodeModelCost> = { ...CURSOR_PRICING_OVERRIDES }
+  const unpriced: Record<string, string> = { default: AUTO_UNPRICED_REASON }
+  const explicitLong = new Map<string, { cost: OpenCodeModelCost; notes: string }>()
+  const explicitFast = new Map<string, OpenCodeModelCost>()
+  const baseRows: Array<{
+    displayName: string
+    modelId: string
+    entry: OpenCodeModelCost
+    notes: string
+  }> = []
 
   for (const row of parsePricingTables(markdown)) {
+    const fastModeId = fastModeModelId(row.displayName)
+    if (fastModeId) {
+      explicitFast.set(fastModeId, cost(row.input, row.output, row.cacheRead, row.cacheWrite))
+      continue
+    }
     if (SKIP_DISPLAY_NAMES.has(row.displayName)) continue
-    if (/\(fast mode\)/i.test(row.displayName)) continue
 
     const modelId = catalogIdForPricingDisplayName(row.displayName)
     if (!modelId) {
@@ -377,30 +573,102 @@ export function buildPricingTable(markdown: string): Record<string, OpenCodeMode
     }
 
     const entry = cost(row.input, row.output, row.cacheRead, row.cacheWrite)
-
     if (row.isExplicitLongContextRow) {
-      longContextById.set(modelId, entry)
+      explicitLong.set(modelId, { cost: entry, notes: row.notes })
       continue
     }
+    baseRows.push({ displayName: row.displayName, modelId, entry, notes: row.notes })
+  }
 
-    if (notesImplyInput2xLongContext(row.notes)) {
-      table[modelId] = withLongContext(entry, doubleInputSide(entry))
+  const explicitFastIds = new Set<string>([
+    ...baseRows.filter((row) => row.modelId.endsWith("-fast")).map((row) => row.modelId),
+    ...[...explicitFast.keys()].map((id) => `${id}-fast`),
+  ])
+
+  for (const row of baseRows) {
+    const publishedLong = explicitLong.get(row.modelId)
+    let priced = row.entry
+    if (publishedLong) {
+      priced = withThreshold(
+        row.entry,
+        requireThreshold(`${publishedLong.notes}\n${row.notes}`, row.displayName, defaultContexts),
+        publishedLong.cost,
+      )
     } else {
-      table[modelId] = entry
+      const multiple = pricedMultipleFromNote(row.notes, row.entry)
+      if (multiple) {
+        priced = withThreshold(
+          row.entry,
+          requireThreshold(row.notes, row.displayName, defaultContexts),
+          multiple,
+        )
+      } else if (noteDoublesInputOnly(row.notes)) {
+        priced = withThreshold(
+          row.entry,
+          requireThreshold(row.notes, row.displayName, defaultContexts),
+          scaleInput(row.entry, 2),
+        )
+      }
     }
-  }
+    costs[row.modelId] = priced
 
-  for (const [modelId, longCost] of longContextById) {
-    const base = table[modelId]
-    if (!base) {
-      // Rare: only a 1M row exists — treat it as the base rate.
-      table[modelId] = longCost
+    if (row.modelId.endsWith("-fast")) continue
+    const fastId = `${row.modelId}-fast`
+    if (explicitFastIds.has(fastId)) {
+      const published = explicitFast.get(row.modelId)
+      if (published) costs[fastId] = published
       continue
     }
-    table[modelId] = withLongContext(base, longCost)
+
+    const fast = fastNote(row.notes)
+    if (!fast) continue
+    if (fast.kind === "unpriced") {
+      unpriced[fastId] = fast.reason
+      continue
+    }
+    if (fast.kind === "opus47FastDividedBy3") {
+      const source = explicitFast.get("claude-opus-4-7")
+      if (!source) {
+        throw new Error("Claude Opus 4.7 (fast mode) row is required to price Claude Opus 4.8 Fast")
+      }
+      costs[fastId] = scaleAll(source, 1 / 3)
+      continue
+    }
+
+    let fastCost = scaleAll(row.entry, 2)
+    if (fastLongDoublesFastInput(row.notes)) {
+      fastCost = withThreshold(
+        fastCost,
+        requireThreshold(row.notes, row.displayName, defaultContexts),
+        scaleInput(fastCost, 2),
+      )
+    }
+    costs[fastId] = fastCost
   }
 
-  return Object.fromEntries(Object.entries(table).sort(([a], [b]) => a.localeCompare(b)))
+  for (const [modelId, publishedLong] of explicitLong) {
+    if (costs[modelId]) continue
+    costs[modelId] = publishedLong.cost
+  }
+
+  return {
+    costs: Object.fromEntries(Object.entries(costs).sort(([a], [b]) => a.localeCompare(b))),
+    unpriced: Object.fromEntries(Object.entries(unpriced).sort(([a], [b]) => a.localeCompare(b))),
+  }
+}
+
+export function buildPricingTable(
+  markdown: string,
+  defaultContexts: Readonly<Record<string, number>> = {},
+): Record<string, OpenCodeModelCost> {
+  return buildPricing(markdown, defaultContexts).costs
+}
+
+export function buildUnpricedModelReasons(
+  markdown: string,
+  defaultContexts: Readonly<Record<string, number>> = {},
+): Record<string, string> {
+  return buildPricing(markdown, defaultContexts).unpriced
 }
 
 export function buildContextTable(markdown: string): Record<string, CursorModelContext> {
@@ -437,11 +705,13 @@ export function buildContextTable(markdown: string): Record<string, CursorModelC
 
 function renderPricingDataModule(
   pricingTable: Record<string, OpenCodeModelCost>,
+  unpriced: Record<string, string>,
   contextTable: Record<string, CursorModelContext>,
   pricingSource: string,
   contextSource: string,
 ): string {
   const pricingBody = JSON.stringify(pricingTable, null, 2)
+  const unpricedBody = JSON.stringify(unpriced, null, 2)
   const contextBody = JSON.stringify(contextTable, null, 2)
   // Keep this module free of imports so it cannot cycle with pricing.ts.
   return `/**
@@ -455,6 +725,9 @@ export const CURSOR_PRICING_SOURCE = ${JSON.stringify(pricingSource)} as const
 export const CURSOR_CONTEXT_SOURCE = ${JSON.stringify(contextSource)} as const
 
 export const CURSOR_MODEL_COSTS = ${pricingBody} as const
+
+/** Catalog ids the docs name without a numeric rate. Keys are the unpriced ids. */
+export const CURSOR_UNPRICED_MODEL_REASONS = ${unpricedBody} as const
 
 export const CURSOR_MODEL_CONTEXTS = ${contextBody} as const
 `
@@ -486,10 +759,13 @@ async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2))
   const pricingDoc = await loadMarkdown(CURSOR_PRICING_DOC_URL, options.fromFile)
   const contextDoc = await loadMarkdown(CURSOR_CONTEXT_DOC_URL, options.contextFromFile)
-  const pricingTable = buildPricingTable(pricingDoc.text)
+  const defaultContexts = defaultContextByDisplayName(contextDoc.text)
+  const pricing = buildPricing(pricingDoc.text, defaultContexts)
+  const pricingTable = pricing.costs
   const contextTable = buildContextTable(contextDoc.text)
   const next = renderPricingDataModule(
     pricingTable,
+    pricing.unpriced,
     contextTable,
     pricingDoc.source,
     contextDoc.source,
