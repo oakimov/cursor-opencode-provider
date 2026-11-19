@@ -73,12 +73,56 @@ describe("pricing", () => {
         cache_write: 7.5,
       },
     })
+    expect(getCursorModelCost("gpt-5.4")).toEqual({
+      input: 2.5,
+      output: 15,
+      cache_read: 0.25,
+      context_over_200k: { input: 5, output: 15, cache_read: 0.5 },
+    })
     expect(getCursorModelCost("gpt-5.5")).toEqual({
       input: 5,
       output: 30,
       cache_read: 0.5,
+      context_over_200k: { input: 10, output: 30, cache_read: 1 },
     })
-    expect(getCursorModelCost("gpt-5.5")?.context_over_200k).toBeUndefined()
+    expect(getCursorModelCost("gpt-5.6-luna")).toEqual({
+      input: 0.2,
+      output: 1.2,
+      cache_read: 0.02,
+      cache_write: 0.25,
+      context_over_200k: { input: 0.4, output: 1.2, cache_read: 0.04, cache_write: 0.5 },
+    })
+    expect(getCursorModelCost("gpt-5.6-sol")).toEqual({
+      input: 4,
+      output: 20,
+      cache_read: 0.4,
+      cache_write: 5,
+      context_over_200k: { input: 8, output: 20, cache_read: 0.8, cache_write: 10 },
+    })
+    expect(getCursorModelCost("gpt-5.6-terra")).toEqual({
+      input: 2,
+      output: 12,
+      cache_read: 0.2,
+      cache_write: 2.5,
+      context_over_200k: { input: 4, output: 12, cache_read: 0.4, cache_write: 5 },
+    })
+    expect(getCursorModelCost("gpt-5.4-mini")?.context_over_200k).toBeUndefined()
+  })
+
+  it("maps Gemini 4 Carbon, Hydrogen, and Neon onto served catalog ids", () => {
+    const expected = [
+      { displayName: "Gemini 4 Carbon", id: "gemini-4-carbon", cost: { input: 2, output: 10, cache_read: 0.1 } },
+      { displayName: "Gemini 4 Hydrogen", id: "gemini-4-hydrogen", cost: { input: 1.5, output: 7.5, cache_read: 0.075 } },
+      { displayName: "Gemini 4 Neon", id: "gemini-4-neon", cost: { input: 3, output: 15, cache_read: 0.15 } },
+    ] as const
+    for (const entry of expected) {
+      expect(catalogIdForPricingDisplayName(entry.displayName)).toBe(entry.id)
+      expect(getCursorModelCost(entry.id)).toEqual(entry.cost)
+      expect(getDocumentedCursorModelContext(entry.id)).toEqual({
+        maxContext: 200_000,
+        maxContextForMaxMode: 1_000_000,
+      })
+    }
   })
 
   it("maps Cursor Models pool rates, including Fast variants", () => {

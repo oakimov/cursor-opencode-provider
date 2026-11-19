@@ -8,6 +8,7 @@
 
 ### Added
 
+- Gemini 4 Carbon, Hydrogen, and Neon token prices and context windows from Cursor's model docs (`gemini-4-carbon`, `gemini-4-hydrogen`, `gemini-4-neon`).
 - `CURSOR_PROVIDER_CACHE_TTL_MS` sets how long a persisted conversation snapshot stays eligible for reuse (24 h by default). Abandoned writer temps still expire after 24 h ([#184](https://github.com/oakimov/cursor-opencode-provider/pull/184), @adonm).
 - Native OpenCode 2.x session runs accept short effort aliases such as `#max` and `#high-fast` when they identify one choice. The picker keeps one entry under its original display label. ACP effort selectors use that label ([#183](https://github.com/oakimov/cursor-opencode-provider/pull/183), @adonm).
 - First-time [review harness setup guide](docs/review-harness.md): supply App credentials or a PAT, run a Cloud Agent or local review, what a published COMMENT review contains, harness architecture (tests, evals, live OpenCode runs, extending scenarios).
@@ -22,6 +23,7 @@
 
 ### Fixed
 
+- GPT-5.4, GPT-5.5, and GPT-5.6 Luna, Sol, and Terra include Cursor's published long-context rates. Above 200k tokens, input, cache read, and cache write are twice the standard rate.
 - Published review summaries no longer include the local publication plan. A retained preview that still contains that plan posts with the plan removed and its approved bytes unchanged. Planned replies and thread resolutions stay in the `review-publish.py show` report and are not part of the posted review ([#196](https://github.com/oakimov/cursor-opencode-provider/pull/196)).
 - Isolated reviews now exercise short effort alias selection, quarantined snapshot recovery and corrupt model-cache replacement. Incomplete contract output and newly failing fixtures block the live check ([#188](https://github.com/oakimov/cursor-opencode-provider/pull/188)).
 - Re-review findings at current-diff locations create native inline code threads while the existing summary is updated in place. The summary does not repeat a finding that is posted inline; findings outside the diff stay in the summary. New comments from one re-review share one review with an empty body, and `post` refuses a second review whose body contains summary text when this publishing identity already has a stamped summary. The App identifies itself by the `<slug>[bot]` login from `GET /app`, because an installation token cannot call `GET /user`; a personal access token still uses `GET /user`. Another author's summary does not block the first post. The catalog contract compares each choice with its wire model id, so a tuple moved onto another model fails. Existing comment snapshots prevent duplicate edits, and partial inline publication keeps its own recovery receipts. `post` refuses the update, before any write, when a finding's path, line and side sit in the pull diff but the rendered comments omit them ([#188](https://github.com/oakimov/cursor-opencode-provider/pull/188)).

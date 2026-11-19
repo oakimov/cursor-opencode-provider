@@ -166,6 +166,21 @@ export const CURSOR_MODEL_COSTS = {
     "output": 10,
     "cache_read": 0.1
   },
+  "gemini-4-carbon": {
+    "input": 2,
+    "output": 10,
+    "cache_read": 0.1
+  },
+  "gemini-4-hydrogen": {
+    "input": 1.5,
+    "output": 7.5,
+    "cache_read": 0.075
+  },
+  "gemini-4-neon": {
+    "input": 3,
+    "output": 15,
+    "cache_read": 0.15
+  },
   "glm-5.2": {
     "input": 1.4,
     "output": 4.4,
@@ -204,7 +219,12 @@ export const CURSOR_MODEL_COSTS = {
   "gpt-5.4": {
     "input": 2.5,
     "output": 15,
-    "cache_read": 0.25
+    "cache_read": 0.25,
+    "context_over_200k": {
+      "input": 5,
+      "output": 15,
+      "cache_read": 0.5
+    }
   },
   "gpt-5.4-mini": {
     "input": 0.75,
@@ -219,25 +239,48 @@ export const CURSOR_MODEL_COSTS = {
   "gpt-5.5": {
     "input": 5,
     "output": 30,
-    "cache_read": 0.5
+    "cache_read": 0.5,
+    "context_over_200k": {
+      "input": 10,
+      "output": 30,
+      "cache_read": 1
+    }
   },
   "gpt-5.6-luna": {
     "input": 0.2,
     "output": 1.2,
     "cache_read": 0.02,
-    "cache_write": 0.25
+    "cache_write": 0.25,
+    "context_over_200k": {
+      "input": 0.4,
+      "output": 1.2,
+      "cache_read": 0.04,
+      "cache_write": 0.5
+    }
   },
   "gpt-5.6-sol": {
     "input": 4,
     "output": 20,
     "cache_read": 0.4,
-    "cache_write": 5
+    "cache_write": 5,
+    "context_over_200k": {
+      "input": 8,
+      "output": 20,
+      "cache_read": 0.8,
+      "cache_write": 10
+    }
   },
   "gpt-5.6-terra": {
     "input": 2,
     "output": 12,
     "cache_read": 0.2,
-    "cache_write": 2.5
+    "cache_write": 2.5,
+    "context_over_200k": {
+      "input": 4,
+      "output": 12,
+      "cache_read": 0.4,
+      "cache_write": 5
+    }
   },
   "grok-4.5": {
     "input": 2,
@@ -400,6 +443,18 @@ export const CURSOR_MODEL_CONTEXTS = {
     "maxContextForMaxMode": 1000000
   },
   "gemini-4-argon": {
+    "maxContext": 200000,
+    "maxContextForMaxMode": 1000000
+  },
+  "gemini-4-carbon": {
+    "maxContext": 200000,
+    "maxContextForMaxMode": 1000000
+  },
+  "gemini-4-hydrogen": {
+    "maxContext": 200000,
+    "maxContextForMaxMode": 1000000
+  },
+  "gemini-4-neon": {
     "maxContext": 200000,
     "maxContextForMaxMode": 1000000
   },
