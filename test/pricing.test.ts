@@ -16,6 +16,7 @@ import {
 } from "../src/pricing.js"
 import {
   buildContextTable,
+  buildPricing,
   buildPricingTable,
   catalogIdForPricingDisplayName,
 } from "../scripts/generate-cursor-pricing.js"
@@ -414,6 +415,70 @@ describe("pricing", () => {
       "grok-4.6": { input: 2, output: 6, cache_read: 0.5 },
       "grok-4.6-fast": { input: 4, output: 12, cache_read: 1 },
     })
+  })
+
+  it("prices Fast notes from the docs prose and keeps an explicit Fast row", () => {
+    const markdown = `
+| Model | Provider | Input | Cache write | Cache read | Output | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| GPT-5.4 | OpenAI | $2.5 | - | $0.25 | $15 | Fast mode is 15% faster with 2x pricing |
+| GPT-5.4 Mini | OpenAI | $0.75 | - | $0.075 | $4.5 | Fast mode is available at 2x pricing |
+| GPT-5.5 | OpenAI | $5 | - | $0.5 | $30 | Fast mode is available at higher rates |
+| GPT-5.6 Sol | OpenAI | $4 | $5 | $0.4 | $20 | Fast mode is 2x pricing. Fast mode for long context (>272k) at 2x Fast input pricing |
+| Claude Opus 5 | Anthropic | $10 | $12.5 | $1 | $50 | Fast mode (\`claude-opus-5-fast\`) |
+| Claude 4.7 Opus | Anthropic | $10 | $12.5 | $1 | $50 | Fast mode is available at 2x pricing |
+| Claude Opus 4.7 (fast mode) | Anthropic | $30 | $37.5 | $3 | $150 | |
+| Claude Opus 4.8 | Anthropic | $5 | $6.25 | $0.5 | $25 | Fast mode is 3x lower per-token pricing than Opus 4.7 fast mode |
+| Composer 2.5 | Cursor | $0.5 | - | $0.2 | $2.5 | Fast mode is available at 2x pricing |
+| Composer 2.5 (Fast) | Cursor | $3 | - | $0.5 | $15 | |
+`
+
+    expect(buildPricing(markdown)).toEqual({
+      costs: {
+        "claude-opus-4-7": { input: 10, output: 50, cache_read: 1, cache_write: 12.5 },
+        "claude-opus-4-7-fast": { input: 30, output: 150, cache_read: 3, cache_write: 37.5 },
+        "claude-opus-4-8": { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 },
+        "claude-opus-4-8-fast": { input: 10, output: 50, cache_read: 1, cache_write: 12.5 },
+        "claude-opus-5": { input: 10, output: 50, cache_read: 1, cache_write: 12.5 },
+        "composer-2.5": { input: 0.5, output: 2.5, cache_read: 0.2 },
+        "composer-2.5-fast": { input: 3, output: 15, cache_read: 0.5 },
+        "gpt-5.4": { input: 2.5, output: 15, cache_read: 0.25 },
+        "gpt-5.4-fast": { input: 5, output: 30, cache_read: 0.5 },
+        "gpt-5.4-mini": { input: 0.75, output: 4.5, cache_read: 0.075 },
+        "gpt-5.4-mini-fast": { input: 1.5, output: 9, cache_read: 0.15 },
+        "gpt-5.5": { input: 5, output: 30, cache_read: 0.5 },
+        "gpt-5.6-sol": { input: 4, output: 20, cache_read: 0.4, cache_write: 5 },
+        "gpt-5.6-sol-fast": {
+          input: 8,
+          output: 40,
+          cache_read: 0.8,
+          cache_write: 10,
+          tiers: [{
+            tier: { type: "context", size: 272_000 },
+            input: 16,
+            output: 40,
+            cache_read: 0.8,
+            cache_write: 10,
+          }],
+        },
+      },
+      unpriced: {
+        "claude-opus-5-fast": "Cursor names Fast mode `claude-opus-5-fast` and publishes no Fast rate",
+        default: "Cursor publishes no numeric Auto rate",
+        "gpt-5.5-fast": "Cursor's pricing note says Fast mode is available at higher rates and publishes no rate",
+      },
+    })
+  })
+
+  it("refuses to price Opus 4.8 Fast without the Opus 4.7 fast-mode row", () => {
+    const markdown = `
+| Model | Provider | Input | Cache write | Cache read | Output | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| Claude Opus 4.8 | Anthropic | $5 | $6.25 | $0.5 | $25 | Fast mode is 3x lower per-token pricing than Opus 4.7 fast mode |
+`
+    expect(() => buildPricing(markdown)).toThrow(
+      "Claude Opus 4.7 (fast mode) row is required to price Claude Opus 4.8 Fast",
+    )
   })
 
   it("leaves Auto unpriced when docs omit an Auto-specific rate", () => {
