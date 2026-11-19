@@ -1773,7 +1773,7 @@ describe("review publication", () => {
         note: "The locked operation is pinned before the lookups.",
       }], mutations: [{
         action: "reply",
-        thread: "discussion_r10",
+        thread: "PRRT_kwDOTWqht864hfZT",
         body: "The lock now keeps the approved pull request.",
         evidence: "test/review-publish.test.ts",
       }] }), null, 2) + "\n")
@@ -1794,11 +1794,21 @@ describe("review publication", () => {
       expect(body.body).toContain("Location: scripts/isolated-check.sh:4 RIGHT")
       expect(body.body).toContain("Earlier findings:")
       expect(body.body).toContain("old-lock (discussion_r10): fixed.")
-      expect(body.body).toContain("GitHub actions after approval (replies remain proposals):")
+      expect(body.body).not.toContain("GitHub actions after approval (replies remain proposals):")
+      expect(body.body).not.toMatch(/PRRT_/)
+      expect(body.comments.every((comment) => !comment.body.includes("GitHub actions after approval (replies remain proposals):") && !/PRRT_/.test(comment.body))).toBe(true)
       expect(callsOf(state)).toEqual([])
       const again = renderReview(source, path.join(directory, "second.json"), env)
       expect(fs.readFileSync(payload, "utf8")).toBe(fs.readFileSync(path.join(directory, "second.json"), "utf8"))
       expect(run(["stamp", payload], env).status).toBe(0)
+      const shown = run(["show", payload], env)
+      expect(shown.status, shown.stderr).toBe(0)
+      expect(shown.stderr).toContain("Local publication plan (not posted):")
+      expect(shown.stderr).toContain("GitHub actions after approval (replies remain proposals):")
+      expect(shown.stderr).toContain("PRRT_kwDOTWqht864hfZT")
+      const shownBody = JSON.parse(shown.stdout) as { body: string }
+      expect(shownBody.body).not.toContain("GitHub actions after approval (replies remain proposals):")
+      expect(shownBody.body).not.toMatch(/PRRT_/)
       expect(approve(payload, approval, env).status).toBe(0)
       const posted = run(["post", payload, approval], env)
       expect(posted.status, `${posted.stdout}\n${posted.stderr}`).toBe(0)
@@ -1813,6 +1823,8 @@ describe("review publication", () => {
       expect(stored).toHaveLength(1)
       expect(stored[0]!.review.body).toContain("<!-- cursor-review:")
       expect(stored[0]!.review.body).not.toContain("High: Replacement approval is sent to the locked pull request")
+      expect(stored[0]!.review.body).not.toContain("GitHub actions after approval (replies remain proposals):")
+      expect(stored[0]!.review.body).not.toMatch(/PRRT_/)
       const attached = JSON.parse(fs.readFileSync(path.join(state, "comments.json"), "utf8")) as Array<{ pull_request_review_id: number }>
       expect(attached[0]?.pull_request_review_id).toBe(stored[0]!.review.id)
       stored[0]!.review.body = "Edited summary without the marker.\n"

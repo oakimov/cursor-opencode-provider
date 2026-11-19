@@ -55,6 +55,7 @@ import time
 from pathlib import Path
 
 MARKER = re.compile(r"<!-- cursor-review:([0-9a-f]{64}) -->")
+OPERATOR_HEADING = "GitHub actions after approval (replies remain proposals):"
 # Values, not the public names of settings. A sentence that names
 # CURSOR_API_KEY or copilot.totalNanoAiu is a review comment, not a secret.
 SECRET = re.compile(
@@ -521,6 +522,60 @@ def finding_text(finding: dict, *, located: bool) -> str:
     return "\n".join(lines)
 
 
+def strip_operator_section(body: str) -> str:
+    """Remove the local publication plan. A body without that heading is unchanged."""
+    if OPERATOR_HEADING not in body:
+        return body
+    ending = "\n" if body.endswith("\n") else ""
+    kept: list[str] = []
+    removed = False
+    index = 0
+    lines = body.splitlines()
+    while index < len(lines):
+        if lines[index].strip() == OPERATOR_HEADING:
+            removed = True
+            if kept and kept[-1] == "":
+                kept.pop()
+            index += 1
+            while index < len(lines) and (lines[index].startswith("- ") or (lines[index].startswith("  ") and lines[index].strip())):
+                index += 1
+            continue
+        kept.append(lines[index])
+        index += 1
+    if not removed:
+        return body
+    return "\n".join(kept) + ending
+
+
+def posted_body(body: str) -> str:
+    """The review text that may be sent to GitHub."""
+    return strip_operator_section(body)
+
+
+def operator_plan(result: object) -> str:
+    """Human-readable publication plan for the local preview. Never sent."""
+    if not isinstance(result, dict):
+        return ""
+    mutations = result.get("mutations")
+    if not isinstance(mutations, list) or not mutations:
+        return ""
+    lines = ["Local publication plan (not posted):", OPERATOR_HEADING]
+    for item in mutations:
+        if not isinstance(item, dict):
+            continue
+        action = item.get("action")
+        thread = item.get("thread")
+        detail = item.get("body")
+        if not isinstance(action, str) or not isinstance(thread, str) or not isinstance(detail, str):
+            continue
+        lines.append(f"- {action} {thread.strip()}: {detail.strip()}")
+        evidence = item.get("evidence")
+        if action == "resolve" and isinstance(evidence, str):
+            lines.append(f"  Evidence: {evidence.strip()}")
+    lines.append("End of local publication plan.")
+    return "\n".join(lines) + "\n"
+
+
 def public_review(result: dict, *, inline_updates: bool = False) -> tuple[str, list[dict]]:
     # Legacy retained previews keep their exact summary-only update format.
     anchors = set() if "update" in result and not inline_updates else {
@@ -576,12 +631,8 @@ def public_review(result: dict, *, inline_updates: bool = False) -> tuple[str, l
         lines.extend(["", "Earlier findings:"])
         for item in result["prior"]:
             lines.append(f"- {item['id']} ({item['source'].strip()}): {item['status']}. {item['note'].strip()}")
-    if result["mutations"]:
-        lines.extend(["", "GitHub actions after approval (replies remain proposals):"])
-        for item in result["mutations"]:
-            lines.append(f"- {item['action']} {item['thread'].strip()}: {item['body'].strip()}")
-            if item["action"] == "resolve":
-                lines.append(f"  Evidence: {item['evidence'].strip()}")
+    # Mutations are the operator's publication plan. show() prints them locally.
+    # They must not be part of the body GitHub receives.
     lines.extend([
         "",
         f"Runtime: {result['runtime']}.",
@@ -1347,7 +1398,7 @@ def checked_update_review(payload: dict, review: dict | None, *, original: bool 
         raise SystemExit("The target is not a stamped harness review. No replacement review was created.")
     if original and hashlib.sha256(body.encode()).hexdigest() != target["bodySha256"]:
         raise SystemExit("The existing review body changed. Refresh its snapshot and approval before updating.")
-    if delivered and body != payload["body"]:
+    if delivered and body != posted_body(payload["body"]):
         raise SystemExit("The review update is not visible with the approved body. No replacement review was created.")
     return review
 
@@ -1982,6 +2033,9 @@ def show(path: Path) -> None:
         register_artifacts(working, payload)
     print(f"REVIEW_RETAINED={retained}", file=sys.stderr)
     print(f"PREVIEW_SHA256={digest}", file=sys.stderr)
+    plan = operator_plan(payload.get("result"))
+    if plan:
+        print(plan, file=sys.stderr, end="")
     sys.stdout.buffer.write(raw)
 
 
@@ -2198,7 +2252,7 @@ def reject_moved_revision(
 def review_body(payload: dict) -> dict:
     return {
         "commit_id": payload["head"],
-        "body": payload["body"],
+        "body": posted_body(payload["body"]),
         "event": "COMMENT",
         "comments": [
             {"path": item["path"], "line": item["line"], "side": item["side"], "body": item["body"]}
@@ -2360,7 +2414,7 @@ def post_locked(
     code, stdout, stderr = gh_api(
         "PUT" if updating else "POST",
         endpoint,
-        {"body": payload["body"]} if updating else review_body(payload),
+        {"body": posted_body(payload["body"])} if updating else review_body(payload),
         token=token,
     )
     if code != 0:
