@@ -862,7 +862,9 @@ These are failure lessons shared by both hosts, not a replacement for
   (`test/selectable-pricing.test.ts`).
   `--from-file` together with `--context-from-file` makes no network request.
   A gap's page must be `<model-id>.html` in `--pages-from-dir`. A missing
-  file fails the run and names the id (`test/fixtures/pricing-offline`).
+  file fails the run and names the id. The offline fixture keeps only those
+  gap pages (`test/fixtures/pricing-offline/pages`). A model whose markdown
+  row already covers the selectable variants has no file there.
 - **Make tests capable of failing.** Type guards once sat outside tsc's include;
   root ignored permission fixtures. Use real usages, deterministic faults and
   independent host/frame evidence (`test/workspace-facts.test.ts`).

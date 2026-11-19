@@ -849,6 +849,7 @@ describe("pricing", () => {
   })
 
   it("reproduces committed prices from saved files and does not fetch", () => {
+    // pages/ holds only the selectable gaps. A markdown row needs no file.
     const root = join(import.meta.dir, "fixtures", "pricing-offline")
     const priced = loadOfflinePricing({
       pricingFile: join(root, "pricing.md"),
