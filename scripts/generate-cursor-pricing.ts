@@ -630,17 +630,37 @@ type PageRow = {
   threshold?: number
 }
 
-function decodeHtml(value: string): string {
-  return value
-    .replace(/&gt;/g, ">")
-    .replace(/&lt;/g, "<")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, "\"")
-    .replace(/&#x27;|&#39;/g, "'")
+/** One pass. A replacement is not scanned again, so `&amp;lt;` stays `&lt;`. */
+function decodeEntities(value: string): string {
+  return value.replace(/&(?:#x27|#39|gt|lt|quot|amp);/g, (entity) => {
+    switch (entity) {
+      case "&gt;": return ">"
+      case "&lt;": return "<"
+      case "&quot;": return "\""
+      case "&#x27;":
+      case "&#39;": return "'"
+      case "&amp;": return "&"
+      default: return entity
+    }
+  })
+}
+
+function stripComments(value: string): string {
+  let out = ""
+  let cursor = 0
+  while (cursor < value.length) {
+    const start = value.indexOf("<!--", cursor)
+    if (start < 0) return out + value.slice(cursor)
+    out += value.slice(cursor, start)
+    const end = value.indexOf("-->", start + 4)
+    if (end < 0) return out
+    cursor = end + 3
+  }
+  return out
 }
 
 function cellText(raw: string): string {
-  return decodeHtml(raw.replace(/<!--[\s\S]*?-->/g, "").replace(/<[^>]+>/g, " "))
+  return decodeEntities(stripComments(raw).replace(/<[^>]+>/g, " "))
     .replace(/\s+/g, " ")
     .trim()
 }
@@ -708,13 +728,33 @@ export function parseModelPagePricing(html: string): PageRow[] {
   })
 }
 
+function stripElement(html: string, name: string): string {
+  const lower = html.toLowerCase()
+  const open = `<${name}`
+  const close = `</${name}`
+  let out = ""
+  let cursor = 0
+  while (cursor < html.length) {
+    const start = lower.indexOf(open, cursor)
+    if (start < 0) return out + html.slice(cursor)
+    const boundary = lower[start + open.length]
+    if (boundary !== ">" && boundary !== "/" && !/\s/.test(boundary ?? "")) {
+      out += html.slice(cursor, start + open.length)
+      cursor = start + open.length
+      continue
+    }
+    out += html.slice(cursor, start)
+    const end = lower.indexOf(close, start + open.length)
+    if (end < 0) return out
+    const tagEnd = lower.indexOf(">", end + close.length)
+    cursor = tagEnd < 0 ? html.length : tagEnd + 1
+  }
+  return out
+}
+
 function pageText(html: string): string {
-  return decodeHtml(
-    html
-      .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
-      .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
-      .replace(/<!--[\s\S]*?-->/g, " ")
-      .replace(/<[^>]+>/g, " "),
+  return decodeEntities(
+    stripElement(stripElement(stripComments(html), "script"), "style").replace(/<[^>]+>/g, " "),
   ).replace(/\s+/g, " ")
 }
 

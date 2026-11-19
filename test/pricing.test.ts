@@ -755,4 +755,29 @@ describe("pricing", () => {
       formula: expect.stringContaining("no combined Fast long-context row"),
     }])
   })
+
+  it("ignores a Fast sentence that only appears inside a script", () => {
+    const html = `
+<table>
+<tr><th>Name</th><th>Input</th><th>Cache write</th><th>Cache read</th><th>Output</th></tr>
+<tr><td>GPT-5.4</td><td>$2.5</td><td>-</td><td>$0.25</td><td>$15</td></tr>
+</table>
+<script>Fast is at 2x the standard price. Above 272k, input pricing doubles and output pricing is 1.5x the standard rate.</script >
+<p>Standard rates only.</p>
+`
+    const markdown = `
+| Model | Provider | Input | Cache write | Cache read | Output | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| GPT-5.4 | OpenAI | $2.5 | - | $0.25 | $15 | |
+`
+    const pricing = buildPricing(markdown, { "GPT-5.4": 272_000 }, {
+      skipNoteModels: new Set(["gpt-5.4"]),
+    })
+    const derived = priceFromModelPages(pricing, [{ modelId: "gpt-5.4", html }], {
+      "GPT-5.4": 272_000,
+    })
+    expect(derived).toEqual([])
+    expect(pricing.costs["gpt-5.4-fast"]).toBeUndefined()
+    expect(pricing.costs["gpt-5.4"]?.tiers).toBeUndefined()
+  })
 })
