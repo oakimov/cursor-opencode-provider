@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { modelsToConfig } from "../src/model-config.js"
@@ -21,16 +21,22 @@ import {
   buildPricing,
   buildPricingTable,
   catalogIdForPricingDisplayName,
+  loadOfflinePricing,
   loadSavedModelPages,
   modelPageSource,
   parseArgs,
   priceFromModelPages,
   type PricingBuild,
 } from "../scripts/generate-cursor-pricing.js"
+import { takeNetworkAttempts } from "./network-guard.js"
 import { getDocumentedCursorModelContext } from "../src/model-metadata.js"
 import { modelsToCatalogModelMap } from "../src/opencode2/catalog.js"
 import { cursorRunCost } from "../src/billing.js"
-import { CURSOR_MODEL_COSTS } from "../src/pricing-data.js"
+import {
+  CURSOR_MODEL_CONTEXTS,
+  CURSOR_MODEL_COSTS,
+  CURSOR_UNPRICED_MODEL_REASONS,
+} from "../src/pricing-data.js"
 
 describe("pricing", () => {
   it("keeps inherited object keys unpriced, including synthetic context suffixes", () => {
@@ -789,7 +795,7 @@ describe("pricing", () => {
     expect(modelPageSource(parseArgs([
       "--from-file", "pricing.md",
       "--context-from-file", "docs.md",
-    ]))).toBe("markdown")
+    ]))).toBe("refused")
     expect(modelPageSource(parseArgs(["--check"]))).toBe("live")
     const dir = mkdtempSync(join(tmpdir(), "pricing-pages-"))
     try {
@@ -807,7 +813,9 @@ describe("pricing", () => {
         join(dir, "gpt-5.5.html"),
         readFileSync(join(import.meta.dir, "fixtures", "model-page-gpt-5-5.html"), "utf8"),
       )
-      const pages = loadSavedModelPages(dir)
+      expect(() => loadSavedModelPages(dir, ["gpt-5.5", "gpt-5.4"])).toThrow(/Refusing to fetch/)
+      expect(() => loadSavedModelPages(dir, ["gpt-5.5", "gpt-5.4"])).toThrow(/gpt-5\.4\.html/)
+      const pages = loadSavedModelPages(dir, ["gpt-5.5"])
       expect(pages.map((page) => page.modelId)).toEqual(["gpt-5.5"])
       const markdown = `
 | Model | Provider | Input | Cache write | Cache read | Output | Notes |
@@ -822,6 +830,32 @@ describe("pricing", () => {
       expect(pricing.costs["gpt-5.5"]?.tiers?.[0]?.output).toBe(45)
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("reproduces committed prices from saved files and does not fetch", () => {
+    const root = join(import.meta.dir, "fixtures", "pricing-offline")
+    const priced = loadOfflinePricing({
+      pricingFile: join(root, "pricing.md"),
+      contextFile: join(root, "context.md"),
+      pagesDir: join(root, "pages"),
+    })
+    expect(takeNetworkAttempts()).toEqual([])
+    expect(priced.costs).toEqual(CURSOR_MODEL_COSTS as unknown as typeof priced.costs)
+    expect(priced.unpriced).toEqual(CURSOR_UNPRICED_MODEL_REASONS)
+    expect(priced.contexts).toEqual(CURSOR_MODEL_CONTEXTS as unknown as typeof priced.contexts)
+    const incomplete = mkdtempSync(join(tmpdir(), "pricing-pages-"))
+    try {
+      cpSync(join(root, "pages"), incomplete, { recursive: true })
+      rmSync(join(incomplete, "gpt-5.5.html"))
+      expect(() => loadOfflinePricing({
+        pricingFile: join(root, "pricing.md"),
+        contextFile: join(root, "context.md"),
+        pagesDir: incomplete,
+      })).toThrow(/Refusing to fetch[\s\S]*gpt-5\.5\.html/)
+      expect(takeNetworkAttempts()).toEqual([])
+    } finally {
+      rmSync(incomplete, { recursive: true, force: true })
     }
   })
 })

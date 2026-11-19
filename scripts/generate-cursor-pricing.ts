@@ -16,13 +16,12 @@
  *
  * Usage:
  *   bun run generate:pricing
- *   bun run generate:pricing -- --from-file /tmp/pricing.md --context-from-file /tmp/docs.md
- *   bun run generate:pricing -- --from-file /tmp/pricing.md --context-from-file /tmp/docs.md --pages-from-dir /tmp/pages
+ *   bun run generate:pricing -- --from-file pricing.md --context-from-file docs.md --pages-from-dir pages
  *   bun run generate:pricing -- --check   # exit 1 if committed data is stale
  *
- * Both file flags stay offline. Without `--pages-from-dir` they price from the
- * saved markdown only. The directory holds `<model-id>.html` copies of the
- * rendered model pages.
+ * Both markdown file flags require `--pages-from-dir`. That run reads
+ * `<model-id>.html` for every model in the pricing markdown and makes no
+ * network request. A missing page fails the run; it is not fetched.
  *
  * Also runs automatically before npm publish (GitHub Actions publish.yml and
  * package.json prepublishOnly) so released packages carry current docs rates.
@@ -268,11 +267,14 @@ export function parseArgs(argv: string[]): Options {
 }
 
 /** Where model-page tables come from. Local markdown never fetches pages. */
-export function modelPageSource(options: Options): "directory" | "markdown" | "live" {
+export function modelPageSource(options: Options): "directory" | "refused" | "live" {
   if (options.pagesFromDir) return "directory"
-  if (options.fromFile && options.contextFromFile) return "markdown"
+  if (options.fromFile && options.contextFromFile) return "refused"
   return "live"
 }
+
+export const LOCAL_PAGES_REQUIRED =
+  "Refusing to fetch model pages. Pass --pages-from-dir with a <model-id>.html file for every model in the pricing markdown."
 
 function stripMarkdownLink(value: string): string {
   return value.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").trim()
@@ -622,6 +624,19 @@ function fastModeModelId(displayName: string): string | undefined {
   // The base row is "Claude 4.7 Opus"; the fast-mode row says "Claude Opus 4.7".
   if (base === "Claude Opus 4.7") return "claude-opus-4-7"
   return DISPLAY_NAME_TO_MODEL_ID[base]
+}
+
+/** Models in the pricing markdown that have a rendered docs page. */
+export function requiredModelPageIds(markdown: string): string[] {
+  const ids = new Set<string>()
+  for (const row of parsePricingTables(markdown)) {
+    if (SKIP_DISPLAY_NAMES.has(row.displayName)) continue
+    const modelId = fastModeModelId(row.displayName) ?? catalogIdForPricingDisplayName(row.displayName)
+    if (!modelId) continue
+    const base = modelId.endsWith("-fast") ? modelId.slice(0, -"-fast".length) : modelId
+    if (Object.hasOwn(MODEL_PAGE_SLUG, base)) ids.add(base)
+  }
+  return [...ids].sort()
 }
 
 export type ModelPageInput = {
@@ -1209,8 +1224,11 @@ async function loadMarkdown(
   return { text: await response.text(), source: url }
 }
 
-/** Read `<model-id>.html` files. A model with no file keeps the main-table rate. */
-export function loadSavedModelPages(dir: string): ModelPageInput[] {
+/**
+ * Read `<model-id>.html` files. Each id in `requiredIds` must be present.
+ * A missing file is an error. This function does not fetch.
+ */
+export function loadSavedModelPages(dir: string, requiredIds: readonly string[] = []): ModelPageInput[] {
   const known = new Set(Object.keys(MODEL_PAGE_SLUG))
   let names: string[]
   try {
@@ -1219,17 +1237,64 @@ export function loadSavedModelPages(dir: string): ModelPageInput[] {
     const message = error instanceof Error ? error.message : String(error)
     throw new Error(`Cannot read model pages from ${dir}: ${message}`)
   }
-  const pages: ModelPageInput[] = []
+  const pages = new Map<string, ModelPageInput>()
   for (const name of names) {
     if (!name.endsWith(".html")) continue
     const modelId = name.slice(0, -".html".length)
     if (!known.has(modelId)) throw new Error(`Unknown model page ${name} in ${dir}`)
-    pages.push({ modelId, html: readFileSync(path.join(dir, name), "utf8") })
+    pages.set(modelId, { modelId, html: readFileSync(path.join(dir, name), "utf8") })
   }
-  if (pages.length === 0) {
+  const missing = requiredIds.filter((id) => !pages.has(id))
+  if (missing.length > 0) {
+    const lines = missing.map((id) => `${id}: ${path.join(dir, `${id}.html`)}`)
+    throw new Error(`Missing saved model page${missing.length === 1 ? "" : "s"}. Refusing to fetch.\n${lines.join("\n")}`)
+  }
+  if (requiredIds.length > 0) return requiredIds.map((id) => pages.get(id)!)
+  if (pages.size === 0) {
     throw new Error(`No model pages in ${dir}. Expected <model-id>.html files.`)
   }
-  return pages
+  return [...pages.values()]
+}
+
+export function assemblePricing(
+  pricingMarkdown: string,
+  contextMarkdown: string,
+  pages: readonly ModelPageInput[],
+): {
+  costs: Record<string, OpenCodeModelCost>
+  unpriced: Record<string, string>
+  contexts: Record<string, CursorModelContext>
+  derived: DerivedModelPrice[]
+} {
+  const defaultContexts = defaultContextByDisplayName(contextMarkdown)
+  const pricing = buildPricing(pricingMarkdown, defaultContexts, {
+    skipNoteModels: new Set(pages.map((page) => page.modelId)),
+  })
+  const derived = priceFromModelPages(pricing, pages, defaultContexts)
+  applyCursorStaffAutoRate(pricing)
+  return {
+    costs: pricing.costs,
+    unpriced: pricing.unpriced,
+    contexts: buildContextTable(contextMarkdown),
+    derived,
+  }
+}
+
+/** Read the three local inputs and price them. Does not fetch. */
+export function loadOfflinePricing(paths: {
+  pricingFile: string
+  contextFile: string
+  pagesDir: string
+}): {
+  costs: Record<string, OpenCodeModelCost>
+  unpriced: Record<string, string>
+  contexts: Record<string, CursorModelContext>
+  derived: DerivedModelPrice[]
+} {
+  const pricingMarkdown = readFileSync(paths.pricingFile, "utf8")
+  const contextMarkdown = readFileSync(paths.contextFile, "utf8")
+  const pages = loadSavedModelPages(paths.pagesDir, requiredModelPageIds(pricingMarkdown))
+  return assemblePricing(pricingMarkdown, contextMarkdown, pages)
 }
 
 async function loadModelPages(): Promise<ModelPageInput[]> {
@@ -1253,36 +1318,29 @@ async function loadModelPages(): Promise<ModelPageInput[]> {
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2))
+  const pageSource = modelPageSource(options)
+  if (pageSource === "refused") throw new Error(LOCAL_PAGES_REQUIRED)
   const pricingDoc = await loadMarkdown(CURSOR_PRICING_DOC_URL, options.fromFile)
   const contextDoc = await loadMarkdown(CURSOR_CONTEXT_DOC_URL, options.contextFromFile)
-  const pageSource = modelPageSource(options)
-  const pages = pageSource === "directory"
-    ? loadSavedModelPages(options.pagesFromDir!)
-    : pageSource === "markdown"
-      ? []
-      : await loadModelPages()
-  const defaultContexts = defaultContextByDisplayName(contextDoc.text)
-  const pricing = buildPricing(pricingDoc.text, defaultContexts, {
-    skipNoteModels: new Set(pages.map((page) => page.modelId)),
-  })
-  const derived = priceFromModelPages(pricing, pages, defaultContexts)
-  applyCursorStaffAutoRate(pricing)
-  const pricingTable = pricing.costs
-  const contextTable = buildContextTable(contextDoc.text)
+  const pages = options.pagesFromDir
+    ? loadSavedModelPages(options.pagesFromDir, requiredModelPageIds(pricingDoc.text))
+    : await loadModelPages()
+  const assembled = assemblePricing(pricingDoc.text, contextDoc.text, pages)
+  const derived = assembled.derived
+  const pricingTable = assembled.costs
+  const contextTable = assembled.contexts
   const next = renderPricingDataModule(
     pricingTable,
-    pricing.unpriced,
+    assembled.unpriced,
     contextTable,
     pricingDoc.source,
     contextDoc.source,
   )
   const dest = outputPath()
   console.log(
-    pageSource === "directory"
+    options.pagesFromDir
       ? `Model pages: ${pages.length} from ${options.pagesFromDir}`
-      : pageSource === "markdown"
-        ? "Model pages: none (local markdown only)"
-        : `Model pages: ${pages.length}`,
+      : `Model pages: ${pages.length}`,
   )
   console.log(`Derived prices: ${derived.length}`)
   for (const price of derived) {

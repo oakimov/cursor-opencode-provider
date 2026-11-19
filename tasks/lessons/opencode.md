@@ -861,8 +861,9 @@ These are failure lessons shared by both hosts, not a replacement for
   Every selectable entry must resolve to a price
   (`test/selectable-pricing.test.ts`).
   `--from-file` together with `--context-from-file` does not fetch model
-  pages. Pass `--pages-from-dir` with `<model-id>.html` copies to reproduce
-  the page tables offline.
+  pages. Pass `--pages-from-dir` with `<model-id>.html` copies. A model in
+  the pricing markdown whose page file is missing fails the run; it is not
+  downloaded (`test/fixtures/pricing-offline`).
 - **Make tests capable of failing.** Type guards once sat outside tsc's include;
   root ignored permission fixtures. Use real usages, deterministic faults and
   independent host/frame evidence (`test/workspace-facts.test.ts`).
