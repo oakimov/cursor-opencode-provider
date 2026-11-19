@@ -106,6 +106,145 @@ describe("inline catalog recovery", () => {
   })
 })
 
+describe("Cursor-side waits", () => {
+  // Independent bytes from the Cursor CLI 2026.10.22 descriptors: ToolCall await_tool_call #42 =
+  // AwaitToolCall {args #1, result #2}; AwaitArgs {task_id #1, block_until_ms #2, regex #3};
+  // AwaitResult {complete #1, still_running #2, error #3, success #4}; AwaitSuccess {complete #1,
+  // still_running #2}; AwaitTaskStillRunning {task_id #1, runtime_ms #2, output_file_path #3,
+  // output_length #4, regex_requested #5, regex_match #6, wake_reason #7}; AwaitTaskComplete
+  // {#1–#6 likewise, exit_code #7, wake_reason #8}.
+  const bytes = (field: number, body: number[] = []) => lengthDelimited(field, Uint8Array.from(body))
+  const text = (field: number, value: string) => lengthDelimited(field, new TextEncoder().encode(value))
+  const number = (field: number, value: number) => [...varint(field << 3), ...varint(value)]
+  const taskArgs = [...text(1, "7"), ...number(2, 30_000)]
+  const sleepArgs = number(2, 20_000)
+  const task = [...text(1, "7"), ...number(2, 30_000), ...text(3, "terminals/7.txt"), ...number(4, 812)]
+  const timedOut = bytes(4, bytes(2, task))
+  const slept = bytes(4, bytes(1, number(2, 20_000)))
+  const analyze = (completed: boolean, args: number[], result?: number[], toolExtra: number[] = [], callId = "wait") => {
+    const frame = updateFrame(completed ? 3 : 2, [
+      ...text(1, callId),
+      ...bytes(2, [
+        ...bytes(42, [...bytes(1, args), ...(result ? bytes(2, result) : [])]),
+        ...text(57, callId), ...number(59, 1), ...(completed ? number(60, 2) : []),
+        ...toolExtra,
+      ]),
+    ])
+    const decoded = decodeMessage<{ interaction_update: Record<string, unknown> }>("AgentServerMessage", frame)
+    return analyzeReplayFrame(frame, { interactionUpdate: decoded.interaction_update }).toolLifecycle
+  }
+
+  it.each([
+    ["a wait whose task is still running when it times out", taskArgs, timedOut],
+    ["a timed-out wait for a regex that did not match", [...taskArgs, ...text(3, "ready")],
+      bytes(4, bytes(2, [...task, ...number(5, 1)]))],
+    ["a sleep that ran its whole length", sleepArgs, slept],
+  ] as const)("accounts for %s without authorizing a naked replay", (_name, args, result) => {
+    const start = analyze(false, [...args])
+    expect(start).toEqual({ kind: "started", callId: "wait", waitArgs: expect.any(String) })
+    expect(analyze(true, [...args], [...result])).toEqual({ kind: "completed", callId: "wait", waitArgs: start?.waitArgs })
+    const state: ReplaySafetyState = {}
+    const safety = new AttemptReplaySafety("run", state)
+    safety.recordToolLifecycle(analyze(false, [...args]))
+    expect(announcedCallsClaimed(state)).toBe(false)
+    safety.recordToolLifecycle(analyze(true, [...args], [...result]))
+    expect(state.historyRebaseUnsafe).toBeUndefined()
+    expect(announcedCallsClaimed(state)).toBe(true)
+    // The model saw the wait's result: the attempt that received it stays a barrier.
+    expect(safety.applyTo(new CursorTransportError("drop", { transient: true, replaySafe: true })))
+      .toMatchObject({ replaySafe: false, replayBarrier: "stateful" })
+  })
+
+  it.each([
+    ["a finished task's exit code", taskArgs, bytes(4, bytes(1, [...task, ...number(7, 0)]))],
+    ["a finished task without an exit code", taskArgs, bytes(4, bytes(1, task))],
+    ["a regex match", taskArgs, bytes(4, bytes(2, [...task, ...text(6, "ready")]))],
+    ["a wake reason", taskArgs, bytes(4, bytes(2, [...task, ...text(7, "user_message")]))],
+    ["an error", taskArgs, bytes(3, text(1, "no such task"))],
+    ["a result outside success", taskArgs, bytes(2, task)],
+    ["an unknown result field", taskArgs, bytes(4, bytes(2, [...task, ...number(9, 1)]))],
+    ["a repeated task id", taskArgs, bytes(4, bytes(2, [...task, ...text(1, "7")]))],
+    ["no task id", taskArgs, bytes(4, bytes(2, number(2, 30_000)))],
+    ["a different result task id", taskArgs, bytes(4, bytes(2, [...text(1, "8"), ...number(2, 30_000)]))],
+    ["a sleep that ended early", sleepArgs, bytes(4, bytes(1, number(2, 4_000)))],
+    ["a sleep result naming a task", sleepArgs, bytes(4, bytes(1, [...number(2, 20_000), ...text(1, "7")]))],
+    ["a sleep that timed out like a task", sleepArgs, timedOut],
+    ["a wait with neither task nor duration", [], slept],
+    ["a regex wait with no task", [...sleepArgs, ...text(3, "ready")], slept],
+    ["an empty task id", text(1, ""), timedOut],
+    ["an unknown argument", [...taskArgs, ...number(9, 1)], timedOut],
+  ] as const)("keeps a wait with %s unaccounted for", (_name, args, result) => {
+    expect(analyze(true, [...args], [...result])?.waitArgs).toBeUndefined()
+    const state: ReplaySafetyState = {}
+    const safety = new AttemptReplaySafety("run", state)
+    safety.recordToolLifecycle(analyze(false, [...args]))
+    safety.recordToolLifecycle(analyze(true, [...args], [...result]))
+    expect(state.historyRebaseUnsafe).toBe(true)
+    expect(announcedCallsClaimed(state)).toBe(false)
+  })
+
+  it("rejects other tool-call members beside the wait and a start that already holds a result", () => {
+    for (const extra of [bytes(15), bytes(54), text(57, "again"), bytes(59)]) {
+      expect(analyze(false, taskArgs, undefined, extra)?.waitArgs).toBeUndefined()
+      expect(analyze(true, taskArgs, timedOut, extra)?.waitArgs).toBeUndefined()
+    }
+    expect(analyze(false, taskArgs, timedOut)?.waitArgs).toBeUndefined()
+    expect(analyze(true, taskArgs)?.waitArgs).toBeUndefined()
+  })
+
+  it("requires its own start, once, and keeps an unfinished wait unaccounted for", () => {
+    const unstarted: ReplaySafetyState = {}
+    new AttemptReplaySafety("run", unstarted).recordToolLifecycle(analyze(true, taskArgs, timedOut))
+    expect(unstarted.historyRebaseUnsafe).toBe(true)
+
+    const duplicate: ReplaySafetyState = {}
+    const twice = new AttemptReplaySafety("run", duplicate)
+    twice.recordToolLifecycle(analyze(false, taskArgs))
+    twice.recordToolLifecycle(analyze(false, taskArgs))
+    expect(duplicate.historyRebaseUnsafe).toBe(true)
+
+    const other: ReplaySafetyState = {}
+    const mismatched = new AttemptReplaySafety("run", other)
+    mismatched.recordToolLifecycle(analyze(false, taskArgs, undefined, [], "wait-1"))
+    mismatched.recordToolLifecycle(analyze(true, taskArgs, timedOut, [], "wait-2"))
+    expect(other.historyRebaseUnsafe).toBe(true)
+
+    const unfinished: ReplaySafetyState = {}
+    new AttemptReplaySafety("run", unfinished).recordToolLifecycle(analyze(false, sleepArgs))
+    expect(unfinished.historyRebaseUnsafe).toBeUndefined()
+    expect(announcedCallsClaimed(unfinished)).toBe(false)
+  })
+
+  it("leaves a wait its terminal polls claimed to the host-exec rule", () => {
+    const state: ReplaySafetyState = {}
+    const safety = new AttemptReplaySafety("run", state)
+    safety.recordToolLifecycle(analyze(false, taskArgs))
+    safety.markBarrier("non-control-exec")
+    safety.recordExec(50, "wait")
+    safety.recordProviderAnswer(50, "terminal-read")
+    // A claimed completion adds nothing, whatever its result.
+    safety.recordToolLifecycle(analyze(true, taskArgs, bytes(4, bytes(1, [...task, ...number(7, 0)]))))
+    expect(state.historyRebaseUnsafe).toBeUndefined()
+    expect(state.waitCalls).toEqual({ wait: { args: expect.any(String) } })
+    expect(announcedCallsClaimed(state)).toBe(true)
+  })
+
+  it("does not account for a completion whose args changed since the start", () => {
+    for (const [started, completed, result] of [
+      [sleepArgs, taskArgs, timedOut],
+      [number(2, 30_000), sleepArgs, slept],
+      [[...taskArgs, ...text(3, "ready")], taskArgs, timedOut],
+    ] as const) {
+      const state: ReplaySafetyState = {}
+      const safety = new AttemptReplaySafety("run", state)
+      safety.recordToolLifecycle(analyze(false, [...started]))
+      safety.recordToolLifecycle(analyze(true, [...completed], result))
+      expect(state.historyRebaseUnsafe).toBe(true)
+      expect(announcedCallsClaimed(state)).toBe(false)
+    }
+  })
+})
+
 describe("replay frame analysis", () => {
   it("treats a KV request with its span context as a control frame", () => {
     expect(analyzeReplayFrame(kvFrame(id, getBlob, span), { kv })).toEqual({ barrier: undefined })
@@ -405,6 +544,20 @@ describe("history coverage of provider answers", () => {
     expect(historyCoverage(state, new Set(["run-1:1"]))).toEqual({
       hostExecs: 1, answers: { "terminal-read": 1, "missing-read": 1 }, complete: true,
     })
+  })
+
+  it("needs no result for a refused request to background a call already sent", () => {
+    const state = run((safety) => {
+      safety.recordExec(1, "shell")
+      safety.recordExec(70)
+      safety.recordProviderAnswer(70, "force-background")
+    })
+    expect(historyCoverage(state, new Set(["run-1:1"]))).toEqual({
+      hostExecs: 1, answers: { "force-background": 1 }, complete: true,
+    })
+    // An exec the provider refused any other way still needs a result.
+    const refused = run((safety) => { safety.recordExec(1, "shell"); safety.recordExec(70) })
+    expect(historyCoverage(refused, new Set(["run-1:1"])).complete).toBe(false)
   })
 
   for (const answer of ["edit-handshake", "task-attachment"] as const) {

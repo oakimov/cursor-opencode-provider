@@ -23,6 +23,36 @@ export const TIMEOUT_EXIT_CODE = 124
 export type ManagedTerminal = { command: string; directory: string; file: string; shellId: number }
 
 /**
+ * Set `variable` to the payload shell and leave that shell's options in "$@". Hooks run a wrapper
+ * with the host's shell and the options the host puts before `-c` as its arguments (OpenCode 2.2.7+
+ * runs zsh as `zsh +o nomatch -c <command>`), so the payload runs the argv the host would have run.
+ * A wrapper run inline, with no arguments, uses `fallback`.
+ */
+export function payloadShellLines(variable: string, fallback: string): string[] {
+  return [`${variable}=${quote(fallback)}`, `if [ "$#" -gt 0 ]; then ${variable}=$1; shift; fi`]
+}
+
+/**
+ * `cursor_own_group LOG COMMAND...` starts COMMAND detached, as a process group of its own, and
+ * sets `cursor_started` to its pid. A host signals the process group of the command it ran, also
+ * after a successful exit: OpenCode 2.3.0's process daemon keeps that group reserved and SIGKILLs it
+ * 25 shell commands later. Bash job control (`set -m`) gives a job its own group on macOS too,
+ * where `setsid` is not a standard executable. COMMAND does not inherit fd 5.
+ */
+export const START_IN_OWN_GROUP = String.raw`cursor_own_group() {
+  cursor_log=$1; shift
+  if cursor_bash=$(command -v bash 2>/dev/null) && [ -n "$cursor_bash" ]; then
+    cursor_started=$("$cursor_bash" -c 'set -m; nohup "$@" >>"$0" 2>&1 </dev/null & printf "%s\n" "$!"' "$cursor_log" "$@" 2>>"$cursor_log" 5>&-)
+  elif command -v setsid >/dev/null 2>&1; then
+    nohup setsid "$@" >>"$cursor_log" 2>&1 </dev/null 5>&- &
+    cursor_started=$!
+  else
+    nohup "$@" >>"$cursor_log" 2>&1 </dev/null 5>&- &
+    cursor_started=$!
+  fi
+}`
+
+/**
  * Soft-background launcher tail: wait out Cursor's foreground window, then
  * return the finished result, a hard timeout, or the output so far plus a
  * background handle.
@@ -48,6 +78,8 @@ function softBackgroundWindow(policy: CursorShellPolicy, shellId: number): strin
     `    sleep ${LAUNCHER_POLL_SECONDS}`, "  done",
     '  cursor_cancel_deadline',
     "fi",
+    // The window is over: from here the job ends or runs on without this launcher.
+    "cursor_detach",
     'if [ -f "$cursor_job/done" ]; then',
     ...capturedOutput('$(cat "$cursor_job/output-bytes")'),
     '  if [ -f "$cursor_job/timedout" ]; then',
@@ -153,16 +185,17 @@ export function createManagedTerminal(policy: CursorShellPolicy, root: string): 
     // Polling a plain cat's file size permits arbitrarily large overshoots.
     fs.writeFileSync(path.join(directory, "collector.cjs"), COLLECTOR, { mode: 0o600 })
     fs.writeFileSync(path.join(directory, "group.sh"), [
-      "#!/bin/sh", `job=${quote(directory)}`,
+      "#!/bin/sh", `job=${quote(directory)}`, IS_OURS,
       // The supervisor naps between checks; USR1 wakes it when state changes.
-      'supervisor="$1"',
+      // The payload shell and its options follow (`payloadShellLines`).
+      'supervisor="$1"', 'payload_shell="$2"', "shift 2",
       // Keep the leader alive until completion or cancellation so a reused
       // PID/PGID can never receive the supervisor's cancellation signal.
       "trap ':' TERM INT HUP",
-      // The supervisor holds the lifeline's only write end. Its exit, however
-      // abrupt (KILL, OOM, crash), is EOF here and stops an unfinished group.
-      'exec 3<"$job/lifeline" || exit 1',
-      '"$CURSOR_SHELL_EXECUTABLE" -c "$(cat "$job/command.sh")" 3<&- &', "payload=$!",
+      // FD 3 was opened at launch while its writer still existed. Do not start
+      // a payload if the supervisor already died. Later deaths reach the watcher.
+      'is_ours "$supervisor" "$job/runner.sh" || exit 1',
+      '"$payload_shell" "$@" -c "$(cat "$job/command.sh")" 3<&- &', "payload=$!",
       "(",
       "  trap '' TERM INT HUP",
       '  while read -r state; do [ "$state" != completed ] || exit 0; done <&3',
@@ -206,9 +239,7 @@ export function createManagedTerminal(policy: CursorShellPolicy, root: string): 
       `hard_seconds=${quote(String((policy.hardTimeoutMs ?? 0) / 1000))}`,
       `max_output=${MAX_RUNTIME_WRITE_BYTES}`,
       `runtime=${quote(process.execPath)}`,
-      `payload_shell=${quote(policy.shellPath ?? process.env.SHELL ?? "/bin/sh")}`,
-      '[ -z "$CURSOR_SHELL_EXECUTABLE" ] || payload_shell="$CURSOR_SHELL_EXECUTABLE"',
-      'export CURSOR_SHELL_EXECUTABLE="$payload_shell"',
+      ...payloadShellLines("payload_shell", policy.shellPath ?? process.env.SHELL ?? "/bin/sh"),
     ].join("\n")
     fs.writeFileSync(path.join(directory, "runner.sh"), setup + "\n" + IS_OURS + "\n" + SUPERVISOR, { mode: 0o700 })
     const delimiter = commandDelimiter(policy.command)
@@ -224,12 +255,25 @@ export function createManagedTerminal(policy: CursorShellPolicy, root: string): 
       body + delimiter,
       `cursor_terminal=${quote(file)}`,
       IS_OURS,
+      START_IN_OWN_GROUP,
+      // The supervisor runs outside this launcher's process group, so the
+      // host's signal to that group no longer reaches it. Cancellation takes
+      // this pipe instead: the launcher holds its only write end and writes
+      // `detached` when it hands the job over. An end of file without that
+      // (Stop, the host's timeout, any kill of this launcher) stops the job.
+      // The EXIT trap cannot write it: bash runs that trap on TERM too.
+      'mkfifo "$cursor_job/handoff" || { rmdir "$cursor_job/claimed"; printf "Background terminal handoff could not be created\\n\\n__CURSOR_SHELL_EXIT__1\\n"; exit 1; }',
+      'exec 5<>"$cursor_job/handoff" 6<"$cursor_job/handoff"',
+      "cursor_detach() { printf 'detached\\n' >&5 2>/dev/null; exec 5>&-; }",
       // Bash job control gives the command its own process group on macOS,
       // where setsid is not a standard executable. Else require setsid.
       'cursor_runner=$(command -v bash 2>/dev/null || true)',
       'if [ -z "$cursor_runner" ]; then cursor_runner=/bin/sh; fi',
-      'nohup "$cursor_runner" "$cursor_job/runner.sh" >"$cursor_job/launcher.log" 2>&1 </dev/null &',
-      "cursor_supervisor=$!",
+      // The payload shell and its options pass through (`payloadShellLines`).
+      'cursor_own_group "$cursor_job/launcher.log" "$cursor_runner" "$cursor_job/runner.sh" "$@"',
+      "cursor_supervisor=$cursor_started",
+      // Only the supervisor reads the handoff pipe.
+      "exec 6<&-",
       // Each deadline is one sleep that marks a file when it elapses. Counting
       // short polls instead drifts with process-start cost (over 50% on
       // macOS) and lets the host's own timeout kill this launcher, and with
@@ -244,7 +288,8 @@ export function createManagedTerminal(policy: CursorShellPolicy, root: string): 
       `    trap 'cursor_stopping=1; if [ -n "$cursor_nap" ]; then cursor_stop_sleep; exit 0; fi' TERM INT HUP`,
       '    sleep "$1" & cursor_nap=$!',
       '    if [ "$cursor_stopping" = 1 ]; then cursor_stop_sleep; exit 0; fi',
-      '    wait "$cursor_nap" && : >"$cursor_job/$2" ) >/dev/null 2>&1 </dev/null &',
+      // A timer must not hold the handoff open past a killed launcher.
+      '    wait "$cursor_nap" && : >"$cursor_job/$2" ) >/dev/null 2>&1 </dev/null 5>&- &',
       "  cursor_timer=$!",
       "}",
       'cursor_cancel_deadline() { [ -n "$cursor_timer" ] || return 0; kill "$cursor_timer" 2>/dev/null; wait "$cursor_timer" 2>/dev/null; cursor_timer=""; }',
@@ -263,7 +308,7 @@ export function createManagedTerminal(policy: CursorShellPolicy, root: string): 
         // A spawn reports its handle as soon as the command is running. A
         // command that already finished is still a successful spawn; its
         // output and exit status are in the terminal record.
-        ? [`printf '\\n__CURSOR_BACKGROUND_SHELL__%s:%s:%s\\n' ${shellId} "$cursor_supervisor" "$cursor_terminal"`]
+        ? ["cursor_detach", `printf '\\n__CURSOR_BACKGROUND_SHELL__%s:%s:%s\\n' ${shellId} "$cursor_supervisor" "$cursor_terminal"`]
         : softBackgroundWindow(policy, shellId)),
     ].join("\n")
     return { command, directory, file, shellId }
@@ -327,7 +372,7 @@ try {
   const stat = fs.fstatSync(output)
   if (!stat.isFile() || stat.nlink !== 1) throw new Error("Unsafe terminal record")
 } catch { fail() }
-const input = fs.openSync(job + "/pipe", fs.constants.O_RDONLY)
+const input = 0 // The supervisor opened the output pipe on stdin at launch.
 const buffer = Buffer.alloc(64 * 1024)
 try {
   for (;;) {
@@ -350,15 +395,15 @@ finally {
 `
 
 const SUPERVISOR = String.raw`
-# bash 4.2 and later read the clock without starting a date process.
+# Bash 4.2 and later read the clock without starting a date process.
+builtin_wait=0
+nap_seconds=1
 if [ -n "$BASH_VERSION" ] && printf -v now '%(%s)T' -1 2>/dev/null && [ -n "$now" ]; then
   clock() { printf -v now '%(%s)T' -1; }
   builtin_wait=1
   nap_seconds=30
 else
   clock() { now=$(date +%s); }
-  builtin_wait=0
-  nap_seconds=1
 fi
 clock
 started=$now
@@ -368,12 +413,13 @@ command_pid=""
 collector=""
 updater=""
 watchdog=""
+handoff_watcher=""
 aborted=0
 group_stopped=0
 group_mode=""
 napper=""
 group_lost=0
-fail() { printf '%s\n' "$1" >"$job/error"; exit 1; }
+fail() { stop_handoff_watcher; printf '%s\n' "$1" >"$job/error"; exit 1; }
 safe_dirs() { [ ! -L "$root" ] && [ ! -L "$terminals" ] && [ ! -L "$job" ] && [ -d "$job" ]; }
 # Every field has a fixed width, so the header is rewritten in place and
 # command output is appended once instead of being copied on every update.
@@ -419,25 +465,46 @@ reap() {
 stop_job() {
   [ -z "$1" ] || { kill -TERM "-$1" 2>/dev/null || kill -TERM "$1" 2>/dev/null || true; reap "$1"; }
 }
-# A trapped signal interrupts a wait that has begun, but one that arrives just
-# before the wait would leave its change to the full nap, so it also ends the
-# nap. Check ownership even after an interrupted wait, which may have reaped
-# the child already. Read the named PPid field because a process name in
-# /proc/PID/stat can contain whitespace and parentheses.
-wake() {
-  [ -n "$napper" ] || return 0
+finish_record() {
+  status=$1
+  code=$2
+  printf '%s\n' "$(( $(wc -c <"$terminal") - header_bytes ))" >"$job/output-bytes" || fail 'Could not finalize terminal record'
+  write_header "$status" || fail 'Could not finalize terminal record'
+  clock
+  printf '\n---\nexit_code: %s\nelapsed_ms: %s\nended_at: %s\n' "$code" "$(( (now - started) * 1000 ))" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >>"$terminal" || fail 'Could not finalize terminal record'
+  if [ -f "$job/error" ]; then printf 'output_storage_failed: true\n' >>"$terminal"; fi
+  printf '%s\n' '---' >>"$terminal" || fail 'Could not finalize terminal record'
+  printf '%s\n' "$code" >"$job/done"
+}
+cleanup_job() {
+  stop_handoff_watcher
+  rm -f "$job/pipe" "$job/lifeline" "$job/idle" "$job/handoff" "$job/command.sh" "$job/group.sh" "$job/collector.cjs" "$job/runner.sh" "$job/command-exit" "$job/group-ready" "$job/finishing" "$job/collected"
+}
+# A child may have exited and been reaped before we try to stop it. Read the
+# named PPid field because /proc/PID/stat names can contain spaces and parentheses.
+is_supervisor_child() {
+  [ -n "$1" ] && kill -0 "$1" 2>/dev/null || return 1
   if [ -d /proc/self ]; then
-    nap_parent=""
-    while read -r nap_field nap_value nap_rest; do
-      [ "$nap_field" = PPid: ] || continue
-      nap_parent=$nap_value
+    child_parent=""
+    while read -r child_field child_value child_rest; do
+      [ "$child_field" = PPid: ] || continue
+      child_parent=$child_value
       break
-    done 2>/dev/null <"/proc/$napper/status"
+    done 2>/dev/null <"/proc/$1/status"
   else
-    nap_parent=$(ps -p "$napper" -o ppid= 2>/dev/null) || return 0
-    nap_parent=${"$"}{nap_parent##* }
+    child_parent=$(ps -p "$1" -o ppid= 2>/dev/null) || return 1
+    child_parent=${"$"}{child_parent##* }
   fi
-  [ "$nap_parent" = "$supervisor" ] || return 0
+  [ "$child_parent" = "$supervisor" ]
+}
+stop_handoff_watcher() {
+  is_supervisor_child "$handoff_watcher" || return 0
+  kill -TERM "$handoff_watcher" 2>/dev/null || :
+  reap "$handoff_watcher"
+}
+# End the nap even if the signal arrives immediately before wait starts.
+wake() {
+  is_supervisor_child "$napper" || return 0
   kill -KILL "$napper" 2>/dev/null || :
 }
 on_signal() { aborted=1; wake; stop_group; }
@@ -445,15 +512,15 @@ trap on_signal TERM INT HUP
 # group.sh and the collector send USR1 when there is something to observe.
 trap wake USR1
 # Wait in a child so a trapped signal interrupts the supervisor's wait.
-# A long nap must also end on lifeline EOF when the supervisor dies. Older
-# shells cannot do a timed read, so keep their sleep bounded to one second.
+# A long nap must also end on FIFO EOF when the supervisor dies. Keep
+# fallback sleeps bounded to one second when timed FIFO reads are disabled.
 # Senders write their state before they signal, so the condition "$2" is
 # checked again once the child exists, for a signal that came before $!.
 nap() {
   if [ "$builtin_wait" = 1 ]; then
-    (read -r -t "$1" -u 6 unused || :) 6<"$job/lifeline" 4>&- &
+    (read -r -t "$1" -u 6 unused || :) 6<"$idle_pipe" 4>&- 7>&- &
   else
-    sleep "$1" 4>&- &
+    sleep "$1" 4>&- 7>&- &
   fi
   napper=$!
   if "$2"; then wait "$napper" 2>/dev/null || wake
@@ -473,6 +540,16 @@ tick() {
     kill -0 "$supervisor" 2>/dev/null
   fi
 }
+# This process group is not the launcher's, so the host's TERM to the launcher
+# (Stop, its own timeout) no longer reaches this process. The launcher holds
+# the only write end of the handoff pipe, inherited here as fd 6, and writes
+# "detached" when it hands the job over; an end without it is that TERM.
+(
+  read -r handoff && [ "$handoff" = detached ] && exit 0
+  [ -f "$job/done" ] || ! is_ours "$supervisor" "$job/runner.sh" || kill -TERM "$supervisor"
+) <&6 >/dev/null 2>&1 &
+handoff_watcher=$!
+exec 6<&-
 safe_dirs || fail 'Runtime terminal directory is unavailable'
 cd -- "$workdir" || fail 'Background command working directory is unavailable'
 [ -f "$job/command.sh" ] || fail 'Background command was not written'
@@ -486,31 +563,49 @@ else fail 'Background terminals require bash or setsid for command-group cancell
 safe_dirs && header running >"$terminal" || fail 'Could not initialize terminal record'
 header_bytes=$(( $(wc -c <"$terminal") ))
 printf '%s\n' "$header_bytes" >"$job/header-bytes" || fail 'Could not initialize terminal record'
-[ "$aborted" = 0 ] || fail 'Background terminal was cancelled before launch'
 # Held for the supervisor's whole life; every child closes its copy.
 exec 4<>"$job/lifeline" || fail 'Could not initialize terminal supervision'
+idle_pipe=/dev/null
+if [ "$builtin_wait" = 1 ]; then
+  # Keep Bash's timed reads off the command group's lifeline. On macOS
+  # they can leave its blocking reader waiting after the last writer exits.
+  idle_pipe="$job/idle"
+  mkfifo "$idle_pipe" && exec 7<>"$idle_pipe" || fail 'Could not initialize terminal idle wait'
+fi
+if [ "$aborted" = 1 ]; then
+  finish_record aborted 143
+  cleanup_job
+  exit 0
+fi
+# Each fork inherits bootstrap endpoints until it opens its own side. Open
+# before closing them in the child so a supervisor death during startup
+# results in EOF, never a blocked open waiting for a peer that cannot start.
+exec 8<>"$job/pipe" || fail 'Could not initialize terminal output'
 # A compiled Bun host re-enters the runtime instead of its bundled CLI.
-BUN_BE_BUN=1 "$runtime" "$job/collector.cjs" "$job" "$terminal" "$max_output" "$supervisor" 2>/dev/null 4>&- &
+BUN_BE_BUN=1 "$runtime" "$job/collector.cjs" "$job" "$terminal" "$max_output" "$supervisor" <"$job/pipe" 2>/dev/null 4>&- 7>&- 8>&- &
 collector=$!
 if [ "$group_mode" = setsid ]; then
-  setsid sh "$job/group.sh" "$supervisor" >"$job/pipe" 2>&1 </dev/null 4>&- &
+  setsid sh "$job/group.sh" "$supervisor" "$payload_shell" "$@" 3<"$job/lifeline" >"$job/pipe" 2>&1 </dev/null 4>&- 7>&- 8>&- &
 else
-  sh "$job/group.sh" "$supervisor" >"$job/pipe" 2>&1 </dev/null 4>&- &
+  sh "$job/group.sh" "$supervisor" "$payload_shell" "$@" 3<"$job/lifeline" >"$job/pipe" 2>&1 </dev/null 4>&- 7>&- 8>&- &
 fi
 command_pid=$!
+exec 8>&-
 start_poll=0
 while starting && [ "$start_poll" -lt 100 ]; do
   nap 0.1 starting; start_poll=$((start_poll + 1))
 done
-if [ ! -f "$job/group-ready" ] || [ "$aborted" = 1 ]; then
-  stop_group; stop_job "$collector"; fail 'Background command group failed to initialize'
+if [ "$aborted" = 0 ]; then
+  if [ ! -f "$job/group-ready" ]; then
+    stop_group; stop_job "$collector"; fail 'Background command group failed to initialize'
+  fi
+  printf '%s\n' "$supervisor" >"$job/ready"
 fi
-printf '%s\n' "$supervisor" >"$job/ready"
 # A TERM that reaches a helper before it has reset the supervisor's traps is
 # discarded, so the helpers also stop on their own once job/finishing exists.
 # They signal the supervisor only while it is still this job's: an abrupt
 # death frees its PID for an unrelated process.
-if [ "$hard_seconds" != 0 ]; then
+if [ "$aborted" = 0 ] && [ "$hard_seconds" != 0 ]; then
   # Without bash job control this subshell shares the supervisor's group, so
   # stop_job can signal only the shell. The trap reaps the deadline sleep,
   # the same way the launcher's cursor_deadline does.
@@ -523,10 +618,11 @@ if [ "$hard_seconds" != 0 ]; then
     sleep "$hard_seconds" & cursor_nap=$!
     if [ "$cursor_stopping" = 1 ]; then cursor_stop_sleep; exit 0; fi
     wait "$cursor_nap" && { : >"$job/timedout"; ! is_ours "$supervisor" "$job/runner.sh" || kill -TERM "$supervisor" 2>/dev/null; }
-  ) 4>&- &
+  ) 4>&- 7>&- &
   watchdog=$!
 fi
-(
+if [ "$aborted" = 0 ]; then
+  (
   while [ ! -f "$job/finishing" ] && tick && [ ! -f "$job/finishing" ]; do
     # Losing a leader to SIGKILL does not send USR1. Notice the loss on
     # this existing tick so it does not wait out the supervisor's long nap.
@@ -548,8 +644,9 @@ fi
   drain=0
   while [ "$drain" -lt 50 ] && kill -0 "$collector" 2>/dev/null; do sleep 0.1; drain=$((drain + 1)); done
   ! is_ours "$collector" "$job/collector.cjs" || kill -TERM "$collector" 2>/dev/null
-) 6<"$job/lifeline" 4>&- &
-updater=$!
+  ) 6<"$idle_pipe" 4>&- 7>&- &
+  updater=$!
+fi
 # The nap is only a backstop: command exit, storage failure, timeouts and
 # cancellation all signal this process and end it early. It also bounds how
 # long a group leader that dies without reporting goes unnoticed.
@@ -593,17 +690,11 @@ if [ -f "$job/error" ]; then aborted=1; code=1; fi
 if [ "$aborted" = 1 ]; then status=aborted
 elif [ "$code" = 0 ]; then status=succeeded
 else status=failed; fi
-printf '%s\n' "$(( $(wc -c <"$terminal") - header_bytes ))" >"$job/output-bytes" || fail 'Could not finalize terminal record'
-write_header "$status" || fail 'Could not finalize terminal record'
-clock
-printf '\n---\nexit_code: %s\nelapsed_ms: %s\nended_at: %s\n' "$code" "$(( (now - started) * 1000 ))" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >>"$terminal" || fail 'Could not finalize terminal record'
-if [ -f "$job/error" ]; then printf 'output_storage_failed: true\n' >>"$terminal"; fi
-printf '%s\n' '---' >>"$terminal" || fail 'Could not finalize terminal record'
-printf '%s\n' "$code" >"$job/done"
+finish_record "$status" "$code"
 # Disarm the FIFO watcher before releasing the leader. The explicit message
 # survives immediate cleanup of job/done by a result consumer.
 [ "$group_lost" = 1 ] || printf 'completed\n' >&4
 wait "$command_pid" 2>/dev/null || true
-rm -f "$job/pipe" "$job/lifeline" "$job/command.sh" "$job/group.sh" "$job/collector.cjs" "$job/runner.sh" "$job/command-exit" "$job/group-ready" "$job/finishing" "$job/collected"
+cleanup_job
 exit 0
 `

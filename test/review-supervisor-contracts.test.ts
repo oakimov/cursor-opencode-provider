@@ -99,11 +99,11 @@ test.skipIf(process.platform !== "linux")("the supervisor probe rejects an orpha
     fs.symlinkSync(path.join(root, "node_modules"), path.join(subject, "node_modules"), "dir")
     const file = path.join(subject, "src/terminal-runner.ts")
     const source = fs.readFileSync(file, "utf8")
-    const wait = '(read -r -t "$1" -u 6 unused || :) 6<"$job/lifeline" 4>&- &'
+    const wait = '(read -r -t "$1" -u 6 unused || :) 6<"$idle_pipe" 4>&- 7>&- &'
     const wakeLostLeader = 'if ! kill -0 "$command_pid" 2>/dev/null; then'
     expect(source.split(wait)).toHaveLength(2)
     expect(source.split(wakeLostLeader)).toHaveLength(2)
-    fs.writeFileSync(file, source.replace(wait, 'sleep "$1" 4>&- &').replace(wakeLostLeader, "if false; then"))
+    fs.writeFileSync(file, source.replace(wait, 'sleep "$1" 4>&- 7>&- &').replace(wakeLostLeader, "if false; then"))
 
     const result = run(subject)
     expect(result.status, result.stdout + result.stderr).toBe(1)

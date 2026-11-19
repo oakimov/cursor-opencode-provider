@@ -328,11 +328,18 @@ names the shell ID and its record. A detached supervisor owns the command
 group, drains descendant output for up to five seconds after command exit, and
 finalizes cancellations and hard timeouts, allowing the group three seconds
 between TERM and KILL. If the supervisor itself dies (killed, crashed, or lost
-to a reboot), the group is stopped and the record is reported as aborted with
-an unknown exit status. Successful completion preserves deliberately detached
+to a reboot), its startup or running helpers are stopped and a read of the
+stale record reports it as aborted with an unknown exit status. Successful
+completion preserves deliberately detached
 daemons, matching native OpenCode; cancellation, hard timeouts, and failed
 commands stop their command group. The payload runs under the shell selected
-by OpenCode, so bash and zsh syntax retains its native meaning.
+by OpenCode, with the options OpenCode passes it before `-c` (OpenCode 2.2.7+
+runs zsh with `+o nomatch`), so bash and zsh syntax retains its native meaning.
+The supervisor runs in a process group of its own, so the host's signal to the
+launcher's group after the launcher returns does not reach the job (OpenCode
+2.3.0 kills that group 25 commands later). Stop or the host's timeout during
+the foreground window still stops the command: the launcher holds a pipe the
+supervisor watches.
 A collector using the provider's JavaScript runtime
 stores at most 8 MiB of command output and drains excess bytes without writing
 them; the terminal header and completion footer are additional metadata.
@@ -364,7 +371,9 @@ reports its shell ID even when the command has already finished. A background
 request made through OpenCode 2.x's own shell `background` option stays an
 OpenCode background job with the host's completion notice. Supervision
 requires POSIX bash or `setsid`. When this conversation has no usable terminal storage, the unmanaged `nohup`
-fallback requires a POSIX shell. Native Windows PowerShell/`cmd` background
+fallback requires a POSIX shell. With bash or `setsid`, its spawn gets a
+process group of its own. Its soft-background command stays in the
+launcher's group. Native Windows PowerShell/`cmd` background
 wrapping is unsupported; see [Known limitations](#known-limitations).
 Transcript storage is supplied
 separately through `CURSOR_AGENT_TRANSCRIPTS_FOLDER`; the provider neither
@@ -406,9 +415,12 @@ can override `continuation.semanticIdleMs` (or its `softHealthMs` alias).
 If a Run drops immediately after completed tool results, before new output,
 the provider can rebuild from host history containing every observed exec's
 result; Cursor's polls of a background shell's terminal record, which the
-provider answers itself, need none. It sends the completed results once and asks Cursor to continue. A
+provider answers itself, need none. Neither does the provider's bare-status
+refusal of Cursor's request to move a running shell or subagent to the
+background, nor an AwaitShell Cursor ran that slept its whole length or timed
+out with the shell still running. It sends the completed results once and asks Cursor to continue. A
 checkpoint predating those results is never resumed. Missing results, unknown
-activity, a tool call Cursor ran itself or a new interaction keep the failure
+activity, other tool calls Cursor ran itself and new interactions keep the failure
 final. If the rebuilt history would fill more than 80% of the model's context,
 the provider reports a context overflow so the host compacts first.
 A checkpoint received while the completed result drains remains eligible.

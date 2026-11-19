@@ -124,6 +124,23 @@ Operator setup: [OpenCode 2.x](../../docs/opencode-2.md).
   what the host approved. Preserve command and basename via an executable
   adapter; retain native `background` ownership and its completion notice
   (`test/shell-timeout.test.ts`).
+- **Match the host's argv grammar, not one release's shape.** OpenCode 2.2.7
+  started zsh as `zsh +o nomatch -c <command>`; the adapter matched only
+  `-c <command>`, so every zsh background shell ran in the foreground (#190).
+  Match the trailing `-c <command>` after `-o`/`+o NAME` pairs and give the
+  payload those options. The payload shell rode in `CURSOR_SHELL_EXECUTABLE`,
+  which every payload inherited; pass it and the options as wrapper arguments
+  (`payloadShellLines`, `shell create adapter argv` in `test/shell-timeout.test.ts`).
+- **The launcher's process group belongs to the host.** OpenCode 2.3.0's daemon
+  kept an exited command's group reserved and SIGKILLed it 25 commands later,
+  taking a supervisor that still shared it (#191; 2.3.1 reaps at exit and
+  signals only a failed command's group). Start the supervisor in its own
+  group; bash job control covers macOS, which has no `setsid`. Leaving the
+  group also dropped Stop and the host timeout, which had reached the
+  supervisor only as that group's TERM: the launcher's handoff pipe carries
+  them now. Write `detached` explicitly, since bash runs the EXIT trap on TERM
+  (`managed terminal and the launcher's process group` in
+  `test/terminal-runner.test.ts`).
 - **Anonymous creates need narrow attribution.** A global gate stalled every
   shell; use identical-command lanes and the live execution input when another
   hook rewrites it (`test/shell-timeout.test.ts`).

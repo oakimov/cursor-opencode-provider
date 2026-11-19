@@ -241,6 +241,18 @@ These are failure lessons shared by both hosts, not a replacement for
   holds the outcome (`historyCoverage`). A fixture must advertise the tool
   whose answer it tests: without `read`, the provider refused the read as
   unavailable, and that refusal posed as a missing-target answer.
+  Exempting reads still refused Runs over Cursor's own traffic: a soft-denied
+  `force_background_shell_args` (sent to deliver a queued host note) counted as
+  a host exec without a result, and an AwaitShell no poll named marked the Run
+  opaque ([#182](https://github.com/oakimov/cursor-opencode-provider/issues/182),
+  [#189](https://github.com/oakimov/cursor-opencode-provider/issues/189)). A
+  bare-status refusal of a request about a call already sent is an answer; a
+  refusal the model reads is not. Account for a server-side call only from a
+  strict wire match of what its result told the model, never from its variant
+  name. An AwaitShell completion must also match the start's arguments and
+  the result must belong to the requested task (`cursorWaitArgs`;
+  `test/replay-safety.test.ts`, `soft-denied-*` and `await-*` in
+  `test/run-error-host.test.ts`).
   A failed replacement open moves a Run's injected notes into the deferred
   store before retrying. The rebuild guard must recognize that retained copy
   too: recomputing recovery from the emptied injection registry otherwise
@@ -709,13 +721,22 @@ These are failure lessons shared by both hosts, not a replacement for
   could block after reaping a child (`test/terminal-runner.test.ts`).
 - **Force signal gaps.** A child inherited traps before exec; a cancel arrived
   before `$!`. Latch cancellation, use marker-before-signal coordination and
-  one-way stop state; instrumentation must not hide the race.
+  one-way stop state; instrumentation must not hide the race. For the launcher
+  handoff, force EOF before the payload starts as well as after it starts but
+  before `ready`. Both paths must publish an aborted record and reap their
+  helpers (`test/terminal-runner.test.ts`).
 - **Missing completion does not mean unstarted.** Startup and cleanup need one
   atomic claim; repeated release may remove only truly unstarted jobs
   (`releaseUnstartedTerminal`).
 - **Detached helpers need bounded owner-death cleanup.** A FIFO detects even
   SIGKILL; descendants can hold output open forever. Make long idle waits exit
-  on that same EOF. If a group leader dies before reporting, close the lifeline
+  on EOF. Give Bash's timed reads their own FIFO. Sharing the lifeline left the
+  group's blocking reader waiting on macOS after the supervisor died.
+  Open the group's lifeline and the collector's input in launch redirections
+  before closing the inherited bootstrap ends. A peer that dies before it
+  enters its script must produce EOF rather than strand the other side in
+  `open` (`releases all startup pipes` in `test/terminal-runner.test.ts`).
+  If a group leader dies before reporting, close the lifeline
   so the in-group watcher stops the surviving payload. Normal completion still
   disarms it so an explicitly detached daemon survives. Assert cleanup using
   captured job-owned PIDs (`test/terminal-runner.test.ts`). The review harness
