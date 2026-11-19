@@ -8,7 +8,6 @@ import {
   CURSOR_UNPRICED_MODEL_IDS,
   getCursorModelCost,
   toOpenCode2Costs,
-  wireModelIdForPricing,
 } from "../src/pricing.js"
 import { CURSOR_UNPRICED_MODEL_REASONS } from "../src/pricing-data.js"
 
@@ -25,26 +24,20 @@ const catalog = JSON.parse(
 describe("selectable catalog pricing", () => {
   const config = modelsToConfig(catalog)
   const catalog2 = modelsToCatalogModelMap(catalog)
-  const unpriced = new Set<string>(CURSOR_UNPRICED_MODEL_IDS)
 
-  it("prices every selectable entry, or lists it as unpriced", () => {
+  it("prices every selectable entry", () => {
+    expect(CURSOR_UNPRICED_MODEL_IDS).toEqual([])
+    expect(CURSOR_UNPRICED_MODEL_REASONS).toEqual({})
     expect(Object.keys(config).sort()).toEqual(Object.keys(catalog2).sort())
     const uncovered: string[] = []
     for (const id of Object.keys(config)) {
       const cost = getCursorModelCost(id)
-      const baseId = wireModelIdForPricing(id).baseId
-      if (cost) {
-        expect(config[id].cost).toEqual(cost)
-        expect(catalog2[id]?.cost).toEqual(toOpenCode2Costs(cost))
+      if (!cost) {
+        uncovered.push(id)
         continue
       }
-      if (unpriced.has(id) || unpriced.has(baseId)) {
-        expect(config[id].cost).toBeUndefined()
-        expect(catalog2[id]?.cost ?? []).toEqual([])
-        expect(CURSOR_UNPRICED_MODEL_REASONS[baseId as keyof typeof CURSOR_UNPRICED_MODEL_REASONS]).toBeTruthy()
-        continue
-      }
-      uncovered.push(id)
+      expect(config[id].cost).toEqual(cost)
+      expect(catalog2[id]?.cost).toEqual(toOpenCode2Costs(cost))
     }
     expect(uncovered).toEqual([])
   })
@@ -67,14 +60,27 @@ describe("selectable catalog pricing", () => {
     expect(config["gpt-5.6-sol-1m-fast"].cost).toEqual(getCursorModelCost("gpt-5.6-sol-fast"))
     expect(catalog2["gpt-5.6-sol-1m"]?.cost?.[1]?.tier).toEqual({ type: "context", size: 272_000 })
     expect(catalog2["gpt-5.6-sol-1m"]?.cost?.[1]?.input).toBe(8)
+    expect(catalog2["gpt-5.6-sol-1m"]?.cost?.[1]?.output).toBe(30)
+    expect(catalog2["gpt-5.6-sol-1m"]?.cost?.[1]?.cache).toEqual({ read: 0.8, write: 10 })
     expect(catalog2["gpt-5.6-sol-1m-fast"]?.cost?.[1]?.input).toBe(16)
-    expect(catalog2["gpt-5.6-sol-1m-fast"]?.cost?.[1]?.cache).toEqual({ read: 0.8, write: 10 })
+    expect(catalog2["gpt-5.6-sol-1m-fast"]?.cost?.[1]?.output).toBe(60)
+    expect(catalog2["gpt-5.6-sol-1m-fast"]?.cost?.[1]?.cache).toEqual({ read: 1.6, write: 20 })
     expect(config["claude-haiku-5-5"].cost?.tiers?.[0]?.tier.size).toBe(100_000)
     expect(config["grok-4.7-500k"].cost?.tiers?.[0]?.tier.size).toBe(256_000)
     expect(config["grok-4.7-500k-fast"].cost?.tiers?.[0]?.input).toBe(6)
-    expect(config["gpt-5.5-fast"].cost).toBeUndefined()
-    expect(config["claude-opus-5-fast"].cost).toBeUndefined()
-    expect(config["claude-opus-5-5-1m-fast"].cost).toBeUndefined()
-    expect(config["default"].cost).toBeUndefined()
+    expect(config["gpt-5.5-fast"].cost).toEqual({ input: 12.5, output: 75, cache_read: 1.25 })
+    expect(config["claude-opus-5-fast"].cost).toEqual({
+      input: 10,
+      output: 50,
+      cache_read: 1,
+      cache_write: 12.5,
+    })
+    expect(config["claude-opus-5-5-1m-fast"].cost).toEqual({
+      input: 8,
+      output: 40,
+      cache_read: 0.4,
+      cache_write: 10,
+    })
+    expect(config["default"].cost).toEqual({ input: 1.25, output: 6, cache_read: 0.25 })
   })
 })

@@ -15,10 +15,13 @@ import {
   wireModelIdForPricing,
 } from "../src/pricing.js"
 import {
+  applyCursorStaffAutoRate,
   buildContextTable,
   buildPricing,
   buildPricingTable,
   catalogIdForPricingDisplayName,
+  priceFromModelPages,
+  type PricingBuild,
 } from "../scripts/generate-cursor-pricing.js"
 import { getDocumentedCursorModelContext } from "../src/model-metadata.js"
 import { modelsToCatalogModelMap } from "../src/opencode2/catalog.js"
@@ -79,13 +82,13 @@ describe("pricing", () => {
       input: 2.5,
       output: 15,
       cache_read: 0.25,
-      tiers: [{ tier: { type: "context", size: 272_000 }, input: 5, output: 15, cache_read: 0.25 }],
+      tiers: [{ tier: { type: "context", size: 272_000 }, input: 5, output: 22.5, cache_read: 0.25 }],
     })
     expect(getCursorModelCost("gpt-5.5")).toEqual({
       input: 5,
       output: 30,
       cache_read: 0.5,
-      tiers: [{ tier: { type: "context", size: 272_000 }, input: 10, output: 30, cache_read: 0.5 }],
+      tiers: [{ tier: { type: "context", size: 272_000 }, input: 10, output: 45, cache_read: 1 }],
     })
     expect(getCursorModelCost("gpt-5.6-luna")).toEqual({
       input: 0.2,
@@ -95,9 +98,9 @@ describe("pricing", () => {
       tiers: [{
         tier: { type: "context", size: 272_000 },
         input: 0.4,
-        output: 1.2,
-        cache_read: 0.02,
-        cache_write: 0.25,
+        output: 1.8,
+        cache_read: 0.04,
+        cache_write: 0.5,
       }],
     })
     expect(getCursorModelCost("gpt-5.6-sol")).toEqual({
@@ -108,9 +111,9 @@ describe("pricing", () => {
       tiers: [{
         tier: { type: "context", size: 272_000 },
         input: 8,
-        output: 20,
-        cache_read: 0.4,
-        cache_write: 5,
+        output: 30,
+        cache_read: 0.8,
+        cache_write: 10,
       }],
     })
     expect(getCursorModelCost("gpt-5.6-terra")).toEqual({
@@ -121,19 +124,19 @@ describe("pricing", () => {
       tiers: [{
         tier: { type: "context", size: 272_000 },
         input: 4,
-        output: 12,
-        cache_read: 0.2,
-        cache_write: 2.5,
+        output: 18,
+        cache_read: 0.4,
+        cache_write: 5,
       }],
     })
     expect(getCursorModelCost("gpt-5.4-mini")?.tiers).toBeUndefined()
     expect(getCursorModelCost("gpt-5.4-mini")?.context_over_200k).toBeUndefined()
     // A prompt of exactly 272k stays on the standard rate. The next token
-    // doubles input only.
+    // uses the page's long-context rate (input 2x, output 1.5x, cache unchanged).
     expect(costForPrompt(getCursorModelCost("gpt-5.4")!, 272_000).input).toBe(2.5)
     expect(costForPrompt(getCursorModelCost("gpt-5.4")!, 272_001)).toEqual({
       input: 5,
-      output: 15,
+      output: 22.5,
       cache_read: 0.25,
     })
     expect(costForPrompt(getCursorModelCost("claude-haiku-5-5")!, 100_000).input).toBe(0.1)
@@ -279,13 +282,23 @@ describe("pricing", () => {
     expect(getCursorModelCost("gpt-5.4-fast")).toEqual({ input: 5, output: 30, cache_read: 0.5 })
     expect(costForPrompt(getCursorModelCost("gpt-5.6-sol-fast")!, 272_001)).toEqual({
       input: 16,
+      output: 60,
+      cache_read: 1.6,
+      cache_write: 20,
+    })
+    expect(getCursorModelCost("gpt-5.5-fast")).toEqual({ input: 12.5, output: 75, cache_read: 1.25 })
+    expect(getCursorModelCost("claude-opus-5-fast")).toEqual({
+      input: 10,
+      output: 50,
+      cache_read: 1,
+      cache_write: 12.5,
+    })
+    expect(getCursorModelCost("claude-opus-5-5-fast")).toEqual({
+      input: 8,
       output: 40,
-      cache_read: 0.8,
+      cache_read: 0.4,
       cache_write: 10,
     })
-    expect(getCursorModelCost("gpt-5.5-fast")).toBeUndefined()
-    expect(getCursorModelCost("claude-opus-5-fast")).toBeUndefined()
-    expect(getCursorModelCost("claude-opus-5-5-fast")).toBeUndefined()
   })
 
   it("maps Cursor Models (Fast) display names onto synthetic catalog ids", () => {
@@ -531,9 +544,20 @@ describe("pricing", () => {
     expect(() => buildPricing(markdown)).toThrow(/No long-context threshold for "GPT-5.4"/)
   })
 
-  it("leaves Auto unpriced when docs omit an Auto-specific rate", () => {
-    expect(getCursorModelCost("default")).toBeUndefined()
-    expect(applyCursorModelCost("default", { name: "Auto" })).toEqual({ name: "Auto" })
+  it("prices Auto at the Cursor staff forum rate", () => {
+    const auto = { input: 1.25, output: 6, cache_read: 0.25 }
+    expect(getCursorModelCost("default")).toEqual(auto)
+    expect(applyCursorModelCost("default", { name: "Auto" })).toEqual({ name: "Auto", cost: auto })
+    const pricing: PricingBuild = { costs: {}, unpriced: { default: "docs publish no rate" } }
+    applyCursorStaffAutoRate(pricing)
+    expect(pricing.unpriced.default).toBeUndefined()
+    expect(pricing.costs.default).toEqual(auto)
+    const published: PricingBuild = {
+      costs: { default: { input: 9, output: 9 } },
+      unpriced: {},
+    }
+    applyCursorStaffAutoRate(published)
+    expect(published.costs.default).toEqual({ input: 9, output: 9 })
   })
 
   it("preserves entry fields while adding cost", () => {
@@ -559,7 +583,7 @@ describe("pricing", () => {
       {
         tier: { type: "context", size: 272_000 },
         input: 5,
-        output: 15,
+        output: 22.5,
         cache: { read: 0.25, write: 0 },
       },
     ])
@@ -656,5 +680,79 @@ describe("pricing", () => {
     const config = modelsToConfig(models)
     expect(config["claude-sonnet-4"].cost).toEqual(getCursorModelCost("claude-sonnet-4"))
     expect(config["claude-sonnet-4-1m"].cost).toEqual(getCursorModelCost("claude-sonnet-4-1m"))
+  })
+
+  it("prices model-page tables ahead of main-table notes", () => {
+    const page = (name: string) => readFileSync(join(import.meta.dir, "fixtures", name), "utf8")
+    const markdown = `
+| Model | Provider | Input | Cache write | Cache read | Output | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| GPT-5.5 | OpenAI | $5 | - | $0.5 | $30 | Fast mode is available at higher rates; Long context supports up to 1M tokens with 2x input pricing |
+| GPT-5.4 | OpenAI | $2.5 | - | $0.25 | $15 | Fast mode is 15% faster with 2x pricing; Long context supports up to 1M tokens with 2x input pricing |
+| GPT-5.6 Sol | OpenAI | $4 | $5 | $0.4 | $20 | Fast mode is 2x pricing. Fast mode for long context (>272k) at 2x Fast input pricing |
+| Grok 4.7 | Cursor | $2 | - | $0.5 | $6 | Fast mode is available at 2x pricing |
+`
+    const contexts = { "GPT-5.4": 272_000, "GPT-5.5": 272_000, "GPT-5.6 Sol": 272_000, "Grok 4.7": 256_000 }
+    const pricing = buildPricing(markdown, contexts, {
+      skipNoteModels: new Set(["gpt-5.5", "gpt-5.4", "gpt-5.6-sol", "grok-4.7"]),
+    })
+    const derived = priceFromModelPages(pricing, [
+      { modelId: "gpt-5.5", html: page("model-page-gpt-5-5.html") },
+      { modelId: "gpt-5.4", html: page("model-page-gpt-5-4.html") },
+      { modelId: "gpt-5.6-sol", html: page("model-page-gpt-5-6-sol.html") },
+      { modelId: "grok-4.7", html: page("model-page-grok-4-7.html") },
+    ], contexts)
+    expect(pricing.costs["gpt-5.5"]).toEqual({
+      input: 5,
+      output: 30,
+      cache_read: 0.5,
+      tiers: [{ tier: { type: "context", size: 272_000 }, input: 10, output: 45, cache_read: 1 }],
+    })
+    expect(pricing.costs["gpt-5.5-fast"]).toEqual({ input: 12.5, output: 75, cache_read: 1.25 })
+    expect(pricing.unpriced["gpt-5.5-fast"]).toBeUndefined()
+    expect(pricing.costs["gpt-5.4-fast"]).toEqual({ input: 5, output: 30, cache_read: 0.5 })
+    expect(pricing.costs["gpt-5.4"]?.tiers?.[0]).toEqual({
+      tier: { type: "context", size: 272_000 },
+      input: 5,
+      output: 22.5,
+      cache_read: 0.25,
+    })
+    expect(pricing.costs["gpt-5.6-sol-fast"]?.tiers?.[0]).toEqual({
+      tier: { type: "context", size: 272_000 },
+      input: 16,
+      output: 60,
+      cache_read: 1.6,
+      cache_write: 20,
+    })
+    expect(pricing.costs["grok-4.7-fast"]?.tiers?.[0]?.tier.size).toBe(256_000)
+    expect(pricing.costs["grok-4.7-fast"]?.tiers?.[0]?.input).toBe(6)
+    expect(derived.map((price) => price.id).sort()).toEqual(["gpt-5.4", "gpt-5.4-fast"])
+  })
+
+  it("derives a missing Fast long-context row from the page's own ratios", () => {
+    const html = readFileSync(join(import.meta.dir, "fixtures", "model-page-fast-long-derived.html"), "utf8")
+    const markdown = `
+| Model | Provider | Input | Cache write | Cache read | Output | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| GPT-5.6 Sol | OpenAI | $4 | $5 | $0.4 | $20 | |
+`
+    const pricing = buildPricing(markdown, { "GPT-5.6 Sol": 272_000 }, {
+      skipNoteModels: new Set(["gpt-5.6-sol"]),
+    })
+    const derived = priceFromModelPages(pricing, [{ modelId: "gpt-5.6-sol", html }], {
+      "GPT-5.6 Sol": 272_000,
+    })
+    expect(pricing.costs["gpt-5.6-sol-fast"]?.tiers?.[0]).toEqual({
+      tier: { type: "context", size: 272_000 },
+      input: 16,
+      output: 60,
+      cache_read: 1.6,
+      cache_write: 20,
+    })
+    expect(derived).toEqual([{
+      id: "gpt-5.6-sol-fast",
+      cost: { input: 16, output: 60, cache_read: 1.6, cache_write: 20 },
+      formula: expect.stringContaining("no combined Fast long-context row"),
+    }])
   })
 })

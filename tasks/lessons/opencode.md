@@ -824,10 +824,42 @@ These are failure lessons shared by both hosts, not a replacement for
   Bind the model snapshot to the Run's cache root and file generation and
   verify the selected max-mode bit on the request (`test/model-selection-run.test.ts`).
 - **Inspect generator inputs before changing mappings.** Pricing and model
-  metadata came from distinct markdown endpoints. An added US data residency
-  column hid the long-context surcharge. Read Notes by header and test a row
-  whose note changes the rates (`test/pricing.test.ts`). Run the live pricing gate
-  before a bump; the v0.6.4 failure forced a retag ([release gate](../../AGENTS.md#hard-stop--release--version-bump--tag-gate-non-optional)).
+  metadata came from distinct endpoints. An added US data residency column hid
+  the long-context surcharge. Read Notes by header and test a row whose note
+  changes the rates (`test/pricing.test.ts`). Run the live pricing gate before a
+  bump; the v0.6.4 failure forced a retag ([release gate](../../AGENTS.md#hard-stop--release--version-bump--tag-gate-non-optional)).
+  The main pricing markdown lists base rows and notes. Each model's rendered
+  page, `https://cursor.com/docs/models/<slug>`, has the full table in HTML;
+  the raw `.md` omits it. That table is the price. Do not infer a rate from a
+  note such as "2x input pricing" when the page has a table: the note can name
+  only some of the cells the table changes. Verified 19 Nov 2026, GPT-5.5's
+  page is standard $5 / – / $0.50 / $30, Fast $12.50 / – / $1.25 / $75, and
+  long context above 272k $10 / – / $1 / $45 (input, cache write, cache read,
+  output). Long context raises cache read and output, not input alone.
+  Claude Opus 5 Fast is $10 / $12.50 / $1 / $50 and Claude Opus 5.5 Fast is
+  $8 / $10 / $0.40 / $40. The main table is the fallback only for a row the
+  page does not publish (Claude Opus 4.7 Fast, Claude 4 Sonnet 1M). GPT-5.4's
+  page has no Fast or long-context row. Its prose is the derivation: Fast is
+  2× the standard row ($5 / – / $0.50 / $30), and above 272k input doubles and
+  output is 1.5× ($5 / – / $0.25 / $22.50). Cache read stays $0.25 because the
+  page does not state a cache change. Fast above 272k is not selectable, so
+  that combination is not priced. A page that states Fast long-context ratios
+  and omits the combined row scales the Fast row by the page's long-context
+  ratios (`test/fixtures/model-page-*.html`). Auto (`default`) has no docs
+  per-1M rate. Cursor staff stated $1.25/M input, $0.25/M cache read, and
+  $6/M output: @deanrie, 2026-03-11,
+  https://forum.cursor.com/t/how-do-the-auto-cursor-1-5-tokens-work/154514
+  (all three); @kevinn, 2026-05-04,
+  https://forum.cursor.com/t/gpt-5-5-medium-is-too-costly/159707
+  (input and output). That is the Auto price, cited in the generator.
+  Gemini 3.1 Pro's page says rates increase above 200k and points at a table
+  that has no second row; the main table has none either, so the only
+  published numbers are the base row. CodexBar
+  (github.com/steipete/CodexBar @1f6da9b) has no Cursor price table for these
+  ids. It reads per-event cost from `POST https://cursor.com/api/dashboard/get-filtered-usage-events`
+  (`tokenUsage.totalCents` / `chargedCents`) and is not a pricing source.
+  Every selectable entry must resolve to a price
+  (`test/selectable-pricing.test.ts`).
 - **Make tests capable of failing.** Type guards once sat outside tsc's include;
   root ignored permission fixtures. Use real usages, deterministic faults and
   independent host/frame evidence (`test/workspace-facts.test.ts`).
