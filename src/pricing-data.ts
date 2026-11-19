@@ -171,12 +171,12 @@ export const CURSOR_MODEL_COSTS = {
     "output": 4.4,
     "cache_read": 0.26
   },
-  "glm-5.3": {
+  "glm-5p3": {
     "input": 1.4,
     "output": 4.4,
     "cache_read": 0.26
   },
-  "glm-5.3-flash": {
+  "glm-5p3-flash": {
     "input": 0.15,
     "output": 0.5,
     "cache_read": 0.029
@@ -406,10 +406,10 @@ export const CURSOR_MODEL_CONTEXTS = {
   "glm-5.2": {
     "maxContext": 200000
   },
-  "glm-5.3": {
+  "glm-5p3": {
     "maxContext": 1000000
   },
-  "glm-5.3-flash": {
+  "glm-5p3-flash": {
     "maxContext": 1000000
   },
   "gpt-5-mini": {
