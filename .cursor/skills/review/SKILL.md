@@ -360,7 +360,7 @@ For every pull request, run the isolated check. It fetches that revision, copies
 scripts/isolated-check.sh <pr-number-or-url>
 ```
 
-A pull URL must name this checkout's origin. The copy has no `.git` directory. Install, build, typecheck, harness model and retention contracts, and `bun test` run inside `scripts/isolate-run.sh`. Exit 0 means those checks passed. Exit 1 is a check failure. Exit 2 is a bad invocation or an unavailable isolation mechanism. The log line `Check root:` is private.
+A pull URL must name this checkout's origin. The copy has no `.git` directory. Install, build, typecheck, harness contracts, and `bun test` run inside `scripts/isolate-run.sh`. Exit 0 means those checks passed. Exit 1 is a check failure. Exit 2 is a bad invocation or an unavailable isolation mechanism. The log line `Check root:` is private.
 
 `MODEL_CONTRACTS` runs the review harness's read-only
 `scripts/review-model-contracts.mjs` against the subject's source and installed
@@ -380,6 +380,12 @@ default-policy test with long, short and invalid settings inherited by Bun.
 The probe requires that the selected assertion actually ran. It tests the
 configured window when that subject exports the configurable resolver;
 older subjects retain the fixed baseline contract.
+
+`SUPERVISOR_CONTRACTS` runs the archived subject's managed background launcher
+on Linux. It checks supervisor death during an active idle wait and reports
+record finalization and payload shutdown separately after group-leader death.
+It observes only processes in the test job's session. A platform skip leaves
+these failure paths unverified on that run.
 
 After build and typecheck, contract checks and the subject unit suite collect
 independent results even when another contract fails. An unavailable boundary

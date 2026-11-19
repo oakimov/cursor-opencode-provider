@@ -43,6 +43,7 @@ That path is not the untrusted-PR boundary.
 | `scripts/review-model-contracts.mjs` | catalog invariants and OpenCode 2.x alias selection against archived source |
 | `scripts/review-model-cache-contract.mjs` | Node localhost Run capture across equal-timestamp cache generations and recovery after corrupt metadata |
 | `scripts/review-retention-contracts.mjs` | expiry, quarantine recovery, provenance, writer temps and inherited test settings against archived source |
+| `scripts/review-supervisor-contracts.mjs` | idle wait cleanup, record finalization and payload shutdown after supervisor or group-leader death on Linux |
 | `scripts/complete-resolutions.py` | finish approved thread resolves after a confirmed review |
 | `scripts/cloud-agent-install.sh` | Cloud Agent bootstrap |
 | `eval/review/` | offline detection fixtures and scorer |
@@ -57,7 +58,7 @@ Cursor. Passing tests do **not** mean the review skill finds real defects.
 |-------|------|-------|
 | Publication | `test/review-publish.test.ts` | App/PAT auth, preview approval, native inline re-review anchors and recovery, privacy refusals, artifact retention, thread resolve, evidence/ledger gate |
 | Isolation / live scripts | `test/review-scripts.test.ts` | Cloud install string, isolated-check targets, sandbox PATH/secrets, live-test skip/deadline/cleanup, pid-targeted cancel |
-| Subject contracts | `test/review-model-contracts.test.ts`, `test/review-model-cache-contract.test.ts`, `test/review-retention-contracts.test.ts` | upstream tuple preservation, cache identity at the Run boundary, independent phase results, persistence probes and deliberately broken controls |
+| Subject contracts | `test/review-model-contracts.test.ts`, `test/review-model-cache-contract.test.ts`, `test/review-retention-contracts.test.ts`, `test/review-supervisor-contracts.test.ts` | catalog and cache behavior, persistence, shell process ownership, independent phase results and broken controls |
 | Eval fixtures / scorer | `test/review-eval.test.ts` | Case orchestration fixtures, mount excludes answer keys, ledger compare, score detection vs false positives |
 
 The test preload clears inherited `CURSOR_PROVIDER_CACHE_TTL_MS` so expiry
@@ -67,7 +68,7 @@ fails that test and is cleared before the next one. Subprocess regressions in
 `test/test-isolation.test.ts` exercise inherited settings and that recovery.
 
 After build and typecheck, isolated PR checks run the harness's catalog,
-model-cache and retention probes and the subject unit suite independently. A contract failure
+model-cache, retention and supervisor probes and the subject unit suite independently. A contract failure
 stays visible while the other checks run; an unavailable boundary stops them.
 Each contract also runs on the merge base. A failure with the same scenario
 and diagnostic on a completed base run is reported as pre-existing.
