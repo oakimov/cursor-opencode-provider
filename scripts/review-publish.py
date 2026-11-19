@@ -522,34 +522,78 @@ def finding_text(finding: dict, *, located: bool) -> str:
     return "\n".join(lines)
 
 
-def strip_operator_section(body: str) -> str:
-    """Remove the local publication plan. A body without that heading is unchanged."""
-    if OPERATOR_HEADING not in body:
-        return body
-    ending = "\n" if body.endswith("\n") else ""
-    kept: list[str] = []
-    removed = False
-    index = 0
-    lines = body.splitlines()
-    while index < len(lines):
-        if lines[index].strip() == OPERATOR_HEADING:
-            removed = True
-            if kept and kept[-1] == "":
-                kept.pop()
-            index += 1
-            while index < len(lines) and (lines[index].startswith("- ") or (lines[index].startswith("  ") and lines[index].strip())):
-                index += 1
-            continue
-        kept.append(lines[index])
-        index += 1
-    if not removed:
-        return body
-    return "\n".join(kept) + ending
+def review_trailer(result: dict) -> str:
+    """The closing lines every rendered summary ends with."""
+    return (
+        f"\n\nRuntime: {result.get('runtime')}.\n"
+        f"Reviewed {result.get('owner')}/{result.get('repo')}#{result.get('pull')} at {result.get('head')}.\n"
+    )
 
 
-def posted_body(body: str) -> str:
+def legacy_plan_text(result: dict) -> str:
+    """The publication-plan block historical public_review appended before the trailer.
+
+    Reply and evidence text are inserted unchanged, including internal blank lines.
+    """
+    mutations = result.get("mutations")
+    if not isinstance(mutations, list) or not mutations:
+        return ""
+    lines = [OPERATOR_HEADING]
+    for item in mutations:
+        if not isinstance(item, dict):
+            return ""
+        action = item.get("action")
+        thread = item.get("thread")
+        detail = item.get("body")
+        if action not in {"reply", "resolve"} or not isinstance(thread, str) or not isinstance(detail, str):
+            return ""
+        lines.append(f"- {action} {thread.strip()}: {detail.strip()}")
+        if action == "resolve":
+            evidence = item.get("evidence")
+            if not isinstance(evidence, str):
+                return ""
+            lines.append(f"  Evidence: {evidence.strip()}")
+    return "\n".join(lines)
+
+
+def legacy_public_body(result: dict, *, inline_updates: bool) -> str:
+    """The summary body public_review used to emit, plan included."""
+    body, _comments = public_review(result, inline_updates=inline_updates)
+    plan = legacy_plan_text(result)
+    trailer = review_trailer(result)
+    if not plan or not body.endswith(trailer):
+        return body
+    return f"{body[:-len(trailer)]}\n\n{plan}{trailer}"
+
+
+def strip_operator_section(body: str, result: dict | None = None) -> str:
+    """Remove a historical publication plan immediately before the runtime trailer.
+
+    The plan is the exact block built from the saved mutations, so a multiline
+    reply or evidence line and every later action leave with it. A body without
+    that heading, or whose plan is not that exact block, is unchanged.
+    """
+    if OPERATOR_HEADING not in body or not isinstance(result, dict):
+        return body
+    plan = legacy_plan_text(result)
+    trailer = review_trailer(result)
+    if not plan:
+        return body
+    index = body.rfind(trailer)
+    block = f"\n\n{plan}"
+    start = index - len(block)
+    if index < 0 or start < 0 or body[start:index] != block:
+        return body
+    return body[:start] + body[index:]
+
+
+def posted_body(payload: dict) -> str:
     """The review text that may be sent to GitHub."""
-    return strip_operator_section(body)
+    body = payload.get("body")
+    if not isinstance(body, str):
+        return ""
+    result = payload.get("result")
+    return strip_operator_section(body, result if isinstance(result, dict) else None)
 
 
 def operator_plan(result: object) -> str:
@@ -646,7 +690,7 @@ def inline_comments_enabled(payload: dict) -> bool:
     return isinstance(evidence, dict) and evidence.get("version") == 4
 
 
-def publication_matches(payload: dict) -> list[str]:
+def publication_matches(payload: dict, raw: bytes | None = None) -> list[str]:
     if "result" not in payload:
         return []
     result = payload.get("result")
@@ -665,8 +709,19 @@ def publication_matches(payload: dict) -> list[str]:
         problems.append("update")
     body, comments = public_review(result, inline_updates=inline_updates)
     current = payload.get("body")
-    if not isinstance(current, str) or MARKER.sub("", current).strip() != body.strip():
+    if not isinstance(current, str):
         problems.append("body")
+    else:
+        visible = MARKER.sub("", current).strip()
+        # A retained preview approved before the plan left the summary still
+        # carries that exact historical body. Accept it without rewriting the
+        # approved bytes; posted_body removes the plan before GitHub sees it.
+        if visible != body.strip() and not (
+            raw is not None
+            and visible == legacy_public_body(result, inline_updates=inline_updates).strip()
+            and retained_legacy(raw, payload)
+        ):
+            problems.append("body")
     if payload.get("comments") != comments:
         problems.append("comments")
     return problems
@@ -708,7 +763,7 @@ def review_matches(review: dict, owner: str, repo: str, pull: int) -> bool:
     )
 
 
-def validate(payload: dict) -> list[str]:
+def validate(payload: dict, raw: bytes | None = None) -> list[str]:
     problems: list[str] = []
     if not isinstance(payload.get("owner"), str) or not NAME.fullmatch(payload["owner"]):
         problems.append("owner")
@@ -725,7 +780,7 @@ def validate(payload: dict) -> list[str]:
         problems.append("runtime")
     if payload.get("event") != "COMMENT":
         problems.append("event")
-    problems.extend(publication_matches(payload))
+    problems.extend(publication_matches(payload, raw))
     if "update" in payload:
         problems.extend(validate_update(payload["update"]))
         if payload.get("comments") and not inline_comments_enabled(payload):
@@ -1398,7 +1453,7 @@ def checked_update_review(payload: dict, review: dict | None, *, original: bool 
         raise SystemExit("The target is not a stamped harness review. No replacement review was created.")
     if original and hashlib.sha256(body.encode()).hexdigest() != target["bodySha256"]:
         raise SystemExit("The existing review body changed. Refresh its snapshot and approval before updating.")
-    if delivered and body != posted_body(payload["body"]):
+    if delivered and body != posted_body(payload):
         raise SystemExit("The review update is not visible with the approved body. No replacement review was created.")
     return review
 
@@ -2012,7 +2067,7 @@ def cleanup_artifacts(directory: Path, instruction: str | None) -> None:
 def show(path: Path) -> None:
     raw, payload = load_payload(path)
     refuse_scan(raw, payload)
-    problems = validate(payload)
+    problems = validate(payload, raw)
     if problems:
         print("Payload is incomplete: " + ", ".join(problems), file=sys.stderr)
         raise SystemExit(2)
@@ -2042,7 +2097,7 @@ def show(path: Path) -> None:
 def stamp(path: Path) -> None:
     raw, payload = load_payload(path)
     refuse_scan(raw, payload)
-    match_problems = publication_matches(payload)
+    match_problems = publication_matches(payload, raw)
     if "incomplete" in match_problems:
         print("The review is incomplete. GitHub was not called.", file=sys.stderr)
         raise SystemExit(2)
@@ -2093,7 +2148,7 @@ def approve(payload_path: Path, approval_path: Path, preview_sha: str) -> None:
         print("Payload must be a JSON object.", file=sys.stderr)
         raise SystemExit(2)
     refuse_scan(raw, payload)
-    problems = validate(payload)
+    problems = validate(payload, raw)
     if problems:
         print("Payload is incomplete: " + ", ".join(problems), file=sys.stderr)
         raise SystemExit(2)
@@ -2179,7 +2234,7 @@ def authorized_post(payload_path: Path, approval_path: Path) -> tuple[bytes, dic
     raw, payload = load_payload(payload_path)
     refuse_discarded(payload)
     refuse_scan(raw, payload)
-    problems = validate(payload)
+    problems = validate(payload, raw)
     if problems:
         print("Payload is incomplete: " + ", ".join(problems), file=sys.stderr)
         raise SystemExit(2)
@@ -2252,7 +2307,7 @@ def reject_moved_revision(
 def review_body(payload: dict) -> dict:
     return {
         "commit_id": payload["head"],
-        "body": posted_body(payload["body"]),
+        "body": posted_body(payload),
         "event": "COMMENT",
         "comments": [
             {"path": item["path"], "line": item["line"], "side": item["side"], "body": item["body"]}
@@ -2414,7 +2469,7 @@ def post_locked(
     code, stdout, stderr = gh_api(
         "PUT" if updating else "POST",
         endpoint,
-        {"body": posted_body(payload["body"])} if updating else review_body(payload),
+        {"body": posted_body(payload)} if updating else review_body(payload),
         token=token,
     )
     if code != 0:
