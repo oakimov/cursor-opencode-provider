@@ -928,7 +928,7 @@ describe("parseExecServerMessage", () => {
         workdir: "/tmp",
       },
     })
-    expect(result?.args.command).toContain("nohup \"$cursor_payload_shell\" -c 'zig translate-c /tmp/tiny.c -lc'")
+    expect(result?.args.command).toContain("cursor_own_group \"$bg_log\" \"$cursor_payload_shell\" \"$@\" -c 'zig translate-c /tmp/tiny.c -lc'")
     expect(result?.args.command).toContain("__CURSOR_BACKGROUND_SHELL__")
     expect(result?.localError).toBeUndefined()
   })

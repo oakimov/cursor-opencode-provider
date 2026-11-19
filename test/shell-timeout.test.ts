@@ -329,7 +329,7 @@ describe("Cursor shell timeout translation", () => {
     const wrapperMatch = injector.match(/exec \/bin\/sh '([^']+)'/)
     expect(wrapperMatch?.[1]).toBeString()
     const wrapper = readFileSync(wrapperMatch![1]!, "utf8")
-    expect(wrapper).toContain("nohup \"$cursor_payload_shell\" -c 'zig translate-c /tmp/tiny.c -lc'")
+    expect(wrapper).toContain("cursor_own_group \"$bg_log\" \"$cursor_payload_shell\" \"$@\" -c 'zig translate-c /tmp/tiny.c -lc'")
     expect(wrapper).toContain("__CURSOR_BACKGROUND_SHELL__")
     expect(wrapper).toContain("</dev/null &")
     expect(buildBackgroundShellCommand("echo hi")).toContain("__CURSOR_BACKGROUND_SHELL__")
@@ -969,5 +969,125 @@ describe("prepareCursorShellCreate correlation", () => {
     const clean = captureCursorShellResult("cursor_managed", "\n__CURSOR_BACKGROUND_SHELL__123456:4321:/cache/terminals/123456.txt\n")
     expect(clean).toBe("Started in the background (shell 123456, pid 4321). Output: /cache/terminals/123456.txt\n")
     expect(consumeCursorShellResult("cursor_managed", clean).outcome).toMatchObject({ kind: "backgrounded", shellId: 123456, pid: 4321, outputFile: "/cache/terminals/123456.txt" })
+  })
+})
+
+// OpenCode 2.2.7+ runs zsh as `zsh +o nomatch -c <command>` (`ShellSelect.args`); other POSIX shells
+// get `-c <command>` (#190). The adapter must still wrap, and the payload must keep those options.
+describe("shell create adapter argv", () => {
+  const spawnAdapter = (adapter: string, args: string[], cwd: string) => {
+    const result = Bun.spawnSync([adapter, ...args], { cwd, stdout: "pipe", stderr: "pipe" })
+    return { stdout: result.stdout.toString(), stderr: result.stderr.toString(), code: result.exitCode }
+  }
+  const adapterFor = (id: string, command: string, shell: string, cwd: string, managed?: { command: string; directory: string }) => {
+    registerCursorShellCall(id, {
+      background_shell_spawn: true, command, working_directory: cwd,
+      ...(managed ? { managed_command: managed.command, managed_job_directory: managed.directory } : {}),
+    })
+    prepareCursorShellArgs(id, { command }, { deferToShellHook: true })
+    const event = { command, cwd, timeout: 0, shell, env: {} as Record<string, string | undefined> }
+    prepareCursorShellCreate(event)
+    expect(event.shell).not.toBe(shell)
+    expect(path.basename(event.shell)).toBe(path.basename(shell))
+    return event.shell
+  }
+  // Each option changes what the payload prints, so its output proves the option reached it.
+  const shells = [
+    ["/bin/sh", ["-o", "noglob"], "echo cursor-glob-*", "cursor-glob-*"],
+    ["/bin/zsh", ["+o", "nomatch"], "echo cursor-no-match-*", "cursor-no-match-*"],
+  ] as const
+
+  it.each(shells)("detaches an unmanaged spawn that %s runs with %p before -c, under those options", async (shell, options, command, printed) => {
+    if (!existsSync(shell)) return
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "cursor-adapter-argv-")))
+    const id = "cursor_adapter_argv"
+    try {
+      writeFileSync(path.join(root, "cursor-glob-file"), "")
+      const launched = spawnAdapter(adapterFor(id, command, shell, root), [...options, "-c", command], root)
+      expect(launched.code).toBe(0)
+      const marker = /__CURSOR_BACKGROUND_SHELL__(\d+):([^\n]+)/.exec(launched.stdout)
+      expect(marker).not.toBeNull()
+      const end = Date.now() + 5000
+      while (Date.now() < end && readFileSync(marker![2]!, "utf8") === "") await Bun.sleep(25)
+      expect(readFileSync(marker![2]!, "utf8")).toBe(`${printed}\n`)
+      await reapBackgroundSpawn(launched.stdout)
+    } finally {
+      releaseCursorShellEnv(id)
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it.each(shells)("runs a managed spawn that %s runs with %p before -c, under those options", async (shell, options, command, printed) => {
+    if (!existsSync(shell)) return
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "cursor-adapter-managed-")))
+    const id = "cursor_adapter_managed"
+    try {
+      runtimeLayout(root, true)
+      writeFileSync(path.join(root, "cursor-glob-file"), "")
+      const terminal = createManagedTerminal({
+        command, workingDirectory: root, timeoutMs: 0, timeoutBehavior: 0, backgroundSpawn: true, shellPath: "/bin/sh",
+      }, root)
+      const launched = spawnAdapter(adapterFor(id, command, shell, root, terminal), [...options, "-c", command], root)
+      expect(launched.code).toBe(0)
+      expect(launched.stdout).toContain(`__CURSOR_BACKGROUND_SHELL__${terminal.shellId}:`)
+      const end = Date.now() + 7000
+      while (Date.now() < end && !existsSync(path.join(terminal.directory, "done"))) await Bun.sleep(25)
+      const record = readFileSync(terminal.file, "utf8")
+      expect(record).toContain(`---\n${printed}\n\n---\nexit_code: 0\n`)
+    } finally {
+      releaseCursorShellEnv(id)
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 15_000)
+
+  it.each([
+    ["a flag the adapter does not take", ["-x", "-c"]],
+    ["an option name that is not a word", ["-o", "no glob", "-c"]],
+    ["an option without its name", ["+o", "-c"]],
+  ] as const)("runs the host shell unwrapped for %s", (_name, args) => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "cursor-adapter-other-")))
+    const id = "cursor_adapter_other"
+    try {
+      const command = "printf foreground"
+      const launched = spawnAdapter(adapterFor(id, command, "/bin/sh", root), [...args, command], root)
+      expect(launched.stdout).not.toContain("__CURSOR_BACKGROUND_SHELL__")
+    } finally {
+      releaseCursorShellEnv(id)
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("runs the host shell unwrapped when arguments follow the command", () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "cursor-adapter-trailing-")))
+    const id = "cursor_adapter_trailing"
+    try {
+      const command = 'printf "%s" "$0"'
+      const launched = spawnAdapter(adapterFor(id, command, "/bin/sh", root), ["-c", command, "argv0"], root)
+      expect(launched).toMatchObject({ stdout: "argv0", code: 0 })
+    } finally {
+      releaseCursorShellEnv(id)
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  // OpenCode 2.3.0 SIGKILLs an exited command's process group 25 commands later (#191).
+  it("keeps an unmanaged spawn out of the launcher's process group", async () => {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), "cursor-spawn-group-")))
+    try {
+      const finished = path.join(root, "finished")
+      const { spawn } = await import("node:child_process")
+      const launcher = spawn("/bin/sh", ["-c", buildBackgroundShellCommand(`sleep 0.5; printf done >'${finished}'`, "/bin/sh")],
+        { detached: true, stdio: ["ignore", "pipe", "ignore"] })
+      let stdout = ""
+      launcher.stdout!.on("data", (chunk: Buffer) => { stdout += chunk.toString() })
+      expect(await new Promise<number | null>(resolve => launcher.on("close", resolve))).toBe(0)
+      try { process.kill(-launcher.pid!, "SIGKILL") } catch { /* already empty */ }
+      const end = Date.now() + 5000
+      while (Date.now() < end && !existsSync(finished)) await Bun.sleep(25)
+      expect(existsSync(finished) ? readFileSync(finished, "utf8") : "").toBe("done")
+      await reapBackgroundSpawn(stdout)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })

@@ -131,7 +131,12 @@ The **1.18 v2** API and **OpenCode 2.x** are source-incompatible:
   permission-gated backend; the public 2.x `ToolContext` cannot request approval.
 - Keep host hook/permission order intact: 1.x `shell.env` follows permission;
   2.x `shell.create.before` preserves the command and shell basename through an
-  executable adapter. Compaction/agent state comes from explicit host hooks.
+  executable adapter. The adapter wraps only `[-o|+o NAME]... -c <command>` and
+  passes the payload shell and those options as wrapper arguments, never
+  through the environment. The supervisor runs outside the launcher's process
+  group (`cursor_own_group`); launcher cancellation reaches it through the
+  handoff pipe, so a job survives the host's signal to that group only after
+  the launcher wrote `detached`. Compaction/agent state comes from explicit host hooks.
 
 ## Auth and transport invariants
 
@@ -258,7 +263,10 @@ The **1.18 v2** API and **OpenCode 2.x** are source-incompatible:
   after delivered host results may rebase from history only when every observed
   exec has a completed result and no opaque activity occurred. A read the
   provider answered itself (`recordProviderAnswer`) needs none: a host shell's
-  terminal record (AwaitShell polls) or a missing target's typed result. A new
+  terminal record (AwaitShell polls), a missing target's typed result or the
+  bare-status refusal of a force-background request. A Cursor-run AwaitShell is
+  accounted for only when its started and completed frames strictly match a
+  timed-out wait or a full-length sleep (`cursorWait`). A new
   file's empty edit read or a Task attachment read needs its call's host result
   instead (`historyCoverage`). Refusals and other answers still need a result,
   and any answer in the cut attempt stays a barrier. Include all

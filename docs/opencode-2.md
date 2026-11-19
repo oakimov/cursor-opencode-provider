@@ -261,7 +261,7 @@ A prompt sent before those servers finish connecting will not see their tools. O
 | `tool` hook (`custom_websearch`, `cursor_image_save`) | `ctx.tool.transform` registers handle-only `cursor_image_save` (`codemode: false`, `permission: "edit"`, output schema) so generated images can be committed. `todowrite`/`todoread` only when `CURSOR_OPENCODE2_TODOS=1` (or `true`) and the host catalog omits them. Off by default. OpenCode 2.x's native `websearch` tool owns permission checks and uses the provider registered through `ctx.websearch.transform`. Plugin tools call the public `ctx.permission.assert` with the executing session, agent, tool source and actual resource before accessing data or saving an image. Image saves assert `external_directory` and `edit`; optional todos assert their own actions. Missing permission APIs fail closed. Web search keeps its native executor. |
 | `event` hook (session activity) | `ctx.event.subscribe` |
 | `tool.execute.before` / `.after` | `ctx.tool.hook(...)` |
-| Post-approval `shell.env` injects the timeout wrapper for bash/zsh | `ctx.shell.hook("create.before")` installs a same-basename executable adapter. The command stays unchanged for the host's later permission scan; the payload uses the actual selected shell. |
+| Post-approval `shell.env` injects the timeout wrapper for bash/zsh | `ctx.shell.hook("create.before")` installs a same-basename executable adapter. The command stays unchanged for the host's later permission scan; the payload uses the actual selected shell and the `-o`/`+o` options OpenCode puts before `-c` (`+o nomatch` for zsh since 2.2.7). The supervisor runs outside the launcher's process group, which OpenCode 2.3.0 kills 25 commands after the launcher exits; Stop and the tool timeout reach it through a pipe the launcher holds. |
 | `chat.params` flags compaction turns and names the current agent | `session.hook("context")` / `"compaction"` sets `options.opencodeCompaction`, `options.opencodeHostAgent`, and the session marker |
 | `plan_enter` / `plan_exit` | OpenCode 2.x's primary `plan` / `build` agents are selected through `session.switchAgent`. Cursor mode entry is applied after its Run reaches a safe terminal boundary. CreatePlan persists the plan through an advertised host `write` or `patch` into the Plan directory, shows it, and asks through `question` whether to switch to `build` and start implementing; Yes ends the plan Run before selecting `build` and continuing. No or dismissal ends the current turn, keeps `plan`, and requires a new user message before further work. Typed freeform feedback continues the same turn in plan mode with that text as the CreatePlan reply. |
 | Host `todowrite` builtin | OpenCode 2.x dropped host todo tools. Plugin-owned `todowrite`/`todoread` stay **off** unless `CURSOR_OPENCODE2_TODOS=1` (or `true`). When enabled they register as **direct** catalog tools (`codemode: false` + `output` schema, in-memory per session) unless `editor.get`/`list` already owns those names. With the flag unset, no provider todo tools are registered. Cursor TodoWrite/TodoRead mirror into them only when they are advertised. OpenCode 1.x still uses the host builtin and is not gated. |
@@ -351,7 +351,10 @@ transport read-idle watchdog remains a backstop. A drop immediately after
 completed tool results can rebuild from complete host history
 before new output; missing results or unrepresented activity remain final.
 Earlier polls of a background shell's terminal record, which the provider
-answers itself, need no result in history.
+answers itself, need no result in history; nor does the provider's bare-status
+refusal of Cursor's request to move a running shell or subagent to the
+background, or an AwaitShell Cursor ran that slept its whole length or timed
+out with the shell still running.
 An early steer or host note Cursor took into that Run does not block the
 rebuild when host history holds it: a steer once OpenCode has added its copy,
 a note while its text is still in history.

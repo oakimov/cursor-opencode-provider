@@ -1773,7 +1773,7 @@ describe("display-only ToolCall pump bridge", () => {
     expect(toolCalls[0].toolName).toBe("bash")
     const input = JSON.parse(toolCalls[0].input)
     expect(input.workdir).toBe("/tmp")
-    expect(input.command).toContain("nohup \"$cursor_payload_shell\" -c 'zig translate-c /tmp/tiny.c -lc'")
+    expect(input.command).toContain("cursor_own_group \"$bg_log\" \"$cursor_payload_shell\" \"$@\" -c 'zig translate-c /tmp/tiny.c -lc'")
     expect(input.command).toContain("__CURSOR_BACKGROUND_SHELL__")
     expect(session.displayToolCalls.has(callId)).toBe(false)
     expect(sessionManager.pendingFor(session.sessionId, 49)).toMatchObject({

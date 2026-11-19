@@ -414,6 +414,10 @@ describe("checkpoint eligibility across host results", () => {
     "inline-catalog", "spilled-catalog", "unfinished-catalog", "unacknowledged-checkpoint",
     "terminal-poll", "terminal-poll-after-result",
     "missing-read", "missing-read-after-result", "refused-read", "new-file-edit",
+    "soft-denied-background", "soft-denied-background-after-result", "soft-denied-fetch",
+    "await-sleep", "await-timed-out", "await-named-poll", "await-finished", "await-woken", "await-short-sleep",
+    "await-mismatched-task", "await-mismatched-duration",
+    "web-fetch",
   ] as const) {
     it(`recovers a post-result drop only from represented completed work (${scenario})`, async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-result-history-"))
@@ -427,9 +431,24 @@ describe("checkpoint eligibility across host results", () => {
       const shellVariant = scenario === "announced-shell" ? "shell_args" : "shell_stream_args"
       const newFileEdit = scenario === "new-file-edit"
       const fileReads = newFileEdit || scenario === "missing-read" || scenario === "missing-read-after-result"
+      const softDenied: number[] = []
       scripted = (stream, message) => {
         const send = (value: Record<string, unknown>) => stream.write(frame(encodeMessage("AgentServerMessage", value)))
         const shell = (callId: string, command: string) => ({ shell_tool_call: { args: { command, tool_call_id: callId } } })
+        // Independent wire bytes; the local schema has neither these exec requests nor AwaitToolCall.result.
+        const varint = (value: number) => {
+          const out: number[] = []
+          for (; value > 0x7f; value >>>= 7) out.push((value & 0x7f) | 0x80)
+          return [...out, value]
+        }
+        const bytes = (fn: number, value: number[]) => [...varint((fn << 3) | 2), ...varint(value.length), ...value]
+        const text = (fn: number, value: string) => bytes(fn, [...Buffer.from(value)])
+        const number = (fn: number, value: number) => [...varint(fn << 3), ...varint(value)]
+        // AgentServerMessage #2 ExecServerMessage {id #1, variant}: the provider soft-denies both requests
+        // itself. force_background_shell_args #30 {tool_call_id #1} asks to move a running shell to the
+        // background (Cursor sends it to deliver a queued host note); fetch_args #20 {url #1} is a model call.
+        const unsupportedExec = (id: number, field: 20 | 30, value: string) =>
+          stream.write(frame(Uint8Array.from(bytes(2, [...number(1, id), ...bytes(field, text(1, value))]))))
         const started = (callId: string, command: string) => {
           if (lifecycle) send({ interaction_update: { tool_call_started: { call_id: callId, tool_call: shell(callId, command) } } })
         }
@@ -469,6 +488,8 @@ describe("checkpoint eligibility across host results", () => {
           send({ exec_server_message: { id: 1, [shellVariant]: { command: "echo first", tool_call_id: "first" } } })
         } else if (message.exec_client_message) {
           const id = (message.exec_client_message as { id: number }).id
+          const reply = message.exec_client_message as { force_background_shell_result?: unknown; fetch_result?: unknown }
+          if (reply.force_background_shell_result || reply.fetch_result) softDenied.push(id)
           // A result is complete with its exit; a large stdout arrives first.
           const hostReply = message.exec_client_message as { shell_stream?: { exit?: unknown }; shell_result?: unknown; write_result?: unknown }
           if ((!hostReply.shell_stream?.exit && !hostReply.shell_result && !hostReply.write_result) || delivered.includes(id)) return
@@ -489,6 +510,50 @@ describe("checkpoint eligibility across host results", () => {
             // Without an advertised `read` (`refused-read`) it refuses the call instead, which stays final.
             if (scenario === "missing-read" || scenario === "refused-read") {
               send({ exec_server_message: { id: 60, read_args: { path: path.join(root, "absent.txt"), tool_call_id: "absent" } } })
+            }
+            // The refusal of a request about a call already sent ran nothing and told the model nothing.
+            // A refused model call (`soft-denied-fetch`) showed the model text history lacks.
+            if (scenario === "soft-denied-background") unsupportedExec(70, 30, "first")
+            if (scenario === "soft-denied-fetch") unsupportedExec(70, 20, "https://example.com/status")
+            // AwaitShell runs in Cursor; only its lifecycle reaches the provider. ToolCall #2 holds
+            // await_tool_call #42 {args #1 {task_id #1, block_until_ms #2}, result #2 = AwaitResult
+            // success #4 {complete #1 | still_running #2 {task_id #1, runtime_ms #2, output_file_path #3,
+            // output_length #4, exit_code #7 (complete) / wake_reason #7 (still_running)}}}.
+            if (scenario.startsWith("await-")) {
+              const sleep = scenario === "await-sleep" || scenario === "await-short-sleep" || scenario === "await-mismatched-duration"
+              const argFields = sleep ? number(2, 20_000) : [...text(1, "7"), ...number(2, 30_000)]
+              const lifecycle = (update: 2 | 3, result: number[] = []) => stream.write(frame(Uint8Array.from(bytes(1, bytes(update, [
+                ...text(1, "wait"), ...bytes(2, bytes(42, [
+                  ...bytes(1, update === 2 && scenario === "await-mismatched-duration" ? number(2, 30_000) : argFields),
+                  ...result,
+                ])),
+              ])))))
+              lifecycle(2)
+              if (!sleep) {
+                const env = sessionManager.findOpenByOpenCodeSessionId(`ses_result_history_${scenario}`)!.requestContext.env as { project_folder: string }
+                const record = path.join(env.project_folder, "terminals", "7.txt")
+                fs.mkdirSync(path.dirname(record), { recursive: true })
+                fs.writeFileSync(record, "running\n")
+                // Cursor's polls of the record; only some name the wait.
+                for (const poll of [50, 51]) {
+                  send({ exec_server_message: { id: poll, read_args: { path: record,
+                    ...scenario === "await-named-poll" ? { tool_call_id: "wait" } : {} } } })
+                }
+              }
+              const task = [...text(1, scenario === "await-mismatched-task" ? "8" : "7"),
+                ...number(2, 30_000), ...text(3, "terminals/7.txt"), ...number(4, 812)]
+              const outcome = scenario === "await-sleep" || scenario === "await-mismatched-duration" ? bytes(1, number(2, 20_000))
+                : scenario === "await-short-sleep" ? bytes(1, number(2, 4_000))
+                : scenario === "await-finished" ? bytes(1, [...task, ...number(7, 0)])
+                : scenario === "await-woken" ? bytes(2, [...task, ...text(7, "user_message")])
+                : bytes(2, task)
+              lifecycle(3, bytes(2, bytes(4, outcome)))
+            }
+            // A call Cursor ran itself whose result history cannot hold.
+            if (scenario === "web-fetch") {
+              const fetch = { web_fetch_tool_call: { args: { url: "https://example.com/status" } } }
+              send({ interaction_update: { tool_call_started: { call_id: "fetch", tool_call: fetch } } })
+              send({ interaction_update: { tool_call_completed: { call_id: "fetch", tool_call: fetch } } })
             }
             // A new file's edit: the provider answers its read with an empty file, then the write goes to the host.
             if (newFileEdit) {
@@ -511,6 +576,7 @@ describe("checkpoint eligibility across host results", () => {
             if (scenario === "missing-read-after-result") {
               send({ exec_server_message: { id: 60, read_args: { path: path.join(root, "absent.txt"), tool_call_id: "absent" } } })
             }
+            if (scenario === "soft-denied-background-after-result") unsupportedExec(71, 30, "second")
             if (scenario === "malformed-completion" || scenario === "repeated-completion-id") {
               // Independent lifecycle wire: completion #3, call_id #1.
               // The decoder discards the unknown field or duplicate call id.
@@ -564,7 +630,9 @@ describe("checkpoint eligibility across host results", () => {
         if (scenario === "missing-history") prompt.splice(1, 2)
         if (scenario === "complete" || scenario === "announced" || scenario === "announced-shell" || scenario === "inline-catalog"
           || scenario === "unacknowledged-checkpoint" || scenario === "terminal-poll"
-          || scenario === "missing-read" || scenario === "new-file-edit") {
+          || scenario === "missing-read" || scenario === "new-file-edit" || scenario === "soft-denied-background"
+          // A wait that timed out, or a sleep that ran its whole length, told the model nothing history lacks.
+          || scenario === "await-sleep" || scenario === "await-timed-out" || scenario === "await-named-poll") {
           const parts = await read()
           expect(parts.some(part => part.type === "finish" && part.finishReason.unified === "stop")).toBe(true)
           expect(parts.some(part => part.type === "tool-call")).toBe(false)
@@ -588,6 +656,11 @@ describe("checkpoint eligibility across host results", () => {
           expect(requests).toHaveLength(scenario === "followup-before-result" ? 2 : 1)
         }
         expect(delivered).toEqual([1, 2])
+        // The provider answered each unsupported request itself; nothing reached the host. A request
+        // sent just before the cut may be answered after the stream ended.
+        if (scenario !== "soft-denied-background-after-result") {
+          expect(softDenied).toEqual(scenario === "soft-denied-background" || scenario === "soft-denied-fetch" ? [70] : [])
+        }
       } finally {
         sessionManager.dispose()
         await settleRunSavesForTests()
