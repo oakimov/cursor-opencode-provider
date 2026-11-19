@@ -1773,7 +1773,7 @@ describe("review publication", () => {
         note: "The locked operation is pinned before the lookups.",
       }], mutations: [{
         action: "reply",
-        thread: "discussion_r10",
+        thread: "PRRT_kwDOTWqht864hfZT",
         body: "The lock now keeps the approved pull request.",
         evidence: "test/review-publish.test.ts",
       }] }), null, 2) + "\n")
@@ -1794,11 +1794,21 @@ describe("review publication", () => {
       expect(body.body).toContain("Location: scripts/isolated-check.sh:4 RIGHT")
       expect(body.body).toContain("Earlier findings:")
       expect(body.body).toContain("old-lock (discussion_r10): fixed.")
-      expect(body.body).toContain("GitHub actions after approval (replies remain proposals):")
+      expect(body.body).not.toContain("GitHub actions after approval (replies remain proposals):")
+      expect(body.body).not.toMatch(/PRRT_/)
+      expect(body.comments.every((comment) => !comment.body.includes("GitHub actions after approval (replies remain proposals):") && !/PRRT_/.test(comment.body))).toBe(true)
       expect(callsOf(state)).toEqual([])
       const again = renderReview(source, path.join(directory, "second.json"), env)
       expect(fs.readFileSync(payload, "utf8")).toBe(fs.readFileSync(path.join(directory, "second.json"), "utf8"))
       expect(run(["stamp", payload], env).status).toBe(0)
+      const shown = run(["show", payload], env)
+      expect(shown.status, shown.stderr).toBe(0)
+      expect(shown.stderr).toContain("Local publication plan (not posted):")
+      expect(shown.stderr).toContain("GitHub actions after approval (replies remain proposals):")
+      expect(shown.stderr).toContain("PRRT_kwDOTWqht864hfZT")
+      const shownBody = JSON.parse(shown.stdout) as { body: string }
+      expect(shownBody.body).not.toContain("GitHub actions after approval (replies remain proposals):")
+      expect(shownBody.body).not.toMatch(/PRRT_/)
       expect(approve(payload, approval, env).status).toBe(0)
       const posted = run(["post", payload, approval], env)
       expect(posted.status, `${posted.stdout}\n${posted.stderr}`).toBe(0)
@@ -1813,6 +1823,8 @@ describe("review publication", () => {
       expect(stored).toHaveLength(1)
       expect(stored[0]!.review.body).toContain("<!-- cursor-review:")
       expect(stored[0]!.review.body).not.toContain("High: Replacement approval is sent to the locked pull request")
+      expect(stored[0]!.review.body).not.toContain("GitHub actions after approval (replies remain proposals):")
+      expect(stored[0]!.review.body).not.toMatch(/PRRT_/)
       const attached = JSON.parse(fs.readFileSync(path.join(state, "comments.json"), "utf8")) as Array<{ pull_request_review_id: number }>
       expect(attached[0]?.pull_request_review_id).toBe(stored[0]!.review.id)
       stored[0]!.review.body = "Edited summary without the marker.\n"
@@ -4219,6 +4231,91 @@ describe("review evidence gate", () => {
       expect(run(["post", payload, approval], env).status).toBe(0)
       expect(fs.readFileSync(payload)).toEqual(bytes)
       expect(postsOf(state)).toBe(1)
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("publishes a retained pre-change payload and strips a multiline reply plus the next action", () => {
+    const { directory, payload, approval, bin, state } = freshReview("review-legacy-plan-")
+    const env = { PATH: `${bin}:/usr/bin:/bin`, GH_STATE: state }
+    const source = path.join(directory, "result.json")
+    const replyThread = "PRRT_kwDOTWqht86reply1"
+    const laterThread = "PRRT_kwDOTWqht86later9"
+    const replyBody = "First paragraph of the reply.\n\nSecond paragraph of the reply."
+    const laterBody = "Follow-up action that must not remain."
+    const evidence = "The first evidence line.\n\nThe second evidence line."
+    const heading = "GitHub actions after approval (replies remain proposals):"
+    const sourceUrl = "https://github.com/oakimov/cursor-opencode-provider/pull/156#discussion_r10"
+    try {
+      fs.writeFileSync(path.join(state, "threads.json"), JSON.stringify([{
+        id: laterThread,
+        isResolved: false,
+        pullRequest: { number: 156, repository: { nameWithOwner: "oakimov/cursor-opencode-provider" } },
+        comments: [{ id: "original", url: sourceUrl, body: "Earlier review finding", updatedAt: "2026-01-01T00:00:00Z" }],
+      }]))
+      const inventory = run(["threads", "oakimov", "cursor-opencode-provider", "156"], env)
+      expect(inventory.status, inventory.stderr).toBe(0)
+      const snapshot = (JSON.parse(inventory.stdout) as { threads: Array<{ snapshot: string }> }).threads[0]!.snapshot
+      fs.writeFileSync(source, JSON.stringify(structuredResult({
+        prior: [{
+          id: "old-lock",
+          status: "fixed",
+          source: sourceUrl,
+          note: "The lock is held until the post returns.",
+        }],
+        mutations: [
+          { action: "reply", thread: replyThread, body: replyBody, evidence: "test/review-publish.test.ts" },
+          {
+            action: "resolve", thread: laterThread, finding: "old-lock", snapshot,
+            body: laterBody, evidence,
+          },
+        ],
+      })))
+      expect(renderReview(source, payload, env).status).toBe(0)
+      const rendered = JSON.parse(fs.readFileSync(payload, "utf8"))
+      const plan = [
+        heading,
+        `- reply ${replyThread}: ${replyBody}`,
+        `- resolve ${laterThread}: ${laterBody}`,
+        `  Evidence: ${evidence}`,
+      ].join("\n")
+      const trailerAt = rendered.body.lastIndexOf("\n\nRuntime: ")
+      expect(trailerAt).toBeGreaterThan(0)
+      rendered.body = `${rendered.body.slice(0, trailerAt)}\n\n${plan}${rendered.body.slice(trailerAt)}`
+      fs.writeFileSync(payload, JSON.stringify(rendered, null, 2) + "\n")
+      const rejected = run(["show", payload], env)
+      expect(rejected.status).toBe(2)
+      expect(rejected.stderr).toContain("Payload is incomplete: body")
+      writeLegacyPayload(payload, JSON.stringify(rendered))
+      const bytes = fs.readFileSync(payload)
+      expect(bytes.includes(heading)).toBe(true)
+      expect(bytes.includes("Second paragraph of the reply.")).toBe(true)
+      expect(bytes.includes(laterThread)).toBe(true)
+      expect(run(["stamp", payload], env).status).toBe(0)
+      expect(fs.readFileSync(payload)).toEqual(bytes)
+      const shown = run(["show", payload], env)
+      expect(shown.status, shown.stderr).toBe(0)
+      expect(Buffer.from(shown.stdout)).toEqual(bytes)
+      expect(shown.stderr).toContain("Local publication plan (not posted):")
+      expect(shown.stderr).toContain("Second paragraph of the reply.")
+      expect(shown.stderr).toContain(laterThread)
+      expect(run(["approve", payload, approval, previewDigest(shown.stderr)], env).status).toBe(0)
+      const postedRun = run(["post", payload, approval], env)
+      expect(postedRun.status, `${postedRun.stdout}\n${postedRun.stderr}`).toBe(0)
+      expect(fs.readFileSync(payload)).toEqual(bytes)
+      expect(postsOf(state)).toBe(1)
+      const posted = postBodies(state)
+      expect(posted).toContain("1 actionable finding.")
+      expect(posted).toContain("Earlier findings:")
+      expect(posted).toContain("Runtime: linux.")
+      expect(posted).toContain("cursor-review:")
+      expect(posted).not.toContain(heading)
+      expect(posted).not.toContain("Second paragraph of the reply.")
+      expect(posted).not.toContain("The second evidence line.")
+      expect(posted).not.toContain(replyThread)
+      expect(posted).not.toContain(laterThread)
+      expect(posted).not.toContain(laterBody)
     } finally {
       fs.rmSync(directory, { recursive: true, force: true })
     }
