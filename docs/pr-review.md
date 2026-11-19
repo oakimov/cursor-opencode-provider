@@ -604,6 +604,13 @@ assertion. It leaves two generations in quarantine across a retention
 increase, checks which snapshot is restored, preserves a live publication,
 and retries a failed promotion. The permissions case runs as an unprivileged
 POSIX user. Subjects without the configurable resolver use the fixed baseline.
+`SUPERVISOR_CONTRACTS` launches a managed background job from the archived
+source on Linux. It observes the active wait before killing the supervisor,
+then kills the group leader in a separate job. It separately checks that the
+wait and helpers exit, that the terminal publishes the leader's status, and
+that the payload stops. Each job runs in a private POSIX session, so unrelated
+processes with the same command do not satisfy or fail the probe. The probe
+uses Linux procfs and reports a platform skip on other systems.
 Each contract also runs on the merge base of the archived head and the pull
 request's base. That base tree is installed and built inside the same
 secret-free boundary. A head failure whose diagnostic signatures already fail

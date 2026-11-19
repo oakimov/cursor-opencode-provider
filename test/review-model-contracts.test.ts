@@ -114,6 +114,7 @@ const contractProcessAdapter = `
       *review-model-contracts.mjs*) label=MODEL_CONTRACTS ;;
       *review-model-cache-contract.mjs*) label=MODEL_CACHE_CONTRACTS ;;
       *review-retention-contracts.mjs*) label=RETENTION_CONTRACTS ;;
+      *review-supervisor-contracts.mjs*) label=SUPERVISOR_CONTRACTS ;;
       *) return "$code" ;;
     esac
     if [[ "\${PROBE_INCOMPLETE:-}" != "$CHECK_TREE/$label" ]]; then
@@ -160,6 +161,7 @@ test("a harness contract failure preserves independent test results and closes t
     expect(result.stdout).toContain("LIVE_TEST=skipped")
     expect(result.stdout).toContain("RETENTION_CONTRACTS=passed")
     expect(result.stdout).toContain("MODEL_CACHE_CONTRACTS=passed")
+    expect(result.stdout).toContain("SUPERVISOR_CONTRACTS=passed")
     expect(result.stdout).toContain("UNIT_TESTS=passed")
     const commands = fs.readFileSync(log, "utf8")
     expect(commands).toContain("bun /opt/harness/scripts/review-model-contracts.mjs /src")
@@ -337,6 +339,38 @@ test("a contract failure the merge base does not have still blocks the live cred
   const archive = result.stdout.match(/^Check root: (.+)$/m)?.[1]
   expect(archive).toBeDefined()
   expect(fs.existsSync(archive!)).toBe(false)
+})
+
+test("supervisor failures compare by scenario and a new one closes the live gate", () => {
+  const result = spawnSync("bash", ["-c", gateScript(`
+    check_prepare_base() {
+      if [[ "$base_ready" -eq 1 ]]; then return 0; fi
+      base_ready=1
+      base_tree="$(mktemp -d "\${TMPDIR:-/tmp}/cursor-pr-base.XXXXXX")"
+    }
+    fixture_run_isolated() {
+      case "$*" in
+        *review-supervisor-contracts.mjs*)
+          echo 'SUPERVISOR_CONTRACT=leader-death-payload:failed payload survived leader death'
+          if [[ "$CHECK_TREE" == head ]]; then
+            echo 'SUPERVISOR_CONTRACT=leader-death-record:failed terminal record did not finalize after leader death'
+          fi
+          return 1
+          ;;
+      esac
+      return 0
+    }
+    check_run_live() { echo UNEXPECTED_LIVE; }
+  `)], { cwd: root, encoding: "utf8", env: {
+    ...process.env, CURSOR_REVIEW_TRUST: "1", CURSOR_REVIEW_TRUST_SHA: "a".repeat(40),
+    CURSOR_API_KEY: "test-only-no-credential",
+  } })
+  expect(result.status, result.stdout + result.stderr).toBe(1)
+  expect(result.stdout).toContain("SUPERVISOR_CONTRACTS_NEW=SUPERVISOR_CONTRACT=leader-death-record:failed")
+  expect(result.stdout).toContain("SUPERVISOR_CONTRACTS_PREEXISTING=SUPERVISOR_CONTRACT=leader-death-payload:failed")
+  expect(result.stdout).toContain("UNIT_TESTS=passed")
+  expect(result.stdout).toContain("LIVE_TEST=skipped")
+  expect(result.stdout).not.toContain("UNEXPECTED_LIVE")
 })
 
 test("an unrecognized catalog failure still blocks when older signatures match the base", () => {

@@ -245,6 +245,7 @@ check_run_isolated() {
     cp "$ROOT/scripts/review-model-contracts.mjs" "$isolate_contracts/review-model-contracts.mjs" || return 2
     cp "$ROOT/scripts/review-retention-contracts.mjs" "$isolate_contracts/review-retention-contracts.mjs" || return 2
     cp "$ROOT/scripts/review-model-cache-contract.mjs" "$isolate_contracts/review-model-cache-contract.mjs" || return 2
+    cp "$ROOT/scripts/review-supervisor-contracts.mjs" "$isolate_contracts/review-supervisor-contracts.mjs" || return 2
   fi
   check_supervise --src "${ISOLATE_SRC:-$PWD}" \
     --tool bun --tool node --tool git --tool python3 \
@@ -366,7 +367,7 @@ check_write_signatures() {
       next
     }
     /^MODEL_CONTRACT_CASE=/ { print $0; next }
-    /^(MODEL_CACHE_CONTRACT|MODEL_ALIAS_CONTRACT|RETENTION_CONTRACT|RETENTION_TEMP|RETENTION_ENV|RETENTION_QUARANTINE)=[^[:space:]]+:failed([[:space:]]|$)/ { print $0; next }
+    /^(MODEL_CACHE_CONTRACT|MODEL_ALIAS_CONTRACT|RETENTION_CONTRACT|RETENTION_TEMP|RETENTION_ENV|RETENTION_QUARANTINE|SUPERVISOR_CONTRACT)=[^[:space:]]+:failed([[:space:]]|$)/ { print $0; next }
     /^RETENTION_CLEANUP=failed([[:space:]]|$)/ { print $0; next }
     /; count=/ {
       line = $0
@@ -545,7 +546,7 @@ check_step() {
   local label="$1" code=0
   shift
   case "$label" in
-    MODEL_CONTRACTS|MODEL_CACHE_CONTRACTS|RETENTION_CONTRACTS)
+    MODEL_CONTRACTS|MODEL_CACHE_CONTRACTS|RETENTION_CONTRACTS|SUPERVISOR_CONTRACTS)
       set +e
       check_contract_pair "$label" "$@"
       code=$?
@@ -645,6 +646,11 @@ check_main() {
       if [[ "$checks" -ne 2 ]]; then
         phase=0
         check_step RETENTION_CONTRACTS bun /opt/harness/scripts/review-retention-contracts.mjs /src || phase=$?
+        if [[ "$phase" -gt "$checks" ]]; then checks="$phase"; fi
+      fi
+      if [[ "$checks" -ne 2 ]]; then
+        phase=0
+        check_step SUPERVISOR_CONTRACTS bun /opt/harness/scripts/review-supervisor-contracts.mjs /src || phase=$?
         if [[ "$phase" -gt "$checks" ]]; then checks="$phase"; fi
       fi
       if [[ "$checks" -ne 2 ]]; then

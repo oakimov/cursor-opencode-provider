@@ -718,7 +718,11 @@ These are failure lessons shared by both hosts, not a replacement for
   on that same EOF. If a group leader dies before reporting, close the lifeline
   so the in-group watcher stops the surviving payload. Normal completion still
   disarms it so an explicitly detached daemon survives. Assert cleanup using
-  captured job-owned PIDs (`test/terminal-runner.test.ts`).
+  captured job-owned PIDs (`test/terminal-runner.test.ts`). The review harness
+  now tests both owner deaths against archived code independently of its tests.
+  Compare finalization and payload shutdown separately: #192 added a delay to
+  record finalization while exposing an existing surviving-payload bug
+  (`scripts/review-supervisor-contracts.mjs`).
 - **A PID is not ownership.** Keep the group leader alive through drain and
   verify identity before signalling either a child group or its supervisor.
 - **Prove streaming and bounds while running.** BSD head/dd buffered output;
