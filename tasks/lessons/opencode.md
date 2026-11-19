@@ -720,6 +720,8 @@ These are failure lessons shared by both hosts, not a replacement for
   disarms it so an explicitly detached daemon survives. Assert cleanup using
   captured job-owned PIDs (`test/terminal-runner.test.ts`). The review harness
   now tests both owner deaths against archived code independently of its tests.
+  Record the probe's detached session before waiting for launcher readiness.
+  On cancellation, stop that session before removing its scratch files.
   Compare finalization and payload shutdown separately: #192 added a delay to
   record finalization while exposing an existing surviving-payload bug
   (`scripts/review-supervisor-contracts.mjs`).

@@ -1,7 +1,7 @@
 // Run the subject's generated launcher with no host or Cursor credentials.
-import { spawnSync } from "node:child_process"
+import { spawn } from "node:child_process"
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { constants, tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { setTimeout as delay } from "node:timers/promises"
@@ -16,6 +16,12 @@ if (process.platform !== "linux") {
 const subject = resolve(process.argv[2] ?? process.cwd())
 const { createManagedTerminal } = await import(pathToFileURL(join(subject, "src/terminal-runner.ts")).href)
 let failed = false
+const cancellation = new AbortController()
+const cancellationSignals = ["SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT"]
+function cancel(name) {
+  cancellation.abort(128 + constants.signals[name])
+}
+for (const name of cancellationSignals) process.on(name, cancel)
 function result(scenario, problem) {
   failed ||= Boolean(problem)
   console.log(`SUPERVISOR_CONTRACT=${scenario}:${problem ? "failed " + problem : "passed"}`)
@@ -49,9 +55,10 @@ function signal(info, name) {
   catch (error) { if (error.code !== "ESRCH") throw error }
 }
 
-async function until(check, timeout) {
+async function until(check, timeout, abort = cancellation.signal) {
   const end = performance.now() + timeout
   do {
+    abort?.throwIfAborted()
     const value = check()
     if (value) return value
     await delay(25)
@@ -64,6 +71,7 @@ function read(file) {
 }
 
 async function withJob(scenarios, probe) {
+  cancellation.signal.throwIfAborted()
   const root = mkdtempSync(join(tmpdir(), "review-supervisor-"))
   let session
   try {
@@ -72,12 +80,26 @@ async function withJob(scenarios, probe) {
       workingDirectory: root, shellPath: "/bin/sh", timeoutMs: 0, timeoutBehavior: 0,
       backgroundSpawn: true,
     }, root)
-    const launch = spawnSync("/bin/sh", ["-c", terminal.command], {
-      cwd: root, encoding: "utf8", detached: true, timeout: 12_000, killSignal: "SIGKILL",
+    const launch = spawn("/bin/sh", ["-c", terminal.command], {
+      cwd: root, detached: true, stdio: ["ignore", "pipe", "ignore"],
     })
     session = launch.pid
-    const marker = /^__CURSOR_BACKGROUND_SHELL__\d+:(\d+):/m.exec(launch.stdout ?? "")
-    if (launch.status !== 0 || !marker || !session || session === processInfo(process.pid)?.session) {
+    // Track the session before waiting for the launcher to report readiness.
+    let stdout = ""
+    launch.stdout.on("data", (chunk) => { stdout += chunk })
+    launch.on("error", () => {}) // close still reports an unsuccessful launch
+    const stopLauncher = () => {
+      launch.kill("SIGKILL")
+      launch.stdout.destroy()
+    }
+    const timeout = setTimeout(stopLauncher, 12_000)
+    cancellation.signal.addEventListener("abort", stopLauncher)
+    const code = await new Promise((resolve) => launch.once("close", resolve))
+    clearTimeout(timeout)
+    cancellation.signal.removeEventListener("abort", stopLauncher)
+    cancellation.signal.throwIfAborted()
+    const marker = /^__CURSOR_BACKGROUND_SHELL__\d+:(\d+):/m.exec(stdout)
+    if (code !== 0 || !marker || !session || session === processInfo(process.pid)?.session) {
       throw new Error("launcher did not return an isolated supervisor")
     }
     const supervisor = processInfo(Number(marker[1]))
@@ -93,6 +115,7 @@ async function withJob(scenarios, probe) {
     }
     await probe({ terminal, session, supervisor, leader, payload })
   } catch (error) {
+    cancellation.signal.throwIfAborted()
     for (const scenario of scenarios) result(scenario, error.message)
   } finally {
     // The launcher and all of its process groups share a private session.
@@ -102,31 +125,44 @@ async function withJob(scenarios, probe) {
         const remaining = members(session)
         for (const info of remaining) signal(info, "SIGKILL")
         return remaining.length === 0
-      }, 2000)
-      if (!stopped) result("cleanup", "job processes survived cleanup")
+      }, 2000, null)
+      if (!stopped) throw new Error("Job processes survived cleanup")
     }
     rmSync(root, { recursive: true, force: true })
   }
 }
 
-await withJob(["supervisor-death"], async ({ session, supervisor }) => {
-  signal(supervisor, "SIGKILL")
-  const stopped = await until(() => members(session).length === 0, 7000)
-  result("supervisor-death", stopped ? undefined : "job processes survived supervisor death")
-})
+async function run() {
+  await withJob(["supervisor-death"], async ({ session, supervisor }) => {
+    signal(supervisor, "SIGKILL")
+    const stopped = await until(() => members(session).length === 0, 7000)
+    result("supervisor-death", stopped ? undefined : "job processes survived supervisor death")
+  })
 
-await withJob(["leader-death-record", "leader-death-payload"], async ({ terminal, leader, payload }) => {
-  signal(leader, "SIGKILL")
-  // Allow the older supervisor's one-second poll and five-second drain.
-  // Record finalization and payload shutdown are independent obligations.
-  const [code, stopped] = await Promise.all([
-    until(() => read(join(terminal.directory, "done"))?.trim(), 8000),
-    until(() => !alive(payload), 8000),
-  ])
-  result("leader-death-record", code === "137" ? undefined
-    : code ? "unexpected exit code after leader death" : "terminal record did not finalize after leader death")
-  result("leader-death-payload", stopped ? undefined : "payload survived leader death")
-})
+  await withJob(["leader-death-record", "leader-death-payload"], async ({ terminal, leader, payload }) => {
+    signal(leader, "SIGKILL")
+    // Allow the older supervisor's one-second poll and five-second drain.
+    // Record finalization and payload shutdown are independent obligations.
+    const [code, stopped] = await Promise.all([
+      until(() => read(join(terminal.directory, "done"))?.trim(), 8000),
+      until(() => !alive(payload), 8000),
+    ])
+    result("leader-death-record", code === "137" ? undefined
+      : code ? "unexpected exit code after leader death" : "terminal record did not finalize after leader death")
+    result("leader-death-payload", stopped ? undefined : "payload survived leader death")
+  })
+}
 
-console.log(`REVIEW_CONTRACT_COMPLETE=${label}:${failed ? "failed" : "passed"}`)
-process.exitCode = failed ? 1 : 0
+try {
+  await run()
+} catch (error) {
+  if (!cancellation.signal.aborted || error !== cancellation.signal.reason) throw error
+} finally {
+  for (const name of cancellationSignals) process.off(name, cancel)
+}
+if (cancellation.signal.aborted) {
+  process.exitCode = cancellation.signal.reason
+} else {
+  console.log(`REVIEW_CONTRACT_COMPLETE=${label}:${failed ? "failed" : "passed"}`)
+  process.exitCode = failed ? 1 : 0
+}
