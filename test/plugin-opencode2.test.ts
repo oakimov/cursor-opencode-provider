@@ -16,7 +16,7 @@ import { resetCheckpointsForTests, setCheckpoint } from "../src/protocol/checkpo
 import { sessionManager } from "../src/session.js"
 import { sessionFixture } from "./session-fixture.js"
 import { settleRunSavesForTests } from "../src/language-model.js"
-import { applyCursorProviderInventory, CURSOR_AISDK_PACKAGE, modelConfigEntryToInfo } from "../src/opencode2/catalog.js"
+import { applyCursorProviderInventory, CURSOR_AISDK_PACKAGE, modelConfigEntryToInfo, shortVariantAliases } from "../src/opencode2/catalog.js"
 import {
   accessTokenFromCredential,
   applyCursorIntegration,
@@ -347,6 +347,247 @@ describe("opencode2 provider inventory", () => {
     expect(model.variants[0].settings).toBeDefined()
   })
 
+  test("keeps display IDs as the only picker choices and maps short effort aliases", () => {
+    const levels = ["none", "low", "medium", "high", "max"] as const
+    const deepseek: ModelInfo = {
+      id: "deepseek-v41-flash-1017",
+      displayName: "DeepSeek V4.1 Flash 1017",
+      supportsThinking: false,
+      supportsAgent: true,
+      maxContext: 1_048_576,
+      variants: levels.map((level) => ({
+        key: "deepseek-v41-flash-1017",
+        displayName: `DeepSeek V4.1 Flash 1017 ${level[0]!.toUpperCase()}${level.slice(1)}`,
+        parameterValues: [{ id: "reasoning_effort", value: level }],
+        isDefaultNonMax: level === "high",
+        isDefaultMax: level === "max",
+      })),
+    }
+
+    const { editor, models } = fakeProviderEditor()
+    applyCursorProviderInventory(editor, [deepseek])
+    const model = models.get("cursor/deepseek-v41-flash-1017")!
+    expect(model.variants.map(({ id }) => id)).toEqual(["None", "Low", "Medium", "High", "Max"])
+    expect(Object.fromEntries(shortVariantAliases(model.variants, model.limit.context))).toEqual({
+      none: "None", low: "Low", medium: "Medium", high: "High", max: "Max",
+    })
+  })
+
+  test("normalizes extra-high to xhigh and keeps the shared effort ids", () => {
+    const info = modelConfigEntryToInfo("gpt-5.4-mini", {
+      name: "GPT-5.4 Mini",
+      variants: {
+        None: { cursorVariantParameters: [{ id: "reasoning", value: "none" }] },
+        High: { cursorVariantParameters: [{ id: "reasoning", value: "high" }] },
+        "Extra High": { cursorVariantParameters: [{ id: "reasoning", value: "xhigh" }] },
+      },
+    })
+    expect(Object.fromEntries(shortVariantAliases(info.variants, info.limit.context))).toEqual({
+      none: "None", high: "High", xhigh: "Extra High",
+    })
+    // Every effort parameter spelling Cursor publishes is recognized.
+    const viaEffort = modelConfigEntryToInfo("grok-4.5", {
+      name: "Grok 4.5",
+      variants: {
+        Low: { cursorVariantParameters: [{ id: "effort", value: "low" }] },
+        High: { cursorVariantParameters: [{ id: "effort", value: "high" }] },
+      },
+    })
+    expect(shortVariantAliases(viaEffort.variants, viaEffort.limit.context).get("high")).toBe("High")
+    const viaReasoningEffort = modelConfigEntryToInfo("gemini-4-carbon", {
+      name: "Gemini 4 Carbon",
+      variants: {
+        High: { cursorVariantParameters: [{ id: "reasoning_effort", value: "high" }] },
+      },
+    })
+    expect(shortVariantAliases(viaReasoningEffort.variants, viaReasoningEffort.limit.context).get("high")).toBe("High")
+  })
+
+  test("omits a bare short id when thinking and non-thinking variants collide", () => {
+    // claude-opus-5 and claude-haiku-5-5 list both "No Thinking High" and
+    // "High": one `high` id cannot say which tuple the user meant.
+    const info = modelConfigEntryToInfo("claude-opus-5", {
+      name: "Claude Opus 5",
+      variants: {
+        "No Thinking Low": {
+          cursorVariantParameters: [
+            { id: "thinking", value: "false" },
+            { id: "effort", value: "low" },
+          ],
+        },
+        "No Thinking High": {
+          cursorVariantParameters: [
+            { id: "thinking", value: "false" },
+            { id: "effort", value: "high" },
+          ],
+        },
+        Low: {
+          cursorVariantParameters: [
+            { id: "thinking", value: "true" },
+            { id: "effort", value: "low" },
+          ],
+        },
+        High: {
+          cursorVariantParameters: [
+            { id: "thinking", value: "true" },
+            { id: "effort", value: "high" },
+          ],
+        },
+      },
+    })
+    const ids = info.variants.map((variant) => variant.id)
+    expect(ids).toEqual(["No Thinking Low", "No Thinking High", "Low", "High"])
+    expect(shortVariantAliases(info.variants, info.limit.context).size).toBe(0)
+  })
+
+  test("suffixes short ids only when an entry mixes tiers or speeds", () => {
+    const tiers = modelConfigEntryToInfo("grok-4.7", {
+      name: "Grok 4.7",
+      variants: {
+        High: { cursorVariantParameters: [{ id: "reasoning_effort", value: "high" }] },
+        "High 500k": {
+          cursorVariantParameters: [
+            { id: "reasoning_effort", value: "high" },
+            { id: "context", value: "500k" },
+          ],
+        },
+      },
+    })
+    expect(Object.fromEntries(shortVariantAliases(tiers.variants, tiers.limit.context))).toEqual({
+      high: "High", "high-500k": "High 500k",
+    })
+
+    const speeds = modelConfigEntryToInfo("gpt-5.6-terra", {
+      name: "GPT-5.6 Terra",
+      variants: {
+        High: { cursorVariantParameters: [{ id: "reasoning", value: "high" }] },
+        "High Fast": {
+          cursorVariantParameters: [
+            { id: "reasoning", value: "high" },
+            { id: "fast", value: "true" },
+          ],
+        },
+      },
+    })
+    expect(Object.fromEntries(shortVariantAliases(speeds.variants, speeds.limit.context))).toEqual({
+      high: "High", "high-fast": "High Fast",
+    })
+
+    // A 1m entry alone names its tier in the catalog id, so it stays bare.
+    const long = modelConfigEntryToInfo("claude-sonnet-5-5-1m", {
+      name: "Claude Sonnet 5.5 1M",
+      variants: {
+        High: {
+          cursorVariantParameters: [
+            { id: "reasoning_effort", value: "high" },
+            { id: "context", value: "1m" },
+          ],
+        },
+      },
+    })
+    expect(Object.fromEntries(shortVariantAliases(long.variants, long.limit.context))).toEqual({ high: "High" })
+
+    const mixed = modelConfigEntryToInfo("claude-opus-5-5", {
+      name: "Claude Opus 5.5",
+      limit: { context: 300_000 },
+      variants: {
+        High: {
+          cursorVariantParameters: [
+            { id: "effort", value: "high" },
+            { id: "context", value: "300k" },
+            { id: "fast", value: "false" },
+          ],
+        },
+        "High Fast": {
+          cursorVariantParameters: [
+            { id: "effort", value: "high" },
+            { id: "context", value: "300k" },
+            { id: "fast", value: "true" },
+          ],
+        },
+        "1M High": {
+          cursorVariantParameters: [
+            { id: "effort", value: "high" },
+            { id: "context", value: "1m" },
+            { id: "fast", value: "false" },
+          ],
+        },
+        "1M High Fast": {
+          cursorVariantParameters: [
+            { id: "effort", value: "high" },
+            { id: "context", value: "1m" },
+            { id: "fast", value: "true" },
+          ],
+        },
+      },
+    })
+    expect(Object.fromEntries(shortVariantAliases(mixed.variants, mixed.limit.context))).toEqual({
+      high: "High", "high-fast": "High Fast", "high-1m": "1M High", "high-1m-fast": "1M High Fast",
+    })
+  })
+
+  test("never republishes an existing id or a variant without an effort parameter", () => {
+    const info = modelConfigEntryToInfo("claude-haiku-4-5", {
+      name: "Claude Haiku 4.5",
+      variants: {
+        "No Thinking": { cursorVariantParameters: [{ id: "thinking", value: "false" }] },
+        Thinking: { cursorVariantParameters: [{ id: "thinking", value: "true" }] },
+      },
+    })
+    // A boolean `thinking` parameter is a mode, not an effort level.
+    expect(info.variants.map((variant) => variant.id)).toEqual(["No Thinking", "Thinking"])
+    expect(shortVariantAliases(info.variants, info.limit.context).size).toBe(0)
+
+    const labelled = modelConfigEntryToInfo("synthetic-model", {
+      name: "Synthetic",
+      variants: {
+        // Already-shaped ids must not gain a duplicate short twin.
+        high: { cursorVariantParameters: [{ id: "reasoning", value: "high" }] },
+        Low: { cursorVariantParameters: [{ id: "reasoning", value: "low" }] },
+      },
+    })
+    expect(labelled.variants.map((variant) => variant.id)).toEqual(["high", "Low"])
+    expect(Object.fromEntries(shortVariantAliases(labelled.variants, labelled.limit.context))).toEqual({ low: "Low" })
+  })
+
+  test("never publishes OpenCode's reserved default variant id", () => {
+    // Both majors treat `default` as "no variant override": 2.x rewrites a
+    // requested `default` to undefined before lookup, so a published tuple
+    // under that id could never be selected. The display-label path already
+    // rewrites it to `Standard`; the short-id path must not republish it.
+    const viaReasoningEffort = modelConfigEntryToInfo("synthetic-default", {
+      name: "Synthetic",
+      variants: {
+        Standard: { cursorVariantParameters: [{ id: "reasoning_effort", value: "default" }] },
+        High: { cursorVariantParameters: [{ id: "reasoning_effort", value: "high" }] },
+      },
+    })
+    expect(viaReasoningEffort.variants.map((variant) => variant.id)).toEqual(["Standard", "High"])
+    expect(Object.fromEntries(shortVariantAliases(viaReasoningEffort.variants, viaReasoningEffort.limit.context)))
+      .toEqual({ high: "High" })
+
+    // Each effort spelling, including a mixed-tier entry where the collision
+    // would otherwise be suffixed rather than dropped.
+    for (const parameter of ["effort", "reasoning", "reasoning_effort"]) {
+      const info = modelConfigEntryToInfo("synthetic-default", {
+        name: "Synthetic",
+        variants: {
+          Default: { cursorVariantParameters: [{ id: parameter, value: "default" }] },
+          "High 500k": {
+            cursorVariantParameters: [
+              { id: parameter, value: "high" },
+              { id: "context", value: "500k" },
+            ],
+          },
+        },
+      })
+      const ids = [...shortVariantAliases(info.variants, info.limit.context).keys()]
+      expect(ids).toEqual(["high-500k"])
+      // The tuple the reserved id would have named is still reachable by label.
+      expect(info.variants.map(({ id }) => id)).toContain("Default")
+    }
+  })
+
   test("re-applying is idempotent (host replays transforms on reload)", () => {
     const { editor, models, providers } = fakeProviderEditor()
     applyCursorProviderInventory(editor, [baseModel])
@@ -628,6 +869,7 @@ function fakeContext(events: readonly unknown[] = []) {
         resolve: async () => undefined,
       },
     },
+    model: { list: async () => ({ data: [...inventory.models.values()] }) },
     session: {
       ...hookDomain("session"),
       get: async ({ sessionID }: { sessionID: string }) => {
@@ -767,6 +1009,43 @@ describe("opencode2 setup", () => {
       rmSync(configDir, { recursive: true, force: true })
       rmSync(cacheDir, { recursive: true, force: true })
     }
+  })
+
+  test("resolves aliases before a Run and gives exact host variant IDs precedence", async () => {
+    await withTempHostCache(async (cacheDir) => {
+      await writeCache(cacheDir, {
+        models: [{ ...baseModel, variants: [
+          { key: "max", displayName: "Max", parameterValues: [{ id: "effort", value: "max" }],
+            isDefaultNonMax: false, isDefaultMax: false },
+          { key: "extra-high", displayName: "Extra High", parameterValues: [{ id: "effort", value: "extra-high" }],
+            isDefaultNonMax: false, isDefaultMax: false },
+        ] }],
+        fetchedAt: Date.now(),
+        schemaVersion: MODEL_CACHE_SCHEMA_VERSION,
+      })
+      const { ctx, hooks, inventory } = fakeContext()
+      const cleanup = await setupPlugin(ctx)
+      try {
+        const key = `cursor/${baseModel.id}`
+        const model = inventory.models.get(key)!
+        expect(model.variants.map(({ id }) => id)).toEqual(["Max", "Extra High"])
+        const resolve = async (variant: string, providerID = "cursor") => {
+          const input = { sessionID: "session", agent: "build", kind: "primary",
+            model: { providerID, id: baseModel.id, variant } }
+          await hooks.get("session.experimental.model.resolve")!(input)
+          return input.model.variant
+        }
+        expect(await resolve("max")).toBe("Max")
+        expect(await resolve("xhigh")).toBe("Extra High")
+        expect(await resolve("Max")).toBe("Max")
+        expect(await resolve("typo")).toBe("typo")
+        expect(await resolve("max", "different-provider")).toBe("max")
+        inventory.models.set(key, { ...model, variants: [{ id: "max" }, ...model.variants] })
+        expect(await resolve("max")).toBe("max")
+      } finally {
+        await cleanup()
+      }
+    })
   })
 
   test("writes CreatePlan plans in OpenCode 2.0's Plan directory", async () => {

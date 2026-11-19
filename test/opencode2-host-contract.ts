@@ -163,6 +163,9 @@ export type HostPluginContext = {
     readonly transform: HostTransform<HostProviderEditor>
     readonly reload: () => Promise<void>
   }
+  readonly model: {
+    readonly list: () => Promise<{ readonly data: readonly HostModelInfo[] }>
+  }
   readonly location: { readonly directory: string }
   readonly session: {
     readonly hook: HostModelHooks<{
@@ -209,6 +212,12 @@ export type HostPluginContext = {
         readonly kind: "primary" | "compaction" | "title" | "generate"
         baseURL?: string
         headers: Record<string, string>
+      }
+      "experimental.model.resolve": {
+        readonly sessionID: string
+        readonly agent: string
+        readonly kind: "primary" | "compaction" | "title" | "generate"
+        model: { providerID: string; id: string; variant?: string }
       }
     }>
     readonly get: (input: { sessionID: string }) => Promise<{

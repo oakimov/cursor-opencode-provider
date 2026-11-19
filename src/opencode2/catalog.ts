@@ -1,7 +1,15 @@
 import { pathToFileURL } from "node:url"
 import { CURSOR_PROVIDER_ID } from "../shared.js"
-import { CURSOR_WIRE_MODEL_ID_KEY, type ModelInfo } from "../models.js"
-import { modelsToConfig } from "../model-config.js"
+import {
+  CURSOR_VARIANT_PARAMETERS_KEY,
+  CURSOR_WIRE_MODEL_ID_KEY,
+  isEffortParameter,
+  normalizeModelParameterValues,
+  parseCursorContextLimit,
+  type ModelInfo,
+  type ModelParameterValue,
+} from "../models.js"
+import { contextSuffix, modelsToConfig, RESERVED_VARIANT_KEY } from "../model-config.js"
 import { toOpenCode2Costs, type OpenCode2ModelCost, type OpenCodeModelCost } from "../pricing.js"
 import type { ConnectionInfo, ModelVariantInfo, ProviderEditor } from "./types.js"
 
@@ -63,6 +71,61 @@ export type CatalogModelInfo = {
   settings?: Record<string, unknown>
 }
 
+function shortEffortId(params: ModelParameterValue[]): string | undefined {
+  const efforts = new Set(params.filter(({ id }) => isEffortParameter(id)).map(({ value }) => {
+    const effort = value.trim().toLowerCase()
+    return effort === "extra-high" || effort === "extra high" ? "xhigh" : effort
+  }))
+  // Several effort fields can agree, but their order must never pick a winner.
+  if (efforts.size !== 1) return undefined
+  const [effort] = efforts
+  return effort && effort !== RESERVED_VARIANT_KEY && /^[a-z][a-z0-9]*$/.test(effort)
+    ? effort
+    : undefined
+}
+
+/** Map unambiguous short IDs to the existing visible labels. */
+export function shortVariantAliases(
+  variants: readonly ModelVariantInfo[],
+  baseContext: number,
+): Map<string, string> {
+  const parameters = variants.map(({ settings }) => {
+    const parsed = normalizeModelParameterValues(settings?.[CURSOR_VARIANT_PARAMETERS_KEY])
+    return parsed ?? []
+  })
+  // An omitted context leaves the choice on the entry's own tier.
+  const contextOf = (params: ModelParameterValue[]) => parseCursorContextLimit(
+    params.find((parameter) => parameter.id === "context")?.value,
+  ) ?? baseContext
+  const isFast = (params: ModelParameterValue[]) =>
+    params.find((parameter) => parameter.id === "fast")?.value === "true"
+  // A tier/speed suffix only disambiguates something the entry actually mixes.
+  const contexts = parameters.map(contextOf)
+  const tiers = new Set(contexts)
+  const speeds = parameters.map(isFast)
+  const spansSpeeds = speeds.includes(true) && speeds.includes(false)
+  const spansTiers = tiers.size > 1
+
+  const shortIds = parameters.map((params, index) => {
+    const effortId = shortEffortId(params)
+    if (!effortId) return undefined
+    const context = contexts[index]!
+    const contextToken = spansTiers && context !== baseContext ? `-${contextSuffix(context)}` : ""
+    const fastToken = speeds[index] && spansSpeeds ? "-fast" : ""
+    return `${effortId}${contextToken}${fastToken}`
+  })
+
+  const counts = new Map<string, number>()
+  for (const id of shortIds) if (id) counts.set(id, (counts.get(id) ?? 0) + 1)
+  const taken = new Set(variants.map(({ id }) => id))
+  const aliases = new Map<string, string>()
+  for (const [index, id] of shortIds.entries()) {
+    if (!id || counts.get(id) !== 1 || taken.has(id)) continue
+    aliases.set(id, variants[index]!.id)
+  }
+  return aliases
+}
+
 /** Translate one `modelsToConfig` entry into the 2.0 `Model.Info` shape. */
 export function modelConfigEntryToInfo(id: string, entry: Record<string, any>): CatalogModelInfo {
   const options = entry.options as Record<string, unknown> | undefined
@@ -75,9 +138,10 @@ export function modelConfigEntryToInfo(id: string, entry: Record<string, any>): 
       ? (options[CURSOR_WIRE_MODEL_ID_KEY] as string)
       : id
 
-  const variants: ModelVariantInfo[] = Object.entries(
+  const context = entry.limit?.context ?? 200_000
+  const variants = Object.entries(
     (entry.variants ?? {}) as Record<string, Record<string, unknown>>,
-  ).map(([variantId, settings]) => ({ id: variantId, settings: { ...settings } }))
+  ).map(([id, settings]) => ({ id, settings: { ...settings } }))
 
   const inputModalities = Array.isArray(entry.modalities?.input)
     ? entry.modalities.input.filter((modality: unknown): modality is string => typeof modality === "string")
@@ -97,7 +161,7 @@ export function modelConfigEntryToInfo(id: string, entry: Record<string, any>): 
       output: outputModalities,
     },
     limit: {
-      context: entry.limit?.context ?? 200_000,
+      context,
       output: entry.limit?.output ?? 8192,
     },
     variants,
@@ -114,7 +178,7 @@ export function modelConfigEntryToInfo(id: string, entry: Record<string, any>): 
 /** Full model map for the in-memory provider inventory. */
 export function modelsToCatalogModelMap(models: ModelInfo[]): Record<string, CatalogModelInfo> {
   const config = modelsToConfig(models)
-  const out: Record<string, CatalogModelInfo> = {}
+  const out: Record<string, CatalogModelInfo> = Object.create(null)
   for (const [id, entry] of Object.entries(config)) {
     out[id] = modelConfigEntryToInfo(id, entry as Record<string, any>)
   }

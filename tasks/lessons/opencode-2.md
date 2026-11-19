@@ -75,6 +75,15 @@ Operator setup: [OpenCode 2.x](../../docs/opencode-2.md).
 
 ## Catalog and permissions
 
+- **Name aliases from the catalog's own tier.** The smallest explicit context
+  can differ from the declared base. Count omitted context with that base
+  when checking ambiguity. Conflicting effort fields have no alias, regardless
+  of parameter order. Check the exact id and original tuple together
+  (`test/model-selection-review.test.ts`).
+  Resolve native session aliases before the host looks up the variant. Consult
+  the effective catalog so configured exact IDs still win. ACP's effort
+  selector validates earlier and uses the display IDs
+  (`test/plugin-opencode2.test.ts`).
 - **Direct tools require both placement and shape.** Missing `codemode: false`
   hid plugin tools; missing output schemas crashed the host. Todos are an
   opt-in in-memory fallback, not native builtins (`test/todo-tools.test.ts`).

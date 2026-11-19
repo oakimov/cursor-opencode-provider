@@ -337,11 +337,19 @@ export type SessionModelRequest = {
   headers: Record<string, string>
 }
 
+export type SessionModelResolve = {
+  readonly sessionID: string
+  readonly agent: string
+  readonly kind: SessionModelRequest["kind"]
+  model: SessionModelRequest["model"]
+}
+
 export type SessionHooks = {
   readonly context: SessionContext
   readonly compaction: SessionCompaction
   readonly generate: SessionGenerate
   readonly title: SessionTitle
+  readonly "experimental.model.resolve": SessionModelResolve
   readonly "model.request": SessionModelRequest
 }
 
@@ -458,6 +466,9 @@ export type PluginContext = {
   readonly aisdk: AISDKDomain
   readonly event: EventDomain
   readonly integration: IntegrationDomain
+  readonly model?: { readonly list: () => Promise<{
+    readonly data: readonly Pick<ModelInfo2, "providerID" | "id" | "variants" | "limit">[]
+  }> }
   readonly provider: ProviderDomain
   readonly session: SessionDomain
   readonly tool: ToolDomain

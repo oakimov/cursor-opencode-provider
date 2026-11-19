@@ -751,6 +751,13 @@ These are failure lessons shared by both hosts, not a replacement for
   legacy selections usable with their old static budget; dedicated entries
   provide the larger budget (`test/model-selection-review.test.ts`,
   `test/model-selection-run.test.ts`).
+  Compare accepted discovery tuples against each catalog independently.
+  Object-key collisions can drop a choice before either host sees it.
+  Preserve the wire id and tuple when escaping a key, and use own properties
+  for pricing lookups (`test/model-selection-review.test.ts`, `test/pricing.test.ts`).
+  Cache timestamps alone cannot distinguish roots or atomic replacements.
+  Bind the model snapshot to the Run's cache root and file generation and
+  verify the selected max-mode bit on the request (`test/model-selection-run.test.ts`).
 - **Inspect generator inputs before changing mappings.** Pricing and model
   metadata came from distinct markdown endpoints. Run the live pricing gate
   before a bump; the v0.6.4 failure forced a retag ([release gate](../../AGENTS.md#hard-stop--release--version-bump--tag-gate-non-optional)).

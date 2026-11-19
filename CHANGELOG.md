@@ -8,6 +8,7 @@
 
 ### Added
 
+- Native OpenCode 2.x session runs accept short effort aliases such as `#max` and `#high-fast` when they identify one choice. The picker keeps one entry under its original display label. ACP effort selectors use that label ([#183](https://github.com/oakimov/cursor-opencode-provider/pull/183), @adonm).
 - First-time [review harness setup guide](docs/review-harness.md): supply App credentials or a PAT, run a Cloud Agent or local review, what a published COMMENT review contains, harness architecture (tests, evals, live OpenCode runs, extending scenarios).
 - `review-publish.py post --token-env NAME`, `review-publish.py threads --token-env NAME`, and `complete-resolutions.py --token-env NAME` read a GitHub personal access token (`ghp_` or `github_pat_`) from that environment variable and send it on every `gh` call those commands make. Without the option, those commands use the GitHub App installation token.
 
@@ -18,6 +19,8 @@
 
 ### Fixed
 
+- Preserve selectable model and variant ids that collide with object keys in both OpenCode catalogs. Keep their original Cursor ids and parameters, and leave inherited pricing keys unpriced ([#188](https://github.com/oakimov/cursor-opencode-provider/pull/188)).
+- Read model selection metadata from the current cache file and generation, even when two files have the same timestamp ([#188](https://github.com/oakimov/cursor-opencode-provider/pull/188)).
 - Thread listing, the pre-publish thread lookup, and resolution reads no longer call `gh` anonymously. `post`, `threads`, and `complete-resolutions.py` send one credential on every `gh` call: the `--token-env` personal access token when that option is set, otherwise the GitHub App installation token. The named token wins over an ambient `GH_TOKEN` or `GITHUB_TOKEN`.
 - Cancelling `scripts/isolated-check.sh` or `scripts/isolate-run.sh` with TERM, INT, HUP or QUIT sent only to the script's own process now stops the sandboxed command before the archive or staging files are removed, including the `--live` run that holds `CURSOR_API_KEY`; the command used to keep running. A boundary still running `ISOLATE_TERM_GRACE` seconds later (default 10) is killed, and the script exits 128 plus the signal number. `scripts/live-test.sh` also stops OpenCode on QUIT. SIGKILL still cannot be forwarded.
 
