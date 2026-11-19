@@ -17,7 +17,12 @@
  * Usage:
  *   bun run generate:pricing
  *   bun run generate:pricing -- --from-file /tmp/pricing.md --context-from-file /tmp/docs.md
+ *   bun run generate:pricing -- --from-file /tmp/pricing.md --context-from-file /tmp/docs.md --pages-from-dir /tmp/pages
  *   bun run generate:pricing -- --check   # exit 1 if committed data is stale
+ *
+ * Both file flags stay offline. Without `--pages-from-dir` they price from the
+ * saved markdown only. The directory holds `<model-id>.html` copies of the
+ * rendered model pages.
  *
  * Also runs automatically before npm publish (GitHub Actions publish.yml and
  * package.json prepublishOnly) so released packages carry current docs rates.
@@ -25,7 +30,7 @@
  * unmapped display names fail publish CI.
  */
 
-import { readFileSync, writeFileSync } from "node:fs"
+import { readdirSync, readFileSync, writeFileSync } from "node:fs"
 import path from "node:path"
 
 export const CURSOR_PRICING_DOC_URL = "https://cursor.com/docs/models-and-pricing.md"
@@ -239,10 +244,11 @@ type ParsedContextRow = CursorModelContext & {
 type Options = {
   fromFile?: string
   contextFromFile?: string
+  pagesFromDir?: string
   check: boolean
 }
 
-function parseArgs(argv: string[]): Options {
+export function parseArgs(argv: string[]): Options {
   const options: Options = { check: false }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!
@@ -250,6 +256,8 @@ function parseArgs(argv: string[]): Options {
       options.fromFile = argv[++i]
     } else if (arg === "--context-from-file" && argv[i + 1]) {
       options.contextFromFile = argv[++i]
+    } else if (arg === "--pages-from-dir" && argv[i + 1]) {
+      options.pagesFromDir = argv[++i]
     } else if (arg === "--check") {
       options.check = true
     } else {
@@ -257,6 +265,13 @@ function parseArgs(argv: string[]): Options {
     }
   }
   return options
+}
+
+/** Where model-page tables come from. Local markdown never fetches pages. */
+export function modelPageSource(options: Options): "directory" | "markdown" | "live" {
+  if (options.pagesFromDir) return "directory"
+  if (options.fromFile && options.contextFromFile) return "markdown"
+  return "live"
 }
 
 function stripMarkdownLink(value: string): string {
@@ -1194,6 +1209,29 @@ async function loadMarkdown(
   return { text: await response.text(), source: url }
 }
 
+/** Read `<model-id>.html` files. A model with no file keeps the main-table rate. */
+export function loadSavedModelPages(dir: string): ModelPageInput[] {
+  const known = new Set(Object.keys(MODEL_PAGE_SLUG))
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`Cannot read model pages from ${dir}: ${message}`)
+  }
+  const pages: ModelPageInput[] = []
+  for (const name of names) {
+    if (!name.endsWith(".html")) continue
+    const modelId = name.slice(0, -".html".length)
+    if (!known.has(modelId)) throw new Error(`Unknown model page ${name} in ${dir}`)
+    pages.push({ modelId, html: readFileSync(path.join(dir, name), "utf8") })
+  }
+  if (pages.length === 0) {
+    throw new Error(`No model pages in ${dir}. Expected <model-id>.html files.`)
+  }
+  return pages
+}
+
 async function loadModelPages(): Promise<ModelPageInput[]> {
   const entries = Object.entries(MODEL_PAGE_SLUG)
   const pages: ModelPageInput[] = []
@@ -1217,7 +1255,12 @@ async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2))
   const pricingDoc = await loadMarkdown(CURSOR_PRICING_DOC_URL, options.fromFile)
   const contextDoc = await loadMarkdown(CURSOR_CONTEXT_DOC_URL, options.contextFromFile)
-  const pages = await loadModelPages()
+  const pageSource = modelPageSource(options)
+  const pages = pageSource === "directory"
+    ? loadSavedModelPages(options.pagesFromDir!)
+    : pageSource === "markdown"
+      ? []
+      : await loadModelPages()
   const defaultContexts = defaultContextByDisplayName(contextDoc.text)
   const pricing = buildPricing(pricingDoc.text, defaultContexts, {
     skipNoteModels: new Set(pages.map((page) => page.modelId)),
@@ -1234,7 +1277,13 @@ async function main(): Promise<void> {
     contextDoc.source,
   )
   const dest = outputPath()
-  console.log(`Model pages: ${pages.length}`)
+  console.log(
+    pageSource === "directory"
+      ? `Model pages: ${pages.length} from ${options.pagesFromDir}`
+      : pageSource === "markdown"
+        ? "Model pages: none (local markdown only)"
+        : `Model pages: ${pages.length}`,
+  )
   console.log(`Derived prices: ${derived.length}`)
   for (const price of derived) {
     console.log(`  ${price.id}: ${JSON.stringify(price.cost)}`)

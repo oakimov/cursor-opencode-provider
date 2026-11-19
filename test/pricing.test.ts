@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test"
-import { readFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { modelsToConfig } from "../src/model-config.js"
 import type { ModelInfo } from "../src/models.js"
@@ -20,6 +21,9 @@ import {
   buildPricing,
   buildPricingTable,
   catalogIdForPricingDisplayName,
+  loadSavedModelPages,
+  modelPageSource,
+  parseArgs,
   priceFromModelPages,
   type PricingBuild,
 } from "../scripts/generate-cursor-pricing.js"
@@ -779,5 +783,45 @@ describe("pricing", () => {
     expect(derived).toEqual([])
     expect(pricing.costs["gpt-5.4-fast"]).toBeUndefined()
     expect(pricing.costs["gpt-5.4"]?.tiers).toBeUndefined()
+  })
+
+  it("prices saved model pages without fetching, and keeps local markdown offline", () => {
+    expect(modelPageSource(parseArgs([
+      "--from-file", "pricing.md",
+      "--context-from-file", "docs.md",
+    ]))).toBe("markdown")
+    expect(modelPageSource(parseArgs(["--check"]))).toBe("live")
+    const dir = mkdtempSync(join(tmpdir(), "pricing-pages-"))
+    try {
+      expect(modelPageSource(parseArgs([
+        "--from-file", "pricing.md",
+        "--context-from-file", "docs.md",
+        "--pages-from-dir", dir,
+      ]))).toBe("directory")
+      writeFileSync(join(dir, "notes.txt"), "not a page")
+      expect(() => loadSavedModelPages(dir)).toThrow(/No model pages/)
+      writeFileSync(join(dir, "not-a-model.html"), "<table></table>")
+      expect(() => loadSavedModelPages(dir)).toThrow(/Unknown model page/)
+      rmSync(join(dir, "not-a-model.html"))
+      writeFileSync(
+        join(dir, "gpt-5.5.html"),
+        readFileSync(join(import.meta.dir, "fixtures", "model-page-gpt-5-5.html"), "utf8"),
+      )
+      const pages = loadSavedModelPages(dir)
+      expect(pages.map((page) => page.modelId)).toEqual(["gpt-5.5"])
+      const markdown = `
+| Model | Provider | Input | Cache write | Cache read | Output | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| GPT-5.5 | OpenAI | $5 | - | $0.5 | $30 | Long context supports up to 1M tokens with 2x input pricing |
+`
+      const pricing = buildPricing(markdown, { "GPT-5.5": 272_000 }, {
+        skipNoteModels: new Set(pages.map((page) => page.modelId)),
+      })
+      priceFromModelPages(pricing, pages, { "GPT-5.5": 272_000 })
+      expect(pricing.costs["gpt-5.5-fast"]).toEqual({ input: 12.5, output: 75, cache_read: 1.25 })
+      expect(pricing.costs["gpt-5.5"]?.tiers?.[0]?.output).toBe(45)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
