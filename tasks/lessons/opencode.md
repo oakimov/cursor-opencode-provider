@@ -862,12 +862,22 @@ These are failure lessons shared by both hosts, not a replacement for
   (`test/selectable-pricing.test.ts`).
   `--from-file` together with `--context-from-file` makes no network request.
   A gap's page must be `<model-id>.html` in `--pages-from-dir`. A missing
-  file fails the run and names the id. A required page with no pricing table,
-  or without the Fast or long-context row that gap needed, also fails before
-  the file is written. The base rate is not written in its place. The offline
-  fixture keeps only those gap pages (`test/fixtures/pricing-offline/pages`).
-  A model whose markdown row already covers the selectable variants has no
-  file there.
+  file fails the run and names the id. A required page with no pricing table
+  fails before the file is written. A Fast or long-context gap can be filled
+  from a row or from a rule the page states: a Fast multiplier ("Nx the
+  standard price") or a same-rate long-context rule ("no long-context
+  multiplier", "the same rates") above a threshold the page names. The tier
+  copies the row it extends, or scales every component by the stated factor.
+  A max-context spec, an effort variant, and a markdown note are not prices.
+  A page that states neither fails, and the base rate is not written in its
+  place. Read on 20 Nov 2026, these pages state no price for the missing
+  variant: GPT-5.2 Fast, GPT-5.3 Codex Fast, and Claude Fable 5.2 Fast (an
+  effort variant or the base rate only); long context for Claude Fable 5,
+  5.1, and 5.2 and for Gemini 4 Argon, Carbon, Hydrogen, and Neon (a 1M max
+  context, and no rate). Opus, Sonnet, and Muse pages state that the published
+  rate continues above the named threshold. The offline fixture keeps only
+  those gap pages (`test/fixtures/pricing-offline/pages`). A model whose
+  markdown row already covers the selectable variants has no file there.
 - **Make tests capable of failing.** Type guards once sat outside tsc's include;
   root ignored permission fixtures. Use real usages, deterministic faults and
   independent host/frame evidence (`test/workspace-facts.test.ts`).

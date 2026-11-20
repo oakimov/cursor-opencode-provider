@@ -722,7 +722,7 @@ describe("pricing", () => {
 <tr><th>Name</th><th>Input</th><th>Cache write</th><th>Cache read</th><th>Output</th></tr>
 <tr><td>GPT-5.4</td><td>$2.5</td><td>-</td><td>$0.25</td><td>$15</td></tr>
 </table>
-<script>Fast is at 2x the standard price. Above 272k, input pricing doubles and output pricing is 1.5x the standard rate.</script >
+<script>Fast is at 2x the standard price. Above 272k, input pricing doubles and output pricing is 1.5x the standard rate. All GPT-5.4 prompts bill at the base per-token rates in the table above, including when context goes above 200k. There is no separate long-context multiplier.</script >
 <p>Standard rates only.</p>
 `
     const markdown = `
@@ -737,6 +737,185 @@ describe("pricing", () => {
     expect(derived).toEqual([])
     expect(pricing.costs["gpt-5.4-fast"]).toBeUndefined()
     expect(pricing.costs["gpt-5.4"]?.tiers).toBeUndefined()
+  })
+
+  it("copies a stated same-rate long-context rule and a Fast row on that page", () => {
+    const html = `
+<table>
+<tr><th>Name</th><th>Input</th><th>Cache write</th><th>Cache read</th><th>Output</th></tr>
+<tr><td>Claude Opus 4.8</td><td>$5</td><td>$6.25</td><td>$0.5</td><td>$25</td></tr>
+<tr><td>Claude Opus 4.8 (Fast Mode)</td><td>$10</td><td>$12.5</td><td>$1</td><td>$50</td></tr>
+</table>
+<p>It is 3x lower than the standard price of some other mode.</p>
+<p>All Opus 4.8 prompts bill at the base per-token rates in the table above, including when context goes above 300k. There is no separate long-context multiplier for Opus 4.8. Context windows up to 1M tokens use the same rates.</p>
+`
+    const markdown = `
+| Model | Provider | Input | Cache write | Cache read | Output | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| Claude Opus 4.8 | Anthropic | $5 | $6.25 | $0.5 | $25 | Up to 1M tokens in a note is not a price |
+| Claude 4.7 Opus | Anthropic | $5 | $6.25 | $0.5 | $25 | |
+| Claude Opus 4.7 (fast mode) | Anthropic | $30 | $37.5 | $3 | $150 | Up to 1M tokens with extended context at the same per-token rates |
+`
+    const pricing = buildPricing(markdown)
+    const opus47 = `
+<table>
+<tr><th>Name</th><th>Input</th><th>Cache write</th><th>Cache read</th><th>Output</th></tr>
+<tr><td>Claude 4.7 Opus</td><td>$5</td><td>$6.25</td><td>$0.5</td><td>$25</td></tr>
+</table>
+<p>All Opus 4.7 prompts bill at the base per-token rates in the table above, including when context goes above 300k. There is no separate long-context multiplier for Opus 4.7. Context windows up to 1M tokens use the same rates.</p>
+<p>Context window 300k. Max context 1M.</p>
+`
+    const derived = priceFromModelPages(pricing, [
+      { modelId: "claude-opus-4-8", html },
+      { modelId: "claude-opus-4-7", html: opus47 },
+    ])
+    const standard = { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 }
+    const fast = { input: 10, output: 50, cache_read: 1, cache_write: 12.5 }
+    expect(pricing.costs["claude-opus-4-8"]).toEqual({
+      ...standard,
+      tiers: [{ tier: { type: "context", size: 300_000 }, ...standard }],
+    })
+    expect(pricing.costs["claude-opus-4-8-fast"]).toEqual({
+      ...fast,
+      tiers: [{ tier: { type: "context", size: 300_000 }, ...fast }],
+    })
+    expect(pricing.costs["claude-opus-4-7"]).toEqual({
+      ...standard,
+      tiers: [{ tier: { type: "context", size: 300_000 }, ...standard }],
+    })
+    // The page never mentions Fast, so the markdown Fast row stays flat.
+    expect(pricing.costs["claude-opus-4-7-fast"]).toEqual({
+      input: 30, output: 150, cache_read: 3, cache_write: 37.5,
+    })
+    expect(derived.find((price) => price.id === "claude-opus-4-8")?.formula).toContain(
+      "All Opus 4.8 prompts bill at the base per-token rates in the table above, including when context goes above 300k.",
+    )
+    expect(derived.find((price) => price.id === "claude-opus-4-8")?.formula).toContain(
+      "Context windows up to 1M tokens use the same rates.",
+    )
+    expect(derived.some((price) => price.id === "claude-opus-4-7-fast")).toBe(false)
+  })
+
+  it("reads the 200k and Max Mode same-rate wordings, and a stated Fast multiplier", () => {
+    const sonnet = `
+<table>
+<tr><th>Name</th><th>Input</th><th>Cache write</th><th>Cache read</th><th>Output</th></tr>
+<tr><td>Claude 4.6 Sonnet</td><td>$3</td><td>$3.75</td><td>$0.3</td><td>$15</td></tr>
+</table>
+<p>All Sonnet 4.6 prompts bill at the base per-token rates in the table above, including when context goes above 200k. Anthropic no longer applies a separate long-context multiplier for Sonnet 4.6.</p>
+`
+    const muse = `
+<table>
+<tr><th>Name</th><th>Input</th><th>Cache write</th><th>Cache read</th><th>Output</th></tr>
+<tr><td>Muse Spark 1.3</td><td>$1.25</td><td>-</td><td>$0.15</td><td>$4.25</td></tr>
+</table>
+<p>Prompts bill at the base per-token rates above, including in Max Mode above 300k tokens. Cached input is billed at $0.15 per million tokens; there is no long-context multiplier and no cache-write charge.</p>
+<p>300k token context window, or 1M in Max Mode at the same per-token rates.</p>
+`
+    const scaled = `
+<table>
+<tr><th>Name</th><th>Input</th><th>Cache write</th><th>Cache read</th><th>Output</th></tr>
+<tr><td>Grok 4.5</td><td>$1</td><td>$0.2</td><td>$0.1</td><td>$2</td></tr>
+</table>
+<p>Fast mode is 3x the standard rates.</p>
+`
+    const markdown = `
+| Model | Provider | Input | Cache write | Cache read | Output | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| Claude 4.6 Sonnet | Anthropic | $3 | $3.75 | $0.3 | $15 | |
+| Muse Spark 1.3 | Meta | $1.25 | - | $0.15 | $4.25 | |
+| Grok 4.5 | Cursor | $1 | $0.2 | $0.1 | $2 | |
+`
+    const pricing = buildPricing(markdown)
+    const derived = priceFromModelPages(pricing, [
+      { modelId: "claude-sonnet-4-6", html: sonnet },
+      { modelId: "muse-spark-1.3", html: muse },
+      { modelId: "grok-4.5", html: scaled },
+    ])
+    expect(pricing.costs["claude-sonnet-4-6"]?.context_over_200k).toEqual({
+      input: 3, output: 15, cache_read: 0.3, cache_write: 3.75,
+    })
+    expect(pricing.costs["muse-spark-1.3"]?.tiers).toEqual([{
+      tier: { type: "context", size: 300_000 },
+      input: 1.25,
+      output: 4.25,
+      cache_read: 0.15,
+    }])
+    expect(pricing.costs["grok-4.5-fast"]).toEqual({ input: 3, output: 6, cache_read: 0.3, cache_write: 0.6 })
+    expect(derived.find((price) => price.id === "claude-sonnet-4-6")?.formula).toContain(
+      "Anthropic no longer applies a separate long-context multiplier for Sonnet 4.6.",
+    )
+    expect(derived.find((price) => price.id === "grok-4.5-fast")?.formula).toContain("multiplied by 3")
+  })
+
+  it("does not invent a price from a context spec, an effort variant, or a future rate", () => {
+    const html = (name: string, money: string, prose: string) => `
+<table>
+<tr><th>Name</th><th>Input</th><th>Cache write</th><th>Cache read</th><th>Output</th></tr>
+<tr><td>${name}</td><td>${money}</td></tr>
+</table>
+<p>${prose}</p>
+`
+    const markdown = `
+| Model | Provider | Input | Cache write | Cache read | Output | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| GPT-5.2 | OpenAI | $1.75 | - | $0.175 | $14 | |
+| Claude Fable 5.2 | Anthropic | $8 | $10 | $0.2 | $40 | |
+| Gemini 4 Carbon | Google | $2 | - | $0.1 | $10 | |
+`
+    const pricing = buildPricing(markdown)
+    priceFromModelPages(pricing, [
+      {
+        modelId: "gpt-5.2",
+        html: html(
+          "GPT-5.2",
+          "$1.75</td><td>-</td><td>$0.175</td><td>$14",
+          "A high reasoning effort variant (gpt-5.2-high) is available for tasks that need deeper analysis. Context window 272k. Max context 1M.",
+        ),
+      },
+      {
+        modelId: "claude-fable-5-2",
+        html: html(
+          "Claude Fable 5.2",
+          "$8</td><td>$10</td><td>$0.2</td><td>$40",
+          "Input and output rates are about 2x Claude Opus 5.5. Context window 300k. Max context 1M.",
+        ),
+      },
+      {
+        modelId: "gemini-4-carbon",
+        html: html(
+          "Gemini 4 Carbon",
+          "$2</td><td>-</td><td>$0.1</td><td>$10",
+          "From December 1, 2026, Gemini 4 Carbon is billed at $4 input, $0.20 cache read, and $20 output per million tokens. Speed Fast. Max context 1M.",
+        ),
+      },
+    ])
+    expect(pricing.costs["gpt-5.2-fast"]).toBeUndefined()
+    expect(pricing.costs["gpt-5.2"]?.tiers).toBeUndefined()
+    expect(pricing.costs["gpt-5.2"]?.context_over_200k).toBeUndefined()
+    expect(pricing.costs["claude-fable-5-2-fast"]).toBeUndefined()
+    expect(pricing.costs["claude-fable-5-2"]?.tiers).toBeUndefined()
+    expect(pricing.costs["gemini-4-carbon"]).toEqual({ input: 2, output: 10, cache_read: 0.1 })
+    expect(() => priceFromModelPages(buildPricing(markdown), [{
+      modelId: "gpt-5.2",
+      html: html(
+        "GPT-5.2",
+        "$1.75</td><td>-</td><td>$0.175</td><td>$14",
+        "Fast is 2x the standard price. Fast is 3x the standard rates.",
+      ),
+    }])).toThrow(/Conflicting Fast multipliers/)
+    expect(() => priceFromModelPages(buildPricing(`
+| Model | Provider | Input | Cache write | Cache read | Output | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| GPT-5.4 | OpenAI | $2.5 | - | $0.25 | $15 | |
+`), [{
+      modelId: "gpt-5.4",
+      html: html(
+        "GPT-5.4",
+        "$2.5</td><td>-</td><td>$0.25</td><td>$15",
+        "When input exceeds 272k tokens (long context), input pricing doubles and output pricing is 1.5x the standard rate. All GPT-5.4 prompts bill at the base per-token rates in the table above, including when context goes above 200k. There is no separate long-context multiplier.",
+      ),
+    }])).toThrow(/both a long-context multiplier and a same-rate rule/)
   })
 
   it("keeps a markdown row when the page disagrees and fills only the missing Fast price", () => {
@@ -859,11 +1038,68 @@ describe("pricing", () => {
     const pages = loadSavedModelPages(join(root, "pages"), pageIds)
     const priced = assemblePricing(pricingMarkdown, contextMarkdown, pages)
     expect(takeNetworkAttempts()).toEqual([])
-    expect(priced.costs).toEqual(CURSOR_MODEL_COSTS as unknown as typeof priced.costs)
     expect(priced.unpriced).toEqual(CURSOR_UNPRICED_MODEL_REASONS)
     expect(priced.contexts).toEqual(CURSOR_MODEL_CONTEXTS as unknown as typeof priced.contexts)
     expect(priced.pageIds).not.toContain("grok-4.7")
     expect(priced.pageIds).toContain("gpt-5.5")
+    expect(Object.keys(priced.costs).sort()).toEqual(
+      Object.keys(CURSOR_MODEL_COSTS).sort(),
+    )
+    const flatOf = (cost: {
+      input: number
+      output: number
+      cache_read?: number
+      cache_write?: number
+    }) => {
+      const flat: {
+        input: number
+        output: number
+        cache_read?: number
+        cache_write?: number
+      } = { input: cost.input, output: cost.output }
+      if (cost.cache_read !== undefined) flat.cache_read = cost.cache_read
+      if (cost.cache_write !== undefined) flat.cache_write = cost.cache_write
+      return flat
+    }
+    const sameRateOver200k = new Set([
+      "claude-opus-4-6",
+      "claude-sonnet-4-6",
+      "claude-sonnet-5",
+      "claude-sonnet-5-5",
+    ])
+    const sameRateTier300k = new Set([
+      "claude-opus-4-7",
+      "claude-opus-4-8",
+      "claude-opus-4-8-fast",
+      "claude-opus-5",
+      "claude-opus-5-5",
+      "claude-opus-5-5-fast",
+      "claude-opus-5-fast",
+      "muse-spark-1.3",
+      "muse-wonder-1.0",
+    ])
+    for (const [id, committed] of Object.entries(CURSOR_MODEL_COSTS)) {
+      const actual = priced.costs[id]
+      const flat = flatOf(committed)
+      expect(flatOf(actual!)).toEqual(flat)
+      if (sameRateOver200k.has(id)) {
+        expect(actual?.context_over_200k).toEqual(flat)
+        expect(actual?.tiers).toBeUndefined()
+      } else if (sameRateTier300k.has(id)) {
+        expect(actual?.tiers).toEqual([{ tier: { type: "context", size: 300_000 }, ...flat }])
+        expect(actual?.context_over_200k).toBeUndefined()
+      } else {
+        expect(actual).toEqual(committed as typeof actual)
+      }
+    }
+    const formula = (id: string) => priced.derived.find((price) => price.id === id)?.formula ?? ""
+    expect(formula("claude-opus-4-6")).toContain(
+      "Anthropic no longer applies a separate long-context multiplier for Opus 4.6.",
+    )
+    expect(formula("claude-opus-4-7")).toContain("Context windows up to 1M tokens use the same rates.")
+    expect(formula("claude-opus-4-7-fast")).toBe("")
+    expect(formula("muse-spark-1.3")).toContain("no long-context multiplier and no cache-write charge.")
+    expect(formula("claude-opus-4-8-fast")).toContain("The Fast long-context tier copies the Fast row")
     const out = mkdtempSync(join(tmpdir(), "pricing-out-"))
     const dest = join(out, "pricing-data.ts")
     let refusal = ""
@@ -881,10 +1117,23 @@ describe("pricing", () => {
         }
         writeFileSync(dest, "written")
       }).toThrow(/Refusing to write/)
-      expect(refusal).toMatch(/claude-fable-5 long context: https:\/\/cursor\.com\/docs\/models\/claude-fable-5 has no long-context row/)
-      expect(refusal).toMatch(/gpt-5\.2-fast: https:\/\/cursor\.com\/docs\/models\/gpt-5-2 has no Fast row/)
+      expect(refusal.split("\n").slice(1)).toEqual([
+        "claude-fable-5 long context: https://cursor.com/docs/models/claude-fable-5 has no long-context row or stated long-context price",
+        "claude-fable-5-1 long context: https://cursor.com/docs/models/claude-fable-5-1 has no long-context row or stated long-context price",
+        "claude-fable-5-2-fast: https://cursor.com/docs/models/claude-fable-5-2 has no Fast row or stated Fast price",
+        "claude-fable-5-2 long context: https://cursor.com/docs/models/claude-fable-5-2 has no long-context row or stated long-context price",
+        "gemini-4-argon long context: https://cursor.com/docs/models/gemini-4-argon has no long-context row or stated long-context price",
+        "gemini-4-carbon long context: https://cursor.com/docs/models/gemini-4-carbon has no long-context row or stated long-context price",
+        "gemini-4-hydrogen long context: https://cursor.com/docs/models/gemini-4-hydrogen has no long-context row or stated long-context price",
+        "gemini-4-neon long context: https://cursor.com/docs/models/gemini-4-neon has no long-context row or stated long-context price",
+        "gpt-5.2-fast: https://cursor.com/docs/models/gpt-5-2 has no Fast row or stated Fast price",
+        "gpt-5.3-codex-fast: https://cursor.com/docs/models/gpt-5-3-codex has no Fast row or stated Fast price",
+      ])
       expect(refusal).not.toMatch(/gpt-5\.5/)
       expect(refusal).not.toMatch(/gpt-5\.4/)
+      expect(refusal).not.toMatch(/claude-opus-/)
+      expect(refusal).not.toMatch(/claude-sonnet-/)
+      expect(refusal).not.toMatch(/muse-/)
       expect(existsSync(dest)).toBe(false)
     } finally {
       rmSync(out, { recursive: true, force: true })

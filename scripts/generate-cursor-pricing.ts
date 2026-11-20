@@ -8,9 +8,12 @@
  * A rendered model page, https://cursor.com/docs/models/<slug>, is fetched
  * only for a selectable model or variant that has no markdown row. A page
  * never replaces a markdown row. Fast rows become synthetic `<id>-fast` ids.
- * A required page with no pricing table, or without the Fast or long-context
- * row that gap needed, fails the run before anything is written. The base
- * rate is not written in its place. Auto (`default`) is the hand-edited
+ * A required page with no pricing table fails the run before anything is
+ * written. A Fast or long-context gap is filled from that page's row, or from
+ * a rule the page states: a Fast multiplier ("Nx the standard price") or a
+ * same-rate long-context rule above a threshold the page names. A page that
+ * states neither fails. The base rate is not written in its place. Auto
+ * (`default`) is the hand-edited
  * `CURSOR_STAFF_AUTO_RATE` constant. Generation also fails, and writes
  * nothing, when a selectable model has no price. The live refresh stays a
  * manual step before a version bump.
@@ -622,8 +625,9 @@ export function pageIdsForSelectableGaps(
 }
 
 /**
- * A page fetched for a gap must contain a pricing table and the row that gap
- * needed. A missing table or row is a refusal, not the base rate.
+ * A page fetched for a gap must contain a pricing table and a price for the
+ * variant that gap needed: a row, or a stated Fast multiplier or same-rate
+ * rule. A missing table or an unstated variant is a refusal, not the base rate.
  */
 export function assertRequiredPageRows(
   gaps: readonly PricingGap[],
@@ -643,19 +647,19 @@ export function assertRequiredPageRows(
       problems.push(`${gap.id}: ${url} has no base price row`)
     }
     if (gap.needs.includes("fast") && !Object.hasOwn(costs, `${gap.id}-fast`)) {
-      problems.push(`${gap.id}-fast: ${url} has no Fast row`)
+      problems.push(`${gap.id}-fast: ${url} has no Fast row or stated Fast price`)
     }
     if (
       gap.needs.includes("long")
       && !longPart(costs[gap.id])
       && !longPart(costs[`${gap.id}-fast`])
     ) {
-      problems.push(`${gap.id} long context: ${url} has no long-context row`)
+      problems.push(`${gap.id} long context: ${url} has no long-context row or stated long-context price`)
     }
   }
   if (problems.length > 0) {
     throw new Error(
-      `Refusing to write. A required model page has no pricing table or lacks the row that was needed:\n${problems.join("\n")}`,
+      `Refusing to write. A required model page has no pricing table or no stated price for the variant that was needed:\n${problems.join("\n")}`,
     )
   }
 }
@@ -939,11 +943,93 @@ function pageUrl(modelId: string): string {
   return `${CURSOR_MODEL_PAGE_URL}/${MODEL_PAGE_SLUG[modelId] ?? modelId}`
 }
 
+function tokensFromThousands(raw: string, evidence: string): number {
+  const tokens = Number(raw) * 1_000
+  if (!Number.isSafeInteger(tokens) || tokens <= 0) {
+    throw new Error(`Invalid threshold in ${JSON.stringify(evidence)}`)
+  }
+  return tokens
+}
+
+/** Split on sentence boundaries. A decimal such as "4.6" or "$0.15" stays intact. */
+function sentences(text: string): string[] {
+  return text.split(/(?<=\.)\s+(?=[A-Z])/).map((sentence) => sentence.trim()).filter((sentence) => sentence !== "")
+}
+
+function statesNoLongContextMultiplier(sentence: string): boolean {
+  return /\bno (?:separate )?long-context multiplier\b/i.test(sentence)
+    || /\bno longer applies a separate long-context multiplier\b/i.test(sentence)
+}
+
+/**
+ * A page sentence that says the published rate continues past a named
+ * threshold. "No long-context multiplier" and "the same rates" are that
+ * price. A max-context spec alone is not.
+ */
+function statedSameRateLongContext(text: string): { threshold: number; evidence: string } | undefined {
+  const parts = sentences(text)
+  const matches: Array<{ threshold: number; evidence: string }> = []
+  for (let index = 0; index < parts.length; index++) {
+    const current = parts[index]!
+    const following = parts[index + 1] ?? ""
+    const above = /\bincluding when context goes above\s+(\d+)\s*k\b/i.exec(current)
+    const maxMode = /\bincluding in Max Mode above\s+(\d+)\s*k tokens\b/i.exec(current)
+    const amount = above?.[1] ?? maxMode?.[1]
+    if (!amount) continue
+    const where = statesNoLongContextMultiplier(current)
+      ? current
+      : statesNoLongContextMultiplier(following) ? following : undefined
+    if (!where) continue
+    // The pricing table has no sentence boundary, so the split can start in a cell.
+    const keywordAt = above?.index ?? maxMode?.index ?? 0
+    const head = current.slice(0, keywordAt)
+    let start = 0
+    for (const marker of [" All ", " Prompts "]) {
+      const at = head.lastIndexOf(marker)
+      if (at + 1 > start) start = at + 1
+    }
+    const clause = current.slice(start).trim()
+    let evidence = where === current ? clause : `${clause} ${following}`
+    const third = parts[index + (where === current ? 1 : 2)] ?? ""
+    if (/^Context windows up to 1M tokens use the same rates\.?$/i.test(third)) {
+      evidence = `${evidence} ${third}`
+    }
+    matches.push({ threshold: tokensFromThousands(amount, evidence), evidence })
+  }
+  if (matches.length === 0) return undefined
+  const threshold = matches[0]!.threshold
+  if (matches.some((match) => match.threshold !== threshold)) {
+    throw new Error(
+      `Conflicting same-rate long-context thresholds: ${matches.map((match) => match.evidence).join(" | ")}`,
+    )
+  }
+  return matches[0]
+}
+
+/** "Nx the standard price/rates" for a Fast mode the page does not tabulate. */
+function statedFastMultiplier(text: string): { factor: number; evidence: string } | undefined {
+  const found: Array<{ factor: number; evidence: string }> = []
+  for (const match of text.matchAll(/(?:^|[^0-9.])(\d+(?:\.\d+)?)x the standard (?:price|rates)/gi)) {
+    const factor = Number(match[1])
+    if (!Number.isFinite(factor) || factor <= 0) {
+      throw new Error(`Invalid Fast multiplier in ${JSON.stringify(match[0])}`)
+    }
+    found.push({ factor, evidence: match[0].replace(/\s+/g, " ").trim() })
+  }
+  if (found.length === 0) return undefined
+  const factor = found[0]!.factor
+  if (found.some((item) => item.factor !== factor)) {
+    throw new Error(`Conflicting Fast multipliers: ${found.map((item) => item.evidence).join(" | ")}`)
+  }
+  return found[0]
+}
+
 /**
  * Fill prices the markdown does not have. A markdown row is kept. When the
  * page states a different number for that row, the difference is recorded
  * and the markdown value stays. Page prose fills a gap only when the page
- * table has no row for it.
+ * table has no row for it, and only with a multiplier or same-rate rule the
+ * page states. A max-context spec is not a price.
  */
 export function priceFromModelPages(
   pricing: PricingBuild,
@@ -956,6 +1042,8 @@ export function priceFromModelPages(
     // An unreadable page must not supply a price from leftover prose.
     if (rows.length === 0) continue
     const text = pageText(page.html)
+    const sameRate = statedSameRateLongContext(text)
+    const fastMultiplier = statedFastMultiplier(text)
     const base = oneRow(rows.filter((row) => !row.fast && !row.longContext), "standard", page.modelId)
     const longContext = oneRow(
       rows.filter((row) => !row.fast && row.longContext),
@@ -1008,6 +1096,9 @@ export function priceFromModelPages(
       )
     } else if (!markdownLong && keptBase && !longContext) {
       const stated = /input exceeds\s+(\d+)\s*k tokens \(long context\), input pricing doubles and output pricing is 1\.5x the standard rate/i.exec(text)
+      if (stated && sameRate) {
+        throw new Error(`${page.modelId} states both a long-context multiplier and a same-rate rule`)
+      }
       if (stated) {
         const tier = scaleComponents(keptBase, { input: 2, output: 1.5, cache: 1 })
         const threshold = Number(stated[1]) * 1_000
@@ -1019,6 +1110,20 @@ export function priceFromModelPages(
             `${pageUrl(page.modelId)} has no long-context row. Its prose says that above ` +
             `${threshold} input tokens, input doubles and output is 1.5x the standard row. ` +
             `Cache is unchanged because the page does not state a cache change.`,
+        })
+      } else if (sameRate) {
+        const tier = flatCostOf(keptBase)
+        pricing.costs[page.modelId] = withThreshold(
+          flatCostOf(pricing.costs[page.modelId] ?? keptBase),
+          sameRate.threshold,
+          tier,
+        )
+        derived.push({
+          id: page.modelId,
+          cost: tier,
+          formula:
+            `${pageUrl(page.modelId)} has no long-context row. ${sameRate.evidence} ` +
+            `The long-context tier copies the standard row because the page states no long-context multiplier.`,
         })
       }
     }
@@ -1085,15 +1190,16 @@ export function priceFromModelPages(
         })
       }
       pricing.costs[fastId] = fastCost
-    } else if (!markdownFast && keptBase && /2x the standard (?:price|rates)/i.test(text)) {
-      const fastCost = scaleAll(keptBase, 2)
+    } else if (!markdownFast && !fast && keptBase && fastMultiplier) {
+      const fastCost = scaleAll(keptBase, fastMultiplier.factor)
       pricing.costs[fastId] = fastCost
       derived.push({
         id: fastId,
         cost: fastCost,
         formula:
-          `${pageUrl(page.modelId)} has no Fast row. Its prose says Fast is 2x the standard price, ` +
-          `so every component of the standard row is doubled.`,
+          `${pageUrl(page.modelId)} has no Fast row. Its prose says Fast is ${fastMultiplier.factor}x ` +
+          `the standard price (${fastMultiplier.evidence}), so every component of the standard row ` +
+          `is multiplied by ${fastMultiplier.factor}.`,
       })
     } else if (markdownFast && !markdownFastLong && fastLong) {
       pricing.costs[fastId] = withThreshold(
@@ -1101,6 +1207,20 @@ export function priceFromModelPages(
         pageThreshold(fastLong, page.modelId, defaultContexts),
         fastLong.cost,
       )
+    }
+
+    // A Fast row on the same page keeps its own components past the threshold.
+    // A markdown-only Fast price is not given a tier the page does not mention.
+    if (sameRate && fast && pricing.costs[fastId] && !longPart(pricing.costs[fastId])) {
+      const fastFlat = flatCostOf(pricing.costs[fastId]!)
+      pricing.costs[fastId] = withThreshold(fastFlat, sameRate.threshold, fastFlat)
+      derived.push({
+        id: fastId,
+        cost: fastFlat,
+        formula:
+          `${pageUrl(page.modelId)} has no Fast long-context row. ${sameRate.evidence} ` +
+          `The Fast long-context tier copies the Fast row because the page states no long-context multiplier.`,
+      })
     }
   }
   pricing.costs = sortRecord(pricing.costs)
