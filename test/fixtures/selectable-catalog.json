@@ -1,0 +1,2383 @@
+[
+  {
+    "id": "claude-fable-5",
+    "displayName": "Claude Fable 5",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 300000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "claude-fable-5 300k low 0",
+        "displayName": "claude-fable-5 300k low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          }
+        ]
+      },
+      {
+        "key": "claude-fable-5 1m low 0",
+        "displayName": "claude-fable-5 1m low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "claude-fable-5-1",
+    "displayName": "Claude Fable 5.1",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 300000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "claude-fable-5-1 300k low 0",
+        "displayName": "claude-fable-5-1 300k low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          }
+        ]
+      },
+      {
+        "key": "claude-fable-5-1 1m low 0",
+        "displayName": "claude-fable-5-1 1m low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "claude-fable-5-2",
+    "displayName": "Claude Fable 5.2",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 300000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "claude-fable-5-2 300k false low 0",
+        "displayName": "claude-fable-5-2 300k false low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "claude-fable-5-2 300k true low 0",
+        "displayName": "claude-fable-5-2 300k true low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      },
+      {
+        "key": "claude-fable-5-2 1m false low 0",
+        "displayName": "claude-fable-5-2 1m false low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "claude-fable-5-2 1m true low 0",
+        "displayName": "claude-fable-5-2 1m true low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "claude-haiku-4-5",
+    "displayName": "Claude Haiku 4.5",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 200000,
+    "maxContextForMaxMode": 200000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "claude-haiku-4-5 false 0",
+        "displayName": "claude-haiku-4-5 false 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "claude-haiku-5-5",
+    "displayName": "Claude Haiku 5.5",
+    "supportsThinking": false,
+    "supportsAgent": true,
+    "maxContext": 300000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "claude-haiku-5-5 300k false 0",
+        "displayName": "claude-haiku-5-5 300k false 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "reasoning_effort",
+            "value": "low"
+          }
+        ]
+      },
+      {
+        "key": "claude-haiku-5-5 1m false 0",
+        "displayName": "claude-haiku-5-5 1m false 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "reasoning_effort",
+            "value": "low"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "claude-opus-4-5",
+    "displayName": "Claude Opus 4.5",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 200000,
+    "maxContextForMaxMode": 200000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "claude-opus-4-5 false 0",
+        "displayName": "claude-opus-4-5 false 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "claude-opus-4-6",
+    "displayName": "Claude Opus 4.6",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 200000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "claude-opus-4-6 200k low 0",
+        "displayName": "claude-opus-4-6 200k low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "200k"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          }
+        ]
+      },
+      {
+        "key": "claude-opus-4-6 1m low 0",
+        "displayName": "claude-opus-4-6 1m low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "claude-opus-4-7",
+    "displayName": "Claude Opus 4.7",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 300000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "claude-opus-4-7 300k false low 0",
+        "displayName": "claude-opus-4-7 300k false low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "claude-opus-4-7 300k true low 0",
+        "displayName": "claude-opus-4-7 300k true low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      },
+      {
+        "key": "claude-opus-4-7 1m false low 0",
+        "displayName": "claude-opus-4-7 1m false low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "claude-opus-4-7 1m true low 0",
+        "displayName": "claude-opus-4-7 1m true low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "claude-opus-4-8",
+    "displayName": "Claude Opus 4.8",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 300000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "claude-opus-4-8 300k false low 0",
+        "displayName": "claude-opus-4-8 300k false low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "claude-opus-4-8 300k true low 0",
+        "displayName": "claude-opus-4-8 300k true low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      },
+      {
+        "key": "claude-opus-4-8 1m false low 0",
+        "displayName": "claude-opus-4-8 1m false low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "claude-opus-4-8 1m true low 0",
+        "displayName": "claude-opus-4-8 1m true low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "claude-opus-5",
+    "displayName": "Claude Opus 5",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 300000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "claude-opus-5 300k false low 0",
+        "displayName": "claude-opus-5 300k false low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "claude-opus-5 300k true low 0",
+        "displayName": "claude-opus-5 300k true low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      },
+      {
+        "key": "claude-opus-5 1m false low 0",
+        "displayName": "claude-opus-5 1m false low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "claude-opus-5 1m true low 0",
+        "displayName": "claude-opus-5 1m true low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "claude-opus-5-5",
+    "displayName": "Claude Opus 5.5",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 300000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "claude-opus-5-5 300k false low 0",
+        "displayName": "claude-opus-5-5 300k false low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "claude-opus-5-5 300k true low 0",
+        "displayName": "claude-opus-5-5 300k true low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      },
+      {
+        "key": "claude-opus-5-5 1m false low 0",
+        "displayName": "claude-opus-5-5 1m false low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "claude-opus-5-5 1m true low 0",
+        "displayName": "claude-opus-5-5 1m true low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "claude-sonnet-4",
+    "displayName": "Claude Sonnet 4",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 200000,
+    "maxContextForMaxMode": 200000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "claude-sonnet-4 200k false 0",
+        "displayName": "claude-sonnet-4 200k false 0",
+        "isDefaultNonMax": true,
+        "isDefaultMax": true,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "200k"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "claude-sonnet-4-5",
+    "displayName": "Claude Sonnet 4.5",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 200000,
+    "maxContextForMaxMode": 200000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "claude-sonnet-4-5 200k false 0",
+        "displayName": "claude-sonnet-4-5 200k false 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "200k"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "claude-sonnet-4-6",
+    "displayName": "Claude Sonnet 4.6",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 200000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "claude-sonnet-4-6 200k low 0",
+        "displayName": "claude-sonnet-4-6 200k low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "200k"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          }
+        ]
+      },
+      {
+        "key": "claude-sonnet-4-6 1m low 0",
+        "displayName": "claude-sonnet-4-6 1m low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "claude-sonnet-5",
+    "displayName": "Claude Sonnet 5",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 300000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "claude-sonnet-5 300k low 0",
+        "displayName": "claude-sonnet-5 300k low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          }
+        ]
+      },
+      {
+        "key": "claude-sonnet-5 1m low 0",
+        "displayName": "claude-sonnet-5 1m low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "thinking",
+            "value": "false"
+          },
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "effort",
+            "value": "low"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "claude-sonnet-5-5",
+    "displayName": "Claude Sonnet 5.5",
+    "supportsThinking": false,
+    "supportsAgent": true,
+    "maxContext": 300000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "claude-sonnet-5-5 300k 0",
+        "displayName": "claude-sonnet-5-5 300k 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "reasoning_effort",
+            "value": "low"
+          }
+        ]
+      },
+      {
+        "key": "claude-sonnet-5-5 1m 0",
+        "displayName": "claude-sonnet-5-5 1m 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "reasoning_effort",
+            "value": "low"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "composer-2.5",
+    "displayName": "Composer 2.5",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 200000,
+    "maxContextForMaxMode": 200000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "composer-2.5 true 0",
+        "displayName": "composer-2.5 true 0",
+        "isDefaultNonMax": true,
+        "isDefaultMax": true,
+        "parameterValues": [
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      },
+      {
+        "key": "composer-2.5 false 0",
+        "displayName": "composer-2.5 false 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "deepseek-v41-flash-1017",
+    "displayName": "DeepSeek V4.1 Flash 1017",
+    "supportsThinking": false,
+    "supportsAgent": true,
+    "maxContext": 1048576,
+    "maxContextForMaxMode": 1048576,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "deepseek-v41-flash-1017 0",
+        "displayName": "deepseek-v41-flash-1017 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "reasoning_effort",
+            "value": "none"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "default",
+    "displayName": "Auto",
+    "supportsThinking": false,
+    "supportsAgent": true,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "default 0",
+        "displayName": "default 0",
+        "isDefaultNonMax": true,
+        "isDefaultMax": true,
+        "parameterValues": []
+      }
+    ]
+  },
+  {
+    "id": "gemini-2.5-flash",
+    "displayName": "Gemini 2.5 Flash",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 1000000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gemini-2.5-flash 0",
+        "displayName": "gemini-2.5-flash 0",
+        "isDefaultNonMax": true,
+        "isDefaultMax": true,
+        "parameterValues": []
+      }
+    ]
+  },
+  {
+    "id": "gemini-3-flash",
+    "displayName": "Gemini 3 Flash",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 1000000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gemini-3-flash 0",
+        "displayName": "gemini-3-flash 0",
+        "isDefaultNonMax": true,
+        "isDefaultMax": true,
+        "parameterValues": []
+      }
+    ]
+  },
+  {
+    "id": "gemini-3.1-pro",
+    "displayName": "Gemini 3.1 Pro",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 1000000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gemini-3.1-pro 0",
+        "displayName": "gemini-3.1-pro 0",
+        "isDefaultNonMax": true,
+        "isDefaultMax": true,
+        "parameterValues": []
+      }
+    ]
+  },
+  {
+    "id": "gemini-3.5-flash",
+    "displayName": "Gemini 3.5 Flash",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 1000000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gemini-3.5-flash 0",
+        "displayName": "gemini-3.5-flash 0",
+        "isDefaultNonMax": true,
+        "isDefaultMax": true,
+        "parameterValues": []
+      }
+    ]
+  },
+  {
+    "id": "gemini-3.8-flash",
+    "displayName": "Gemini 3.8 Flash",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 1000000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gemini-3.8-flash 0",
+        "displayName": "gemini-3.8-flash 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "reasoning_effort",
+            "value": "low"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "gemini-4-argon",
+    "displayName": "Gemini 4 Argon",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 300000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gemini-4-argon 300k 0",
+        "displayName": "gemini-4-argon 300k 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "reasoning_effort",
+            "value": "low"
+          }
+        ]
+      },
+      {
+        "key": "gemini-4-argon 1m 0",
+        "displayName": "gemini-4-argon 1m 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "reasoning_effort",
+            "value": "low"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "gemini-4-carbon",
+    "displayName": "Gemini 4 Carbon",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 300000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gemini-4-carbon 300k 0",
+        "displayName": "gemini-4-carbon 300k 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "reasoning_effort",
+            "value": "low"
+          }
+        ]
+      },
+      {
+        "key": "gemini-4-carbon 1m 0",
+        "displayName": "gemini-4-carbon 1m 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "reasoning_effort",
+            "value": "low"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "gemini-4-hydrogen",
+    "displayName": "Gemini 4 Hydrogen",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 300000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gemini-4-hydrogen 300k 0",
+        "displayName": "gemini-4-hydrogen 300k 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "reasoning_effort",
+            "value": "low"
+          }
+        ]
+      },
+      {
+        "key": "gemini-4-hydrogen 1m 0",
+        "displayName": "gemini-4-hydrogen 1m 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "reasoning_effort",
+            "value": "low"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "gemini-4-neon",
+    "displayName": "Gemini 4 Neon",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 300000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gemini-4-neon 300k 0",
+        "displayName": "gemini-4-neon 300k 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "reasoning_effort",
+            "value": "low"
+          }
+        ]
+      },
+      {
+        "key": "gemini-4-neon 1m 0",
+        "displayName": "gemini-4-neon 1m 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "reasoning_effort",
+            "value": "low"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "glm-5.2",
+    "displayName": "GLM 5.2",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 1000000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "glm-5.2 high 0",
+        "displayName": "glm-5.2 high 0",
+        "isDefaultNonMax": true,
+        "isDefaultMax": true,
+        "parameterValues": [
+          {
+            "id": "reasoning",
+            "value": "high"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "glm-5p3",
+    "displayName": "GLM 5.3",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 1000000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "glm-5p3 low 0",
+        "displayName": "glm-5p3 low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "reasoning",
+            "value": "low"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "glm-5p3-flash",
+    "displayName": "GLM 5.3 Flash",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 1000000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "glm-5p3-flash low 0",
+        "displayName": "glm-5p3-flash low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "reasoning",
+            "value": "low"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "gpt-5-mini",
+    "displayName": "GPT-5 Mini",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 272000,
+    "maxContextForMaxMode": 272000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gpt-5-mini 0",
+        "displayName": "gpt-5-mini 0",
+        "isDefaultNonMax": true,
+        "isDefaultMax": true,
+        "parameterValues": []
+      }
+    ]
+  },
+  {
+    "id": "gpt-5.1",
+    "displayName": "GPT-5.1",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 272000,
+    "maxContextForMaxMode": 272000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gpt-5.1 low 0",
+        "displayName": "gpt-5.1 low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "reasoning",
+            "value": "low"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "gpt-5.2",
+    "displayName": "GPT-5.2",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 272000,
+    "maxContextForMaxMode": 272000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gpt-5.2 false low 0",
+        "displayName": "gpt-5.2 false low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "reasoning",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "gpt-5.2 true low 0",
+        "displayName": "gpt-5.2 true low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "reasoning",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "gpt-5.3-codex",
+    "displayName": "Codex 5.3",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 272000,
+    "maxContextForMaxMode": 272000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gpt-5.3-codex false low 0",
+        "displayName": "gpt-5.3-codex false low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "reasoning",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "gpt-5.3-codex true low 0",
+        "displayName": "gpt-5.3-codex true low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "reasoning",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "gpt-5.4",
+    "displayName": "GPT-5.4",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 272000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gpt-5.4 272k false none 0",
+        "displayName": "gpt-5.4 272k false none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "272k"
+          },
+          {
+            "id": "reasoning",
+            "value": "none"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "gpt-5.4 272k false low 1",
+        "displayName": "gpt-5.4 272k false low 1",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "272k"
+          },
+          {
+            "id": "reasoning",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "gpt-5.4 272k true none 0",
+        "displayName": "gpt-5.4 272k true none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "272k"
+          },
+          {
+            "id": "reasoning",
+            "value": "none"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      },
+      {
+        "key": "gpt-5.4 272k true low 1",
+        "displayName": "gpt-5.4 272k true low 1",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "272k"
+          },
+          {
+            "id": "reasoning",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      },
+      {
+        "key": "gpt-5.4 1m false none 0",
+        "displayName": "gpt-5.4 1m false none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "reasoning",
+            "value": "none"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "gpt-5.4-mini",
+    "displayName": "GPT-5.4 Mini",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 272000,
+    "maxContextForMaxMode": 272000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gpt-5.4-mini none 0",
+        "displayName": "gpt-5.4-mini none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "reasoning",
+            "value": "none"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "gpt-5.4-nano",
+    "displayName": "GPT-5.4 Nano",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 272000,
+    "maxContextForMaxMode": 272000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gpt-5.4-nano none 0",
+        "displayName": "gpt-5.4-nano none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "reasoning",
+            "value": "none"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "gpt-5.5",
+    "displayName": "GPT-5.5",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 272000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gpt-5.5 272k false none 0",
+        "displayName": "gpt-5.5 272k false none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "272k"
+          },
+          {
+            "id": "reasoning",
+            "value": "none"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "gpt-5.5 272k true none 0",
+        "displayName": "gpt-5.5 272k true none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "272k"
+          },
+          {
+            "id": "reasoning",
+            "value": "none"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      },
+      {
+        "key": "gpt-5.5 1m false none 0",
+        "displayName": "gpt-5.5 1m false none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "reasoning",
+            "value": "none"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "gpt-5.6-luna",
+    "displayName": "GPT-5.6 Luna",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 272000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gpt-5.6-luna 272k false none 0",
+        "displayName": "gpt-5.6-luna 272k false none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "272k"
+          },
+          {
+            "id": "reasoning",
+            "value": "none"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "gpt-5.6-luna 272k true none 0",
+        "displayName": "gpt-5.6-luna 272k true none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "272k"
+          },
+          {
+            "id": "reasoning",
+            "value": "none"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      },
+      {
+        "key": "gpt-5.6-luna 1m false none 0",
+        "displayName": "gpt-5.6-luna 1m false none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "reasoning",
+            "value": "none"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "gpt-5.6-luna 1m true none 0",
+        "displayName": "gpt-5.6-luna 1m true none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "reasoning",
+            "value": "none"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "gpt-5.6-sol",
+    "displayName": "GPT-5.6 Sol",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 272000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gpt-5.6-sol 272k false none 0",
+        "displayName": "gpt-5.6-sol 272k false none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "272k"
+          },
+          {
+            "id": "reasoning",
+            "value": "none"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "gpt-5.6-sol 272k true none 0",
+        "displayName": "gpt-5.6-sol 272k true none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "272k"
+          },
+          {
+            "id": "reasoning",
+            "value": "none"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      },
+      {
+        "key": "gpt-5.6-sol 1m false none 0",
+        "displayName": "gpt-5.6-sol 1m false none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "reasoning",
+            "value": "none"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "gpt-5.6-sol 1m true none 0",
+        "displayName": "gpt-5.6-sol 1m true none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "reasoning",
+            "value": "none"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "gpt-5.6-terra",
+    "displayName": "GPT-5.6 Terra",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 272000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "gpt-5.6-terra 272k false none 0",
+        "displayName": "gpt-5.6-terra 272k false none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "272k"
+          },
+          {
+            "id": "reasoning",
+            "value": "none"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "gpt-5.6-terra 272k true none 0",
+        "displayName": "gpt-5.6-terra 272k true none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "272k"
+          },
+          {
+            "id": "reasoning",
+            "value": "none"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      },
+      {
+        "key": "gpt-5.6-terra 1m false none 0",
+        "displayName": "gpt-5.6-terra 1m false none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "reasoning",
+            "value": "none"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "gpt-5.6-terra 1m true none 0",
+        "displayName": "gpt-5.6-terra 1m true none 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "reasoning",
+            "value": "none"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "grok-4.5",
+    "displayName": "Grok 4.5",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 256000,
+    "maxContextForMaxMode": 256000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "grok-4.5 false low 0",
+        "displayName": "grok-4.5 false low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "grok-4.5 true low 0",
+        "displayName": "grok-4.5 true low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "grok-4.6",
+    "displayName": "Grok 4.6",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 256000,
+    "maxContextForMaxMode": 256000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "grok-4.6 false low 0",
+        "displayName": "grok-4.6 false low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "grok-4.6 true low 0",
+        "displayName": "grok-4.6 true low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "grok-4.7",
+    "displayName": "Grok 4.7",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 256000,
+    "maxContextForMaxMode": 500000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "grok-4.7 256k false 0",
+        "displayName": "grok-4.7 256k false 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "256k"
+          },
+          {
+            "id": "reasoning_effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "grok-4.7 256k true 0",
+        "displayName": "grok-4.7 256k true 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "256k"
+          },
+          {
+            "id": "reasoning_effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      },
+      {
+        "key": "grok-4.7 500k false 0",
+        "displayName": "grok-4.7 500k false 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "500k"
+          },
+          {
+            "id": "reasoning_effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "false"
+          }
+        ]
+      },
+      {
+        "key": "grok-4.7 500k true 0",
+        "displayName": "grok-4.7 500k true 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "500k"
+          },
+          {
+            "id": "reasoning_effort",
+            "value": "low"
+          },
+          {
+            "id": "fast",
+            "value": "true"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "kimi-k2.7-code",
+    "displayName": "Kimi K2.7 Code",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 262000,
+    "maxContextForMaxMode": 262000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "kimi-k2.7-code 0",
+        "displayName": "kimi-k2.7-code 0",
+        "isDefaultNonMax": true,
+        "isDefaultMax": true,
+        "parameterValues": []
+      }
+    ]
+  },
+  {
+    "id": "kimi-k3",
+    "displayName": "Kimi K3",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 1048576,
+    "maxContextForMaxMode": 1048576,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "kimi-k3 low 0",
+        "displayName": "kimi-k3 low 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "reasoning",
+            "value": "low"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "muse-spark-1.3",
+    "displayName": "Muse Spark 1.3",
+    "supportsThinking": true,
+    "supportsAgent": true,
+    "maxContext": 300000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "muse-spark-1.3 300k minimal 0",
+        "displayName": "muse-spark-1.3 300k minimal 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "effort",
+            "value": "minimal"
+          }
+        ]
+      },
+      {
+        "key": "muse-spark-1.3 1m minimal 0",
+        "displayName": "muse-spark-1.3 1m minimal 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "effort",
+            "value": "minimal"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "muse-wonder-1.0",
+    "displayName": "Muse Wonder",
+    "supportsThinking": false,
+    "supportsAgent": true,
+    "maxContext": 300000,
+    "maxContextForMaxMode": 1000000,
+    "supportsMaxMode": true,
+    "supportsNonMaxMode": true,
+    "variants": [
+      {
+        "key": "muse-wonder-1.0 300k 0",
+        "displayName": "muse-wonder-1.0 300k 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "300k"
+          },
+          {
+            "id": "reasoning_effort",
+            "value": "minimal"
+          }
+        ]
+      },
+      {
+        "key": "muse-wonder-1.0 1m 0",
+        "displayName": "muse-wonder-1.0 1m 0",
+        "isDefaultNonMax": false,
+        "isDefaultMax": false,
+        "isMaxMode": true,
+        "parameterValues": [
+          {
+            "id": "context",
+            "value": "1m"
+          },
+          {
+            "id": "reasoning_effort",
+            "value": "minimal"
+          }
+        ]
+      }
+    ]
+  }
+]

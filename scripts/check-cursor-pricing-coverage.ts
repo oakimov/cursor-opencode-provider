@@ -1,8 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Check that known Cursor model ids resolve to pricing (or are intentionally unpriced).
- * Synthetic Fast catalog ids (`<id>-fast`) are first-class keys; Auto (`default`)
- * is the only remaining unpriced first-party id.
+ * Check that every selectable model and variant has a price or is Auto.
  *
  *   bun run check:pricing
  *   bun run check:pricing -- --models-file test/fixtures/cursor-pricing-models.txt
@@ -10,6 +8,8 @@
 
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
+import { modelsToConfig } from "../src/model-config.js"
+import type { ModelInfo } from "../src/models.js"
 import {
   CURSOR_UNPRICED_MODEL_IDS,
   checkCursorPricingCoverage,
@@ -46,11 +46,18 @@ function loadModelIds(options: Options): string[] {
     .filter((line) => line && !line.startsWith("#"))
 }
 
+function selectableEntryIds(): string[] {
+  const catalogPath = fileURLToPath(new URL("../test/fixtures/selectable-catalog.json", import.meta.url))
+  const catalog = JSON.parse(readFileSync(catalogPath, "utf8")) as ModelInfo[]
+  return Object.keys(modelsToConfig(catalog))
+}
+
 function main(): void {
   const options = parseArgs(process.argv.slice(2))
-  const modelIds = loadModelIds(options)
+  const modelIds = [...new Set([...loadModelIds(options), ...selectableEntryIds()])].sort()
   const coverage = checkCursorPricingCoverage(modelIds)
-  const failed = coverage.missing.length > 0
+  const unpriced = [...CURSOR_UNPRICED_MODEL_IDS]
+  const failed = coverage.missing.length > 0 || unpriced.some((id) => id !== "default")
 
   if (options.json) {
     console.log(
@@ -58,7 +65,7 @@ function main(): void {
         {
           source: CURSOR_PRICING_SOURCE,
           modelCount: modelIds.length,
-          intentionallyUnpriced: CURSOR_UNPRICED_MODEL_IDS,
+          intentionallyUnpriced: unpriced,
           coverage,
         },
         null,
@@ -70,7 +77,7 @@ function main(): void {
     console.log(`Models checked: ${modelIds.length}`)
     console.log(`Covered: ${coverage.priced.length}`)
     console.log(`Missing: ${coverage.missing.length}`)
-    console.log(`Intentionally unpriced: ${CURSOR_UNPRICED_MODEL_IDS.join(", ")}`)
+    console.log(`Unpriced exceptions: ${unpriced.length === 0 ? "none" : unpriced.join(", ")}`)
     if (coverage.missing.length > 0) {
       console.log("Missing pricing:")
       for (const id of coverage.missing) console.log(`  ${id}`)

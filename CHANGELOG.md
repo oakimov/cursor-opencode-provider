@@ -6,6 +6,8 @@
 
 - Saved OpenCode variant picks that use the old full-name keys (for example `grok-4.7#Grok 4.7 High 500k`) no longer match a variant until it is picked again under its new key. OpenCode 1.x sends the model's default variant meanwhile; OpenCode 2.x rejects the prompt with a variant-unavailable error. A variant whose delta is empty is keyed `Standard`, because OpenCode reserves `default` for "no variant".
 
+- Fast choices that now have a dedicated price move to the corresponding `-fast` model. Reselect any saved Fast choice under the new entry.
+
 ### Added
 
 - Gemini 4 Carbon, Hydrogen, and Neon token prices and context windows from Cursor's model docs (`gemini-4-carbon`, `gemini-4-hydrogen`, `gemini-4-neon`).
@@ -23,7 +25,9 @@
 
 ### Fixed
 
-- GPT-5.4, GPT-5.5, and GPT-5.6 Luna, Sol, and Terra include Cursor's published long-context rates. Above 200k tokens, input, cache read, and cache write are twice the standard rate.
+- Use published Fast and long-context rates for selectable Cursor models. The pricing table takes precedence, followed by the Cursor model page and the provider's API list rate for supported gaps. OpenCode 2.x displays the context tiers. OpenCode 1.19.6 shows the flat model rate and uses the applicable tier when recording a step's cost. Auto stays unpriced because billing can vary by route and plan. ([#199](https://github.com/oakimov/cursor-opencode-provider/pull/199))
+- Apply Gemini 3.1 Pro's published Standard tier above 200k prompt tokens, even though Cursor serves it as one model entry.
+- Offline pricing generation uses saved markdown and model pages, plus provider inputs where needed. The same saved inputs reproduce the generated file regardless of local paths. Generation rejects missing Fast and long-context rates before writing.
 - Published review summaries no longer include the local publication plan. A retained preview that still contains that plan posts with the plan removed and its approved bytes unchanged. Planned replies and thread resolutions stay in the `review-publish.py show` report and are not part of the posted review ([#196](https://github.com/oakimov/cursor-opencode-provider/pull/196)).
 - Isolated reviews now exercise short effort alias selection, quarantined snapshot recovery and corrupt model-cache replacement. Incomplete contract output and newly failing fixtures block the live check ([#188](https://github.com/oakimov/cursor-opencode-provider/pull/188)).
 - Re-review findings at current-diff locations create native inline code threads while the existing summary is updated in place. The summary does not repeat a finding that is posted inline; findings outside the diff stay in the summary. New comments from one re-review share one review with an empty body, and `post` refuses a second review whose body contains summary text when this publishing identity already has a stamped summary. The App identifies itself by the `<slug>[bot]` login from `GET /app`, because an installation token cannot call `GET /user`; a personal access token still uses `GET /user`. Another author's summary does not block the first post. The catalog contract compares each choice with its wire model id, so a tuple moved onto another model fails. Existing comment snapshots prevent duplicate edits, and partial inline publication keeps its own recovery receipts. `post` refuses the update, before any write, when a finding's path, line and side sit in the pull diff but the rendered comments omit them ([#188](https://github.com/oakimov/cursor-opencode-provider/pull/188)).

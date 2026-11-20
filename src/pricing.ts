@@ -6,15 +6,31 @@
  * `bun run generate:pricing`. Unknown / unpublished models get no `cost`.
  */
 
-import { CURSOR_MODEL_COSTS } from "./pricing-data.js"
+import { CURSOR_MODEL_COSTS, CURSOR_UNPRICED_MODEL_REASONS } from "./pricing-data.js"
 
-/** Classic OpenCode / models.dev cost shape used in provider config. */
+/** One context tier. OpenCode applies it when the prompt is larger than `size`. */
+export type OpenCodeCostTier = {
+  tier: { type: "context"; size: number }
+  input: number
+  output: number
+  cache_read?: number
+  cache_write?: number
+}
+
+/**
+ * Classic OpenCode / models.dev cost shape used in provider config.
+ * `context_over_200k` is only a 200k threshold. Any other threshold is `tiers`.
+ * OpenCode 2.3.2 selects `tiers` by size. OpenCode 1.19.6 drops both fields
+ * when it loads a provider model, so its model list shows the flat rate and
+ * the step cost is carried by `totalNanoAiu`.
+ */
 export type OpenCodeModelCost = {
   input: number
   output: number
   cache_read?: number
   cache_write?: number
   context_over_200k?: OpenCodeModelCost
+  tiers?: ReadonlyArray<OpenCodeCostTier>
 }
 
 /** OpenCode 2.0 `Model.Info.cost` entry (array of tiered rates). */
@@ -31,12 +47,9 @@ export type CursorPricingCoverage = {
 }
 
 /**
- * Models we expose that Cursor does not currently publish numeric rates for
- * (Auto is billed at the routed model's list price).
+ * Explicit exceptions with no uniform token rate.
  */
-export const CURSOR_UNPRICED_MODEL_IDS = ["default"] as const
-
-const UNPRICED = new Set<string>(CURSOR_UNPRICED_MODEL_IDS)
+export const CURSOR_UNPRICED_MODEL_IDS = Object.keys(CURSOR_UNPRICED_MODEL_REASONS)
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -66,6 +79,30 @@ function collectCostValidationErrors(value: unknown, path: string, errors: strin
   if (value.context_over_200k !== undefined) {
     collectCostValidationErrors(value.context_over_200k, `${path}.context_over_200k`, errors)
   }
+  if (value.tiers !== undefined) {
+    if (!Array.isArray(value.tiers)) {
+      errors.push(`${path}.tiers must be an array`)
+    } else {
+      value.tiers.forEach((tier, index) => {
+        const tierPath = `${path}.tiers[${index}]`
+        if (!isRecord(tier)) {
+          errors.push(`${tierPath} must be an object`)
+          return
+        }
+        collectCostValidationErrors(tier, tierPath, errors)
+        const spec = tier.tier
+        if (
+          !isRecord(spec) ||
+          spec.type !== "context" ||
+          !isNonNegativeFiniteNumber(spec.size) ||
+          !Number.isInteger(spec.size) ||
+          spec.size <= 0
+        ) {
+          errors.push(`${tierPath}.tier must be { type: "context", size: positive integer }`)
+        }
+      })
+    }
+  }
 }
 
 export function validateOpenCodeModelCost(
@@ -94,11 +131,14 @@ export function wireModelIdForPricing(modelId: string): {
 }
 
 /**
- * True when Cursor publishes a distinct Fast rate for this wire model id.
- * Catalog code uses this to split Fast variants into a `-fast` entry.
+ * True when Fast is its own catalog entry: a published Fast rate, or a Fast
+ * mode the docs name without a number. Catalog code splits those variants
+ * into a `-fast` entry so they do not inherit the base rate.
  */
 export function hasCursorFastPricing(modelId: string): boolean {
-  return Object.prototype.hasOwnProperty.call(CURSOR_MODEL_COSTS, `${modelId}-fast`)
+  const fastId = `${modelId}-fast`
+  return Object.prototype.hasOwnProperty.call(CURSOR_MODEL_COSTS, fastId)
+    || Object.prototype.hasOwnProperty.call(CURSOR_UNPRICED_MODEL_REASONS, fastId)
 }
 
 function asMutableCost(value: OpenCodeModelCost): OpenCodeModelCost {
@@ -108,7 +148,51 @@ function asMutableCost(value: OpenCodeModelCost): OpenCodeModelCost {
   if (value.context_over_200k) {
     copy.context_over_200k = asMutableCost(value.context_over_200k)
   }
+  if (value.tiers) {
+    copy.tiers = value.tiers.map((tier) => {
+      const copyTier: OpenCodeCostTier = {
+        tier: { type: "context", size: tier.tier.size },
+        input: tier.input,
+        output: tier.output,
+      }
+      if (tier.cache_read !== undefined) copyTier.cache_read = tier.cache_read
+      if (tier.cache_write !== undefined) copyTier.cache_write = tier.cache_write
+      return copyTier
+    })
+  }
   return copy
+}
+
+function flatCost(value: {
+  input: number
+  output: number
+  cache_read?: number
+  cache_write?: number
+}): OpenCodeModelCost {
+  const copy: OpenCodeModelCost = { input: value.input, output: value.output }
+  if (value.cache_read !== undefined) copy.cache_read = value.cache_read
+  if (value.cache_write !== undefined) copy.cache_write = value.cache_write
+  return copy
+}
+
+/**
+ * The rate OpenCode charges once `promptTokens` of input (including cache)
+ * are known. The largest context tier the prompt exceeds wins. A prompt
+ * equal to the threshold stays on the lower rate, matching OpenCode 1.19.6
+ * and 2.3.2 (`prompt > size`). `context_over_200k` is the 200k tier.
+ */
+export function costForPrompt(cost: OpenCodeModelCost, promptTokens: number): OpenCodeModelCost {
+  const candidates: Array<{ size: number; cost: OpenCodeModelCost }> = []
+  for (const tier of cost.tiers ?? []) {
+    if (tier.tier.type === "context") candidates.push({ size: tier.tier.size, cost: flatCost(tier) })
+  }
+  if (cost.context_over_200k) {
+    candidates.push({ size: 200_000, cost: flatCost(cost.context_over_200k) })
+  }
+  const chosen = candidates
+    .filter((candidate) => promptTokens > candidate.size)
+    .sort((left, right) => right.size - left.size)[0]
+  return chosen?.cost ?? flatCost(cost)
 }
 
 /**
@@ -149,14 +233,32 @@ export function toOpenCode2Costs(cost: OpenCodeModelCost | undefined): OpenCode2
       },
     },
   ]
-  if (cost.context_over_200k) {
+  const tiers = [
+    ...(cost.tiers ?? []).map((tier) => ({
+      size: tier.tier.size,
+      input: tier.input,
+      output: tier.output,
+      cache_read: tier.cache_read,
+      cache_write: tier.cache_write,
+    })),
+    ...(cost.context_over_200k
+      ? [{
+        size: 200_000,
+        input: cost.context_over_200k.input,
+        output: cost.context_over_200k.output,
+        cache_read: cost.context_over_200k.cache_read,
+        cache_write: cost.context_over_200k.cache_write,
+      }]
+      : []),
+  ].sort((left, right) => left.size - right.size)
+  for (const tier of tiers) {
     out.push({
-      tier: { type: "context", size: 200_000 },
-      input: cost.context_over_200k.input,
-      output: cost.context_over_200k.output,
+      tier: { type: "context", size: tier.size },
+      input: tier.input,
+      output: tier.output,
       cache: {
-        read: cost.context_over_200k.cache_read ?? 0,
-        write: cost.context_over_200k.cache_write ?? 0,
+        read: tier.cache_read ?? 0,
+        write: tier.cache_write ?? 0,
       },
     })
   }
@@ -164,15 +266,14 @@ export function toOpenCode2Costs(cost: OpenCodeModelCost | undefined): OpenCode2
 }
 
 /**
- * Coverage helper for CI / maintainer checks.
- * Intentionally unpriced first-party ids are counted as priced (covered).
+ * Coverage helper for maintainer checks.
+ * An explicit exception counts as covered without supplying a rate.
  */
 export function checkCursorPricingCoverage(modelIds: string[]): CursorPricingCoverage {
   const priced: string[] = []
   const missing: string[] = []
   for (const modelId of modelIds) {
-    const { baseId } = wireModelIdForPricing(modelId)
-    if (UNPRICED.has(baseId) || getCursorModelCost(modelId)) priced.push(modelId)
+    if (CURSOR_UNPRICED_MODEL_IDS.includes(modelId) || getCursorModelCost(modelId)) priced.push(modelId)
     else missing.push(modelId)
   }
   return { priced, missing }
