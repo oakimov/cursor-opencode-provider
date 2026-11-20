@@ -1,6 +1,6 @@
 # OpenCode general lessons
 
-[Index](../lessons.md) · [1.x](opencode-1.md) · [2.x](opencode-2.md)
+[Index](../lessons.md) · [1.x](opencode-1.md) · [2.x](opencode-2.md) · [Pricing](pricing.md)
 
 These are failure lessons shared by both hosts, not a replacement for
 [AGENTS.md](../../AGENTS.md). Host-specific details live in the linked files.
@@ -824,64 +824,9 @@ These are failure lessons shared by both hosts, not a replacement for
   Bind the model snapshot to the Run's cache root and file generation and
   verify the selected max-mode bit on the request (`test/model-selection-run.test.ts`).
 - **Inspect generator inputs before changing mappings.** Pricing and model
-  metadata came from distinct endpoints. An added US data residency column hid
-  the long-context surcharge. Read Notes by header and test a row whose note
-  changes the rates (`test/pricing.test.ts`). Run the live pricing gate before a
-  bump; the v0.6.4 failure forced a retag ([release gate](../../AGENTS.md#hard-stop--release--version-bump--tag-gate-non-optional)).
-  The pricing markdown is the price for every row it publishes. Context
-  windows come from `https://cursor.com/docs.md`. A note is not a price.
-  Fetch `https://cursor.com/docs/models/<slug>` only for a selectable model
-  or variant that has no markdown row, and do not let that page replace a
-  markdown row. If the two disagree on a row the markdown has, keep the
-  markdown number and report the difference. Verified 19 Nov 2026, the pages
-  and the markdown rows agreed. Pages supply the gaps: GPT-5.5 Fast
-  $12.50 / – / $1.25 / $75 and long context above 272k $10 / – / $1 / $45;
-  Claude Opus 5 Fast $10 / $12.50 / $1 / $50; Claude Opus 5.5 Fast
-  $8 / $10 / $0.40 / $40; GPT-5.6 fast and long rows; Claude Haiku 5.5 above
-  100k. GPT-5.4's page has no Fast or long-context row. Its prose fills those
-  gaps: Fast is 2× the standard row ($5 / – / $0.50 / $30), and above 272k
-  input doubles and output is 1.5× ($5 / – / $0.25 / $22.50). Cache read stays
-  $0.25 because the page does not state a cache change. Fast above 272k is
-  not selectable. Claude Opus 4.7 Fast and Claude 4 Sonnet 1M are markdown
-  rows. Auto (`default`) is the hand-edited staff constant, not a fetched
-  row: $1.25/M input, $0.25/M cache read, $6/M output. @deanrie, 2026-03-11,
-  https://forum.cursor.com/t/how-do-the-auto-cursor-1-5-tokens-work/154514
-  (all three); @kevinn, 2026-05-04,
-  https://forum.cursor.com/t/gpt-5-5-medium-is-too-costly/159707
-  (input and output). Generation fails and writes nothing if any selectable
-  model is unpriced. `check:pricing` requires every selectable entry to have
-  a price and an empty unpriced list. The live refresh stays a manual step
-  before a version bump; there is no scheduled pricing job.
-  Gemini 3.1 Pro's markdown has one row. Its page says rates increase above
-  200k and the table has no second row, so the base row is the only published
-  price. CodexBar (github.com/steipete/CodexBar @1f6da9b) has no Cursor price
-  table for these ids. It reads per-event cost from
-  `POST https://cursor.com/api/dashboard/get-filtered-usage-events`
-  (`tokenUsage.totalCents` / `chargedCents`) and is not a pricing source.
-  Every selectable entry must resolve to a price
-  (`test/selectable-pricing.test.ts`).
-  `--from-file` together with `--context-from-file` makes no network request.
-  A gap's page must be `<model-id>.html` in `--pages-from-dir`. A missing
-  file fails the run and names the id. A required page with no pricing table
-  fails before the file is written. A Fast or long-context gap can be filled
-  from a row or from a rule the page states. A Fast multiplier ("Nx the
-  standard price") scales every component of the standard row. A same-rate
-  sentence ("no long-context multiplier", "the same rates") means the
-  published row is the price above the threshold the page names. A page that
-  lists Max context 1M beside that one rate means the rate applies across the
-  whole window. A page that does not name Fast mode uses the standard row for
-  Fast, which is the rate already in the committed file. A page or markdown
-  note that names Fast mode and states no rate still fails, and the base rate
-  is not written as a new row. An effort variant, a speed label, a future
-  base rate, and a markdown note are not separate prices. Read on 20 Nov 2026:
-  GPT-5.2, GPT-5.3 Codex, and Claude Fable 5.2 do not name Fast mode, so Fast
-  stays on the standard row ($1.75 / $0.175 / $14, and $8 / $10 / $0.20 / $40).
-  Fable 5, 5.1, and 5.2 and Gemini 4 Argon, Carbon, Hydrogen, and Neon list
-  Max context 1M with one rate, so that rate covers the 1M window. Opus,
-  Sonnet, and Muse pages state that the published rate continues. The offline
-  fixture keeps only those gap pages (`test/fixtures/pricing-offline/pages`).
-  A model whose markdown row already covers the selectable variants has no
-  file there.
+  metadata come from distinct endpoints. Pricing source order, the provider
+  list price, Fast mode, long context, Auto, and the version-bump gate are
+  in [Pricing](pricing.md).
 - **Make tests capable of failing.** Type guards once sat outside tsc's include;
   root ignored permission fixtures. Use real usages, deterministic faults and
   independent host/frame evidence (`test/workspace-facts.test.ts`).

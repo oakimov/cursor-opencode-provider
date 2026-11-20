@@ -53,10 +53,19 @@ describe("selectable catalog pricing", () => {
     // This account's GPT-5.4 and GPT-5.5 catalogs offer Fast only at 272k.
     expect(config["gpt-5.4-1m-fast"]).toBeUndefined()
     expect(config["gpt-5.5-1m-fast"]).toBeUndefined()
-    // Docs don't state a Fast price for these, so Fast stays on the base rate.
-    expect(config["claude-fable-5-2-fast"]).toBeUndefined()
-    expect(config["gpt-5.2-fast"]).toBeUndefined()
-    expect(config["gpt-5.3-codex-fast"]).toBeUndefined()
+    expect(config["claude-fable-5-2-fast"].cost).toEqual({
+      input: 16, output: 80, cache_read: 0.4, cache_write: 20,
+    })
+    expect(config["claude-fable-5-2-1m-fast"].cost).toEqual(config["claude-fable-5-2-fast"].cost)
+    expect(config["gpt-5.2-fast"].cost).toEqual({ input: 3.5, output: 28, cache_read: 0.35 })
+    expect(config["gpt-5.3-codex-fast"].cost).toEqual({ input: 3.5, output: 28, cache_read: 0.35 })
+    const keepsFastOff = (id: string) => Object.values(config[id].variants).every((variant) =>
+      !(variant as { cursorVariantParameters?: { id: string; value: string }[] }).cursorVariantParameters
+        ?.some((parameter) => parameter.id === "fast" && parameter.value === "true"),
+    )
+    expect(keepsFastOff("claude-fable-5-2")).toBe(true)
+    expect(keepsFastOff("gpt-5.2")).toBe(true)
+    expect(keepsFastOff("gpt-5.3-codex")).toBe(true)
     expect(config["gpt-5.6-sol-1m-fast"].cost).toEqual(getCursorModelCost("gpt-5.6-sol-fast"))
     expect(catalog2["gpt-5.6-sol-1m"]?.cost?.[1]?.tier).toEqual({ type: "context", size: 272_000 })
     expect(catalog2["gpt-5.6-sol-1m"]?.cost?.[1]?.input).toBe(8)

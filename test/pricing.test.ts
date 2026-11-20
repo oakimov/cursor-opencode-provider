@@ -29,7 +29,10 @@ import {
   modelPageSource,
   pageIdsForSelectableGaps,
   parseArgs,
+  parseOpenAiFastPrices,
   priceFromModelPages,
+  priceFromProviderPages,
+  PROVIDER_PRICING_URL,
   type PricingBuild,
   type SelectableCatalogModel,
 } from "../scripts/generate-cursor-pricing.js"
@@ -281,7 +284,14 @@ describe("pricing", () => {
     expect(hasCursorFastPricing("gpt-5.5")).toBe(true)
     expect(hasCursorFastPricing("gpt-5.6-sol")).toBe(true)
     expect(hasCursorFastPricing("claude-sonnet-4-5")).toBe(false)
-    expect(hasCursorFastPricing("claude-fable-5-2")).toBe(false)
+    expect(hasCursorFastPricing("claude-fable-5-2")).toBe(true)
+    expect(hasCursorFastPricing("gpt-5.2")).toBe(true)
+    expect(hasCursorFastPricing("gpt-5.3-codex")).toBe(true)
+    expect(getCursorModelCost("claude-fable-5-2-fast")).toEqual({
+      input: 16, output: 80, cache_read: 0.4, cache_write: 20,
+    })
+    expect(getCursorModelCost("gpt-5.2-fast")).toEqual({ input: 3.5, output: 28, cache_read: 0.35 })
+    expect(getCursorModelCost("gpt-5.3-codex-fast")).toEqual({ input: 3.5, output: 28, cache_read: 0.35 })
     expect(getCursorModelCost("claude-opus-4-7-fast")).toEqual({
       input: 30,
       output: 150,
@@ -510,9 +520,7 @@ describe("pricing", () => {
       unpriced: { default: "docs publish no rate" },
       markdownDefault: { input: 9, output: 9 },
       disagreements: [],
-      fastCoveredByBase: new Set(),
       longCoveredByBase: new Set(),
-      fastNamedInNotes: new Set(),
     }
     applyCursorStaffAutoRate(pricing)
     expect(pricing.costs.default).toEqual(auto)
@@ -887,16 +895,14 @@ describe("pricing", () => {
     ])
     expect(pricing.costs["gpt-5.2-fast"]).toBeUndefined()
     expect(pricing.costs["gpt-5.2"]).toEqual({ input: 1.75, output: 14, cache_read: 0.175 })
-    expect(pricing.fastCoveredByBase.has("gpt-5.2")).toBe(true)
     expect(pricing.longCoveredByBase.has("gpt-5.2")).toBe(false)
     expect(pricing.costs["claude-fable-5-2-fast"]).toBeUndefined()
     expect(pricing.costs["claude-fable-5-2"]).toEqual({
       input: 8, output: 40, cache_read: 0.2, cache_write: 10,
     })
-    expect(pricing.fastCoveredByBase.has("claude-fable-5-2")).toBe(true)
     expect(pricing.longCoveredByBase.has("claude-fable-5-2")).toBe(true)
     expect(pricing.costs["gemini-4-carbon"]).toEqual({ input: 2, output: 10, cache_read: 0.1 })
-    expect(pricing.fastCoveredByBase.has("gemini-4-carbon")).toBe(true)
+    expect(pricing.costs["gemini-4-carbon-fast"]).toBeUndefined()
     expect(pricing.longCoveredByBase.has("gemini-4-carbon")).toBe(true)
     const haiku = buildPricing(`
 | Model | Provider | Input | Cache write | Cache read | Output | Notes |
@@ -912,7 +918,9 @@ describe("pricing", () => {
       ),
     }])
     expect(haiku.costs["claude-haiku-5-5-fast"]).toBeUndefined()
-    expect(haiku.fastCoveredByBase.has("claude-haiku-5-5")).toBe(true)
+    expect(haiku.costs["claude-haiku-5-5"]).toEqual({
+      input: 0.1, output: 0.5, cache_read: 0.01, cache_write: 0.125,
+    })
     expect(() => priceFromModelPages(buildPricing(markdown), [{
       modelId: "gpt-5.2",
       html: html(
@@ -1053,7 +1061,17 @@ describe("pricing", () => {
     const contextMarkdown = readFileSync(join(root, "context.md"), "utf8")
     const pageIds = pageIdsForSelectableGaps(pricingMarkdown, contextMarkdown, loadSelectableCatalog())
     const pages = loadSavedModelPages(join(root, "pages"), pageIds)
-    const priced = assemblePricing(pricingMarkdown, contextMarkdown, pages)
+    const providerPages = [
+      { provider: "anthropic" as const, html: readFileSync(join(root, "providers", "anthropic.html"), "utf8") },
+      { provider: "openai" as const, html: readFileSync(join(root, "providers", "openai.html"), "utf8") },
+    ]
+    const priced = assemblePricing(
+      pricingMarkdown,
+      contextMarkdown,
+      pages,
+      loadSelectableCatalog(),
+      providerPages,
+    )
     expect(takeNetworkAttempts()).toEqual([])
     expect(priced.unpriced).toEqual(CURSOR_UNPRICED_MODEL_REASONS)
     expect(priced.contexts).toEqual(CURSOR_MODEL_CONTEXTS as unknown as typeof priced.contexts)
@@ -1093,18 +1111,31 @@ describe("pricing", () => {
     expect(formula("claude-fable-5")).toContain("That rate applies across the whole window")
     expect(formula("gemini-4-carbon")).toContain("Context window 200k. Max context 1M")
     expect(formula("gemini-4-carbon")).not.toContain("December 1, 2026")
-    expect(formula("gpt-5.2-fast")).toContain("does not name a Fast mode")
-    expect(formula("gpt-5.3-codex-fast")).toContain("does not name a Fast mode")
-    expect(formula("claude-fable-5-2-fast")).toContain("does not name a Fast mode")
-    expect(priced.costs["gpt-5.2-fast"]).toBeUndefined()
-    expect(priced.costs["claude-fable-5-2-fast"]).toBeUndefined()
+    expect(formula("gpt-5.2-fast")).toContain("Fast tier gpt-5.2")
+    expect(formula("gpt-5.2-fast")).toContain(PROVIDER_PRICING_URL.openai)
+    expect(formula("gpt-5.3-codex-fast")).toContain("marks gpt-5.3-codex deprecated")
+    expect(formula("claude-fable-5-2-fast")).toContain("Claude Fable 5.2 $16 USD / MTok $80 USD / MTok")
+    expect(formula("claude-fable-5-2-fast")).toContain("cache read 0.025x")
+    expect(formula("claude-fable-5-2-fast")).toContain("5-minute cache write 1.25x")
+    expect(priced.costs["gpt-5.2-fast"]).toEqual({ input: 3.5, output: 28, cache_read: 0.35 })
+    expect(priced.costs["gpt-5.3-codex-fast"]).toEqual({ input: 3.5, output: 28, cache_read: 0.35 })
+    expect(priced.costs["claude-fable-5-2-fast"]).toEqual({
+      input: 16, output: 80, cache_read: 0.4, cache_write: 20,
+    })
+    expect(priced.costs["gpt-5.2"]).toEqual({ input: 1.75, output: 14, cache_read: 0.175 })
     const offline = loadOfflinePricing({
       pricingFile: join(root, "pricing.md"),
       contextFile: join(root, "context.md"),
       pagesDir: join(root, "pages"),
+      providerPagesDir: join(root, "providers"),
     })
     expect(offline.costs).toEqual(priced.costs)
     expect(takeNetworkAttempts()).toEqual([])
+    expect(() => loadOfflinePricing({
+      pricingFile: join(root, "pricing.md"),
+      contextFile: join(root, "context.md"),
+      pagesDir: join(root, "pages"),
+    })).toThrow(/Refusing to fetch provider pricing pages[\s\S]*anthropic\.html/)
     expect(() => loadOfflinePricing({
       pricingFile: join(root, "pricing.md"),
       contextFile: join(root, "context.md"),
@@ -1153,7 +1184,7 @@ describe("pricing", () => {
       expect(() => {
         assemblePricing(markdown, context, [{ modelId: "gpt-5.5", html: standardOnly }], fastCatalog)
         writeFileSync(dest, "written")
-      }).toThrow(/gpt-5\.5-fast: https:\/\/cursor\.com\/docs\/models\/gpt-5-5 has no Fast row/)
+      }).toThrow(/gpt-5\.5-fast[\s\S]*standard rate is not a Fast price/)
       expect(existsSync(dest)).toBe(false)
       const complete = readFileSync(join(import.meta.dir, "fixtures", "pricing-offline", "pages", "gpt-5.5.html"), "utf8")
       const priced = assemblePricing(markdown, context, [{ modelId: "gpt-5.5", html: complete }], [{
@@ -1170,5 +1201,85 @@ describe("pricing", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  it("prices an unstated Fast variant from the provider list price, never the standard row", () => {
+    const root = join(import.meta.dir, "fixtures", "pricing-offline", "providers")
+    const openai = readFileSync(join(root, "openai.html"), "utf8")
+    const anthropic = readFileSync(join(root, "anthropic.html"), "utf8")
+    const parsed = parseOpenAiFastPrices(openai, new Set(["gpt-5.2", "gpt-5.3-codex", "gpt-5", "gpt-5.6-sol"]))
+    expect(parsed.get("gpt-5.2")?.cost).toEqual({ input: 3.5, output: 28, cache_read: 0.35 })
+    expect(parsed.get("gpt-5.3-codex")).toMatchObject({
+      deprecated: true,
+      cost: { input: 3.5, output: 28, cache_read: 0.35 },
+    })
+    expect(parsed.get("gpt-5")?.cost).toEqual({ input: 2.5, output: 20, cache_read: 0.25 })
+    expect(parsed.get("gpt-5.6-sol")?.cost).toEqual({
+      input: 8, output: 40, cache_read: 0.8, cache_write: 10,
+    })
+    expect(JSON.stringify([...parsed.values()])).not.toContain("1.75")
+
+    const markdown = `
+| Model | Provider | Input | Cache write | Cache read | Output | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| GPT-5.2 | OpenAI | $1.75 | - | $0.175 | $14 | |
+| GPT-5.4 | OpenAI | $2.5 | - | $0.25 | $15 | |
+| Claude Fable 5.2 | Anthropic | $8 | $10 | $0.2 | $40 | |
+`
+    const context = `
+| Model | Provider | Default context | Max context | Capabilities | Notes |
+| --- | --- | --- | --- | --- | --- |
+| GPT-5.2 | OpenAI | 272k | - | Agent | |
+| GPT-5.4 | OpenAI | 272k | 1M | Agent | |
+| Claude Fable 5.2 | Anthropic | 300k | 1M | Agent | |
+`
+    const standard = (name: string, cells: string) => `
+<table>
+<tr><th>Name</th><th>Input</th><th>Cache write</th><th>Cache read</th><th>Output</th></tr>
+<tr><td>${name}</td><td>${cells}</td></tr>
+</table>`
+    const catalog: SelectableCatalogModel[] = [
+      { id: "gpt-5.2", variants: [{ parameterValues: [{ id: "fast", value: "true" }] }] },
+      { id: "claude-fable-5-2", variants: [{ parameterValues: [{ id: "fast", value: "true" }, { id: "context", value: "1m" }], isMaxMode: true }] },
+    ]
+    const pages = [
+      { modelId: "gpt-5.2", html: standard("GPT-5.2", "$1.75</td><td>-</td><td>$0.175</td><td>$14") },
+      { modelId: "claude-fable-5-2", html: `${standard("Claude Fable 5.2", "$8</td><td>$10</td><td>$0.2</td><td>$40")}<p>Context window 300k. Max context 1M.</p>` },
+    ]
+    expect(() => assemblePricing(markdown, context, pages, catalog)).toThrow(
+      new RegExp(`${PROVIDER_PRICING_URL.anthropic.replace(/[.]/g, "\\.")}[\\s\\S]*standard rate is not a Fast price`),
+    )
+    expect(() => assemblePricing(markdown, context, pages, [catalog[0]!])).toThrow(
+      new RegExp(`${PROVIDER_PRICING_URL.openai.replace(/[.]/g, "\\.")}[\\s\\S]*standard rate is not a Fast price`),
+    )
+    const priced = assemblePricing(markdown, context, pages, catalog, [
+      { provider: "openai", html: openai },
+      { provider: "anthropic", html: anthropic },
+    ])
+    expect(priced.costs["gpt-5.2"]).toEqual({ input: 1.75, output: 14, cache_read: 0.175 })
+    expect(priced.costs["gpt-5.2-fast"]).toEqual({ input: 3.5, output: 28, cache_read: 0.35 })
+    expect(priced.costs["claude-fable-5-2"]).toEqual({
+      input: 8, output: 40, cache_read: 0.2, cache_write: 10,
+    })
+    expect(priced.costs["claude-fable-5-2-fast"]).toEqual({
+      input: 16, output: 80, cache_read: 0.4, cache_write: 20,
+    })
+    expect(priced.costs["claude-fable-5-2-fast"]).not.toEqual(priced.costs["claude-fable-5-2"])
+    expect(priced.derived.find((price) => price.id === "claude-fable-5-2")?.formula)
+      .toContain("That rate applies across the whole window")
+    const doubled = assemblePricing(markdown, context, [{
+      modelId: "gpt-5.4",
+      html: `${standard("GPT-5.4", "$2.5</td><td>-</td><td>$0.25</td><td>$15")}<p>Fast is 2x the standard price.</p>`,
+    }], [{ id: "gpt-5.4", variants: [{ parameterValues: [{ id: "fast", value: "true" }] }] }])
+    expect(doubled.costs["gpt-5.4-fast"]).toEqual({ input: 5, output: 30, cache_read: 0.5 })
+    const pricing = buildPricing(markdown)
+    expect(() => priceFromProviderPages(pricing, ["claude-fable-5-2"], [{
+      provider: "anthropic",
+      html: anthropic
+        .replace("Claude Fable 5.2 and Claude Mythos 5.2 0.025x", "Claude Fable 5.2 and Claude Mythos 5.2 see")
+        .replace("All other models 0.1x", "All other models see"),
+    }])).toThrow(/no single cache hit multiplier/)
+    expect(pricing.costs["claude-fable-5-2-fast"]).toBeUndefined()
+    expect(takeNetworkAttempts()).toEqual([])
   })
 })

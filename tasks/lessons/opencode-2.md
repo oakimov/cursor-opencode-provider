@@ -1,6 +1,6 @@
 # OpenCode 2.x lessons
 
-[Index](../lessons.md) · [General](opencode.md) · [1.x](opencode-1.md)
+[Index](../lessons.md) · [General](opencode.md) · [1.x](opencode-1.md) · [Pricing](pricing.md)
 
 Operator setup: [OpenCode 2.x](../../docs/opencode-2.md).
 

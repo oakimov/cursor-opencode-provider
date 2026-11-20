@@ -13,22 +13,24 @@
  * a rule the page states. A Fast multiplier ("Nx the standard price") scales
  * the standard row. A same-rate sentence, or a page that lists Max context 1M
  * with one rate, means that rate applies across the window, so the published
- * row is the long-context price. A page that does not name Fast mode uses that
- * same row for Fast. A page that names Fast mode and states no rate still
- * fails, and the base rate is not written as a new row in its place. Auto
- * (`default`) is the hand-edited
+ * row is the long-context price. A Fast variant Cursor does not price is read
+ * from the provider's official pricing page (Anthropic or OpenAI). The
+ * standard row is never that Fast price. A provider page that does not state
+ * the variant fails the run. Auto (`default`) is the hand-edited
  * `CURSOR_STAFF_AUTO_RATE` constant. Generation also fails, and writes
  * nothing, when a selectable model has no price. The live refresh stays a
  * manual step before a version bump.
  *
  * Usage:
  *   bun run generate:pricing
- *   bun run generate:pricing -- --from-file pricing.md --context-from-file docs.md --pages-from-dir pages
+ *   bun run generate:pricing -- --from-file pricing.md --context-from-file docs.md --pages-from-dir pages --provider-pages-from-dir providers
  *   bun run generate:pricing -- --check   # exit 1 if committed data is stale
  *
  * `--from-file` together with `--context-from-file` makes no network request.
  * A page needed for a gap must be `<model-id>.html` in `--pages-from-dir`.
- * A missing file fails the run and names the id. It is not fetched.
+ * A Fast price still missing after that page must be `<provider>.html` in
+ * `--provider-pages-from-dir`. A missing file fails the run and names the
+ * id. It is not fetched.
  *
  * Also runs automatically before npm publish (GitHub Actions publish.yml and
  * package.json prepublishOnly) so released packages carry current docs rates.
@@ -36,7 +38,7 @@
  * unmapped display names fail publish CI.
  */
 
-import { readdirSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import path from "node:path"
 
 export const CURSOR_PRICING_DOC_URL = "https://cursor.com/docs/models-and-pricing.md"
@@ -245,6 +247,7 @@ type Options = {
   fromFile?: string
   contextFromFile?: string
   pagesFromDir?: string
+  providerPagesFromDir?: string
   check: boolean
 }
 
@@ -258,6 +261,8 @@ export function parseArgs(argv: string[]): Options {
       options.contextFromFile = argv[++i]
     } else if (arg === "--pages-from-dir" && argv[i + 1]) {
       options.pagesFromDir = argv[++i]
+    } else if (arg === "--provider-pages-from-dir" && argv[i + 1]) {
+      options.providerPagesFromDir = argv[++i]
     } else if (arg === "--check") {
       options.check = true
     } else {
@@ -507,6 +512,22 @@ export type PriceDisagreement = {
   otherSource: "page" | "markdown"
 }
 
+/**
+ * Official list-price pages. Used only after the Cursor markdown and the
+ * Cursor model page have no price for that variant.
+ */
+export const PROVIDER_PRICING_URL = {
+  anthropic: "https://docs.anthropic.com/en/docs/about-claude/pricing",
+  openai: "https://developers.openai.com/api/docs/pricing",
+} as const
+
+export type ProviderId = keyof typeof PROVIDER_PRICING_URL
+
+export type ProviderPageInput = {
+  provider: ProviderId
+  html: string
+}
+
 export type PricingBuild = {
   costs: Record<string, OpenCodeModelCost>
   /** Always empty. A selectable model with no price fails generation. */
@@ -515,17 +536,10 @@ export type PricingBuild = {
   markdownDefault?: OpenCodeModelCost
   disagreements: PriceDisagreement[]
   /**
-   * The published standard row is this model's Fast price. The page does not
-   * name a Fast mode, so no separate `<id>-fast` entry is written.
-   */
-  fastCoveredByBase: Set<string>
-  /**
    * The published standard row applies across the whole context window,
    * including Max context 1M. No separate tier is written.
    */
   longCoveredByBase: Set<string>
-  /** The pricing-markdown note names a distinct Fast mode for this model. */
-  fastNamedInNotes: Set<string>
 }
 
 /** A recorded AvailableModels entry. Generation uses it to find pricing gaps. */
@@ -641,18 +655,16 @@ export function pageIdsForSelectableGaps(
 
 /**
  * A page fetched for a gap must contain a pricing table and a price for the
- * variant that gap needed: a row, a stated multiplier, or the published
- * standard row when the page says that row covers the variant. A missing
- * table, or a named Fast mode with no rate, is a refusal.
+ * variant that gap needed: a row, or a stated multiplier or same-rate rule.
+ * A Fast variant with no Cursor price is not satisfied here. The standard
+ * row is not a Fast price. `checkFast: false` defers that check until the
+ * provider page has been read.
  */
 export function assertRequiredPageRows(
   gaps: readonly PricingGap[],
   pages: readonly ModelPageInput[],
   costs: Readonly<Record<string, OpenCodeModelCost>>,
-  coverage: { fast: ReadonlySet<string>; long: ReadonlySet<string> } = {
-    fast: new Set(),
-    long: new Set(),
-  },
+  coverage: { long: ReadonlySet<string>; checkFast?: boolean } = { long: new Set() },
 ): void {
   const byId = new Map(pages.map((page) => [page.modelId, page]))
   const problems: string[] = []
@@ -667,11 +679,16 @@ export function assertRequiredPageRows(
       problems.push(`${gap.id}: ${url} has no base price row`)
     }
     if (
-      gap.needs.includes("fast")
+      coverage.checkFast !== false
+      && gap.needs.includes("fast")
       && !Object.hasOwn(costs, `${gap.id}-fast`)
-      && !coverage.fast.has(gap.id)
     ) {
-      problems.push(`${gap.id}-fast: ${url} has no Fast row or stated Fast price`)
+      const provider = providerForModel(gap.id)
+      const providerUrl = provider ? PROVIDER_PRICING_URL[provider] : "no provider pricing page"
+      problems.push(
+        `${gap.id}-fast: ${url} has no Fast row or stated Fast price. ` +
+          `${providerUrl} did not supply one. The standard rate is not a Fast price.`,
+      )
     }
     if (
       gap.needs.includes("long")
@@ -698,19 +715,12 @@ export function missingSavedPagesMessage(ids: readonly string[]): string {
 export function assertSelectablePriced(
   catalog: readonly SelectableCatalogModel[],
   costs: Readonly<Record<string, OpenCodeModelCost>>,
-  coverage: { fast: ReadonlySet<string>; long: ReadonlySet<string> } = {
-    fast: new Set(),
-    long: new Set(),
-  },
+  coverage: { long: ReadonlySet<string> } = { long: new Set() },
 ): void {
   const missing: string[] = []
   for (const model of catalog) {
     if (model.id !== "default" && !Object.hasOwn(costs, model.id)) missing.push(model.id)
-    if (
-      variantRequestsFast(model)
-      && !Object.hasOwn(costs, `${model.id}-fast`)
-      && !coverage.fast.has(model.id)
-    ) {
+    if (variantRequestsFast(model) && !Object.hasOwn(costs, `${model.id}-fast`)) {
       missing.push(`${model.id}-fast`)
     }
     if (
@@ -1050,16 +1060,6 @@ function statedWholeWindowRate(text: string): { evidence: string } | undefined {
   return { evidence: match[0].replace(/\s+/g, " ").trim() }
 }
 
-/** The page names Fast mode as its own price. A speed label is not that. */
-function pageNamesFastMode(text: string): boolean {
-  return /\bfast mode\b/i.test(text)
-}
-
-/** The pricing-markdown note names a distinct Fast mode. A cost comparison is not one. */
-function notesNameFastMode(notes: string): boolean {
-  return /\bfast mode\b/i.test(notes) || /\bhigher rates\b/i.test(notes)
-}
-
 /**
  * "Nx the standard price/rates" for a Fast mode the page does not tabulate.
  * The sentence, or the one before it, has to name Fast mode. A long-context
@@ -1095,8 +1095,8 @@ function statedFastMultiplier(text: string): { factor: number; evidence: string 
  * and the markdown value stays. Page prose fills a gap only when the page
  * table has no row for it, and only with a multiplier or same-rate rule the
  * page states. Max context 1M beside one rate means that rate covers the
- * window. A page that does not name Fast mode uses the same row for Fast.
- * A named Fast mode with no rate is left unpriced.
+ * window. A Fast gap with no stated rate stays empty. The standard row is
+ * not copied into `<id>-fast`.
  */
 export function priceFromModelPages(
   pricing: PricingBuild,
@@ -1284,7 +1284,8 @@ export function priceFromModelPages(
     }
 
     // A Fast row on the same page keeps its own published components. The
-    // same-rate sentence does not add a second copy of that row.
+    // same-rate sentence does not add a second copy of that row. A page that
+    // states no Fast price does not receive the standard row.
     if (sameRate && fast && pricing.costs[fastId] && !longPart(pricing.costs[fastId])) {
       pricing.longCoveredByBase.add(page.modelId)
       derived.push({
@@ -1293,27 +1294,6 @@ export function priceFromModelPages(
         formula:
           `${pageUrl(page.modelId)} has no Fast long-context row. ${sameRate.evidence} ` +
           `The Fast row's published rate applies above that threshold because the page states no long-context multiplier.`,
-      })
-    }
-
-    // No named Fast mode: the standard row is the Fast price. A page or note
-    // that names Fast mode and gives no rate does not take this path.
-    if (
-      !Object.hasOwn(pricing.costs, fastId)
-      && !fast
-      && !fastMultiplier
-      && keptBase
-      && base
-      && !pageNamesFastMode(text)
-      && !pricing.fastNamedInNotes.has(page.modelId)
-    ) {
-      pricing.fastCoveredByBase.add(page.modelId)
-      derived.push({
-        id: fastId,
-        cost: flatCostOf(keptBase),
-        formula:
-          `${pageUrl(page.modelId)} does not name a Fast mode. Fast uses the standard row ` +
-          `published on the pricing markdown and on this page.`,
       })
     }
   }
@@ -1366,7 +1346,6 @@ export function buildPricing(
     modelId: string
     entry: OpenCodeModelCost
   }> = []
-  const fastNamedInNotes = new Set<string>()
   let markdownDefault: OpenCodeModelCost | undefined
 
   for (const row of parsePricingTables(markdown)) {
@@ -1390,7 +1369,6 @@ export function buildPricing(
       markdownDefault = entry
       continue
     }
-    if (notesNameFastMode(row.notes)) fastNamedInNotes.add(modelId)
     if (row.isExplicitLongContextRow) {
       explicitLong.set(modelId, { cost: entry, displayName: row.displayName })
       continue
@@ -1428,9 +1406,7 @@ export function buildPricing(
     unpriced: {},
     markdownDefault,
     disagreements: [],
-    fastCoveredByBase: new Set(),
     longCoveredByBase: new Set(),
-    fastNamedInNotes,
   }
 }
 
@@ -1495,6 +1471,8 @@ function renderPricingDataModule(
  * AUTO-GENERATED by scripts/generate-cursor-pricing.ts — do not edit by hand.
  * Pricing source: markdown rows in ${pricingSource}.
  * A model page fills a selectable variant that has no markdown row.
+ * A Fast price Cursor does not publish comes from the provider's official
+ * pricing page. The standard row is not a Fast price.
  * Context source: ${contextSource}
  * Auto (\`default\`) is the hand-edited staff rate, not a fetched docs row.
  * Cursor staff stated $1.25/M input,
@@ -1580,27 +1558,437 @@ export type PricingAssembly = {
   pageIds: string[]
 }
 
+function providerForModel(modelId: string): ProviderId | undefined {
+  if (modelId.startsWith("claude-")) return "anthropic"
+  if (modelId.startsWith("gpt-")) return "openai"
+  return undefined
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+function cursorDisplayName(modelId: string): string {
+  const names = Object.entries(DISPLAY_NAME_TO_MODEL_ID)
+    .filter(([, id]) => id === modelId)
+    .map(([name]) => name)
+    .filter((name) => !/\b(?:1M|500k|fast)\b/i.test(name))
+  if (names.length !== 1) {
+    throw new Error(
+      `No single display name for ${modelId} on a provider pricing page: ${names.join(", ") || "none"}`,
+    )
+  }
+  return names[0]!
+}
+
+/** Astro island props encode a value as [0, x] and a list as [1, xs]. */
+function unwrapAstro(node: unknown): unknown {
+  if (Array.isArray(node) && node.length === 2 && (node[0] === 0 || node[0] === 1)) {
+    const inner = unwrapAstro(node[1])
+    return node[0] === 1 && Array.isArray(inner) ? inner.map(unwrapAstro) : inner
+  }
+  if (Array.isArray(node)) return node.map(unwrapAstro)
+  if (node && typeof node === "object") {
+    return Object.fromEntries(Object.entries(node).map(([key, value]) => [key, unwrapAstro(value)]))
+  }
+  return node
+}
+
+function readIslandProps(html: string, exportName: string): Array<{ at: number; props: unknown }> {
+  const marker = `component-export="${exportName}"`
+  const found: Array<{ at: number; props: unknown }> = []
+  let from = 0
+  while (from < html.length) {
+    const at = html.indexOf(marker, from)
+    if (at < 0) break
+    const propsKey = html.indexOf('props="', at)
+    if (propsKey < 0 || propsKey - at > 800) {
+      throw new Error(`OpenAI pricing page is missing props for ${exportName}`)
+    }
+    const start = propsKey + 'props="'.length
+    const end = html.indexOf('"', start)
+    if (end < 0) throw new Error(`OpenAI pricing page has an unclosed ${exportName} props attribute`)
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(decodeEntities(html.slice(start, end)))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`OpenAI pricing page ${exportName} props are not JSON: ${message}`)
+    }
+    found.push({ at, props: unwrapAstro(parsed) })
+    from = end + 1
+  }
+  return found
+}
+
+function nearestTierLabel(html: string, index: number): string | undefined {
+  const before = html.slice(0, index)
+  let last: string | undefined
+  for (const match of before.matchAll(/>(Standard|Batch|Flex|Fast|Ultrafast)</g)) last = match[1]
+  return last
+}
+
+function openAiLabel(cell: unknown): { label: string; deprecated: boolean } {
+  if (typeof cell === "string") return { label: cell, deprecated: false }
+  if (cell && typeof cell === "object" && "label" in cell && typeof cell.label === "string") {
+    const deprecated = "deprecated" in cell && cell.deprecated === true
+    return { label: cell.label, deprecated }
+  }
+  throw new Error(`OpenAI pricing row has no model label: ${JSON.stringify(cell)}`)
+}
+
+function openAiMoney(value: unknown, what: string): number | undefined {
+  if (value === undefined || value === null || value === "-" || value === "") return undefined
+  if (typeof value === "number" && Number.isFinite(value)) return value
+  throw new Error(`OpenAI ${what} price is not a number: ${JSON.stringify(value)}`)
+}
+
+/**
+ * Text-token rows follow the pricing component. Three values are input,
+ * cached input, output. Four values are input, cached input, 30-minute
+ * cache write, output. The rendered table shows output before the cache
+ * columns; the props do not.
+ */
+function openAiTextCost(values: unknown[], label: string): OpenCodeModelCost {
+  if (values.length === 3) {
+    const input = openAiMoney(values[0], `${label} input`)
+    const output = openAiMoney(values[2], `${label} output`)
+    if (input === undefined || output === undefined) {
+      throw new Error(`OpenAI Fast row ${label} has no input or output`)
+    }
+    return cost(input, output, openAiMoney(values[1], `${label} cached input`))
+  }
+  if (values.length === 4) {
+    const input = openAiMoney(values[0], `${label} input`)
+    const output = openAiMoney(values[3], `${label} output`)
+    if (input === undefined || output === undefined) {
+      throw new Error(`OpenAI Fast row ${label} has no input or output`)
+    }
+    return cost(
+      input,
+      output,
+      openAiMoney(values[1], `${label} cached input`),
+      openAiMoney(values[2], `${label} cache write`),
+    )
+  }
+  throw new Error(`OpenAI Fast row ${label} has ${values.length} price cells`)
+}
+
+type OpenAiFastHit = { cost: OpenCodeModelCost; deprecated: boolean; evidence: string }
+
+function rememberOpenAiFast(
+  found: Map<string, OpenAiFastHit>,
+  modelId: string,
+  hit: OpenAiFastHit,
+): void {
+  const previous = found.get(modelId)
+  if (previous && !sameFlat(previous.cost, hit.cost)) {
+    throw new Error(
+      `OpenAI Fast tier lists two prices for ${modelId}: ${JSON.stringify(previous.cost)} and ${JSON.stringify(hit.cost)}`,
+    )
+  }
+  if (!previous) found.set(modelId, hit)
+}
+
+/**
+ * Fast tier only. Standard, Batch, Flex, and Ultrafast rows are not prices
+ * for a Cursor Fast variant.
+ */
+export function parseOpenAiFastPrices(
+  html: string,
+  needed: ReadonlySet<string>,
+): Map<string, OpenAiFastHit> {
+  const found = new Map<string, OpenAiFastHit>()
+  for (const island of readIslandProps(html, "TextTokenPricingTables")) {
+    const props = island.props
+    if (!props || typeof props !== "object" || !("tier" in props) || !("rows" in props)) {
+      throw new Error("OpenAI text pricing table has no tier")
+    }
+    if (props.tier !== "fast" || !Array.isArray(props.rows)) continue
+    for (const row of props.rows) {
+      if (!Array.isArray(row) || row.length < 2) {
+        throw new Error("OpenAI Fast tier has a row without prices")
+      }
+      const identity = openAiLabel(row[0])
+      const modelId = identity.label.replace(/\s+\([^)]*\)\s*$/, "").trim()
+      if (!needed.has(modelId)) continue
+      const costForRow = openAiTextCost(row.slice(1), identity.label)
+      rememberOpenAiFast(found, modelId, {
+        cost: costForRow,
+        deprecated: identity.deprecated,
+        evidence: `Fast tier ${identity.label}: ${JSON.stringify(costForRow)}`,
+      })
+    }
+  }
+  for (const island of readIslandProps(html, "GroupedPricingTable")) {
+    if (nearestTierLabel(html, island.at) !== "Fast") continue
+    const props = island.props
+    if (!props || typeof props !== "object" || !("headings" in props) || !("groups" in props)) continue
+    const headings = props.headings
+    const groups = props.groups
+    if (!Array.isArray(headings) || !headings.every((heading) => typeof heading === "string")) {
+      continue
+    }
+    if (!Array.isArray(groups)) continue
+    const headingNames = headings as string[]
+    const modelAt = headingNames.indexOf("Model")
+    if (modelAt < 0 || !headingNames.includes("Input") || !headingNames.includes("Output")) continue
+    for (const group of groups) {
+      if (!group || typeof group !== "object" || !("rows" in group) || !Array.isArray(group.rows)) continue
+      for (const row of group.rows) {
+        if (!Array.isArray(row)) throw new Error("OpenAI Fast grouped row is empty")
+        const identity = openAiLabel(row[0])
+        const modelId = identity.label.replace(/\s+\([^)]*\)\s*$/, "").trim()
+        if (!needed.has(modelId)) continue
+        const at = (name: string) => {
+          const index = headingNames.findIndex((heading) => heading.toLowerCase() === name)
+          if (index < 0) return undefined
+          return row[index - modelAt]
+        }
+        const input = openAiMoney(at("input"), `${identity.label} input`)
+        const output = openAiMoney(at("output"), `${identity.label} output`)
+        if (input === undefined || output === undefined) {
+          throw new Error(`OpenAI Fast grouped row ${identity.label} has no input or output`)
+        }
+        const cachedName = headingNames.find((heading) => heading.toLowerCase() === "cached input")
+        const writeName = headingNames.find((heading) => heading.toLowerCase().includes("30m"))
+        rememberOpenAiFast(found, modelId, {
+          cost: cost(
+            input,
+            output,
+            cachedName ? openAiMoney(at("cached input"), `${identity.label} cached input`) : undefined,
+            writeName ? openAiMoney(at(writeName), `${identity.label} cache write`) : undefined,
+          ),
+          deprecated: identity.deprecated,
+          evidence:
+            `Fast tier headings ${headingNames.join(", ")}: ${identity.label} ` +
+            `input ${input}, output ${output}` +
+            (cachedName ? `, cached input ${String(at("cached input"))}` : ""),
+        })
+      }
+    }
+  }
+  return found
+}
+
+function anthropicFastParts(text: string, name: string): {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  hit: number
+  write: number
+  evidence: string
+} {
+  if (!/Fast mode pricing applies across the full context window/i.test(text)) {
+    throw new Error(
+      `${PROVIDER_PRICING_URL.anthropic} does not say Fast mode pricing applies across the full context window`,
+    )
+  }
+  if (!/Prompt caching multipliers apply on top of fast mode pricing/i.test(text)) {
+    throw new Error(
+      `${PROVIDER_PRICING_URL.anthropic} does not say prompt caching multipliers apply on top of fast mode pricing`,
+    )
+  }
+  const anchor = text.search(/Fast mode pricing applies across the full context window/i)
+  const tableAt = text.indexOf("Model Input Output", anchor)
+  const tableEnd = text.indexOf("Fast mode pricing stacks", tableAt)
+  if (tableAt < 0 || tableEnd < 0) {
+    throw new Error(`${PROVIDER_PRICING_URL.anthropic} has no Fast mode pricing table`)
+  }
+  const row = new RegExp(
+    `${escapeRegExp(name)}\\s+\\$(\\d+(?:\\.\\d+)?)\\s+USD\\s*/\\s*MTok\\s+\\$(\\d+(?:\\.\\d+)?)\\s+USD\\s*/\\s*MTok`,
+    "g",
+  )
+  const rows = [...text.slice(tableAt, tableEnd).matchAll(row)]
+  if (rows.length !== 1) {
+    throw new Error(
+      `${PROVIDER_PRICING_URL.anthropic} Fast mode table has ${rows.length} rows for ${name}`,
+    )
+  }
+  const input = Number(rows[0]![1])
+  const output = Number(rows[0]![2])
+  const writeMatches = [...text.matchAll(/5-minute cache write\s+(\d+(?:\.\d+)?)x base input price/gi)]
+  if (writeMatches.length === 0) {
+    throw new Error(`${PROVIDER_PRICING_URL.anthropic} does not state a 5-minute cache write multiplier`)
+  }
+  const write = Number(writeMatches[0]![1])
+  if (writeMatches.some((match) => Number(match[1]) !== write)) {
+    throw new Error(`${PROVIDER_PRICING_URL.anthropic} states conflicting 5-minute cache write multipliers`)
+  }
+  const hitAt = text.search(/What a cache hit costs depends on the model/i)
+  if (hitAt < 0) {
+    throw new Error(`${PROVIDER_PRICING_URL.anthropic} does not state cache hit multipliers`)
+  }
+  const hitSection = text.slice(hitAt)
+  const groups = [...hitSection.matchAll(/((?:Claude|All other models)[^$]*?)\s(\d+(?:\.\d+)?)x\b/g)]
+  const named = groups.filter((group) =>
+    new RegExp(`(?:^|\\s)${escapeRegExp(name)}(?:\\s|$)`).test(group[1]!),
+  )
+  const chosen = named.length > 0
+    ? named
+    : groups.filter((group) => /All other models/.test(group[1]!))
+  if (chosen.length !== 1) {
+    throw new Error(`${PROVIDER_PRICING_URL.anthropic} has no single cache hit multiplier for ${name}`)
+  }
+  const hit = Number(chosen[0]![2])
+  if (![input, output, write, hit].every((value) => Number.isFinite(value) && value > 0)) {
+    throw new Error(`${PROVIDER_PRICING_URL.anthropic} Fast price for ${name} is not a positive rate`)
+  }
+  return {
+    input,
+    output,
+    cacheRead: roundRate(input * hit),
+    cacheWrite: roundRate(input * write),
+    hit,
+    write,
+    evidence: rows[0]![0].replace(/\s+/g, " "),
+  }
+}
+
+/**
+ * Fill Fast prices the Cursor markdown and model page do not state.
+ * Reads only the provider page for that family. Never copies the standard row.
+ */
+export function priceFromProviderPages(
+  pricing: PricingBuild,
+  modelIds: readonly string[],
+  pages: readonly ProviderPageInput[],
+): DerivedModelPrice[] {
+  const derived: DerivedModelPrice[] = []
+  const byProvider = new Map(pages.map((page) => [page.provider, page]))
+  const openAiNeeded = new Set(modelIds.filter((id) => providerForModel(id) === "openai"))
+  const openAiPage = byProvider.get("openai")
+  const openAiPrices = openAiNeeded.size > 0 && openAiPage
+    ? parseOpenAiFastPrices(openAiPage.html, openAiNeeded)
+    : undefined
+  for (const modelId of modelIds) {
+    const fastId = `${modelId}-fast`
+    if (Object.hasOwn(pricing.costs, fastId)) continue
+    const provider = providerForModel(modelId)
+    if (!provider) {
+      throw new Error(
+        `${fastId} has no Cursor Fast price and no provider pricing page. The standard rate is not a Fast price.`,
+      )
+    }
+    const page = byProvider.get(provider)
+    if (!page) {
+      throw new Error(
+        `Refusing to fetch ${PROVIDER_PRICING_URL[provider]} for ${fastId}. The standard rate is not a Fast price.`,
+      )
+    }
+    if (provider === "anthropic") {
+      const name = cursorDisplayName(modelId)
+      const parts = anthropicFastParts(pageText(page.html), name)
+      const fastCost = cost(parts.input, parts.output, parts.cacheRead, parts.cacheWrite)
+      pricing.costs[fastId] = fastCost
+      derived.push({
+        id: fastId,
+        cost: fastCost,
+        formula:
+          `${PROVIDER_PRICING_URL.anthropic} Fast mode pricing: ${parts.evidence}. ` +
+          `Fast mode pricing applies across the full context window, so this rate has no separate long-context tier. ` +
+          `Prompt caching multipliers apply on top of fast mode pricing: cache read ${parts.hit}x and ` +
+          `5-minute cache write ${parts.write}x.`,
+      })
+      continue
+    }
+    const hit = openAiPrices?.get(modelId)
+    if (!hit) {
+      throw new Error(
+        `${PROVIDER_PRICING_URL.openai} has no Fast price for ${modelId}. The standard rate is not a Fast price.`,
+      )
+    }
+    pricing.costs[fastId] = hit.cost
+    derived.push({
+      id: fastId,
+      cost: hit.cost,
+      formula:
+        `${PROVIDER_PRICING_URL.openai} ${hit.evidence}.` +
+        (hit.deprecated ? ` The page marks ${modelId} deprecated and still lists that Fast tier.` : ""),
+    })
+  }
+  pricing.costs = sortRecord(pricing.costs)
+  return derived
+}
+
+export function fastModelIdsMissingPrice(
+  catalog: readonly SelectableCatalogModel[],
+  costs: Readonly<Record<string, OpenCodeModelCost>>,
+): string[] {
+  return catalog
+    .filter((model) => variantRequestsFast(model) && !Object.hasOwn(costs, `${model.id}-fast`))
+    .map((model) => model.id)
+    .sort()
+}
+
+export function providersForFastModels(modelIds: readonly string[]): ProviderId[] {
+  const providers = new Set<ProviderId>()
+  for (const modelId of modelIds) {
+    const provider = providerForModel(modelId)
+    if (!provider) {
+      throw new Error(
+        `${modelId}-fast has no Cursor Fast price and no provider pricing page. The standard rate is not a Fast price.`,
+      )
+    }
+    providers.add(provider)
+  }
+  return [...providers].sort()
+}
+
+/** Read `<provider>.html`. A missing required file is an error. Does not fetch. */
+export function loadSavedProviderPages(
+  dir: string,
+  required: readonly ProviderId[],
+): ProviderPageInput[] {
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`Cannot read provider pricing pages from ${dir}: ${message}`)
+  }
+  const unknown = names.filter((name) => name.endsWith(".html") && !Object.hasOwn(PROVIDER_PRICING_URL, name.slice(0, -".html".length)))
+  if (unknown.length > 0) {
+    throw new Error(`Unknown provider pricing page ${unknown.join(", ")} in ${dir}`)
+  }
+  return required.map((provider) => {
+    const file = path.join(dir, `${provider}.html`)
+    if (!existsSync(file)) {
+      throw new Error(
+        `Refusing to fetch ${PROVIDER_PRICING_URL[provider]}. Missing ${file}.`,
+      )
+    }
+    return { provider, html: readFileSync(file, "utf8") }
+  })
+}
+
 export function assemblePricing(
   pricingMarkdown: string,
   contextMarkdown: string,
   pages: readonly ModelPageInput[],
   catalog?: readonly SelectableCatalogModel[],
+  providerPages: readonly ProviderPageInput[] = [],
 ): PricingAssembly {
   const defaultContexts = defaultContextByDisplayName(contextMarkdown)
   const pricing = buildPricing(pricingMarkdown, defaultContexts)
   const gaps = catalog ? selectablePricingGaps(pricingMarkdown, contextMarkdown, catalog) : []
   const derived = priceFromModelPages(pricing, pages, defaultContexts)
   applyCursorStaffAutoRate(pricing)
+  let providerDerived: DerivedModelPrice[] = []
   if (catalog) {
-    const coverage = { fast: pricing.fastCoveredByBase, long: pricing.longCoveredByBase }
+    const coverage = { long: pricing.longCoveredByBase, checkFast: false }
     assertRequiredPageRows(gaps, pages, pricing.costs, coverage)
-    assertSelectablePriced(catalog, pricing.costs, coverage)
+    const fastIds = fastModelIdsMissingPrice(catalog, pricing.costs)
+    providerDerived = priceFromProviderPages(pricing, fastIds, providerPages)
+    assertRequiredPageRows(gaps, pages, pricing.costs, { long: pricing.longCoveredByBase })
+    assertSelectablePriced(catalog, pricing.costs, { long: pricing.longCoveredByBase })
   }
   return {
     costs: pricing.costs,
     unpriced: pricing.unpriced,
     contexts: buildContextTable(contextMarkdown),
-    derived,
+    derived: [...derived, ...providerDerived],
     disagreements: pricing.disagreements,
     pageIds: pages.map((page) => page.modelId).sort(),
   }
@@ -1621,6 +2009,7 @@ export function loadOfflinePricing(paths: {
   pricingFile: string
   contextFile: string
   pagesDir?: string
+  providerPagesDir?: string
   catalogFile?: string
 }): PricingAssembly {
   const pricingMarkdown = readFileSync(paths.pricingFile, "utf8")
@@ -1633,7 +2022,35 @@ export function loadOfflinePricing(paths: {
   const pages = pageIds.length === 0 || !paths.pagesDir
     ? []
     : loadSavedModelPages(paths.pagesDir, pageIds)
-  return assemblePricing(pricingMarkdown, contextMarkdown, pages, catalog)
+  const preview = buildPricing(pricingMarkdown, defaultContextByDisplayName(contextMarkdown))
+  priceFromModelPages(preview, pages, defaultContextByDisplayName(contextMarkdown))
+  const providers = providersForFastModels(fastModelIdsMissingPrice(catalog, preview.costs))
+  if (providers.length > 0 && !paths.providerPagesDir) {
+    const lines = providers.map((provider) =>
+      `${provider}: ${PROVIDER_PRICING_URL[provider]} (saved as ${provider}.html)`,
+    )
+    throw new Error(`Refusing to fetch provider pricing pages.\n${lines.join("\n")}`)
+  }
+  const providerPages = providers.length === 0 || !paths.providerPagesDir
+    ? []
+    : loadSavedProviderPages(paths.providerPagesDir, providers)
+  return assemblePricing(pricingMarkdown, contextMarkdown, pages, catalog, providerPages)
+}
+
+async function loadProviderPages(providers: readonly ProviderId[]): Promise<ProviderPageInput[]> {
+  const pages: ProviderPageInput[] = []
+  for (const provider of providers) {
+    const url = PROVIDER_PRICING_URL[provider]
+    const response = await fetch(url, {
+      headers: {
+        accept: "text/html",
+        "user-agent": "Mozilla/5.0",
+      },
+    })
+    if (!response.ok) throw new Error(`Failed to fetch ${url}: HTTP ${response.status}`)
+    pages.push({ provider, html: await response.text() })
+  }
+  return pages
 }
 
 async function loadModelPages(modelIds: readonly string[]): Promise<ModelPageInput[]> {
@@ -1672,7 +2089,23 @@ async function main(): Promise<void> {
   } else {
     pages = await loadModelPages(pageIds)
   }
-  const assembled = assemblePricing(pricingDoc.text, contextDoc.text, pages, catalog)
+  const preview = buildPricing(pricingDoc.text, defaultContextByDisplayName(contextDoc.text))
+  priceFromModelPages(preview, pages, defaultContextByDisplayName(contextDoc.text))
+  const providers = providersForFastModels(fastModelIdsMissingPrice(catalog, preview.costs))
+  let providerPages: ProviderPageInput[] = []
+  if (providers.length > 0) {
+    if (options.providerPagesFromDir) {
+      providerPages = loadSavedProviderPages(options.providerPagesFromDir, providers)
+    } else if (offline) {
+      const lines = providers.map((provider) =>
+        `${provider}: ${PROVIDER_PRICING_URL[provider]} (saved as ${provider}.html)`,
+      )
+      throw new Error(`Refusing to fetch provider pricing pages.\n${lines.join("\n")}`)
+    } else {
+      providerPages = await loadProviderPages(providers)
+    }
+  }
+  const assembled = assemblePricing(pricingDoc.text, contextDoc.text, pages, catalog, providerPages)
   const derived = assembled.derived
   const pricingTable = assembled.costs
   const contextTable = assembled.contexts
@@ -1686,6 +2119,12 @@ async function main(): Promise<void> {
   const dest = outputPath()
   console.log(`Model pages: ${pages.length}${options.pagesFromDir ? ` from ${options.pagesFromDir}` : ""}`)
   if (pageIds.length > 0) console.log(`Page gaps: ${pageIds.join(", ")}`)
+  if (providers.length > 0) {
+    console.log(
+      `Provider pages: ${providers.join(", ")}` +
+        `${options.providerPagesFromDir ? ` from ${options.providerPagesFromDir}` : ""}`,
+    )
+  }
   console.log(`Derived prices: ${derived.length}`)
   for (const price of derived) {
     console.log(`  ${price.id}: ${JSON.stringify(price.cost)}`)
