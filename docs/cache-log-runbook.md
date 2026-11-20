@@ -346,7 +346,7 @@ prefix was recorded:
 | `stepOutput` | Output accepted by this finish: a characters / 4 estimate on tool steps, or outstanding measured output at turn-end, bounded to occupancy with a one-token display minimum. Reasoning is estimated separately and reconciled within its owning Run. |
 | `sessionRealOutput` / `sessionReportedOutput` | Cursor's measured output and output accepted by host finishes. Estimates or the display minimum can make reported output higher; that surplus never reduces a later Run's output. |
 | `delivered` | Whether the stream consumer accepted the finish; ledger totals contain accepted finishes only. |
-| `pricing=unpriced` | No published rate for that catalog id: nothing is billed. Auto (`default`) has the staff forum rate and is priced. |
+| `pricing=unpriced` | The provider has no uniform rate for that catalog id and reports zero cost. This includes Auto (`default`), whose price can depend on the route and plan. |
 
 The outstanding balance is `sessionRealUsd + sessionEstimatedUsd -
 sessionBilledUsd`, including rounding and the minimum/maximum charge the

@@ -16,9 +16,9 @@
  * row is the long-context price. A Fast variant Cursor does not price is read
  * from the provider's official pricing page (Anthropic or OpenAI). The
  * standard row is never that Fast price. A provider page that does not state
- * the variant fails the run. Auto (`default`) is the hand-edited
- * `CURSOR_STAFF_AUTO_RATE` constant. Generation also fails, and writes
- * nothing, when a selectable model has no price. The live refresh stays a
+ * the variant fails the run. Auto (`default`) has route-dependent pricing.
+ * Generation fails, and writes nothing, when another selectable model or
+ * variant has no price. The live refresh stays a
  * manual step before a version bump.
  *
  * Usage:
@@ -28,9 +28,8 @@
  *
  * `--from-file` together with `--context-from-file` makes no network request.
  * A page needed for a gap must be `<model-id>.html` in `--pages-from-dir`.
- * A Fast price still missing after that page must be `<provider>.html` in
- * `--provider-pages-from-dir`. A missing file fails the run and names the
- * id. It is not fetched.
+ * Saved provider inputs belong in `--provider-pages-from-dir` as
+ * `anthropic.html`, `openai.html`, or `google.md`. Missing inputs fail the run.
  *
  * Also runs automatically before npm publish (GitHub Actions publish.yml and
  * package.json prepublishOnly) so released packages carry current docs rates.
@@ -40,6 +39,7 @@
 
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import path from "node:path"
+import { parseCursorContextLimit } from "../src/models.js"
 
 export const CURSOR_PRICING_DOC_URL = "https://cursor.com/docs/models-and-pricing.md"
 export const CURSOR_PRICING_DOC_HTML_URL = "https://cursor.com/docs/models-and-pricing"
@@ -157,20 +157,8 @@ const SKIP_DISPLAY_NAMES = new Set([
   "Legacy Enterprise Auto",
 ])
 
-/**
- * Auto (`default`). The docs publish no per-1M rate. Cursor staff stated this
- * fixed rate on the forum: $1.25/M input, $0.25/M cache read, $6/M output.
- * @deanrie, 2026-03-11, states all three:
- * https://forum.cursor.com/t/how-do-the-auto-cursor-1-5-tokens-work/154514
- * @kevinn, 2026-05-04, restates input and output:
- * https://forum.cursor.com/t/gpt-5-5-medium-is-too-costly/159707
- * Not a lab price. Generation copies this constant. A docs row does not replace it.
- */
-export const CURSOR_STAFF_AUTO_RATE: OpenCodeModelCost = {
-  input: 1.25,
-  output: 6,
-  cache_read: 0.25,
-}
+const AUTO_UNPRICED_REASON = "Cursor does not publish a uniform Auto token rate across routes and plans"
+const GEMINI_PRO_ID = "gemini-3.1-pro"
 
 /**
  * Wire id → docs slug. Dots become dashes. A few older Claude and Cursor
@@ -508,8 +496,8 @@ export type PriceDisagreement = {
   part: "base" | "fast" | "long" | "fast-long"
   kept: OpenCodeModelCost
   other: OpenCodeModelCost
-  keptSource: "markdown" | "manual"
-  otherSource: "page" | "markdown"
+  keptSource: "markdown"
+  otherSource: "page"
 }
 
 /**
@@ -518,6 +506,7 @@ export type PriceDisagreement = {
  */
 export const PROVIDER_PRICING_URL = {
   anthropic: "https://docs.anthropic.com/en/docs/about-claude/pricing",
+  google: "https://aistudio.google.com/docs/pricing.md",
   openai: "https://developers.openai.com/api/docs/pricing",
 } as const
 
@@ -530,14 +519,11 @@ export type ProviderPageInput = {
 
 export type PricingBuild = {
   costs: Record<string, OpenCodeModelCost>
-  /** Always empty. A selectable model with no price fails generation. */
+  /** Explicit exceptions to the selectable price requirement. */
   unpriced: Record<string, string>
-  /** Markdown row for Auto, when one exists. The manual constant replaces it. */
-  markdownDefault?: OpenCodeModelCost
   disagreements: PriceDisagreement[]
   /**
-   * The published standard row applies across the whole context window,
-   * including Max context 1M. No separate tier is written.
+   * Price ids whose own flat rate covers long context.
    */
   longCoveredByBase: Set<string>
 }
@@ -587,23 +573,17 @@ function fastModeModelId(displayName: string): string | undefined {
   return DISPLAY_NAME_TO_MODEL_ID[base]
 }
 
-function catalogContext(value: string | undefined): number | undefined {
-  if (!value) return undefined
-  const match = /^(\d+(?:\.\d+)?)\s*([km])$/i.exec(value.trim())
-  if (!match) return undefined
-  const limit = Number(match[1]) * (match[2]!.toLowerCase() === "k" ? 1_000 : 1_000_000)
-  return Number.isSafeInteger(limit) && limit > 0 ? limit : undefined
-}
-
 function variantRequestsFast(model: SelectableCatalogModel): boolean {
   return (model.variants ?? []).some((variant) =>
     variant.parameterValues?.some((parameter) => parameter.id === "fast" && parameter.value === "true"),
   )
 }
 
-function variantRequestsSeparateContext(model: SelectableCatalogModel): boolean {
+function variantRequestsSeparateContext(model: SelectableCatalogModel, fast: boolean): boolean {
   return (model.variants ?? []).some((variant) => {
-    const context = catalogContext(variant.parameterValues?.find((parameter) => parameter.id === "context")?.value)
+    const isFast = variant.parameterValues?.some((parameter) => parameter.id === "fast" && parameter.value === "true") ?? false
+    if (isFast !== fast) return false
+    const context = parseCursorContextLimit(variant.parameterValues?.find((parameter) => parameter.id === "context")?.value)
     if (context === 1_000_000) return true
     return variant.isMaxMode === true && context !== undefined && context !== model.maxContext
   })
@@ -611,28 +591,39 @@ function variantRequestsSeparateContext(model: SelectableCatalogModel): boolean 
 
 type PricingGap = {
   id: string
-  needs: Array<"base" | "fast" | "long">
+  needs: Array<"base" | "fast" | "long" | "fast-long">
+}
+
+function missingPriceParts(
+  model: SelectableCatalogModel,
+  pricing: {
+    costs: Readonly<Record<string, OpenCodeModelCost>>
+    longCoveredByBase: ReadonlySet<string>
+  },
+): PricingGap["needs"] {
+  if (model.id === "default") return []
+  const { costs, longCoveredByBase } = pricing
+  const fastId = `${model.id}-fast`
+  const missing: PricingGap["needs"] = []
+  if (!Object.hasOwn(costs, model.id)) missing.push("base")
+  if (variantRequestsFast(model) && !Object.hasOwn(costs, fastId)) missing.push("fast")
+  // Cursor serves Gemini 3.1 Pro as a single 1M entry. Its price changes inside
+  // that window, even though discovery does not advertise a separate variant.
+  if ((variantRequestsSeparateContext(model, false) || (model.id === GEMINI_PRO_ID && (model.maxContext ?? 0) > 200_000))
+    && !longPart(costs[model.id]) && !longCoveredByBase.has(model.id)) missing.push("long")
+  if (variantRequestsSeparateContext(model, true)
+    && !longPart(costs[fastId]) && !longCoveredByBase.has(fastId)) missing.push("fast-long")
+  return missing
 }
 
 /** Selectable models whose markdown rows do not cover a base, Fast, or long-context price. */
 function selectablePricingGaps(
-  markdown: string,
-  contextMarkdown: string,
+  pricing: PricingBuild,
   catalog: readonly SelectableCatalogModel[],
 ): PricingGap[] {
-  const pricing = buildPricing(markdown, defaultContextByDisplayName(contextMarkdown))
   const gaps: PricingGap[] = []
   for (const model of catalog) {
-    if (model.id === "default") continue
-    const base = pricing.costs[model.id]
-    const needs: PricingGap["needs"] = []
-    if (!base) needs.push("base")
-    if (variantRequestsFast(model) && !pricing.costs[`${model.id}-fast`]) needs.push("fast")
-    if (
-      variantRequestsSeparateContext(model)
-      && !longPart(base)
-      && !longPart(pricing.costs[`${model.id}-fast`])
-    ) needs.push("long")
+    const needs = missingPriceParts(model, pricing)
     if (needs.length === 0) continue
     if (!Object.hasOwn(MODEL_PAGE_SLUG, model.id)) {
       throw new Error(
@@ -650,21 +641,19 @@ export function pageIdsForSelectableGaps(
   contextMarkdown: string,
   catalog: readonly SelectableCatalogModel[],
 ): string[] {
-  return selectablePricingGaps(markdown, contextMarkdown, catalog).map((gap) => gap.id)
+  return selectablePricingGaps(buildPricing(markdown, defaultContextByDisplayName(contextMarkdown)), catalog)
+    .map((gap) => gap.id)
 }
 
 /**
  * A page fetched for a gap must contain a pricing table and a price for the
- * variant that gap needed: a row, or a stated multiplier or same-rate rule.
- * A Fast variant with no Cursor price is not satisfied here. The standard
- * row is not a Fast price. `checkFast: false` defers that check until the
- * provider page has been read.
+ * standard variants the page can price. Validate before loading provider
+ * pages. Fast and the documented Gemini gap can still use a provider page.
  */
-export function assertRequiredPageRows(
+function assertRequiredPageRows(
   gaps: readonly PricingGap[],
   pages: readonly ModelPageInput[],
-  costs: Readonly<Record<string, OpenCodeModelCost>>,
-  coverage: { long: ReadonlySet<string>; checkFast?: boolean } = { long: new Set() },
+  pricing: PricingBuild,
 ): void {
   const byId = new Map(pages.map((page) => [page.modelId, page]))
   const problems: string[] = []
@@ -675,27 +664,11 @@ export function assertRequiredPageRows(
       problems.push(`${gap.id}: ${url} has no pricing table`)
       continue
     }
-    if (gap.needs.includes("base") && !Object.hasOwn(costs, gap.id)) {
+    if (gap.needs.includes("base") && !Object.hasOwn(pricing.costs, gap.id)) {
       problems.push(`${gap.id}: ${url} has no base price row`)
     }
-    if (
-      coverage.checkFast !== false
-      && gap.needs.includes("fast")
-      && !Object.hasOwn(costs, `${gap.id}-fast`)
-    ) {
-      const provider = providerForModel(gap.id)
-      const providerUrl = provider ? PROVIDER_PRICING_URL[provider] : "no provider pricing page"
-      problems.push(
-        `${gap.id}-fast: ${url} has no Fast row or stated Fast price. ` +
-          `${providerUrl} did not supply one. The standard rate is not a Fast price.`,
-      )
-    }
-    if (
-      gap.needs.includes("long")
-      && !longPart(costs[gap.id])
-      && !longPart(costs[`${gap.id}-fast`])
-      && !coverage.long.has(gap.id)
-    ) {
+    if (gap.id !== GEMINI_PRO_ID && gap.needs.includes("long")
+      && !longPart(pricing.costs[gap.id]) && !pricing.longCoveredByBase.has(gap.id)) {
       problems.push(`${gap.id} long context: ${url} has no long-context row or stated long-context price`)
     }
   }
@@ -718,18 +691,11 @@ export function assertSelectablePriced(
   coverage: { long: ReadonlySet<string> } = { long: new Set() },
 ): void {
   const missing: string[] = []
+  const pricing = { costs, longCoveredByBase: coverage.long }
   for (const model of catalog) {
-    if (model.id !== "default" && !Object.hasOwn(costs, model.id)) missing.push(model.id)
-    if (variantRequestsFast(model) && !Object.hasOwn(costs, `${model.id}-fast`)) {
-      missing.push(`${model.id}-fast`)
-    }
-    if (
-      variantRequestsSeparateContext(model)
-      && !longPart(costs[model.id])
-      && !longPart(costs[`${model.id}-fast`])
-      && !coverage.long.has(model.id)
-    ) {
-      missing.push(`${model.id} long context`)
+    for (const part of missingPriceParts(model, pricing)) {
+      const id = part.startsWith("fast") ? `${model.id}-fast` : model.id
+      missing.push(part.endsWith("long") ? `${id} long context` : id)
     }
   }
   if (missing.length > 0) {
@@ -1062,17 +1028,17 @@ function statedWholeWindowRate(text: string): { evidence: string } | undefined {
 
 /**
  * "Nx the standard price/rates" for a Fast mode the page does not tabulate.
- * The sentence, or the one before it, has to name Fast mode. A long-context
+ * The sentence must name Fast mode or describe the speed of the Fast mode
+ * named in the preceding sentence. A long-context
  * line such as "above 100k ... 5x the standard rates" is not a Fast price.
  */
 function statedFastMultiplier(text: string): { factor: number; evidence: string } | undefined {
   const found: Array<{ factor: number; evidence: string }> = []
   const parts = sentences(text)
-  for (let index = 0; index < parts.length; index++) {
-    const sentence = parts[index]!
-    const previous = parts[index - 1] ?? ""
-    const namesFast = (value: string) => /\bfast mode\b/i.test(value) || /\bfast is\b/i.test(value)
-    if (!namesFast(sentence) && !namesFast(previous)) continue
+  for (const [index, sentence] of parts.entries()) {
+    const namesFast = /\bfast (?:mode|is)\b/i
+    const describesFastSpeed = /^it runs .+ faster\b/i.test(sentence) && namesFast.test(parts[index - 1] ?? "")
+    if (!namesFast.test(sentence) && !describesFastSpeed) continue
     for (const match of sentence.matchAll(/(?:^|[^0-9.])(\d+(?:\.\d+)?)x the standard (?:price|rates)/gi)) {
       const factor = Number(match[1])
       if (!Number.isFinite(factor) || factor <= 0) {
@@ -1110,8 +1076,8 @@ export function priceFromModelPages(
     if (rows.length === 0) continue
     const text = pageText(page.html)
     const sameRate = statedSameRateLongContext(text)
-    const wholeWindow = sameRate ? undefined : statedWholeWindowRate(text)
-    const fastMultiplier = statedFastMultiplier(text)
+    const mentionsSurcharge = /input exceeds\s+\d+\s*k tokens \(long context\)[^.!?]*pricing increases/i.test(text)
+    const wholeWindow = sameRate || mentionsSurcharge || rows.length !== 1 ? undefined : statedWholeWindowRate(text)
     const base = oneRow(rows.filter((row) => !row.fast && !row.longContext), "standard", page.modelId)
     const longContext = oneRow(
       rows.filter((row) => !row.fast && row.longContext),
@@ -1231,17 +1197,27 @@ export function priceFromModelPages(
       }
     }
 
-    if (!markdownFast && fast) {
-      let fastCost = fast.cost
-      if (!markdownFastLong && fastLong) {
+    let fastCost = markdownFast ?? fast?.cost
+    const fastMultiplier = !fastCost && keptBase ? statedFastMultiplier(text) : undefined
+    if (fastMultiplier && keptBase) {
+      fastCost = scaleAll(keptBase, fastMultiplier.factor)
+      derived.push({
+        id: fastId,
+        cost: fastCost,
+        formula:
+          `${pageUrl(page.modelId)} states ${fastMultiplier.evidence}, so each standard rate ` +
+          `component is multiplied by ${fastMultiplier.factor} for Fast mode.`,
+      })
+    }
+    if (fastCost && !markdownFastLong) {
+      if (fastLong) {
         fastCost = withThreshold(
           fastCost,
           pageThreshold(fastLong, page.modelId, defaultContexts),
           fastLong.cost,
         )
       } else if (
-        !markdownFastLong
-        && /long-context requests bill at 2x the Fast input, cache write, and cache read rates, and 1\.5x the Fast output rate/i.test(text)
+        /long-context requests bill at 2x the Fast input, cache write, and cache read rates, and 1\.5x the Fast output rate/i.test(text)
       ) {
         const threshold = longContext
           ? pageThreshold(longContext, page.modelId, defaultContexts)
@@ -1252,8 +1228,8 @@ export function priceFromModelPages(
         const ratioBase = base?.cost ?? keptBase
         if (!ratioBase) throw new Error(`${page.modelId} states Fast long-context pricing without a standard row`)
         const tier = longContext
-          ? scaleComponents(fast.cost, longContextFactors(ratioBase, longContext.cost))
-          : scaleComponents(fast.cost, { input: 2, output: 1.5, cache: 2 })
+          ? scaleComponents(fastCost, longContextFactors(ratioBase, longContext.cost))
+          : scaleComponents(fastCost, { input: 2, output: 1.5, cache: 2 })
         fastCost = withThreshold(fastCost, threshold, tier)
         derived.push({
           id: fastId,
@@ -1263,31 +1239,14 @@ export function priceFromModelPages(
             `the Fast row is scaled by the page's long-context ratios.`,
         })
       }
-      pricing.costs[fastId] = fastCost
-    } else if (!markdownFast && !fast && keptBase && fastMultiplier) {
-      const fastCost = scaleAll(keptBase, fastMultiplier.factor)
-      pricing.costs[fastId] = fastCost
-      derived.push({
-        id: fastId,
-        cost: fastCost,
-        formula:
-          `${pageUrl(page.modelId)} has no Fast row. Its prose says Fast is ${fastMultiplier.factor}x ` +
-          `the standard price (${fastMultiplier.evidence}), so every component of the standard row ` +
-          `is multiplied by ${fastMultiplier.factor}.`,
-      })
-    } else if (markdownFast && !markdownFastLong && fastLong) {
-      pricing.costs[fastId] = withThreshold(
-        flatCostOf(markdownFast),
-        pageThreshold(fastLong, page.modelId, defaultContexts),
-        fastLong.cost,
-      )
     }
+    if (fastCost) pricing.costs[fastId] = fastCost
 
     // A Fast row on the same page keeps its own published components. The
     // same-rate sentence does not add a second copy of that row. A page that
     // states no Fast price does not receive the standard row.
     if (sameRate && fast && pricing.costs[fastId] && !longPart(pricing.costs[fastId])) {
-      pricing.longCoveredByBase.add(page.modelId)
+      pricing.longCoveredByBase.add(fastId)
       derived.push({
         id: fastId,
         cost: flatCostOf(pricing.costs[fastId]!),
@@ -1300,29 +1259,6 @@ export function priceFromModelPages(
   pricing.costs = sortRecord(pricing.costs)
   pricing.unpriced = sortRecord(pricing.unpriced)
   return derived
-}
-
-/**
- * Auto is the hand-edited staff rate. A markdown row for `default` does not
- * replace it. A difference is recorded.
- */
-export function applyCursorStaffAutoRate(pricing: PricingBuild): void {
-  const manual = { ...CURSOR_STAFF_AUTO_RATE }
-  if (pricing.markdownDefault && !sameFlat(pricing.markdownDefault, manual)) {
-    pricing.disagreements.push({
-      id: "default",
-      part: "base",
-      kept: manual,
-      other: pricing.markdownDefault,
-      keptSource: "manual",
-      otherSource: "markdown",
-    })
-  }
-  delete pricing.costs.default
-  delete pricing.unpriced.default
-  pricing.costs.default = manual
-  pricing.costs = sortRecord(pricing.costs)
-  pricing.unpriced = sortRecord(pricing.unpriced)
 }
 
 function sortRecord<T>(record: Record<string, T>): Record<string, T> {
@@ -1346,12 +1282,15 @@ export function buildPricing(
     modelId: string
     entry: OpenCodeModelCost
   }> = []
-  let markdownDefault: OpenCodeModelCost | undefined
+  const longCoveredByBase = new Set<string>()
 
   for (const row of parsePricingTables(markdown)) {
     const fastModeId = fastModeModelId(row.displayName)
     if (fastModeId) {
       explicitFast.set(fastModeId, cost(row.input, row.output, row.cacheRead, row.cacheWrite))
+      if (/\bat the same per-token rates as shorter context\b/i.test(row.notes)) {
+        longCoveredByBase.add(`${fastModeId}-fast`)
+      }
       continue
     }
     if (SKIP_DISPLAY_NAMES.has(row.displayName)) continue
@@ -1365,10 +1304,7 @@ export function buildPricing(
     }
 
     const entry = cost(row.input, row.output, row.cacheRead, row.cacheWrite)
-    if (modelId === "default") {
-      markdownDefault = entry
-      continue
-    }
+    if (modelId === "default") continue
     if (row.isExplicitLongContextRow) {
       explicitLong.set(modelId, { cost: entry, displayName: row.displayName })
       continue
@@ -1398,15 +1334,14 @@ export function buildPricing(
 
   for (const [modelId, publishedLong] of explicitLong) {
     if (costs[modelId]) continue
-    costs[modelId] = publishedLong.cost
+    throw new Error(`Long-context row ${JSON.stringify(publishedLong.displayName)} has no corresponding base row`)
   }
 
   return {
     costs: sortRecord(costs),
     unpriced: {},
-    markdownDefault,
     disagreements: [],
-    longCoveredByBase: new Set(),
+    longCoveredByBase,
   }
 }
 
@@ -1460,8 +1395,6 @@ function renderPricingDataModule(
   pricingTable: Record<string, OpenCodeModelCost>,
   unpriced: Record<string, string>,
   contextTable: Record<string, CursorModelContext>,
-  pricingSource: string,
-  contextSource: string,
 ): string {
   const pricingBody = JSON.stringify(pricingTable, null, 2)
   const unpricedBody = JSON.stringify(unpriced, null, 2)
@@ -1469,26 +1402,19 @@ function renderPricingDataModule(
   // Keep this module free of imports so it cannot cycle with pricing.ts.
   return `/**
  * AUTO-GENERATED by scripts/generate-cursor-pricing.ts — do not edit by hand.
- * Pricing source: markdown rows in ${pricingSource}.
+ * Pricing source: markdown rows in ${CURSOR_PRICING_DOC_URL}.
  * A model page fills a selectable variant that has no markdown row.
- * A Fast price Cursor does not publish comes from the provider's official
- * pricing page. The standard row is not a Fast price.
- * Context source: ${contextSource}
- * Auto (\`default\`) is the hand-edited staff rate, not a fetched docs row.
- * Cursor staff stated $1.25/M input,
- * $0.25/M cache read, $6/M output (@deanrie, 2026-03-11,
- * https://forum.cursor.com/t/how-do-the-auto-cursor-1-5-tokens-work/154514;
- * @kevinn, 2026-05-04, restated input and output,
- * https://forum.cursor.com/t/gpt-5-5-medium-is-too-costly/159707).
+ * Gaps may use the provider's official pricing page.
+ * Context source: ${CURSOR_CONTEXT_DOC_URL}
  * Regenerate: bun run generate:pricing
  */
 
-export const CURSOR_PRICING_SOURCE = ${JSON.stringify(pricingSource)} as const
-export const CURSOR_CONTEXT_SOURCE = ${JSON.stringify(contextSource)} as const
+export const CURSOR_PRICING_SOURCE = ${JSON.stringify(CURSOR_PRICING_DOC_URL)} as const
+export const CURSOR_CONTEXT_SOURCE = ${JSON.stringify(CURSOR_CONTEXT_DOC_URL)} as const
 
 export const CURSOR_MODEL_COSTS = ${pricingBody} as const
 
-/** Empty. Generation fails instead of recording an unpriced selectable model. */
+/** Selectable entries without a uniform token rate. */
 export const CURSOR_UNPRICED_MODEL_REASONS = ${unpricedBody} as const
 
 export const CURSOR_MODEL_CONTEXTS = ${contextBody} as const
@@ -1741,7 +1667,7 @@ export function parseOpenAiFastPrices(
         const modelId = identity.label.replace(/\s+\([^)]*\)\s*$/, "").trim()
         if (!needed.has(modelId)) continue
         const at = (name: string) => {
-          const index = headingNames.findIndex((heading) => heading.toLowerCase() === name)
+          const index = headingNames.findIndex((heading) => heading.toLowerCase() === name.toLowerCase())
           if (index < 0) return undefined
           return row[index - modelAt]
         }
@@ -1882,6 +1808,7 @@ export function priceFromProviderPages(
       const parts = anthropicFastParts(pageText(page.html), name)
       const fastCost = cost(parts.input, parts.output, parts.cacheRead, parts.cacheWrite)
       pricing.costs[fastId] = fastCost
+      pricing.longCoveredByBase.add(fastId)
       derived.push({
         id: fastId,
         cost: fastCost,
@@ -1936,7 +1863,44 @@ export function providersForFastModels(modelIds: readonly string[]): ProviderId[
   return [...providers].sort()
 }
 
-/** Read `<provider>.html`. A missing required file is an error. Does not fetch. */
+function geminiLongRateMissing(gaps: readonly PricingGap[], pricing: PricingBuild): boolean {
+  return gaps.some((gap) => gap.id === GEMINI_PRO_ID && gap.needs.includes("long"))
+    && !longPart(pricing.costs[GEMINI_PRO_ID])
+    && !pricing.longCoveredByBase.has(GEMINI_PRO_ID)
+}
+
+function applyGeminiLongRate(pricing: PricingBuild, markdown: string): DerivedModelPrice {
+  // Read only the paid Standard token rows for the model Cursor calls Gemini 3.1 Pro.
+  const section = markdown.split(/^## /m).find((part) => part.startsWith("Gemini 3.1 Pro Preview "))
+  const standard = /\{% tab title="Standard" %\}([\s\S]*?)\{% \/tab %\}/.exec(section ?? "")?.[1] ?? ""
+  const rows = standard.replace(/\r\n/g, "\n").split(/^\s*---\s*$/m)
+  const rateFor = (label: string) => {
+    const row = rows.find((part) => part.trimStart().startsWith(`* ${label}\n`)) ?? ""
+    const pair = /\$(\d+(?:\.\d+)?), prompts <= (\d+)k[^\n]*\n\s*\$(\d+(?:\.\d+)?), prompts > (\d+)k\b/.exec(row)
+    if (!pair || pair[2] !== pair[4]) {
+      throw new Error(`${PROVIDER_PRICING_URL.google} has no unambiguous Gemini 3.1 Pro Standard tier for ${label}`)
+    }
+    return { base: Number(pair[1]), long: Number(pair[3]), threshold: tokensFromThousands(pair[2]!, label) }
+  }
+  const input = rateFor("Input price")
+  const output = rateFor("Output price (including thinking tokens)")
+  const cache = rateFor("Context caching price")
+  const rates = [input, output, cache]
+  const base = pricing.costs[GEMINI_PRO_ID]!
+  if (rates.some((rate) => rate.threshold !== input.threshold || !Number.isFinite(rate.base) || !Number.isFinite(rate.long))
+    || !sameFlat(base, cost(input.base, output.base, cache.base))) {
+    throw new Error(`${PROVIDER_PRICING_URL.google} Gemini 3.1 Pro Standard tiers disagree with each other or Cursor's base rate`)
+  }
+  const long = cost(input.long, output.long, cache.long)
+  pricing.costs[GEMINI_PRO_ID] = withThreshold(base, input.threshold, long)
+  return { id: GEMINI_PRO_ID, cost: long, formula: `${PROVIDER_PRICING_URL.google} Gemini 3.1 Pro Standard rate above ${input.threshold} tokens` }
+}
+
+function providerPageFilename(provider: ProviderId): string {
+  return provider === "google" ? "google.md" : `${provider}.html`
+}
+
+/** Read the required saved provider inputs without fetching. */
 export function loadSavedProviderPages(
   dir: string,
   required: readonly ProviderId[],
@@ -1953,7 +1917,7 @@ export function loadSavedProviderPages(
     throw new Error(`Unknown provider pricing page ${unknown.join(", ")} in ${dir}`)
   }
   return required.map((provider) => {
-    const file = path.join(dir, `${provider}.html`)
+    const file = path.join(dir, providerPageFilename(provider))
     if (!existsSync(file)) {
       throw new Error(
         `Refusing to fetch ${PROVIDER_PRICING_URL[provider]}. Missing ${file}.`,
@@ -1970,25 +1934,53 @@ export function assemblePricing(
   catalog?: readonly SelectableCatalogModel[],
   providerPages: readonly ProviderPageInput[] = [],
 ): PricingAssembly {
+  const prepared = preparePricing(pricingMarkdown, contextMarkdown, catalog)
+  const supplied = applyModelPages(prepared, pages)
+  return completePricing(prepared, supplied, pages, providerPages)
+}
+
+function preparePricing(pricingMarkdown: string, contextMarkdown: string, catalog?: readonly SelectableCatalogModel[]) {
   const defaultContexts = defaultContextByDisplayName(contextMarkdown)
   const pricing = buildPricing(pricingMarkdown, defaultContexts)
-  const gaps = catalog ? selectablePricingGaps(pricingMarkdown, contextMarkdown, catalog) : []
+  const gaps = catalog ? selectablePricingGaps(pricing, catalog) : []
+  return { pricing, defaultContexts, gaps, catalog, contexts: buildContextTable(contextMarkdown) }
+}
+
+function applyModelPages(prepared: ReturnType<typeof preparePricing>, pages: readonly ModelPageInput[]) {
+  const { pricing, defaultContexts, gaps, catalog } = prepared
   const derived = priceFromModelPages(pricing, pages, defaultContexts)
-  applyCursorStaffAutoRate(pricing)
-  let providerDerived: DerivedModelPrice[] = []
+  assertRequiredPageRows(gaps, pages, pricing)
+  const fastIds = catalog ? fastModelIdsMissingPrice(catalog, pricing.costs) : []
+  const providers = providersForFastModels(fastIds)
+  const geminiGap = geminiLongRateMissing(gaps, pricing)
+  if (geminiGap) providers.push("google")
+  return { derived, fastIds, providers, geminiGap }
+}
+
+function completePricing(
+  prepared: ReturnType<typeof preparePricing>,
+  supplied: ReturnType<typeof applyModelPages>,
+  pages: readonly ModelPageInput[],
+  providerPages: readonly ProviderPageInput[],
+): PricingAssembly {
+  const { pricing, catalog, contexts } = prepared
+  const { derived, fastIds, geminiGap } = supplied
+  delete pricing.costs.default
+  pricing.unpriced.default = AUTO_UNPRICED_REASON
+  if (geminiGap) {
+    const google = providerPages.find((page) => page.provider === "google")
+    if (!google) throw new Error(`Refusing to fetch ${PROVIDER_PRICING_URL.google} for ${GEMINI_PRO_ID} long context`)
+    derived.push(applyGeminiLongRate(pricing, google.html))
+  }
   if (catalog) {
-    const coverage = { long: pricing.longCoveredByBase, checkFast: false }
-    assertRequiredPageRows(gaps, pages, pricing.costs, coverage)
-    const fastIds = fastModelIdsMissingPrice(catalog, pricing.costs)
-    providerDerived = priceFromProviderPages(pricing, fastIds, providerPages)
-    assertRequiredPageRows(gaps, pages, pricing.costs, { long: pricing.longCoveredByBase })
+    derived.push(...priceFromProviderPages(pricing, fastIds, providerPages))
     assertSelectablePriced(catalog, pricing.costs, { long: pricing.longCoveredByBase })
   }
   return {
     costs: pricing.costs,
     unpriced: pricing.unpriced,
-    contexts: buildContextTable(contextMarkdown),
-    derived: [...derived, ...providerDerived],
+    contexts,
+    derived,
     disagreements: pricing.disagreements,
     pageIds: pages.map((page) => page.modelId).sort(),
   }
@@ -2015,26 +2007,26 @@ export function loadOfflinePricing(paths: {
   const pricingMarkdown = readFileSync(paths.pricingFile, "utf8")
   const contextMarkdown = readFileSync(paths.contextFile, "utf8")
   const catalog = loadSelectableCatalog(paths.catalogFile)
-  const pageIds = pageIdsForSelectableGaps(pricingMarkdown, contextMarkdown, catalog)
+  const prepared = preparePricing(pricingMarkdown, contextMarkdown, catalog)
+  const pageIds = prepared.gaps.map((gap) => gap.id)
   if (pageIds.length > 0 && !paths.pagesDir) {
     throw new Error(missingSavedPagesMessage(pageIds))
   }
   const pages = pageIds.length === 0 || !paths.pagesDir
     ? []
     : loadSavedModelPages(paths.pagesDir, pageIds)
-  const preview = buildPricing(pricingMarkdown, defaultContextByDisplayName(contextMarkdown))
-  priceFromModelPages(preview, pages, defaultContextByDisplayName(contextMarkdown))
-  const providers = providersForFastModels(fastModelIdsMissingPrice(catalog, preview.costs))
+  const supplied = applyModelPages(prepared, pages)
+  const { providers } = supplied
   if (providers.length > 0 && !paths.providerPagesDir) {
     const lines = providers.map((provider) =>
-      `${provider}: ${PROVIDER_PRICING_URL[provider]} (saved as ${provider}.html)`,
+      `${provider}: ${PROVIDER_PRICING_URL[provider]} (saved as ${providerPageFilename(provider)})`,
     )
     throw new Error(`Refusing to fetch provider pricing pages.\n${lines.join("\n")}`)
   }
   const providerPages = providers.length === 0 || !paths.providerPagesDir
     ? []
     : loadSavedProviderPages(paths.providerPagesDir, providers)
-  return assemblePricing(pricingMarkdown, contextMarkdown, pages, catalog, providerPages)
+  return completePricing(prepared, supplied, pages, providerPages)
 }
 
 async function loadProviderPages(providers: readonly ProviderId[]): Promise<ProviderPageInput[]> {
@@ -2043,7 +2035,7 @@ async function loadProviderPages(providers: readonly ProviderId[]): Promise<Prov
     const url = PROVIDER_PRICING_URL[provider]
     const response = await fetch(url, {
       headers: {
-        accept: "text/html",
+        accept: provider === "google" ? "text/markdown" : "text/html",
         "user-agent": "Mozilla/5.0",
       },
     })
@@ -2078,7 +2070,8 @@ async function main(): Promise<void> {
   const pricingDoc = await loadMarkdown(CURSOR_PRICING_DOC_URL, options.fromFile)
   const contextDoc = await loadMarkdown(CURSOR_CONTEXT_DOC_URL, options.contextFromFile)
   const catalog = loadSelectableCatalog()
-  const pageIds = pageIdsForSelectableGaps(pricingDoc.text, contextDoc.text, catalog)
+  const prepared = preparePricing(pricingDoc.text, contextDoc.text, catalog)
+  const pageIds = prepared.gaps.map((gap) => gap.id)
   let pages: ModelPageInput[]
   if (pageIds.length === 0) {
     pages = []
@@ -2089,23 +2082,22 @@ async function main(): Promise<void> {
   } else {
     pages = await loadModelPages(pageIds)
   }
-  const preview = buildPricing(pricingDoc.text, defaultContextByDisplayName(contextDoc.text))
-  priceFromModelPages(preview, pages, defaultContextByDisplayName(contextDoc.text))
-  const providers = providersForFastModels(fastModelIdsMissingPrice(catalog, preview.costs))
+  const supplied = applyModelPages(prepared, pages)
+  const { providers } = supplied
   let providerPages: ProviderPageInput[] = []
   if (providers.length > 0) {
     if (options.providerPagesFromDir) {
       providerPages = loadSavedProviderPages(options.providerPagesFromDir, providers)
     } else if (offline) {
       const lines = providers.map((provider) =>
-        `${provider}: ${PROVIDER_PRICING_URL[provider]} (saved as ${provider}.html)`,
+        `${provider}: ${PROVIDER_PRICING_URL[provider]} (saved as ${providerPageFilename(provider)})`,
       )
       throw new Error(`Refusing to fetch provider pricing pages.\n${lines.join("\n")}`)
     } else {
       providerPages = await loadProviderPages(providers)
     }
   }
-  const assembled = assemblePricing(pricingDoc.text, contextDoc.text, pages, catalog, providerPages)
+  const assembled = completePricing(prepared, supplied, pages, providerPages)
   const derived = assembled.derived
   const pricingTable = assembled.costs
   const contextTable = assembled.contexts
@@ -2113,8 +2105,6 @@ async function main(): Promise<void> {
     pricingTable,
     assembled.unpriced,
     contextTable,
-    pricingDoc.source,
-    contextDoc.source,
   )
   const dest = outputPath()
   console.log(`Model pages: ${pages.length}${options.pagesFromDir ? ` from ${options.pagesFromDir}` : ""}`)

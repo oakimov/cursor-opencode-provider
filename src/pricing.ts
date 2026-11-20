@@ -47,8 +47,7 @@ export type CursorPricingCoverage = {
 }
 
 /**
- * Selectable ids with no price. Generation fails instead of adding one, so
- * this list stays empty.
+ * Explicit exceptions with no uniform token rate.
  */
 export const CURSOR_UNPRICED_MODEL_IDS = Object.keys(CURSOR_UNPRICED_MODEL_REASONS)
 
@@ -268,13 +267,13 @@ export function toOpenCode2Costs(cost: OpenCodeModelCost | undefined): OpenCode2
 
 /**
  * Coverage helper for maintainer checks.
- * Every id must resolve to a price. The unpriced map does not count as coverage.
+ * An explicit exception counts as covered without supplying a rate.
  */
 export function checkCursorPricingCoverage(modelIds: string[]): CursorPricingCoverage {
   const priced: string[] = []
   const missing: string[] = []
   for (const modelId of modelIds) {
-    if (getCursorModelCost(modelId)) priced.push(modelId)
+    if (CURSOR_UNPRICED_MODEL_IDS.includes(modelId) || getCursorModelCost(modelId)) priced.push(modelId)
     else missing.push(modelId)
   }
   return { priced, missing }

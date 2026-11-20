@@ -1,8 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Check that every selectable model and variant resolves to a price.
- * The unpriced map has no escape hatch: it must be empty, and a listed id
- * is missing rather than covered.
+ * Check that every selectable model and variant has a price or is Auto.
  *
  *   bun run check:pricing
  *   bun run check:pricing -- --models-file test/fixtures/cursor-pricing-models.txt
@@ -59,7 +57,7 @@ function main(): void {
   const modelIds = [...new Set([...loadModelIds(options), ...selectableEntryIds()])].sort()
   const coverage = checkCursorPricingCoverage(modelIds)
   const unpriced = [...CURSOR_UNPRICED_MODEL_IDS]
-  const failed = coverage.missing.length > 0 || unpriced.length > 0
+  const failed = coverage.missing.length > 0 || unpriced.some((id) => id !== "default")
 
   if (options.json) {
     console.log(

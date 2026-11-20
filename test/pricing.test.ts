@@ -16,7 +16,6 @@ import {
   wireModelIdForPricing,
 } from "../src/pricing.js"
 import {
-  applyCursorStaffAutoRate,
   assertSelectablePriced,
   buildContextTable,
   buildPricing,
@@ -33,7 +32,6 @@ import {
   priceFromModelPages,
   priceFromProviderPages,
   PROVIDER_PRICING_URL,
-  type PricingBuild,
   type SelectableCatalogModel,
 } from "../scripts/generate-cursor-pricing.js"
 import { takeNetworkAttempts } from "./network-guard.js"
@@ -84,6 +82,15 @@ describe("pricing", () => {
   })
 
   it("attaches documented long-context rates", () => {
+    const gemini = getCursorModelCost("gemini-3.1-pro")!
+    expect(costForPrompt(gemini, 200_000)).toEqual({ input: 2, output: 12, cache_read: 0.2 })
+    expect(costForPrompt(gemini, 200_001)).toEqual({ input: 4, output: 18, cache_read: 0.4 })
+    expect(toOpenCode2Costs(gemini)[1]).toEqual({
+      tier: { type: "context", size: 200_000 },
+      input: 4,
+      output: 18,
+      cache: { read: 0.4, write: 0 },
+    })
     expect(getCursorModelCost("claude-sonnet-4")).toEqual({
       input: 3,
       output: 15,
@@ -511,28 +518,16 @@ describe("pricing", () => {
     expect(pricing.unpriced).toEqual({})
   })
 
-  it("keeps Auto at the manual staff rate", () => {
-    const auto = { input: 1.25, output: 6, cache_read: 0.25 }
-    expect(getCursorModelCost("default")).toEqual(auto)
-    expect(applyCursorModelCost("default", { name: "Auto" })).toEqual({ name: "Auto", cost: auto })
-    const pricing: PricingBuild = {
-      costs: { default: { input: 9, output: 9 } },
-      unpriced: { default: "docs publish no rate" },
-      markdownDefault: { input: 9, output: 9 },
-      disagreements: [],
-      longCoveredByBase: new Set(),
-    }
-    applyCursorStaffAutoRate(pricing)
-    expect(pricing.costs.default).toEqual(auto)
-    expect(pricing.unpriced.default).toBeUndefined()
-    expect(pricing.disagreements).toEqual([{
-      id: "default",
-      part: "base",
-      kept: auto,
-      other: { input: 9, output: 9 },
-      keptSource: "manual",
-      otherSource: "markdown",
-    }])
+  it("leaves route-dependent Auto unpriced", () => {
+    expect(getCursorModelCost("default")).toBeUndefined()
+    expect(cursorRunCost("default", [])).toBeUndefined()
+    expect(applyCursorModelCost("default", { name: "Auto" })).toEqual({ name: "Auto" })
+    const pricing = buildPricing(`
+| Model | Provider | Input | Cache write | Cache read | Output | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| Auto Cost | Cursor | $9 | - | - | $9 | Cost mode only |
+`)
+    expect(pricing.costs.default).toBeUndefined()
   })
 
   it("preserves entry fields while adding cost", () => {
@@ -1063,6 +1058,7 @@ describe("pricing", () => {
     const pages = loadSavedModelPages(join(root, "pages"), pageIds)
     const providerPages = [
       { provider: "anthropic" as const, html: readFileSync(join(root, "providers", "anthropic.html"), "utf8") },
+      { provider: "google" as const, html: readFileSync(join(root, "providers", "google.md"), "utf8") },
       { provider: "openai" as const, html: readFileSync(join(root, "providers", "openai.html"), "utf8") },
     ]
     const priced = assemblePricing(
@@ -1154,6 +1150,48 @@ describe("pricing", () => {
     } finally {
       rmSync(incomplete, { recursive: true, force: true })
     }
+  })
+
+  it("checks byte-identical generated pricing using absolute paths to saved inputs", () => {
+    const root = join(import.meta.dir, "fixtures", "pricing-offline")
+    const result = Bun.spawnSync([
+      process.execPath,
+      join(import.meta.dir, "../scripts/generate-cursor-pricing.ts"),
+      "--check",
+      "--from-file", join(root, "pricing.md"),
+      "--context-from-file", join(root, "context.md"),
+      "--pages-from-dir", join(root, "pages"),
+      "--provider-pages-from-dir", join(root, "providers"),
+    ])
+    expect({ status: result.exitCode, error: result.stderr.toString() }).toEqual({ status: 0, error: "" })
+  })
+
+  it("requires separate evidence for standard and Fast long-context prices", () => {
+    const root = join(import.meta.dir, "fixtures", "pricing-offline")
+    const markdown = readFileSync(join(root, "pricing.md"), "utf8")
+    const context = readFileSync(join(root, "context.md"), "utf8")
+    const html = readFileSync(join(import.meta.dir, "fixtures", "model-page-fast-long-derived.html"), "utf8")
+    const catalog: SelectableCatalogModel[] = [{
+      id: "gpt-5.6-sol",
+      maxContext: 272_000,
+      variants: [
+        { isMaxMode: true, parameterValues: [{ id: "context", value: "1000000" }] },
+        { isMaxMode: true, parameterValues: [{ id: "context", value: "1000000" }, { id: "fast", value: "true" }] },
+      ],
+    }]
+    const withoutFastRule = html.slice(0, html.indexOf("<p>"))
+    expect(() => assemblePricing(markdown, context, [{ modelId: "gpt-5.6-sol", html: withoutFastRule }], catalog))
+      .toThrow(/gpt-5\.6-sol-fast long context/)
+    const recovered = assemblePricing(markdown, context, [{ modelId: "gpt-5.6-sol", html }], catalog)
+    expect(recovered.costs["gpt-5.6-sol"]?.tiers?.[0]?.output).toBe(30)
+    expect(recovered.costs["gpt-5.6-sol-fast"]?.tiers?.[0]?.output).toBe(60)
+    const markdownFast = markdown.replace(
+      /(^\| \[GPT-5\.6 Sol\][^\n]*\n)/m,
+      (standard) => standard + "| GPT-5.6 Sol (Fast) | OpenAI | $9 | $10 | $0.8 | $42 | Yes | |\n",
+    )
+    const combined = assemblePricing(markdownFast, context, [{ modelId: "gpt-5.6-sol", html }], catalog)
+    expect(combined.costs["gpt-5.6-sol-fast"]?.input).toBe(9)
+    expect(combined.costs["gpt-5.6-sol-fast"]?.tiers?.[0]?.output).toBe(63)
   })
 
   it("refuses to write when a required gpt-5.5 page has no table or no Fast row", () => {

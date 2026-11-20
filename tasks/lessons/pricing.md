@@ -14,8 +14,8 @@ The generator is `scripts/generate-cursor-pricing.ts`. Guards are
      selectable model or variant that has no row there;
   3. the provider's official pricing page, and only for a model or variant that
      still has no price on Cursor.
-  A markdown row wins when the page disagrees. A note is not a price. `default`
-  stays the hand-edited staff rate and is not fetched. The provider page exists
+  A markdown row wins when the page disagrees. A note alone supplies no rate.
+  Auto remains unpriced. The provider page exists
   because Cursor bills third-party models at API list price and sometimes
   publishes no number of its own for a variant. Copying the standard row into
   `<id>-fast` is not a source. An added US data residency column once hid the
@@ -100,16 +100,21 @@ The generator is `scripts/generate-cursor-pricing.ts`. Guards are
   when a Fast variant of the same model is priced from the provider page.
   Gemini 4 "Speed Fast" is a capability label, not a Fast variant.
 
+- **Check standard and Fast long-context coverage independently.** A tier on
+  the standard entry cannot supply a Fast tier. A model can also change rates
+  inside a single advertised window. Gemini 3.1 Pro serves a 1M context without
+  a separate variant, and Cursor's page states a surcharge above 200k without
+  listing the numbers. The generator keeps Cursor's base row and reads the
+  paid Standard tier from [Google's pricing page](https://aistudio.google.com/docs/pricing#gemini-3.1-pro-preview).
+  It checks that the base rates agree before using the long-context rate.
+
 ## Auto
 
-- **`default` is the hand-edited staff rate.** Cursor's docs do not publish an
-  Auto token price. `CURSOR_STAFF_AUTO_RATE` is $1.25 per million input tokens,
-  $0.25 per million cache reads, and $6 per million output tokens.
-  [@deanrie, 2026-03-11](https://forum.cursor.com/t/how-do-the-auto-cursor-1-5-tokens-work/154514)
-  stated all three.
-  [@kevinn, 2026-05-04](https://forum.cursor.com/t/gpt-5-5-medium-is-too-costly/159707)
-  restated input and output. It is not read from a model page or a provider
-  page. Generation does not replace it.
+- **Do not assign a flat rate to Auto.** Cursor's current pricing documentation
+  distinguishes Cost, Balance, and Intelligence. Balance and Intelligence
+  bill at the routed rate, so the historical forum rates for classic Auto
+  cannot price the shared `default` entry.
+  [Cursor pricing](https://cursor.com/docs/models-and-pricing.md#auto-modes)
 
 ## The standard-rate Fast fallback
 
@@ -131,13 +136,15 @@ The generator is `scripts/generate-cursor-pricing.ts`. Guards are
   `--context-from-file` makes no network request. A Cursor gap page must be
   `<model-id>.html` in `--pages-from-dir`. A Fast price still missing after
   that page must be `<provider>.html` (`anthropic.html`, `openai.html`) in
-  `--provider-pages-from-dir`. A missing file throws "Refusing to fetch" and
+  `--provider-pages-from-dir`. Gemini 3.1 Pro's long-context tier uses
+  `google.md` in the same directory. A missing file throws "Refusing to fetch" and
   names the URL. An unknown `.html` name fails. A required Cursor page with
   no pricing table fails before any provider page is read and before
   `src/pricing-data.ts` is written. Tests must not fetch Cursor or read
   operator credentials (`test/network-guard.ts`). The saved pages are
   `test/fixtures/pricing-offline/pages` and
-  `test/fixtures/pricing-offline/providers`.
+  `test/fixtures/pricing-offline/providers`. The generated module records the
+  public source URLs so an offline run cannot embed machine-specific paths.
 - **Refreshing prices is a manual step before a version bump.** Run live
   `bun run generate:pricing`, resolve every unmapped display name, run
   `bun run check:pricing`, run `bun run generate:images`, and finalize the

@@ -26,12 +26,18 @@ describe("selectable catalog pricing", () => {
   const catalog2 = modelsToCatalogModelMap(catalog)
 
   it("prices every selectable entry", () => {
-    expect(CURSOR_UNPRICED_MODEL_IDS).toEqual([])
-    expect(CURSOR_UNPRICED_MODEL_REASONS).toEqual({})
+    expect(CURSOR_UNPRICED_MODEL_IDS).toEqual(["default"])
+    expect(CURSOR_UNPRICED_MODEL_REASONS).toHaveProperty("default")
     expect(Object.keys(config).sort()).toEqual(Object.keys(catalog2).sort())
     const uncovered: string[] = []
     for (const id of Object.keys(config)) {
       const cost = getCursorModelCost(id)
+      if (id === "default") {
+        expect(cost).toBeUndefined()
+        expect(config[id].cost).toBeUndefined()
+        expect(catalog2[id]?.cost).toEqual([])
+        continue
+      }
       if (!cost) {
         uncovered.push(id)
         continue
@@ -90,6 +96,5 @@ describe("selectable catalog pricing", () => {
       cache_read: 0.4,
       cache_write: 10,
     })
-    expect(config["default"].cost).toEqual({ input: 1.25, output: 6, cache_read: 0.25 })
   })
 })
