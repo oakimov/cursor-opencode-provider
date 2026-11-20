@@ -1,4 +1,6 @@
-import { pathToFileURL } from "node:url"
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs"
+import path from "node:path"
+import { fileURLToPath, pathToFileURL } from "node:url"
 import { CURSOR_PROVIDER_ID } from "../shared.js"
 import {
   CURSOR_VARIANT_PARAMETERS_KEY,
@@ -25,25 +27,110 @@ import type { ConnectionInfo, ModelVariantInfo, ProviderEditor } from "./types.j
 /** Integration id owning Cursor credentials. Matches the provider id. */
 export const CURSOR_INTEGRATION_ID = CURSOR_PROVIDER_ID
 
+const PACKAGE_NAME = "cursor-opencode-provider"
+
+/** The published package, which the host installs from the registry. */
+export const CURSOR_AISDK_REGISTRY_PACKAGE = `aisdk:${PACKAGE_NAME}`
+
+type PackageManifest = {
+  name?: unknown
+  main?: unknown
+  exports?: unknown
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+}
+
+/** Recognize the simple root ESM declarations used by local builds. */
+function declaredRootEntry(manifest: PackageManifest): string | undefined {
+  const exported = manifest.exports
+  if (exported === undefined) return typeof manifest.main === "string" ? manifest.main : undefined
+  let root: unknown = exported
+  if (isPlainRecord(exported)) {
+    const keys = Object.keys(exported)
+    if (keys.some((key) => key.startsWith("."))) {
+      if (!keys.every((key) => key.startsWith("./") || key === ".")) return undefined
+      root = exported["."]
+    }
+  }
+  if (typeof root === "string") return root.startsWith("./") ? root : undefined
+  if (!isPlainRecord(root)) return undefined
+  // The first applicable condition wins. A runtime-specific condition ahead
+  // of import/default makes the entry ambiguous for this structural check.
+  for (const [condition, target] of Object.entries(root)) {
+    if (condition === "types" || condition === "require") continue
+    if (condition !== "import" && condition !== "default") return undefined
+    return typeof target === "string" && target.startsWith("./") ? target : undefined
+  }
+  return undefined
+}
+
+function nearestManifest(directory: string): string | undefined {
+  for (let current = directory; ; current = path.dirname(current)) {
+    const candidate = path.join(current, "package.json")
+    if (existsSync(candidate)) return candidate
+    if (path.dirname(current) === current) return undefined
+  }
+}
+
 /**
- * `aisdk:` selects OpenCode 2.0's AI SDK path, which is what surfaces the
- * `aisdk.hook("sdk")` / `("language")` extension points we supply the provider
- * through. The suffix is this package's npm name so the host's built-in
- * fallback can still resolve it if our own hook is ever bypassed — that
- * fallback runs `npm.add(pkg)` against the *published* registry into
- * `<host-cache>/packages/<pkg>/node_modules/<pkg>`, ignoring any local
- * `file://` plugin path this process was loaded from.
- *
- * `CURSOR_OPENCODE2_DEV_ENTRY` overrides the suffix with an `aisdk:file://…`
- * spec instead, pointed at a local built entry file (e.g. `dist/index.js`,
- * which exports `createCursor`). The host's fallback recognizes `file://`
- * specs and imports them directly, skipping `npm.add` — the only way to
- * exercise a local build through that fallback path short of publishing.
- * Unset in production; only meant for local `opencode2 run` testing.
+ * The built package entry beside this module, when it is a local build of this
+ * package. Both modules must resolve into the same package's dist tree, and
+ * the package manifest must declare dist/index.js as its root entry.
  */
-export const CURSOR_AISDK_PACKAGE = process.env.CURSOR_OPENCODE2_DEV_ENTRY
-  ? `aisdk:${pathToFileURL(process.env.CURSOR_OPENCODE2_DEV_ENTRY).href}`
-  : "aisdk:cursor-opencode-provider"
+function verifiedLocalEntry(moduleUrl: string): string | undefined {
+  try {
+    if (!moduleUrl.startsWith("file:")) return undefined
+    const modulePath = realpathSync(fileURLToPath(moduleUrl))
+    if (modulePath.split(path.sep).includes("node_modules")) return undefined
+    const moduleDirectory = path.dirname(modulePath)
+    const manifestPath = nearestManifest(moduleDirectory)
+    if (!manifestPath) return undefined
+    const packageDirectory = path.dirname(manifestPath)
+    if (path.relative(packageDirectory, moduleDirectory) !== path.join("dist", "opencode2")) return undefined
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as PackageManifest
+    if (manifest.name !== PACKAGE_NAME) return undefined
+    const declared = declaredRootEntry(manifest)
+    const entry = path.join(packageDirectory, "dist", "index.js")
+    if (!declared || path.resolve(packageDirectory, declared) !== entry) return undefined
+    return realpathSync(entry) === entry && statSync(entry).isFile() ? entry : undefined
+  } catch {
+    // A missing, unreadable or malformed layout cannot be verified.
+    return undefined
+  }
+}
+
+/**
+ * The AI SDK package published in the provider inventory.
+ *
+ * `aisdk:` selects OpenCode 2.x's AI SDK path, which surfaces the
+ * `aisdk.hook("sdk")` / `("language")` extension points we supply the provider
+ * through. When our `sdk` hook does not claim the event, the host's own loader
+ * resolves this package instead: it imports an `aisdk:file://…` entry directly
+ * and installs any other name from the registry into its cache.
+ *
+ * In priority order:
+ * 1. `CURSOR_OPENCODE2_DEV_ENTRY`, an explicit entry file (e.g. `dist/index.js`).
+ * 2. `CURSOR_OPENCODE2_USE_LOCAL_DIST=0` selects the published package.
+ * 3. A verified local build's own `dist/index.js` (`verifiedLocalEntry`), so a
+ *    fallback runs the same build as the plugin rather than the published one.
+ * 4. The published package: registry installs, source runs, and missing or
+ *    unverified local entries.
+ */
+export function resolveAiSdkPackageSpec(
+  moduleUrl: string = import.meta.url,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): string {
+  const devEntry = env.CURSOR_OPENCODE2_DEV_ENTRY
+  if (devEntry) return `aisdk:${pathToFileURL(devEntry).href}`
+  if (env.CURSOR_OPENCODE2_USE_LOCAL_DIST?.trim() === "0") return CURSOR_AISDK_REGISTRY_PACKAGE
+  const entry = verifiedLocalEntry(moduleUrl)
+  return entry ? `aisdk:${pathToFileURL(entry).href}` : CURSOR_AISDK_REGISTRY_PACKAGE
+}
+
+/** Resolved once per module copy, from the environment the host started with. */
+export const CURSOR_AISDK_PACKAGE = resolveAiSdkPackageSpec()
 
 /**
  * Plain-object `Model.Info` equivalent used by `ctx.provider.transform`.
