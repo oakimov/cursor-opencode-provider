@@ -8,9 +8,12 @@
  * A rendered model page, https://cursor.com/docs/models/<slug>, is fetched
  * only for a selectable model or variant that has no markdown row. A page
  * never replaces a markdown row. Fast rows become synthetic `<id>-fast` ids.
- * Auto (`default`) is the hand-edited `CURSOR_STAFF_AUTO_RATE` constant.
- * Generation fails, and writes nothing, when a selectable model has no price.
- * The live refresh stays a manual step before a version bump.
+ * A required page with no pricing table, or without the Fast or long-context
+ * row that gap needed, fails the run before anything is written. The base
+ * rate is not written in its place. Auto (`default`) is the hand-edited
+ * `CURSOR_STAFF_AUTO_RATE` constant. Generation also fails, and writes
+ * nothing, when a selectable model has no price. The live refresh stays a
+ * manual step before a version bump.
  *
  * Usage:
  *   bun run generate:pricing
@@ -574,31 +577,87 @@ function variantRequestsSeparateContext(model: SelectableCatalogModel): boolean 
   })
 }
 
+type PricingGap = {
+  id: string
+  needs: Array<"base" | "fast" | "long">
+}
+
 /** Selectable models whose markdown rows do not cover a base, Fast, or long-context price. */
+function selectablePricingGaps(
+  markdown: string,
+  contextMarkdown: string,
+  catalog: readonly SelectableCatalogModel[],
+): PricingGap[] {
+  const pricing = buildPricing(markdown, defaultContextByDisplayName(contextMarkdown))
+  const gaps: PricingGap[] = []
+  for (const model of catalog) {
+    if (model.id === "default") continue
+    const base = pricing.costs[model.id]
+    const needs: PricingGap["needs"] = []
+    if (!base) needs.push("base")
+    if (variantRequestsFast(model) && !pricing.costs[`${model.id}-fast`]) needs.push("fast")
+    if (
+      variantRequestsSeparateContext(model)
+      && !longPart(base)
+      && !longPart(pricing.costs[`${model.id}-fast`])
+    ) needs.push("long")
+    if (needs.length === 0) continue
+    if (!Object.hasOwn(MODEL_PAGE_SLUG, model.id)) {
+      throw new Error(
+        `Selectable model ${model.id} has no pricing-markdown row for ` +
+          `${needs.join(", ")} and has no docs page slug.`,
+      )
+    }
+    gaps.push({ id: model.id, needs })
+  }
+  return gaps.sort((left, right) => left.id.localeCompare(right.id))
+}
+
 export function pageIdsForSelectableGaps(
   markdown: string,
   contextMarkdown: string,
   catalog: readonly SelectableCatalogModel[],
 ): string[] {
-  const pricing = buildPricing(markdown, defaultContextByDisplayName(contextMarkdown))
-  const ids: string[] = []
-  for (const model of catalog) {
-    if (model.id === "default") continue
-    const base = pricing.costs[model.id]
-    const needsBase = !base
-    const needsFast = variantRequestsFast(model) && !pricing.costs[`${model.id}-fast`]
-    const needsLong = variantRequestsSeparateContext(model) && !longPart(base) && !longPart(pricing.costs[`${model.id}-fast`])
-    if (!needsBase && !needsFast && !needsLong) continue
-    if (!Object.hasOwn(MODEL_PAGE_SLUG, model.id)) {
-      throw new Error(
-        `Selectable model ${model.id} has no pricing-markdown row for ` +
-          `${[needsBase ? "its base rate" : "", needsFast ? "Fast" : "", needsLong ? "long context" : ""].filter(Boolean).join(", ")} ` +
-          `and has no docs page slug.`,
-      )
+  return selectablePricingGaps(markdown, contextMarkdown, catalog).map((gap) => gap.id)
+}
+
+/**
+ * A page fetched for a gap must contain a pricing table and the row that gap
+ * needed. A missing table or row is a refusal, not the base rate.
+ */
+export function assertRequiredPageRows(
+  gaps: readonly PricingGap[],
+  pages: readonly ModelPageInput[],
+  costs: Readonly<Record<string, OpenCodeModelCost>>,
+): void {
+  const byId = new Map(pages.map((page) => [page.modelId, page]))
+  const problems: string[] = []
+  for (const gap of gaps) {
+    const url = pageUrl(gap.id)
+    const page = byId.get(gap.id)
+    if (!page || parseModelPagePricing(page.html).length === 0) {
+      problems.push(`${gap.id}: ${url} has no pricing table`)
+      continue
     }
-    ids.push(model.id)
+    if (gap.needs.includes("base") && !Object.hasOwn(costs, gap.id)) {
+      problems.push(`${gap.id}: ${url} has no base price row`)
+    }
+    if (gap.needs.includes("fast") && !Object.hasOwn(costs, `${gap.id}-fast`)) {
+      problems.push(`${gap.id}-fast: ${url} has no Fast row`)
+    }
+    if (
+      gap.needs.includes("long")
+      && !longPart(costs[gap.id])
+      && !longPart(costs[`${gap.id}-fast`])
+    ) {
+      problems.push(`${gap.id} long context: ${url} has no long-context row`)
+    }
   }
-  return ids.sort()
+  if (problems.length > 0) {
+    throw new Error(
+      `Refusing to write. A required model page has no pricing table or lacks the row that was needed:\n${problems.join("\n")}`,
+    )
+  }
 }
 
 export function missingSavedPagesMessage(ids: readonly string[]): string {
@@ -606,41 +665,23 @@ export function missingSavedPagesMessage(ids: readonly string[]): string {
   return `Refusing to fetch model pages. A selectable price is missing from the pricing markdown:\n${lines.join("\n")}`
 }
 
-function pricingResolves(id: string, costs: Readonly<Record<string, OpenCodeModelCost>>): boolean {
-  if (Object.hasOwn(costs, id)) return true
-  const match = /^(.*)-\d+(?:\.\d+)?[km](?:-\d+)?(-fast)?$/.exec(id)
-  if (!match) return false
-  return Object.hasOwn(costs, `${match[1]!}${match[2] ?? ""}`)
-}
-
-function contextSuffixFor(context: number): string {
-  return context % 1_000_000 === 0 ? `${context / 1_000_000}m` : `${context / 1_000}k`
-}
-
-/** Fail when a selectable catalog entry has no price. Does not write. */
+/** Fail when a selectable catalog entry has no price of its own. Does not write. */
 export function assertSelectablePriced(
   catalog: readonly SelectableCatalogModel[],
   costs: Readonly<Record<string, OpenCodeModelCost>>,
 ): void {
   const missing: string[] = []
   for (const model of catalog) {
-    const ids = new Set<string>([model.id])
-    let long = false
-    const separate = new Set<number>()
-    for (const variant of model.variants ?? []) {
-      const context = catalogContext(variant.parameterValues?.find((parameter) => parameter.id === "context")?.value)
-      if (context === 1_000_000) long = true
-      else if (variant.isMaxMode === true && context !== undefined && context !== model.maxContext) separate.add(context)
+    if (model.id !== "default" && !Object.hasOwn(costs, model.id)) missing.push(model.id)
+    if (variantRequestsFast(model) && !Object.hasOwn(costs, `${model.id}-fast`)) {
+      missing.push(`${model.id}-fast`)
     }
-    if (long) ids.add(`${model.id}-1m`)
-    for (const context of separate) ids.add(`${model.id}-${contextSuffixFor(context)}`)
-    if (Object.hasOwn(costs, `${model.id}-fast`)) {
-      ids.add(`${model.id}-fast`)
-      if (long) ids.add(`${model.id}-1m-fast`)
-      for (const context of separate) ids.add(`${model.id}-${contextSuffixFor(context)}-fast`)
-    }
-    for (const id of ids) {
-      if (!pricingResolves(id, costs)) missing.push(id)
+    if (
+      variantRequestsSeparateContext(model)
+      && !longPart(costs[model.id])
+      && !longPart(costs[`${model.id}-fast`])
+    ) {
+      missing.push(`${model.id} long context`)
     }
   }
   if (missing.length > 0) {
@@ -912,6 +953,8 @@ export function priceFromModelPages(
   const derived: DerivedModelPrice[] = []
   for (const page of pages) {
     const rows = parseModelPagePricing(page.html)
+    // An unreadable page must not supply a price from leftover prose.
+    if (rows.length === 0) continue
     const text = pageText(page.html)
     const base = oneRow(rows.filter((row) => !row.fast && !row.longContext), "standard", page.modelId)
     const longContext = oneRow(
@@ -1326,9 +1369,13 @@ export function assemblePricing(
 ): PricingAssembly {
   const defaultContexts = defaultContextByDisplayName(contextMarkdown)
   const pricing = buildPricing(pricingMarkdown, defaultContexts)
+  const gaps = catalog ? selectablePricingGaps(pricingMarkdown, contextMarkdown, catalog) : []
   const derived = priceFromModelPages(pricing, pages, defaultContexts)
   applyCursorStaffAutoRate(pricing)
-  if (catalog) assertSelectablePriced(catalog, pricing.costs)
+  if (catalog) {
+    assertRequiredPageRows(gaps, pages, pricing.costs)
+    assertSelectablePriced(catalog, pricing.costs)
+  }
   return {
     costs: pricing.costs,
     unpriced: pricing.unpriced,

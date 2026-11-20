@@ -22,8 +22,10 @@ import {
   buildPricing,
   buildPricingTable,
   catalogIdForPricingDisplayName,
+  assemblePricing,
   loadOfflinePricing,
   loadSavedModelPages,
+  loadSelectableCatalog,
   modelPageSource,
   pageIdsForSelectableGaps,
   parseArgs,
@@ -851,17 +853,42 @@ describe("pricing", () => {
   it("reproduces committed prices from saved files and does not fetch", () => {
     // pages/ holds only the selectable gaps. A markdown row needs no file.
     const root = join(import.meta.dir, "fixtures", "pricing-offline")
-    const priced = loadOfflinePricing({
-      pricingFile: join(root, "pricing.md"),
-      contextFile: join(root, "context.md"),
-      pagesDir: join(root, "pages"),
-    })
+    const pricingMarkdown = readFileSync(join(root, "pricing.md"), "utf8")
+    const contextMarkdown = readFileSync(join(root, "context.md"), "utf8")
+    const pageIds = pageIdsForSelectableGaps(pricingMarkdown, contextMarkdown, loadSelectableCatalog())
+    const pages = loadSavedModelPages(join(root, "pages"), pageIds)
+    const priced = assemblePricing(pricingMarkdown, contextMarkdown, pages)
     expect(takeNetworkAttempts()).toEqual([])
     expect(priced.costs).toEqual(CURSOR_MODEL_COSTS as unknown as typeof priced.costs)
     expect(priced.unpriced).toEqual(CURSOR_UNPRICED_MODEL_REASONS)
     expect(priced.contexts).toEqual(CURSOR_MODEL_CONTEXTS as unknown as typeof priced.contexts)
     expect(priced.pageIds).not.toContain("grok-4.7")
     expect(priced.pageIds).toContain("gpt-5.5")
+    const out = mkdtempSync(join(tmpdir(), "pricing-out-"))
+    const dest = join(out, "pricing-data.ts")
+    let refusal = ""
+    try {
+      expect(() => {
+        try {
+          loadOfflinePricing({
+            pricingFile: join(root, "pricing.md"),
+            contextFile: join(root, "context.md"),
+            pagesDir: join(root, "pages"),
+          })
+        } catch (error) {
+          refusal = error instanceof Error ? error.message : String(error)
+          throw error
+        }
+        writeFileSync(dest, "written")
+      }).toThrow(/Refusing to write/)
+      expect(refusal).toMatch(/claude-fable-5 long context: https:\/\/cursor\.com\/docs\/models\/claude-fable-5 has no long-context row/)
+      expect(refusal).toMatch(/gpt-5\.2-fast: https:\/\/cursor\.com\/docs\/models\/gpt-5-2 has no Fast row/)
+      expect(refusal).not.toMatch(/gpt-5\.5/)
+      expect(refusal).not.toMatch(/gpt-5\.4/)
+      expect(existsSync(dest)).toBe(false)
+    } finally {
+      rmSync(out, { recursive: true, force: true })
+    }
     expect(() => loadOfflinePricing({
       pricingFile: join(root, "pricing.md"),
       contextFile: join(root, "context.md"),
@@ -879,6 +906,52 @@ describe("pricing", () => {
       expect(takeNetworkAttempts()).toEqual([])
     } finally {
       rmSync(incomplete, { recursive: true, force: true })
+    }
+  })
+
+  it("refuses to write when a required gpt-5.5 page has no table or no Fast row", () => {
+    const markdown = `
+| Model | Provider | Input | Cache write | Cache read | Output | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| GPT-5.5 | OpenAI | $5 | - | $0.5 | $30 | |
+`
+    const fastCatalog: SelectableCatalogModel[] = [{
+      id: "gpt-5.5",
+      variants: [{ parameterValues: [{ id: "fast", value: "true" }] }],
+    }]
+    const standardOnly = `
+<table>
+<tr><th>Name</th><th>Input</th><th>Cache write</th><th>Cache read</th><th>Output</th></tr>
+<tr><td>GPT-5.5</td><td>$5</td><td>-</td><td>$0.5</td><td>$30</td></tr>
+</table>`
+    const context = readFileSync(join(import.meta.dir, "fixtures", "pricing-offline", "context.md"), "utf8")
+    const dir = mkdtempSync(join(tmpdir(), "pricing-out-"))
+    const dest = join(dir, "pricing-data.ts")
+    try {
+      expect(() => {
+        assemblePricing(markdown, context, [{ modelId: "gpt-5.5", html: "<p>GPT-5.5</p>" }], fastCatalog)
+        writeFileSync(dest, "written")
+      }).toThrow(/gpt-5\.5: https:\/\/cursor\.com\/docs\/models\/gpt-5-5 has no pricing table/)
+      expect(existsSync(dest)).toBe(false)
+      expect(() => {
+        assemblePricing(markdown, context, [{ modelId: "gpt-5.5", html: standardOnly }], fastCatalog)
+        writeFileSync(dest, "written")
+      }).toThrow(/gpt-5\.5-fast: https:\/\/cursor\.com\/docs\/models\/gpt-5-5 has no Fast row/)
+      expect(existsSync(dest)).toBe(false)
+      const complete = readFileSync(join(import.meta.dir, "fixtures", "pricing-offline", "pages", "gpt-5.5.html"), "utf8")
+      const priced = assemblePricing(markdown, context, [{ modelId: "gpt-5.5", html: complete }], [{
+        id: "gpt-5.5",
+        variants: [
+          { parameterValues: [{ id: "fast", value: "true" }] },
+          { parameterValues: [{ id: "context", value: "1m" }] },
+        ],
+      }])
+      expect(priced.costs["gpt-5.5-fast"]).toEqual({ input: 12.5, output: 75, cache_read: 1.25 })
+      expect(priced.costs["gpt-5.5"]?.tiers?.[0]?.input).toBe(10)
+      expect(priced.costs["gpt-5.5"]?.tiers?.[0]?.output).toBe(45)
+      expect(existsSync(dest)).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })
