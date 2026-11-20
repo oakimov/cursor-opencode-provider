@@ -198,13 +198,13 @@ so both hosts can select its parameters.
 
 #### Fast variants with distinct prices
 
-When Cursor publishes a different Fast rate for a model (currently Composer and Grok), the plugin emits a separate OpenCode entry `<model-id>-fast` (for example `composer-2.5-fast`) using the same pattern as `-1m`:
+When a model has a published Fast rate, the plugin exposes a separate OpenCode entry `<model-id>-fast`, such as `composer-2.5-fast`, `gpt-5.5-fast`, or `claude-fable-5-2-fast`:
 
 - only the Fast variants in its picker, with `" Fast"` in the catalog name
 - the real Cursor model id in `options.cursorModelId`, plus default Fast variant parameters
 - its own `cost` row (`composer-2.5-fast` is not nested under `composer-2.5`)
 
-Claude Fast variants stay on the base entry: Cursor does not publish a separate Fast price for them, so they remain picker variants instead of a second catalog id. Combinations with long context use `<id>-1m-fast`.
+Combinations with long context use `<id>-1m-fast` where Cursor offers them. If you saved a Fast variant under a base model that now has a separate Fast entry, select the new model and pick its effort again.
 
 #### Context limit sources
 

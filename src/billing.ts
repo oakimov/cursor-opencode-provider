@@ -26,7 +26,7 @@
  * output. The host's one-token display minimum can also exceed the remainder.
  */
 import type { LanguageModelV3Usage } from "@ai-sdk/provider"
-import { getCursorModelCost, hasCursorFastPricing, type OpenCodeModelCost } from "./pricing.js"
+import { costForPrompt, getCursorModelCost, hasCursorFastPricing, type OpenCodeModelCost } from "./pricing.js"
 import { buildLanguageModelV3UsageFromCounters, type CursorUsageCounters } from "./usage.js"
 
 /** USD per token for each category a host prices. */
@@ -38,14 +38,13 @@ export type StepPrices = {
 }
 
 const PER_MILLION = 1_000_000
-const CONTEXT_TIER_TOKENS = 200_000
 /** OpenCode 1.x divides `totalNanoAiu` by 1e11 to get USD. */
 const NANO_AIU_PER_USD = 100_000_000_000
 
 /**
  * Price entry the catalog gave this model: `<wire>-fast` for a Fast variant
  * with its own published rate, else the wire id (a long-context entry is
- * priced from the base entry and its over-200k tier), as `model-config.ts` does.
+ * priced from the base entry and its context tier), as `model-config.ts` does.
  */
 export function cursorPricingId(
   wireModelId: string,
@@ -58,7 +57,7 @@ export function cursorPricingId(
 /** The rates a host applies to a step with `inputSideTokens` of prompt (its context tier). */
 export function hostStepPrices(cost: OpenCodeModelCost | undefined, inputSideTokens: number): StepPrices | undefined {
   if (!cost) return undefined
-  const tier = cost.context_over_200k && inputSideTokens > CONTEXT_TIER_TOKENS ? cost.context_over_200k : cost
+  const tier = costForPrompt(cost, inputSideTokens)
   return {
     input: tier.input / PER_MILLION,
     output: tier.output / PER_MILLION,
@@ -95,7 +94,7 @@ export function turnEndedCostUsd(
   const usage = buildLanguageModelV3UsageFromCounters(counters)
   const input = usage.inputTokens
   const promptTokens = Math.min(input.total ?? 0, Math.max(0, contextTokens - (usage.outputTokens.total ?? 0)))
-  const tier = cost.context_over_200k && promptTokens > CONTEXT_TIER_TOKENS ? cost.context_over_200k : cost
+  const tier = costForPrompt(cost, promptTokens)
   return ((input.noCache ?? 0) * tier.input
     + (input.cacheRead ?? 0) * (tier.cache_read ?? tier.input)
     + (input.cacheWrite ?? 0) * (tier.cache_write ?? tier.input)

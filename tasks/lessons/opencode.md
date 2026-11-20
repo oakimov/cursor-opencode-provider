@@ -1,6 +1,6 @@
 # OpenCode general lessons
 
-[Index](../lessons.md) · [1.x](opencode-1.md) · [2.x](opencode-2.md)
+[Index](../lessons.md) · [1.x](opencode-1.md) · [2.x](opencode-2.md) · [Pricing](pricing.md)
 
 These are failure lessons shared by both hosts, not a replacement for
 [AGENTS.md](../../AGENTS.md). Host-specific details live in the linked files.
@@ -824,10 +824,9 @@ These are failure lessons shared by both hosts, not a replacement for
   Bind the model snapshot to the Run's cache root and file generation and
   verify the selected max-mode bit on the request (`test/model-selection-run.test.ts`).
 - **Inspect generator inputs before changing mappings.** Pricing and model
-  metadata came from distinct markdown endpoints. An added US data residency
-  column hid the long-context surcharge. Read Notes by header and test a row
-  whose note changes the rates (`test/pricing.test.ts`). Run the live pricing gate
-  before a bump; the v0.6.4 failure forced a retag ([release gate](../../AGENTS.md#hard-stop--release--version-bump--tag-gate-non-optional)).
+  metadata come from distinct endpoints. Pricing source order, the provider
+  list price, Fast mode, long context, Auto, and the version-bump gate are
+  in [Pricing](pricing.md).
 - **Make tests capable of failing.** Type guards once sat outside tsc's include;
   root ignored permission fixtures. Use real usages, deterministic faults and
   independent host/frame evidence (`test/workspace-facts.test.ts`).

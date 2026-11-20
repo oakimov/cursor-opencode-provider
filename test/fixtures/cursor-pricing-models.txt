@@ -1,6 +1,6 @@
 # Cursor wire / catalog model ids used for pricing coverage checks.
-# Auto (`default`) is intentionally unpriced; Composer / Grok Fast rows use
-# synthetic `<id>-fast` catalog ids.
+# Every id here must resolve to a price. There is no unpriced exception.
+# Composer, Grok, and other Fast rows use synthetic `<id>-fast` ids.
 default
 composer-2.5
 composer-2.5-fast
@@ -19,9 +19,13 @@ claude-haiku-5-5
 claude-opus-4-5
 claude-opus-4-6
 claude-opus-4-7
+claude-opus-4-7-fast
 claude-opus-4-8
+claude-opus-4-8-fast
 claude-opus-5
+claude-opus-5-fast
 claude-opus-5-5
+claude-opus-5-5-fast
 claude-sonnet-4
 claude-sonnet-4-1m
 claude-sonnet-4-5
@@ -48,14 +52,19 @@ gpt-5.2
 gpt-5.3-codex
 gpt-5.4
 gpt-5.4-1m
+gpt-5.4-fast
 gpt-5.4-mini
 gpt-5.4-nano
 gpt-5.5
 gpt-5.5-1m
+gpt-5.5-fast
 gpt-5.6-luna
+gpt-5.6-luna-fast
 gpt-5.6-sol
 gpt-5.6-sol-1m
+gpt-5.6-sol-fast
 gpt-5.6-terra
+gpt-5.6-terra-fast
 kimi-k2.7-code
 kimi-k3
 muse-spark-1.3
