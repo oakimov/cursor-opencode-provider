@@ -54,7 +54,7 @@ import { getSessionDirectory, markSessionDirectory } from "./session-directory.j
 import { rememberHostSkillFiles } from "./context/skills.js"
 import { trace } from "./debug.js"
 import { withAbortDeadline } from "./deadline.js"
-import { CursorAuthError, CursorProtocolError, CursorTransportError } from "./errors.js"
+import { CursorAuthError, CursorTransportError } from "./errors.js"
 import { processShared } from "./process-shared.js"
 import { loadSessionForPermissions, sessionRulesDenyEdits } from "./protocol/session-edits.js"
 import {
@@ -538,8 +538,11 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
       }
     }
 
+    let refreshModelsOnContext: (() => void) | undefined
     await track(
       ctx.session.hook("context", async (event) => {
+        // Count turns as activity even when the event stream is unavailable.
+        refreshModelsOnContext?.()
         event.messages = preserveNativeToolResults(event.messages, refusals)
         markCompactionAndOptions(event, event.agent === "compaction")
         event.options ??= {}
@@ -687,12 +690,8 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
             throw error
           }
           if (!current()) continue
-          const discovered = loaded.models
-          if (!discovered.length) throw new CursorProtocolError("Cursor returned an empty model catalog", {
-            code: "CURSOR_EMPTY_MODEL_CATALOG",
-          })
           try {
-            if (!await publishModels(discovered, current)) continue
+            if (!await publishModels(loaded.models, current)) continue
           } catch (error) {
             if (!current()) continue
             throw error
@@ -707,13 +706,13 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
           } else {
             // Startup can fall back to an expired disk snapshot.
             noteRefreshFailure()
-            trace(`opencode2 models: using an expired catalog count=${discovered.length}`)
+            trace(`opencode2 models: using an expired catalog count=${loaded.models.length}`)
           }
           void resolveAgentUrl(token, {
             apiBaseURL: cursorApiBaseURL(),
             telemetryEnabled: cursorGetServerConfigTelemetryEnabled(),
           }).catch(() => {})
-          trace(`opencode2 models: ready count=${discovered.length}`)
+          trace(`opencode2 models: ready count=${loaded.models.length}`)
           return
         }
       }).catch((error: unknown) => {
@@ -729,6 +728,7 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
         trace(`opencode2 models: discovery/publication failed: ${String(error)}`)
       })
     }
+    refreshModelsOnContext = refreshModels
 
     const RETRY_INTERVAL_MS = 3_000
     const RETRY_WINDOW_MS = 300_000

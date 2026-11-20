@@ -1,5 +1,6 @@
 import { MODEL_CACHE_FILE, MODEL_CACHE_SCHEMA_VERSION, MODEL_CACHE_TTL_MS } from "./shared.js"
 import { unaryAvailableModels } from "./transport/connect.js"
+import { CursorProtocolError } from "./errors.js"
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises"
 import path from "node:path"
 
@@ -664,6 +665,11 @@ async function refreshModelCacheSnapshot(
   }
   const refresh = (async () => {
     const models = await fetcher()
+    if (models.length === 0) {
+      throw new CursorProtocolError("Cursor returned an empty model catalog", {
+        code: "CURSOR_EMPTY_MODEL_CATALOG",
+      })
+    }
     const snapshot: ModelCache = {
       models,
       fetchedAt: Date.now(),
@@ -723,9 +729,11 @@ export async function discoverModelCache(
 
   if (forceRefresh) return refresh()
   const cached = await readCache(cacheDir)
+  // Older versions could persist an empty response with a fresh timestamp.
+  if (!cached?.models.length) return refresh()
 
   // Cache is fresh → return it; refresh in background
-  if (cached && isCacheFresh(cached)) {
+  if (isCacheFresh(cached)) {
     // Background refresh (fire and forget)
     void refresh()
       .catch(() => {
@@ -735,14 +743,9 @@ export async function discoverModelCache(
   }
 
   // Cache exists but expired → try fetch, serve stale on failure
-  if (cached) {
-    try {
-      return await refresh()
-    } catch {
-      return cached
-    }
+  try {
+    return await refresh()
+  } catch {
+    return cached
   }
-
-  // No cache → must fetch
-  return refresh()
 }

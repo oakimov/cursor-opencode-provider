@@ -37,7 +37,8 @@ operator's store. Enable provider debug logs for each run.
 6. Seed a catalog just before its 24-hour expiry. After expiry, create a
    session without sending a prompt. Verify a newly discovered model appears
    in `model.list` without remounting the Location. Repeat with a failed
-   discovery and verify the last good catalog stays visible.
+   discovery and a successful HTTP response with an empty catalog. Verify
+   the last good catalog stays visible and its cache file is preserved.
 
 ## OpenCode 2.x foreign compaction
 

@@ -1434,6 +1434,50 @@ describe("model cache integrity", () => {
     expect(await readCache(directory)).toEqual(other)
   })
 
+  it("preserves the last good cache on an empty refresh and recovers on the next discovery", async () => {
+    const directory = await tempDir()
+    const previous = { ...testCache("previous-model"), fetchedAt: Date.now() - 30 * 3_600_000 }
+    await writeCache(directory, previous)
+    const path = cacheFilePath(directory)
+    const before = await fs.readFile(path, "utf8")
+    let requests = 0
+    using server = Bun.serve({
+      port: 0,
+      fetch() {
+        const models = ++requests === 1 ? [] : [{ name: "replacement" }]
+        return Response.json({ models })
+      },
+    })
+    const options = { baseURL: server.url.origin }
+
+    await expect(discoverModelCache("token", directory, { ...options, forceRefresh: true }))
+      .rejects.toMatchObject({ code: "CURSOR_EMPTY_MODEL_CATALOG" })
+    expect(await fs.readFile(path, "utf8")).toBe(before)
+    expect(await readCache(directory)).toEqual(previous)
+
+    const models = await discoverModels("token", directory, options)
+    expect(requests).toBe(2)
+    expect(models.map(({ id }) => id)).toEqual(["replacement"])
+    expect((await readCache(directory))?.models).toEqual(models)
+  })
+
+  it("replaces a legacy empty cache before returning models, even when its timestamp is fresh", async () => {
+    const directory = await tempDir()
+    await writeCache(directory, { ...testCache(), models: [] })
+    using server = Bun.serve({
+      port: 0,
+      fetch: () => Response.json({ models: [{ name: "replacement" }] }),
+    })
+
+    const models = await discoverModels("token", directory, { baseURL: server.url.origin })
+    // On regression, settle the unexpected background write before cleanup.
+    if (models.length === 0) {
+      await refreshModelCache(directory, () => Promise.resolve(models))
+    }
+    expect(models.map(({ id }) => id)).toEqual(["replacement"])
+    expect((await readCache(directory))?.models).toEqual(models)
+  })
+
   it("returns the fresh cache entry before its background refresh completes", async () => {
     const directory = await tempDir()
     const cached = testCache("cached-account")

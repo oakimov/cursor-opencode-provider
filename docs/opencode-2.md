@@ -15,8 +15,10 @@ Discovered Cursor models are published **in memory** through `ctx.provider.trans
 
 The cache seeds the inventory, and `/connect` refreshes it for the selected
 credential. After the loaded catalog's 24-hour expiry, host activity triggers
-discovery without reloading the Location. Failed, timed-out, or empty refreshes
-keep the last good catalog; later activity retries with bounded backoff.
+discovery without reloading the Location. A turn also triggers this check if
+the event stream is unavailable. Failed, timed-out, or empty refreshes keep
+the last good picker. An empty discovery response also leaves the disk cache
+intact. Later activity retries with a delay from one minute to 15 minutes.
 
 On OpenCode 2.1.4, session requests wait for plugin activation before resolving
 their model. With no usable cache, setup waits for authenticated discovery and

@@ -1950,13 +1950,15 @@ describe("opencode2 setup", () => {
       })
     })
 
-    test("failed and empty rechecks retain inventory and back off until recovery", async () => {
+    test("failed and empty rechecks retain inventory and the cache file until recovery", async () => {
       let requests = 0
       await withCatalog(() => {
         if (++requests === 1) return new Response("unavailable", { status: 503 })
         if (requests === 2) return Response.json({ models: [] })
         return modelResponse()
       }, async ({ bus, cacheDir, expiresAt, inventory, reloads }) => {
+        const previous = await readCache(cacheDir)
+        expect(previous?.models.map(({ id }) => id)).toEqual([baseModel.id])
         setSystemTime(new Date(expiresAt))
         await bus.publish(activity)
         await until(() => requests === 1)
@@ -1968,18 +1970,55 @@ describe("opencode2 setup", () => {
 
         setSystemTime(new Date(expiresAt + 60_000))
         await bus.publish(activity)
-        await until(async () => (await readCache(cacheDir))?.models.length === 0)
+        await until(() => requests === 2)
         setSystemTime(new Date(expiresAt + 179_999))
         await bus.publish(activity)
         expect(requests).toBe(2)
         expect(inventory.models.has(cachedKey)).toBe(true)
         expect(reloads).toHaveLength(2)
+        expect(await readCache(cacheDir)).toEqual(previous)
 
         setSystemTime(new Date(expiresAt + 180_000))
         await bus.publish(activity)
         await until(() => inventory.models.has("cursor/new-model"))
         expect(requests).toBe(3)
         expect(reloads).toHaveLength(3)
+        expect((await readCache(cacheDir))?.models.map(({ id }) => id)).toEqual(["new-model"])
+      })
+    })
+
+    test("a turn rechecks the expired catalog when the event stream has closed", async () => {
+      await withTempHostCache(async (cacheDir) => {
+        const start = Date.now()
+        const expiresAt = start + 3_600_000
+        await seedCache(cacheDir, baseModel, expiresAt - MODEL_CACHE_TTL_MS)
+        const { ctx, hooks, inventory, reloads } = connectedContext()
+        const streamEnded = deferred()
+        ctx.event.subscribe = async function* () { streamEnded.release() }
+        let requests = 0
+        await withFetch((url) => {
+          if (!url.endsWith("/AvailableModels")) return Response.json({})
+          requests++
+          return modelResponse()
+        }, async () => {
+          setSystemTime(new Date(start))
+          const cleanup = await setupPlugin(ctx)
+          try {
+            await streamEnded.promise
+            await until(() => reloads.length === 2)
+            const turn = hooks.get("session.context")!
+            const event = { sessionID: "catalog-session", agent: "build", model: { providerID: "openai" } }
+            await turn(event)
+            expect(requests).toBe(0)
+            setSystemTime(new Date(expiresAt))
+            await turn(event)
+            await until(() => inventory.models.has("cursor/new-model"))
+            expect(requests).toBe(1)
+          } finally {
+            await cleanup()
+            setSystemTime()
+          }
+        })
       })
     })
 
