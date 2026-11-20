@@ -1246,12 +1246,20 @@ describe("pricing", () => {
       { modelId: "gpt-5.2", html: standard("GPT-5.2", "$1.75</td><td>-</td><td>$0.175</td><td>$14") },
       { modelId: "claude-fable-5-2", html: `${standard("Claude Fable 5.2", "$8</td><td>$10</td><td>$0.2</td><td>$40")}<p>Context window 300k. Max context 1M.</p>` },
     ]
-    expect(() => assemblePricing(markdown, context, pages, catalog)).toThrow(
-      new RegExp(`${PROVIDER_PRICING_URL.anthropic.replace(/[.]/g, "\\.")}[\\s\\S]*standard rate is not a Fast price`),
-    )
-    expect(() => assemblePricing(markdown, context, pages, [catalog[0]!])).toThrow(
-      new RegExp(`${PROVIDER_PRICING_URL.openai.replace(/[.]/g, "\\.")}[\\s\\S]*standard rate is not a Fast price`),
-    )
+    const messageOf = (run: () => void) => {
+      try {
+        run()
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error)
+      }
+      throw new Error("expected assemblePricing to throw")
+    }
+    const missingAnthropic = messageOf(() => assemblePricing(markdown, context, pages, catalog))
+    expect(missingAnthropic).toContain(PROVIDER_PRICING_URL.anthropic)
+    expect(missingAnthropic).toContain("standard rate is not a Fast price")
+    const missingOpenAi = messageOf(() => assemblePricing(markdown, context, pages, [catalog[0]!]))
+    expect(missingOpenAi).toContain(PROVIDER_PRICING_URL.openai)
+    expect(missingOpenAi).toContain("standard rate is not a Fast price")
     const priced = assemblePricing(markdown, context, pages, catalog, [
       { provider: "openai", html: openai },
       { provider: "anthropic", html: anthropic },
