@@ -10,9 +10,12 @@
  * never replaces a markdown row. Fast rows become synthetic `<id>-fast` ids.
  * A required page with no pricing table fails the run before anything is
  * written. A Fast or long-context gap is filled from that page's row, or from
- * a rule the page states: a Fast multiplier ("Nx the standard price") or a
- * same-rate long-context rule above a threshold the page names. A page that
- * states neither fails. The base rate is not written in its place. Auto
+ * a rule the page states. A Fast multiplier ("Nx the standard price") scales
+ * the standard row. A same-rate sentence, or a page that lists Max context 1M
+ * with one rate, means that rate applies across the window, so the published
+ * row is the long-context price. A page that does not name Fast mode uses that
+ * same row for Fast. A page that names Fast mode and states no rate still
+ * fails, and the base rate is not written as a new row in its place. Auto
  * (`default`) is the hand-edited
  * `CURSOR_STAFF_AUTO_RATE` constant. Generation also fails, and writes
  * nothing, when a selectable model has no price. The live refresh stays a
@@ -511,6 +514,18 @@ export type PricingBuild = {
   /** Markdown row for Auto, when one exists. The manual constant replaces it. */
   markdownDefault?: OpenCodeModelCost
   disagreements: PriceDisagreement[]
+  /**
+   * The published standard row is this model's Fast price. The page does not
+   * name a Fast mode, so no separate `<id>-fast` entry is written.
+   */
+  fastCoveredByBase: Set<string>
+  /**
+   * The published standard row applies across the whole context window,
+   * including Max context 1M. No separate tier is written.
+   */
+  longCoveredByBase: Set<string>
+  /** The pricing-markdown note names a distinct Fast mode for this model. */
+  fastNamedInNotes: Set<string>
 }
 
 /** A recorded AvailableModels entry. Generation uses it to find pricing gaps. */
@@ -626,13 +641,18 @@ export function pageIdsForSelectableGaps(
 
 /**
  * A page fetched for a gap must contain a pricing table and a price for the
- * variant that gap needed: a row, or a stated Fast multiplier or same-rate
- * rule. A missing table or an unstated variant is a refusal, not the base rate.
+ * variant that gap needed: a row, a stated multiplier, or the published
+ * standard row when the page says that row covers the variant. A missing
+ * table, or a named Fast mode with no rate, is a refusal.
  */
 export function assertRequiredPageRows(
   gaps: readonly PricingGap[],
   pages: readonly ModelPageInput[],
   costs: Readonly<Record<string, OpenCodeModelCost>>,
+  coverage: { fast: ReadonlySet<string>; long: ReadonlySet<string> } = {
+    fast: new Set(),
+    long: new Set(),
+  },
 ): void {
   const byId = new Map(pages.map((page) => [page.modelId, page]))
   const problems: string[] = []
@@ -646,13 +666,18 @@ export function assertRequiredPageRows(
     if (gap.needs.includes("base") && !Object.hasOwn(costs, gap.id)) {
       problems.push(`${gap.id}: ${url} has no base price row`)
     }
-    if (gap.needs.includes("fast") && !Object.hasOwn(costs, `${gap.id}-fast`)) {
+    if (
+      gap.needs.includes("fast")
+      && !Object.hasOwn(costs, `${gap.id}-fast`)
+      && !coverage.fast.has(gap.id)
+    ) {
       problems.push(`${gap.id}-fast: ${url} has no Fast row or stated Fast price`)
     }
     if (
       gap.needs.includes("long")
       && !longPart(costs[gap.id])
       && !longPart(costs[`${gap.id}-fast`])
+      && !coverage.long.has(gap.id)
     ) {
       problems.push(`${gap.id} long context: ${url} has no long-context row or stated long-context price`)
     }
@@ -673,17 +698,26 @@ export function missingSavedPagesMessage(ids: readonly string[]): string {
 export function assertSelectablePriced(
   catalog: readonly SelectableCatalogModel[],
   costs: Readonly<Record<string, OpenCodeModelCost>>,
+  coverage: { fast: ReadonlySet<string>; long: ReadonlySet<string> } = {
+    fast: new Set(),
+    long: new Set(),
+  },
 ): void {
   const missing: string[] = []
   for (const model of catalog) {
     if (model.id !== "default" && !Object.hasOwn(costs, model.id)) missing.push(model.id)
-    if (variantRequestsFast(model) && !Object.hasOwn(costs, `${model.id}-fast`)) {
+    if (
+      variantRequestsFast(model)
+      && !Object.hasOwn(costs, `${model.id}-fast`)
+      && !coverage.fast.has(model.id)
+    ) {
       missing.push(`${model.id}-fast`)
     }
     if (
       variantRequestsSeparateContext(model)
       && !longPart(costs[model.id])
       && !longPart(costs[`${model.id}-fast`])
+      && !coverage.long.has(model.id)
     ) {
       missing.push(`${model.id} long context`)
     }
@@ -1006,15 +1040,46 @@ function statedSameRateLongContext(text: string): { threshold: number; evidence:
   return matches[0]
 }
 
-/** "Nx the standard price/rates" for a Fast mode the page does not tabulate. */
+/**
+ * "Context window 300k. Max context 1M" with one published rate. The rate
+ * applies to every token in that window. "Max context -" is not this rule.
+ */
+function statedWholeWindowRate(text: string): { evidence: string } | undefined {
+  const match = /Context window\s+\d+\s*k\s*\.?\s*Max context\s+1M\b/i.exec(text)
+  if (!match) return undefined
+  return { evidence: match[0].replace(/\s+/g, " ").trim() }
+}
+
+/** The page names Fast mode as its own price. A speed label is not that. */
+function pageNamesFastMode(text: string): boolean {
+  return /\bfast mode\b/i.test(text)
+}
+
+/** The pricing-markdown note names a distinct Fast mode. A cost comparison is not one. */
+function notesNameFastMode(notes: string): boolean {
+  return /\bfast mode\b/i.test(notes) || /\bhigher rates\b/i.test(notes)
+}
+
+/**
+ * "Nx the standard price/rates" for a Fast mode the page does not tabulate.
+ * The sentence, or the one before it, has to name Fast mode. A long-context
+ * line such as "above 100k ... 5x the standard rates" is not a Fast price.
+ */
 function statedFastMultiplier(text: string): { factor: number; evidence: string } | undefined {
   const found: Array<{ factor: number; evidence: string }> = []
-  for (const match of text.matchAll(/(?:^|[^0-9.])(\d+(?:\.\d+)?)x the standard (?:price|rates)/gi)) {
-    const factor = Number(match[1])
-    if (!Number.isFinite(factor) || factor <= 0) {
-      throw new Error(`Invalid Fast multiplier in ${JSON.stringify(match[0])}`)
+  const parts = sentences(text)
+  for (let index = 0; index < parts.length; index++) {
+    const sentence = parts[index]!
+    const previous = parts[index - 1] ?? ""
+    const namesFast = (value: string) => /\bfast mode\b/i.test(value) || /\bfast is\b/i.test(value)
+    if (!namesFast(sentence) && !namesFast(previous)) continue
+    for (const match of sentence.matchAll(/(?:^|[^0-9.])(\d+(?:\.\d+)?)x the standard (?:price|rates)/gi)) {
+      const factor = Number(match[1])
+      if (!Number.isFinite(factor) || factor <= 0) {
+        throw new Error(`Invalid Fast multiplier in ${JSON.stringify(match[0])}`)
+      }
+      found.push({ factor, evidence: match[0].replace(/\s+/g, " ").trim() })
     }
-    found.push({ factor, evidence: match[0].replace(/\s+/g, " ").trim() })
   }
   if (found.length === 0) return undefined
   const factor = found[0]!.factor
@@ -1029,7 +1094,9 @@ function statedFastMultiplier(text: string): { factor: number; evidence: string 
  * page states a different number for that row, the difference is recorded
  * and the markdown value stays. Page prose fills a gap only when the page
  * table has no row for it, and only with a multiplier or same-rate rule the
- * page states. A max-context spec is not a price.
+ * page states. Max context 1M beside one rate means that rate covers the
+ * window. A page that does not name Fast mode uses the same row for Fast.
+ * A named Fast mode with no rate is left unpriced.
  */
 export function priceFromModelPages(
   pricing: PricingBuild,
@@ -1043,6 +1110,7 @@ export function priceFromModelPages(
     if (rows.length === 0) continue
     const text = pageText(page.html)
     const sameRate = statedSameRateLongContext(text)
+    const wholeWindow = sameRate ? undefined : statedWholeWindowRate(text)
     const fastMultiplier = statedFastMultiplier(text)
     const base = oneRow(rows.filter((row) => !row.fast && !row.longContext), "standard", page.modelId)
     const longContext = oneRow(
@@ -1112,18 +1180,24 @@ export function priceFromModelPages(
             `Cache is unchanged because the page does not state a cache change.`,
         })
       } else if (sameRate) {
-        const tier = flatCostOf(keptBase)
-        pricing.costs[page.modelId] = withThreshold(
-          flatCostOf(pricing.costs[page.modelId] ?? keptBase),
-          sameRate.threshold,
-          tier,
-        )
+        // The published row already is that price at every size. Recording a
+        // copy as a tier would change the committed file without changing the rate.
+        pricing.longCoveredByBase.add(page.modelId)
         derived.push({
           id: page.modelId,
-          cost: tier,
+          cost: flatCostOf(keptBase),
           formula:
             `${pageUrl(page.modelId)} has no long-context row. ${sameRate.evidence} ` +
-            `The long-context tier copies the standard row because the page states no long-context multiplier.`,
+            `The published standard row applies above that threshold because the page states no long-context multiplier.`,
+        })
+      } else if (wholeWindow) {
+        pricing.longCoveredByBase.add(page.modelId)
+        derived.push({
+          id: page.modelId,
+          cost: flatCostOf(keptBase),
+          formula:
+            `${pageUrl(page.modelId)} lists one rate and ${wholeWindow.evidence}. ` +
+            `That rate applies across the whole window, including the 1M max context.`,
         })
       }
     }
@@ -1209,17 +1283,37 @@ export function priceFromModelPages(
       )
     }
 
-    // A Fast row on the same page keeps its own components past the threshold.
-    // A markdown-only Fast price is not given a tier the page does not mention.
+    // A Fast row on the same page keeps its own published components. The
+    // same-rate sentence does not add a second copy of that row.
     if (sameRate && fast && pricing.costs[fastId] && !longPart(pricing.costs[fastId])) {
-      const fastFlat = flatCostOf(pricing.costs[fastId]!)
-      pricing.costs[fastId] = withThreshold(fastFlat, sameRate.threshold, fastFlat)
+      pricing.longCoveredByBase.add(page.modelId)
       derived.push({
         id: fastId,
-        cost: fastFlat,
+        cost: flatCostOf(pricing.costs[fastId]!),
         formula:
           `${pageUrl(page.modelId)} has no Fast long-context row. ${sameRate.evidence} ` +
-          `The Fast long-context tier copies the Fast row because the page states no long-context multiplier.`,
+          `The Fast row's published rate applies above that threshold because the page states no long-context multiplier.`,
+      })
+    }
+
+    // No named Fast mode: the standard row is the Fast price. A page or note
+    // that names Fast mode and gives no rate does not take this path.
+    if (
+      !Object.hasOwn(pricing.costs, fastId)
+      && !fast
+      && !fastMultiplier
+      && keptBase
+      && base
+      && !pageNamesFastMode(text)
+      && !pricing.fastNamedInNotes.has(page.modelId)
+    ) {
+      pricing.fastCoveredByBase.add(page.modelId)
+      derived.push({
+        id: fastId,
+        cost: flatCostOf(keptBase),
+        formula:
+          `${pageUrl(page.modelId)} does not name a Fast mode. Fast uses the standard row ` +
+          `published on the pricing markdown and on this page.`,
       })
     }
   }
@@ -1272,6 +1366,7 @@ export function buildPricing(
     modelId: string
     entry: OpenCodeModelCost
   }> = []
+  const fastNamedInNotes = new Set<string>()
   let markdownDefault: OpenCodeModelCost | undefined
 
   for (const row of parsePricingTables(markdown)) {
@@ -1295,6 +1390,7 @@ export function buildPricing(
       markdownDefault = entry
       continue
     }
+    if (notesNameFastMode(row.notes)) fastNamedInNotes.add(modelId)
     if (row.isExplicitLongContextRow) {
       explicitLong.set(modelId, { cost: entry, displayName: row.displayName })
       continue
@@ -1332,6 +1428,9 @@ export function buildPricing(
     unpriced: {},
     markdownDefault,
     disagreements: [],
+    fastCoveredByBase: new Set(),
+    longCoveredByBase: new Set(),
+    fastNamedInNotes,
   }
 }
 
@@ -1493,8 +1592,9 @@ export function assemblePricing(
   const derived = priceFromModelPages(pricing, pages, defaultContexts)
   applyCursorStaffAutoRate(pricing)
   if (catalog) {
-    assertRequiredPageRows(gaps, pages, pricing.costs)
-    assertSelectablePriced(catalog, pricing.costs)
+    const coverage = { fast: pricing.fastCoveredByBase, long: pricing.longCoveredByBase }
+    assertRequiredPageRows(gaps, pages, pricing.costs, coverage)
+    assertSelectablePriced(catalog, pricing.costs, coverage)
   }
   return {
     costs: pricing.costs,

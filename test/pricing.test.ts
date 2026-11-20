@@ -510,6 +510,9 @@ describe("pricing", () => {
       unpriced: { default: "docs publish no rate" },
       markdownDefault: { input: 9, output: 9 },
       disagreements: [],
+      fastCoveredByBase: new Set(),
+      longCoveredByBase: new Set(),
+      fastNamedInNotes: new Set(),
     }
     applyCursorStaffAutoRate(pricing)
     expect(pricing.costs.default).toEqual(auto)
@@ -728,7 +731,7 @@ describe("pricing", () => {
     const markdown = `
 | Model | Provider | Input | Cache write | Cache read | Output | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| GPT-5.4 | OpenAI | $2.5 | - | $0.25 | $15 | |
+| GPT-5.4 | OpenAI | $2.5 | - | $0.25 | $15 | Fast mode is 15% faster with 2x pricing |
 `
     const pricing = buildPricing(markdown, { "GPT-5.4": 272_000 })
     const derived = priceFromModelPages(pricing, [{ modelId: "gpt-5.4", html }], {
@@ -771,18 +774,11 @@ describe("pricing", () => {
     ])
     const standard = { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 }
     const fast = { input: 10, output: 50, cache_read: 1, cache_write: 12.5 }
-    expect(pricing.costs["claude-opus-4-8"]).toEqual({
-      ...standard,
-      tiers: [{ tier: { type: "context", size: 300_000 }, ...standard }],
-    })
-    expect(pricing.costs["claude-opus-4-8-fast"]).toEqual({
-      ...fast,
-      tiers: [{ tier: { type: "context", size: 300_000 }, ...fast }],
-    })
-    expect(pricing.costs["claude-opus-4-7"]).toEqual({
-      ...standard,
-      tiers: [{ tier: { type: "context", size: 300_000 }, ...standard }],
-    })
+    expect(pricing.costs["claude-opus-4-8"]).toEqual(standard)
+    expect(pricing.costs["claude-opus-4-8-fast"]).toEqual(fast)
+    expect(pricing.costs["claude-opus-4-7"]).toEqual(standard)
+    expect(pricing.longCoveredByBase.has("claude-opus-4-8")).toBe(true)
+    expect(pricing.longCoveredByBase.has("claude-opus-4-7")).toBe(true)
     // The page never mentions Fast, so the markdown Fast row stays flat.
     expect(pricing.costs["claude-opus-4-7-fast"]).toEqual({
       input: 30, output: 150, cache_read: 3, cache_write: 37.5,
@@ -832,15 +828,14 @@ describe("pricing", () => {
       { modelId: "muse-spark-1.3", html: muse },
       { modelId: "grok-4.5", html: scaled },
     ])
-    expect(pricing.costs["claude-sonnet-4-6"]?.context_over_200k).toEqual({
+    expect(pricing.costs["claude-sonnet-4-6"]).toEqual({
       input: 3, output: 15, cache_read: 0.3, cache_write: 3.75,
     })
-    expect(pricing.costs["muse-spark-1.3"]?.tiers).toEqual([{
-      tier: { type: "context", size: 300_000 },
-      input: 1.25,
-      output: 4.25,
-      cache_read: 0.15,
-    }])
+    expect(pricing.costs["muse-spark-1.3"]).toEqual({
+      input: 1.25, output: 4.25, cache_read: 0.15,
+    })
+    expect(pricing.longCoveredByBase.has("claude-sonnet-4-6")).toBe(true)
+    expect(pricing.longCoveredByBase.has("muse-spark-1.3")).toBe(true)
     expect(pricing.costs["grok-4.5-fast"]).toEqual({ input: 3, output: 6, cache_read: 0.3, cache_write: 0.6 })
     expect(derived.find((price) => price.id === "claude-sonnet-4-6")?.formula).toContain(
       "Anthropic no longer applies a separate long-context multiplier for Sonnet 4.6.",
@@ -870,7 +865,7 @@ describe("pricing", () => {
         html: html(
           "GPT-5.2",
           "$1.75</td><td>-</td><td>$0.175</td><td>$14",
-          "A high reasoning effort variant (gpt-5.2-high) is available for tasks that need deeper analysis. Context window 272k. Max context 1M.",
+          "A high reasoning effort variant (gpt-5.2-high) is available for tasks that need deeper analysis. Context window 272k. Max context -.",
         ),
       },
       {
@@ -886,16 +881,38 @@ describe("pricing", () => {
         html: html(
           "Gemini 4 Carbon",
           "$2</td><td>-</td><td>$0.1</td><td>$10",
-          "From December 1, 2026, Gemini 4 Carbon is billed at $4 input, $0.20 cache read, and $20 output per million tokens. Speed Fast. Max context 1M.",
+          "From December 1, 2026, Gemini 4 Carbon is billed at $4 input, $0.20 cache read, and $20 output per million tokens. Speed Fast. Context window 200k. Max context 1M.",
         ),
       },
     ])
     expect(pricing.costs["gpt-5.2-fast"]).toBeUndefined()
-    expect(pricing.costs["gpt-5.2"]?.tiers).toBeUndefined()
-    expect(pricing.costs["gpt-5.2"]?.context_over_200k).toBeUndefined()
+    expect(pricing.costs["gpt-5.2"]).toEqual({ input: 1.75, output: 14, cache_read: 0.175 })
+    expect(pricing.fastCoveredByBase.has("gpt-5.2")).toBe(true)
+    expect(pricing.longCoveredByBase.has("gpt-5.2")).toBe(false)
     expect(pricing.costs["claude-fable-5-2-fast"]).toBeUndefined()
-    expect(pricing.costs["claude-fable-5-2"]?.tiers).toBeUndefined()
+    expect(pricing.costs["claude-fable-5-2"]).toEqual({
+      input: 8, output: 40, cache_read: 0.2, cache_write: 10,
+    })
+    expect(pricing.fastCoveredByBase.has("claude-fable-5-2")).toBe(true)
+    expect(pricing.longCoveredByBase.has("claude-fable-5-2")).toBe(true)
     expect(pricing.costs["gemini-4-carbon"]).toEqual({ input: 2, output: 10, cache_read: 0.1 })
+    expect(pricing.fastCoveredByBase.has("gemini-4-carbon")).toBe(true)
+    expect(pricing.longCoveredByBase.has("gemini-4-carbon")).toBe(true)
+    const haiku = buildPricing(`
+| Model | Provider | Input | Cache write | Cache read | Output | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| Claude Haiku 5.5 | Anthropic | $0.1 | $0.125 | $0.01 | $0.5 | |
+`)
+    priceFromModelPages(haiku, [{
+      modelId: "claude-haiku-5-5",
+      html: html(
+        "Claude Haiku 5.5",
+        "$0.1</td><td>$0.125</td><td>$0.01</td><td>$0.5",
+        "Requests above 100k input tokens bill at 5x the standard rates.",
+      ),
+    }])
+    expect(haiku.costs["claude-haiku-5-5-fast"]).toBeUndefined()
+    expect(haiku.fastCoveredByBase.has("claude-haiku-5-5")).toBe(true)
     expect(() => priceFromModelPages(buildPricing(markdown), [{
       modelId: "gpt-5.2",
       html: html(
@@ -1061,37 +1078,10 @@ describe("pricing", () => {
       if (cost.cache_write !== undefined) flat.cache_write = cost.cache_write
       return flat
     }
-    const sameRateOver200k = new Set([
-      "claude-opus-4-6",
-      "claude-sonnet-4-6",
-      "claude-sonnet-5",
-      "claude-sonnet-5-5",
-    ])
-    const sameRateTier300k = new Set([
-      "claude-opus-4-7",
-      "claude-opus-4-8",
-      "claude-opus-4-8-fast",
-      "claude-opus-5",
-      "claude-opus-5-5",
-      "claude-opus-5-5-fast",
-      "claude-opus-5-fast",
-      "muse-spark-1.3",
-      "muse-wonder-1.0",
-    ])
     for (const [id, committed] of Object.entries(CURSOR_MODEL_COSTS)) {
-      const actual = priced.costs[id]
-      const flat = flatOf(committed)
-      expect(flatOf(actual!)).toEqual(flat)
-      if (sameRateOver200k.has(id)) {
-        expect(actual?.context_over_200k).toEqual(flat)
-        expect(actual?.tiers).toBeUndefined()
-      } else if (sameRateTier300k.has(id)) {
-        expect(actual?.tiers).toEqual([{ tier: { type: "context", size: 300_000 }, ...flat }])
-        expect(actual?.context_over_200k).toBeUndefined()
-      } else {
-        expect(actual).toEqual(committed as typeof actual)
-      }
+      expect(priced.costs[id]).toEqual(committed as typeof priced.costs[string])
     }
+    expect(flatOf(priced.costs["claude-opus-4-6"]!)).toEqual(flatOf(CURSOR_MODEL_COSTS["claude-opus-4-6"]))
     const formula = (id: string) => priced.derived.find((price) => price.id === id)?.formula ?? ""
     expect(formula("claude-opus-4-6")).toContain(
       "Anthropic no longer applies a separate long-context multiplier for Opus 4.6.",
@@ -1099,45 +1089,22 @@ describe("pricing", () => {
     expect(formula("claude-opus-4-7")).toContain("Context windows up to 1M tokens use the same rates.")
     expect(formula("claude-opus-4-7-fast")).toBe("")
     expect(formula("muse-spark-1.3")).toContain("no long-context multiplier and no cache-write charge.")
-    expect(formula("claude-opus-4-8-fast")).toContain("The Fast long-context tier copies the Fast row")
-    const out = mkdtempSync(join(tmpdir(), "pricing-out-"))
-    const dest = join(out, "pricing-data.ts")
-    let refusal = ""
-    try {
-      expect(() => {
-        try {
-          loadOfflinePricing({
-            pricingFile: join(root, "pricing.md"),
-            contextFile: join(root, "context.md"),
-            pagesDir: join(root, "pages"),
-          })
-        } catch (error) {
-          refusal = error instanceof Error ? error.message : String(error)
-          throw error
-        }
-        writeFileSync(dest, "written")
-      }).toThrow(/Refusing to write/)
-      expect(refusal.split("\n").slice(1)).toEqual([
-        "claude-fable-5 long context: https://cursor.com/docs/models/claude-fable-5 has no long-context row or stated long-context price",
-        "claude-fable-5-1 long context: https://cursor.com/docs/models/claude-fable-5-1 has no long-context row or stated long-context price",
-        "claude-fable-5-2-fast: https://cursor.com/docs/models/claude-fable-5-2 has no Fast row or stated Fast price",
-        "claude-fable-5-2 long context: https://cursor.com/docs/models/claude-fable-5-2 has no long-context row or stated long-context price",
-        "gemini-4-argon long context: https://cursor.com/docs/models/gemini-4-argon has no long-context row or stated long-context price",
-        "gemini-4-carbon long context: https://cursor.com/docs/models/gemini-4-carbon has no long-context row or stated long-context price",
-        "gemini-4-hydrogen long context: https://cursor.com/docs/models/gemini-4-hydrogen has no long-context row or stated long-context price",
-        "gemini-4-neon long context: https://cursor.com/docs/models/gemini-4-neon has no long-context row or stated long-context price",
-        "gpt-5.2-fast: https://cursor.com/docs/models/gpt-5-2 has no Fast row or stated Fast price",
-        "gpt-5.3-codex-fast: https://cursor.com/docs/models/gpt-5-3-codex has no Fast row or stated Fast price",
-      ])
-      expect(refusal).not.toMatch(/gpt-5\.5/)
-      expect(refusal).not.toMatch(/gpt-5\.4/)
-      expect(refusal).not.toMatch(/claude-opus-/)
-      expect(refusal).not.toMatch(/claude-sonnet-/)
-      expect(refusal).not.toMatch(/muse-/)
-      expect(existsSync(dest)).toBe(false)
-    } finally {
-      rmSync(out, { recursive: true, force: true })
-    }
+    expect(formula("claude-opus-4-8-fast")).toContain("The Fast row's published rate applies above that threshold")
+    expect(formula("claude-fable-5")).toContain("That rate applies across the whole window")
+    expect(formula("gemini-4-carbon")).toContain("Context window 200k. Max context 1M")
+    expect(formula("gemini-4-carbon")).not.toContain("December 1, 2026")
+    expect(formula("gpt-5.2-fast")).toContain("does not name a Fast mode")
+    expect(formula("gpt-5.3-codex-fast")).toContain("does not name a Fast mode")
+    expect(formula("claude-fable-5-2-fast")).toContain("does not name a Fast mode")
+    expect(priced.costs["gpt-5.2-fast"]).toBeUndefined()
+    expect(priced.costs["claude-fable-5-2-fast"]).toBeUndefined()
+    const offline = loadOfflinePricing({
+      pricingFile: join(root, "pricing.md"),
+      contextFile: join(root, "context.md"),
+      pagesDir: join(root, "pages"),
+    })
+    expect(offline.costs).toEqual(priced.costs)
+    expect(takeNetworkAttempts()).toEqual([])
     expect(() => loadOfflinePricing({
       pricingFile: join(root, "pricing.md"),
       contextFile: join(root, "context.md"),
@@ -1172,7 +1139,8 @@ describe("pricing", () => {
 <table>
 <tr><th>Name</th><th>Input</th><th>Cache write</th><th>Cache read</th><th>Output</th></tr>
 <tr><td>GPT-5.5</td><td>$5</td><td>-</td><td>$0.5</td><td>$30</td></tr>
-</table>`
+</table>
+<p>Fast mode is available at higher rates.</p>`
     const context = readFileSync(join(import.meta.dir, "fixtures", "pricing-offline", "context.md"), "utf8")
     const dir = mkdtempSync(join(tmpdir(), "pricing-out-"))
     const dest = join(dir, "pricing-data.ts")
