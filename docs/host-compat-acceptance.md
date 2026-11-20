@@ -34,6 +34,11 @@ operator's store. Enable provider debug logs for each run.
 5. Switch credentials during discovery and publication. Only the current
    attempt may publish; dispose a setup while discovery is pending and verify
    no later reload comes from it. Use deterministic fixtures for these races.
+6. Seed a catalog just before its 24-hour expiry. After expiry, create a
+   session without sending a prompt. Verify a newly discovered model appears
+   in `model.list` without remounting the Location. Repeat with a failed
+   discovery and a successful HTTP response with an empty catalog. Verify
+   the last good catalog stays visible and its cache file is preserved.
 
 ## OpenCode 2.x foreign compaction
 

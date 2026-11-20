@@ -49,7 +49,7 @@ import { hostPlansDir, opencode2PlanDir, setHostCacheDirOverride, setNativePlans
 import { hostSkillFiles, resetHostSkillFilesForTests } from "../src/context/skills.js"
 import { readCache, writeCache } from "../src/models.js"
 import { resetClientVersionCache } from "../src/protocol/client-version.js"
-import { MODEL_CACHE_SCHEMA_VERSION } from "../src/shared.js"
+import { MODEL_CACHE_SCHEMA_VERSION, MODEL_CACHE_TTL_MS } from "../src/shared.js"
 import {
   getActiveCursorMode,
   resetActiveCursorModesForTests,
@@ -103,7 +103,7 @@ function jwtExpiringIn(seconds: number): string {
 }
 
 /** Run `body` with `fetch` answered by `respond`. */
-async function withFetch<T>(respond: (url: string) => Response, body: () => Promise<T>): Promise<T> {
+async function withFetch<T>(respond: (url: string) => Response | Promise<Response>, body: () => Promise<T>): Promise<T> {
   const realFetch = globalThis.fetch
   globalThis.fetch = (async (input: RequestInfo | URL) => respond(String(input))) as unknown as typeof fetch
   try {
@@ -937,6 +937,25 @@ function fakeEventBus() {
 }
 
 describe("opencode2 setup", () => {
+  const connectedContext = () => {
+    const host = fakeContext()
+    host.ctx.integration.connection.active = async () => ({ type: "credential", id: "account", label: "Cursor" })
+    host.ctx.integration.connection.resolve = async () => ({ type: "key", key: "test.account.jwt" })
+    return host
+  }
+  const deferred = () => {
+    let release!: () => void
+    const promise = new Promise<void>((resolve) => { release = resolve })
+    return { promise, release }
+  }
+  const until = async (ready: () => boolean | Promise<boolean>) => {
+    for (let i = 0; i < 200; i++) {
+      if (await ready()) return
+      await Bun.sleep(5)
+    }
+    expect(await ready()).toBe(true)
+  }
+
   beforeEach(() => {
     resetHostAgentModeSwitchForTests()
     resetActiveCursorModesForTests()
@@ -1579,24 +1598,6 @@ describe("opencode2 setup", () => {
     const modelResponse = (id = "ready-model") => Response.json({ models: [{
       name: id, client_display_name: id, supports_agent: true, variants: [],
     }] })
-    const connectedContext = () => {
-      const host = fakeContext()
-      host.ctx.integration.connection.active = async () => ({ type: "credential", id: "account", label: "Cursor" })
-      host.ctx.integration.connection.resolve = async () => ({ type: "key", key: "test.account.jwt" })
-      return host
-    }
-    const deferred = () => {
-      let release!: () => void
-      const promise = new Promise<void>((resolve) => { release = resolve })
-      return { promise, release }
-    }
-    const until = async (ready: () => boolean | Promise<boolean>) => {
-      for (let i = 0; i < 200; i++) {
-        if (await ready()) return
-        await Bun.sleep(5)
-      }
-      expect(await ready()).toBe(true)
-    }
     beforeEach(() => {
       cacheDir = mkdtempSync(join(tmpdir(), "cursor-model-readiness-"))
       setHostCacheDirOverride(cacheDir)
@@ -1868,6 +1869,226 @@ describe("opencode2 setup", () => {
       expect(reloads.length).toBe(count)
       expect(inventory.models.has("cursor/ready-model")).toBe(false)
     })
+  })
+
+  describe("stale catalog recheck", () => {
+    const modelResponse = () => Response.json({ models: [{
+      name: "new-model",
+      client_display_name: "New Model",
+      supports_agent: true,
+      variants: [{ display_name: "Max", parameter_values: [{ id: "effort", value: "max" }] }],
+    }] })
+    const activity = { type: "session.created", data: { sessionID: "catalog-session" } }
+    const cachedKey = `cursor/${baseModel.id}`
+    const seedCache = (cacheDir: string, model: ModelInfo, fetchedAt: number) =>
+      writeCache(cacheDir, { models: [model], fetchedAt, schemaVersion: MODEL_CACHE_SCHEMA_VERSION })
+    const withCatalog = (
+      availableModels: () => Response | Promise<Response>,
+      body: (fixture: ReturnType<typeof connectedContext> & {
+        cacheDir: string
+        bus: ReturnType<typeof fakeEventBus>
+        expiresAt: number
+      }) => Promise<void>,
+      expiredAtStartup = false,
+    ) => withTempHostCache(async (cacheDir) => {
+      const start = Date.now()
+      const expiresAt = expiredAtStartup ? start : start + 3_600_000
+      await seedCache(cacheDir, baseModel, expiresAt - MODEL_CACHE_TTL_MS)
+      const bus = fakeEventBus()
+      const host = connectedContext()
+      host.ctx.event.subscribe = bus.subscribe
+      setSystemTime(new Date(start))
+      try {
+        await withFetch((url) => url.endsWith("/AvailableModels") ? availableModels() : Response.json({}), async () => {
+          const cleanup = await setupPlugin(host.ctx)
+          try {
+            // Wait for both the cache seed and the post-activation attempt.
+            await until(() => host.reloads.length === 2)
+            expect(host.inventory.models.has(cachedKey)).toBe(true)
+            await body({ ...host, cacheDir, bus, expiresAt })
+          } finally { await cleanup() }
+        })
+      } finally { setSystemTime() }
+    })
+
+    test("one in-place refresh serves simultaneous activity at the original expiry and updates alias lookup", async () => {
+      const discovery = deferred()
+      let requests = 0
+      await withCatalog(async () => {
+        requests++
+        await discovery.promise
+        return modelResponse()
+      }, async ({ bus, cacheDir, expiresAt, hooks, inventory, reloads }) => {
+        try {
+          setSystemTime(new Date(expiresAt - 1))
+          await bus.publish(activity)
+          expect(requests).toBe(0)
+
+          setSystemTime(new Date(expiresAt))
+          // A fresh write to the shared cache does not belong to this setup.
+          await seedCache(cacheDir, { ...baseModel, id: "other-account" }, Date.now())
+          await Promise.all([
+            bus.publish(activity),
+            bus.publish({ type: "message.updated", data: activity.data }),
+            bus.publish({ type: "session.updated", data: activity.data }),
+          ])
+          await until(() => requests === 1)
+          expect(reloads).toHaveLength(2)
+          discovery.release()
+          await until(() => inventory.models.has("cursor/new-model"))
+          expect(inventory.models.has("cursor/other-account")).toBe(false)
+          expect(inventory.models.get("cursor/new-model")?.variants.map(({ id }) => id)).toEqual(["Max"])
+          const selection = { sessionID: activity.data.sessionID, agent: "build", kind: "primary",
+            model: { providerID: "cursor", id: "new-model", variant: "max" } }
+          await hooks.get("session.experimental.model.resolve")!(selection)
+          expect(selection.model.variant).toBe("Max")
+
+          await bus.publish(activity)
+          expect(requests).toBe(1)
+          expect(reloads).toHaveLength(3)
+        } finally { discovery.release() }
+      })
+    })
+
+    test("failed and empty rechecks retain inventory and the cache file until recovery", async () => {
+      let requests = 0
+      await withCatalog(() => {
+        if (++requests === 1) return new Response("unavailable", { status: 503 })
+        if (requests === 2) return Response.json({ models: [] })
+        return modelResponse()
+      }, async ({ bus, cacheDir, expiresAt, inventory, reloads }) => {
+        const previous = await readCache(cacheDir)
+        expect(previous?.models.map(({ id }) => id)).toEqual([baseModel.id])
+        setSystemTime(new Date(expiresAt))
+        await bus.publish(activity)
+        await until(() => requests === 1)
+        setSystemTime(new Date(expiresAt + 59_999))
+        await bus.publish(activity)
+        expect(requests).toBe(1)
+        expect(inventory.models.has(cachedKey)).toBe(true)
+        expect(reloads).toHaveLength(2)
+
+        setSystemTime(new Date(expiresAt + 60_000))
+        await bus.publish(activity)
+        await until(() => requests === 2)
+        setSystemTime(new Date(expiresAt + 179_999))
+        await bus.publish(activity)
+        expect(requests).toBe(2)
+        expect(inventory.models.has(cachedKey)).toBe(true)
+        expect(reloads).toHaveLength(2)
+        expect(await readCache(cacheDir)).toEqual(previous)
+
+        setSystemTime(new Date(expiresAt + 180_000))
+        await bus.publish(activity)
+        await until(() => inventory.models.has("cursor/new-model"))
+        expect(requests).toBe(3)
+        expect(reloads).toHaveLength(3)
+        expect((await readCache(cacheDir))?.models.map(({ id }) => id)).toEqual(["new-model"])
+      })
+    })
+
+    test("a turn rechecks the expired catalog when the event stream has closed", async () => {
+      await withTempHostCache(async (cacheDir) => {
+        const start = Date.now()
+        const expiresAt = start + 3_600_000
+        await seedCache(cacheDir, baseModel, expiresAt - MODEL_CACHE_TTL_MS)
+        const { ctx, hooks, inventory, reloads } = connectedContext()
+        const streamEnded = deferred()
+        ctx.event.subscribe = async function* () { streamEnded.release() }
+        let requests = 0
+        await withFetch((url) => {
+          if (!url.endsWith("/AvailableModels")) return Response.json({})
+          requests++
+          return modelResponse()
+        }, async () => {
+          setSystemTime(new Date(start))
+          const cleanup = await setupPlugin(ctx)
+          try {
+            await streamEnded.promise
+            await until(() => reloads.length === 2)
+            const turn = hooks.get("session.context")!
+            const event = { sessionID: "catalog-session", agent: "build", model: { providerID: "openai" } }
+            await turn(event)
+            expect(requests).toBe(0)
+            setSystemTime(new Date(expiresAt))
+            await turn(event)
+            await until(() => inventory.models.has("cursor/new-model"))
+            expect(requests).toBe(1)
+          } finally {
+            await cleanup()
+            setSystemTime()
+          }
+        })
+      })
+    })
+
+    test("a missing credential backs off, but a credential switch retries immediately", async () => {
+      let requests = 0
+      await withCatalog(() => { requests++; return modelResponse() }, async ({ bus, ctx, expiresAt, inventory }) => {
+        const connection = ctx.integration.connection.active
+        let lookups = 0
+        ctx.integration.connection.active = async () => { lookups++; return undefined }
+        setSystemTime(new Date(expiresAt))
+        await bus.publish(activity)
+        await until(() => lookups === 1)
+        await bus.publish(activity)
+        expect(lookups).toBe(1)
+        expect(requests).toBe(0)
+        expect(inventory.models.has(cachedKey)).toBe(true)
+
+        ctx.integration.connection.active = connection
+        await bus.publish({ type: "credential.switched", data: { integrationID: "cursor" } })
+        await until(() => inventory.models.has("cursor/new-model"))
+        expect(requests).toBe(1)
+      })
+    })
+
+    test("an expired startup fallback retains its age and backs off", async () => {
+      let requests = 0
+      await withCatalog(() => ++requests === 1 ? new Response("unavailable", { status: 503 }) : modelResponse(),
+        async ({ bus, expiresAt, inventory, reloads }) => {
+          await bus.publish(activity)
+          expect(requests).toBe(1)
+          expect(reloads).toHaveLength(2)
+          setSystemTime(new Date(expiresAt + 60_000))
+          await bus.publish(activity)
+          await until(() => inventory.models.has("cursor/new-model"))
+          expect(requests).toBe(2)
+        }, true)
+    })
+
+    test("a readiness timeout backs off and a late credential cannot publish", async () => {
+      let requests = 0
+      await withCatalog(() => { requests++; return modelResponse() }, async ({ bus, ctx, expiresAt, inventory, reloads }) => {
+        const credential = deferred()
+        const resolve = ctx.integration.connection.resolve
+        let resolutions = 0
+        ctx.integration.connection.resolve = async () => {
+          if (++resolutions === 1) await credential.promise
+          return resolve()
+        }
+        try {
+          setSystemTime(new Date(expiresAt))
+          await bus.publish(activity)
+          await until(() => resolutions === 1)
+          // Stall before fetch so only the 10s readiness deadline can fire.
+          await Bun.sleep(10_100)
+          await bus.publish(activity)
+          await bus.publish(activity)
+          expect(resolutions).toBe(1)
+          credential.release()
+          await bus.publish(activity)
+          expect(requests).toBe(0)
+          expect(reloads).toHaveLength(2)
+          expect(inventory.models.has(cachedKey)).toBe(true)
+
+          setSystemTime(new Date(expiresAt + 60_000))
+          await bus.publish(activity)
+          await until(() => inventory.models.has("cursor/new-model"))
+          expect(requests).toBe(1)
+        } finally { credential.release() }
+      })
+    }, 20_000)
   })
 
   test("credential updates replace a fresh cache with the selected account's inventory", async () => {

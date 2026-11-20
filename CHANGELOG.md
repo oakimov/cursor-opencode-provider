@@ -25,6 +25,7 @@
 
 ### Fixed
 
+- OpenCode 2.x refreshes an expired Cursor model catalog on host activity without reloading the Location. Failed refreshes keep the last good catalog ([#194](https://github.com/oakimov/cursor-opencode-provider/issues/194), @adonm).
 - Use published Fast and long-context rates for selectable Cursor models. The pricing table takes precedence, followed by the Cursor model page and the provider's API list rate for supported gaps. OpenCode 2.x displays the context tiers. OpenCode 1.19.6 shows the flat model rate and uses the applicable tier when recording a step's cost. Auto stays unpriced because billing can vary by route and plan. ([#199](https://github.com/oakimov/cursor-opencode-provider/pull/199))
 - Apply Gemini 3.1 Pro's published Standard tier above 200k prompt tokens, even though Cursor serves it as one model entry.
 - Offline pricing generation uses saved markdown and model pages, plus provider inputs where needed. The same saved inputs reproduce the generated file regardless of local paths. Generation rejects missing Fast and long-context rates before writing.
