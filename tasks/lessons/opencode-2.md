@@ -70,8 +70,16 @@ Operator setup: [OpenCode 2.x](../../docs/opencode-2.md).
   `test/errors.test.ts`, `test/run-error-host.test.ts`).
 - **A new plugin header does not prove a new SDK.** Pin the intended binary,
   isolate config, use the 2.1.4 `plugins` configuration key and a local wrapper
-  directory with an index entry, set the provider entry before daemon start,
-  and restart after rebuilding ([local setup](../../docs/opencode-2.md#from-a-local-clone-cursor_opencode2_dev_entry)).
+  directory with an index entry, check the `package` that `provider.list`
+  publishes, and restart after rebuilding ([local setup](../../docs/opencode-2.md#from-a-local-clone)).
+  A local build published the npm package unless an entry was exported before
+  daemon start, so any path that skipped our `sdk` hook ran the published
+  bundle against the local plugin (#185). Publish a verified local build's own
+  `dist/index.js` and keep registry installs on the package name. Find the
+  manifest from the loaded catalog. Starting from a symlinked SDK entry can
+  verify a different build's manifest. Check conditional exports in their
+  declared order so an earlier default cannot be mistaken for a later import
+  (`resolveAiSdkPackageSpec`, `test/opencode2-aisdk-package.test.ts`).
 
 ## Catalog and permissions
 
