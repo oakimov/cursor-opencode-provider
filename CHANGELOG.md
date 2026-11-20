@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- OpenCode 2.x refreshes an expired Cursor model catalog on host activity without reloading the Location. Failed refreshes keep the last good catalog ([#194](https://github.com/oakimov/cursor-opencode-provider/issues/194), @adonm).
 - GPT-5.4, GPT-5.5, and GPT-5.6 Luna, Sol, and Terra include Cursor's published long-context rates. Above 200k tokens, input, cache read, and cache write are twice the standard rate.
 - Published review summaries no longer include the local publication plan. A retained preview that still contains that plan posts with the plan removed and its approved bytes unchanged. Planned replies and thread resolutions stay in the `review-publish.py show` report and are not part of the posted review ([#196](https://github.com/oakimov/cursor-opencode-provider/pull/196)).
 - Isolated reviews now exercise short effort alias selection, quarantined snapshot recovery and corrupt model-cache replacement. Incomplete contract output and newly failing fixtures block the live check ([#188](https://github.com/oakimov/cursor-opencode-provider/pull/188)).

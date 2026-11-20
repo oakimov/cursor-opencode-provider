@@ -75,6 +75,14 @@ Operator setup: [OpenCode 2.x](../../docs/opencode-2.md).
 
 ## Catalog and permissions
 
+- **A loaded catalog is not a fresh one.** The `modelsLoaded` latch let
+  long-lived Locations serve the same models past the cache's 24-hour TTL
+  (#194). Recheck the published snapshot's original `fetchedAt` on activity
+  and publish through `provider.reload()`. Don't reread the shared cache to
+  timestamp the result: another credential may have written to it since.
+  Retain the last good catalog and back off failures, including readiness
+  timeouts outside the discovery loop. Credential switches clear the backoff
+  (`discoverModelCache`, `test/plugin-opencode2.test.ts`, stale catalog recheck).
 - **Name aliases from the catalog's own tier.** The smallest explicit context
   can differ from the declared base. Count omitted context with that base
   when checking ambiguity. Conflicting effort fields have no alias, regardless

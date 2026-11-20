@@ -5,6 +5,7 @@ import path from "node:path"
 import {
   mapAvailableModelsResponse,
   discoverModels,
+  discoverModelCache,
   isCacheFresh,
   cacheFilePath,
   normalizeModelCache,
@@ -1386,6 +1387,80 @@ describe("model cache integrity", () => {
     await expect(writeCache(directory, invalid)).rejects.toThrow(/invalid Cursor model cache/)
     expect(await readCache(directory)).toEqual(cache)
     expect((await fs.readdir(directory)).filter((name) => name.includes(".tmp"))).toEqual([])
+  })
+
+  it("returns a value snapshot: an immediately succeeding write does not change its models or age", async () => {
+    const directory = await tempDir()
+    await writeCache(directory, testCache("old-account"))
+    using server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({
+          models: [{ name: "new-account", client_display_name: "New Account", supports_agent: true, variants: [] }],
+        })
+      },
+    })
+    const snapshot = await discoverModelCache("new-account-token", directory, {
+      baseURL: server.url.origin,
+      forceRefresh: true,
+    })
+    expect(snapshot.models.map((model) => model.id)).toEqual(["new-account"])
+    expect(snapshot.schemaVersion).toBe(MODEL_CACHE_SCHEMA_VERSION)
+    expect(normalizeModelCache(snapshot)).toEqual(await readCache(directory))
+
+    const other = { ...testCache("other-process"), fetchedAt: Date.now() + 60_000 }
+    await writeCache(directory, other)
+    expect(snapshot.models.map((model) => model.id)).toEqual(["new-account"])
+    expect(snapshot.fetchedAt).not.toBe(other.fetchedAt)
+    expect(isCacheFresh(snapshot)).toBe(true)
+    expect(await readCache(directory)).toEqual(other)
+  })
+
+  it("serves the exact stale entry it read when a fetch fails", async () => {
+    const directory = await tempDir()
+    const stale = { ...testCache("stale-account"), fetchedAt: Date.now() - 30 * 3_600_000 }
+    const other = testCache("other-account")
+    await writeCache(directory, stale)
+    using server = Bun.serve({
+      port: 0,
+      async fetch() {
+        await writeCache(directory, other)
+        return new Response("unavailable", { status: 503 })
+      },
+    })
+    const snapshot = await discoverModelCache("token", directory, { baseURL: server.url.origin })
+    expect(snapshot).toEqual(stale)
+    expect(isCacheFresh(snapshot)).toBe(false)
+    expect(await readCache(directory)).toEqual(other)
+  })
+
+  it("returns the fresh cache entry before its background refresh completes", async () => {
+    const directory = await tempDir()
+    const cached = testCache("cached-account")
+    await writeCache(directory, cached)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    using server = Bun.serve({
+      port: 0,
+      async fetch() {
+        await gate
+        return Response.json({ models: [{ name: "replacement" }] })
+      },
+    })
+
+    try {
+      const snapshot = await discoverModelCache("token", directory, {
+        baseURL: server.url.origin,
+        timeoutMs: 1000,
+      })
+      expect(snapshot).toEqual(cached)
+      const background = refreshModelCache(directory, async () => {
+        throw new Error("expected to join the background refresh")
+      })
+      release()
+      expect((await background).map((model) => model.id)).toEqual(["replacement"])
+      expect(snapshot).toEqual(cached)
+    } finally { release() }
   })
 
   it("coalesces concurrent refreshes for the same cache directory", async () => {

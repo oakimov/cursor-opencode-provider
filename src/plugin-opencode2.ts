@@ -7,7 +7,13 @@ import {
 } from "./shared.js"
 import { createSdk, cursorApiBaseURL, cursorGetServerConfigTelemetryEnabled, isCursorPackage } from "./plugin-core.js"
 import { opencode2PlanDir, opencodeGlobalCacheDir, setNativePlansDir } from "./context/paths.js"
-import { discoverModels, isCacheFresh, readCache, type ModelInfo } from "./models.js"
+import {
+  discoverModelCache,
+  isCacheFresh,
+  readCache,
+  type ModelCache,
+  type ModelInfo,
+} from "./models.js"
 import { resolveAgentUrl } from "./agent-url.js"
 import { applyHostPromptEvent, applyHostToolEvent, sessionActivity } from "./activity.js"
 import { notifyHostInterrupt } from "./host-interrupt.js"
@@ -96,11 +102,11 @@ async function loadModels(
   cacheDir: string,
   accessToken: string,
   forceRefresh = false,
-): Promise<ModelInfo[]> {
-  const cached = await readCache(cacheDir)
-  if (!forceRefresh && cached?.models.length && isCacheFresh(cached)) return cached.models
+): Promise<ModelCache> {
+  const cached = forceRefresh ? null : await readCache(cacheDir)
+  if (cached?.models.length && isCacheFresh(cached)) return cached
 
-  return discoverModels(accessToken, cacheDir, {
+  return discoverModelCache(accessToken, cacheDir, {
     baseURL: cursorApiBaseURL(),
     // An empty response can be cached; it must not pin later retries to [].
     forceRefresh: forceRefresh || cached?.models.length === 0,
@@ -629,41 +635,59 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
     )
 
     // ── Model discovery ────────────────────────────────────────
-    let modelsLoaded = false
     let credentialGeneration = 0
     let loadedCredentialGeneration = 0
+    // Keep the published catalog's original age, even when it came from disk.
+    let loadedCatalog: ModelCache | undefined
+    let refreshRetryAt = 0
+    let refreshRetryDelayMs = 0
     let ensureInflight: Promise<void> | undefined
+    const resetRefreshBackoff = () => {
+      refreshRetryAt = 0
+      refreshRetryDelayMs = 0
+    }
+    const noteRefreshFailure = () => {
+      if (!loadedCatalog) return
+      refreshRetryDelayMs = Math.min(
+        Math.max(refreshRetryDelayMs * 2, MODEL_REFRESH_RETRY_MIN_MS),
+        MODEL_REFRESH_RETRY_MAX_MS,
+      )
+      refreshRetryAt = Date.now() + refreshRetryDelayMs
+    }
     const ensureModels = (timeoutMs = MODEL_READINESS_TIMEOUT_MS): Promise<void> => {
       if (disposed) return Promise.resolve()
-      if (modelsLoaded && loadedCredentialGeneration === credentialGeneration) {
-        return Promise.resolve()
-      }
+      if (loadedCatalog && (isCacheFresh(loadedCatalog) || Date.now() < refreshRetryAt)) return Promise.resolve()
       // If credentials change during an existing discovery, wait for that
       // attempt and immediately run again. The generation check prevents the
       // older attempt from suppressing the account-scoped refresh.
       if (ensureInflight) return ensureInflight
 
+      let attemptGeneration = credentialGeneration
       ensureInflight = withAbortDeadline(timeoutMs, modelReadinessTimeout, async (signal) => {
         while (!disposed && !signal.aborted) {
-          const attemptGeneration = credentialGeneration
-          const current = () => !disposed && !signal.aborted && credentialGeneration === attemptGeneration
-          const forceRefresh = loadedCredentialGeneration !== attemptGeneration
+          const generation = attemptGeneration = credentialGeneration
+          const current = () => !disposed && !signal.aborted && credentialGeneration === generation
+          // Once loaded, only an authoritative response can replace the catalog:
+          // another Location may have since written to the shared cache.
+          const forceRefresh = !!loadedCatalog || loadedCredentialGeneration !== generation
           let token: string
-          let discovered: ModelInfo[]
+          let loaded: ModelCache
           try {
             // Preserve auth failures; only a missing connection is normal startup.
             token = await requireCursorAccessToken(ctx.integration)
             if (!current()) continue
-            discovered = await loadModels(cacheDir, token, forceRefresh)
+            loaded = await loadModels(cacheDir, token, forceRefresh)
           } catch (error) {
             if (!current()) continue
             if (error instanceof CursorAuthError && error.code === "no_credential") {
               trace("opencode2 models: no Cursor credential; connect Cursor first")
+              noteRefreshFailure()
               return
             }
             throw error
           }
           if (!current()) continue
+          const discovered = loaded.models
           if (!discovered.length) throw new CursorProtocolError("Cursor returned an empty model catalog", {
             code: "CURSOR_EMPTY_MODEL_CATALOG",
           })
@@ -676,8 +700,15 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
           // A newer credential event arrived while this request was in flight.
           // Keep the state dirty so the loop uses the latest token.
           if (!current()) continue
-          modelsLoaded = true
-          loadedCredentialGeneration = attemptGeneration
+          loadedCredentialGeneration = generation
+          loadedCatalog = loaded
+          if (isCacheFresh(loaded)) {
+            resetRefreshBackoff()
+          } else {
+            // Startup can fall back to an expired disk snapshot.
+            noteRefreshFailure()
+            trace(`opencode2 models: using an expired catalog count=${discovered.length}`)
+          }
           void resolveAgentUrl(token, {
             apiBaseURL: cursorApiBaseURL(),
             telemetryEnabled: cursorGetServerConfigTelemetryEnabled(),
@@ -685,6 +716,11 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
           trace(`opencode2 models: ready count=${discovered.length}`)
           return
         }
+      }).catch((error: unknown) => {
+        // The deadline rejects outside the loop; a superseded attempt must
+        // not back off discovery for the new credential.
+        if (!disposed && credentialGeneration === attemptGeneration) noteRefreshFailure()
+        throw error
       }).finally(() => { ensureInflight = undefined })
       return ensureInflight
     }
@@ -698,7 +734,7 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
     const RETRY_WINDOW_MS = 300_000
     const startedAt = Date.now()
     const retry = setInterval(() => {
-      if (modelsLoaded || Date.now() - startedAt > RETRY_WINDOW_MS) {
+      if (loadedCatalog || Date.now() - startedAt > RETRY_WINDOW_MS) {
         clearInterval(retry)
         return
       }
@@ -707,7 +743,8 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
     ;(retry as unknown as { unref?: () => void }).unref?.()
 
     const onCredentialSwitch = () => {
-      modelsLoaded = false
+      loadedCatalog = undefined
+      resetRefreshBackoff()
       credentialGeneration++
     }
 
@@ -749,6 +786,8 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
 
 const SHUTDOWN_SAVE_TIMEOUT_MS = 2_000
 const MODEL_READINESS_TIMEOUT_MS = 10_000
+const MODEL_REFRESH_RETRY_MIN_MS = 60_000
+const MODEL_REFRESH_RETRY_MAX_MS = 15 * 60_000
 
 function modelReadinessTimeout(): CursorTransportError {
   return new CursorTransportError(

@@ -646,31 +646,31 @@ export async function fetchModels(
   return mapAvailableModelsResponse(raw)
 }
 
-const refreshesByDirectory = new Map<string, Promise<ModelInfo[]>>()
+const refreshesByDirectory = new Map<string, Promise<ModelCache>>()
 
-export async function refreshModelCache(
+async function refreshModelCacheSnapshot(
   cacheDir: string,
   fetcher: () => Promise<ModelInfo[]>,
   options: { forceAfterInflight?: boolean } = {},
-): Promise<ModelInfo[]> {
+): Promise<ModelCache> {
   const key = path.resolve(cacheDir)
   const existing = refreshesByDirectory.get(key)
   if (existing) {
     if (!options.forceAfterInflight) return existing
-    // An account switch must not join a background refresh authenticated as
-    // the previous account. Wait for that write to finish, then run this
-    // caller's fetch so its account inventory is authoritative on disk.
+    // An authoritative fetch must not join a refresh authenticated as another
+    // account. Wait for that write before fetching this account's catalog.
     await existing.catch(() => {})
-    return refreshModelCache(cacheDir, fetcher, options)
+    return refreshModelCacheSnapshot(cacheDir, fetcher, options)
   }
   const refresh = (async () => {
     const models = await fetcher()
-    await writeCache(cacheDir, {
+    const snapshot: ModelCache = {
       models,
       fetchedAt: Date.now(),
       schemaVersion: MODEL_CACHE_SCHEMA_VERSION,
-    })
-    return models
+    }
+    await writeCache(cacheDir, snapshot)
+    return snapshot
   })()
   refreshesByDirectory.set(key, refresh)
   try {
@@ -680,50 +680,66 @@ export async function refreshModelCache(
   }
 }
 
+export async function refreshModelCache(
+  cacheDir: string,
+  fetcher: () => Promise<ModelInfo[]>,
+  options: { forceAfterInflight?: boolean } = {},
+): Promise<ModelInfo[]> {
+  return (await refreshModelCacheSnapshot(cacheDir, fetcher, options)).models
+}
+
+export type DiscoverModelsOptions = {
+  baseURL?: string
+  headers?: Record<string, string>
+  timeoutMs?: number
+  /** Require a response for this credential; never fall back to the shared cache. */
+  forceRefresh?: boolean
+}
+
 export async function discoverModels(
   token: string,
   cacheDir: string,
-  options: {
-    baseURL?: string
-    headers?: Record<string, string>
-    timeoutMs?: number
-    /**
-     * Bypass even a fresh cache and require an authoritative response.
-     *
-     * Model availability is account-scoped. Callers use this after a
-     * credential switch so a fresh cache produced by the previous account is
-     * never rebound to the new connection. A forced refresh rejects on fetch
-     * failure; the caller can keep the already-published inventory unchanged.
-     */
-    forceRefresh?: boolean
-  } = {},
+  options: DiscoverModelsOptions = {},
 ): Promise<ModelInfo[]> {
+  return (await discoverModelCache(token, cacheDir, options)).models
+}
+
+/**
+ * Return the snapshot this call read or wrote, including its original age
+ * when falling back to stale data. A later read may see another writer's catalog.
+ */
+export async function discoverModelCache(
+  token: string,
+  cacheDir: string,
+  options: DiscoverModelsOptions = {},
+): Promise<ModelCache> {
   const { forceRefresh = false, ...fetchOptions } = options
-  const cached = await readCache(cacheDir)
   const refresh = () =>
-    refreshModelCache(
+    refreshModelCacheSnapshot(
       cacheDir,
       () => fetchModels(token, fetchOptions),
       { forceAfterInflight: forceRefresh },
     )
 
+  if (forceRefresh) return refresh()
+  const cached = await readCache(cacheDir)
+
   // Cache is fresh → return it; refresh in background
-  if (!forceRefresh && cached && isCacheFresh(cached)) {
+  if (cached && isCacheFresh(cached)) {
     // Background refresh (fire and forget)
     void refresh()
       .catch(() => {
         /* background refresh failure is non-fatal */
       })
-    return cached.models
+    return cached
   }
 
   // Cache exists but expired → try fetch, serve stale on failure
   if (cached) {
     try {
       return await refresh()
-    } catch (error) {
-      if (forceRefresh) throw error
-      return cached.models
+    } catch {
+      return cached
     }
   }
 
