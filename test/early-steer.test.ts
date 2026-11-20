@@ -920,9 +920,16 @@ describe("a steer sent while Cursor waits inside a step", () => {
     })
   }, 30_000)
 
-  for (const mode of ["taken", "not taken", "follow-up fails", "follow-up drops", "follow-up checkpoint"] as const) {
+  for (const mode of [
+    "taken", "not taken", "follow-up fails", "follow-up drops", "follow-up checkpoint", "progress continuation off",
+  ] as const) {
     it(`continues the held Run when OpenCode adds its copy after the step's tool results (${mode})`, async () => {
       const delivered = mode === "taken"
+      // The opt-out removes only the progress nudge: a progress fragment with a
+      // steer Cursor did not take still sends that steer as the follow-up Run.
+      const progressOff = mode === "progress continuation off"
+      const savedProgress = process.env.CURSOR_PROGRESS_CONTINUATION
+      if (progressOff) process.env.CURSOR_PROGRESS_CONTINUATION = "0"
       await withModel(`tools-${mode.replaceAll(" ", "-")}`, async (model, cacheDir) => {
         const file = probeFile(cacheDir)
         const sessionKey = `ses_early_tools_${mode.replaceAll(" ", "_")}`
@@ -936,7 +943,7 @@ describe("a steer sent while Cursor waits inside a step", () => {
             if (message.exec_client_message?.read_result) {
               if (delivered) injectionState(run, injectionId, "delivered")
               run.send({ interaction_update: { tool_call_completed: { call_id: "tc-1" } } })
-              endTurn(run, delivered ? "Read it. STEERED" : "Read it.")
+              endTurn(run, delivered ? "Read it. STEERED" : progressOff ? "Checking the workspace" : "Read it.")
             } else if (message.run_request && mode === "follow-up checkpoint" && runs.indexOf(run) === 1) {
               run.send({ conversation_checkpoint_update: Uint8Array.of(10, 1, 42) })
               run.send({ interaction_update: { thinking_delta: { text: "Taking the follow-up" } } })
@@ -1004,11 +1011,14 @@ describe("a steer sent while Cursor waits inside a step", () => {
           expect(textOf(second)).toBe("Read it. STEERED")
           expect(runs).toHaveLength(1)
         } else {
-          expect(textOf(second)).toBe("Read it.\n\nSTEERED")
+          expect(textOf(second)).toBe(progressOff ? "Checking the workspace\n\nSTEERED" : "Read it.\n\nSTEERED")
           expect(runs).toHaveLength(2)
           expect(runs[1]!.received[0]!.run_request.conversation_id).toBe(runs[0]!.received[0]!.run_request.conversation_id)
           expect(userText(runs[1]!)).toBe(message.text)
         }
+      }).finally(() => {
+        if (savedProgress === undefined) delete process.env.CURSOR_PROGRESS_CONTINUATION
+        else process.env.CURSOR_PROGRESS_CONTINUATION = savedProgress
       })
     }, 30_000)
   }

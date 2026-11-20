@@ -873,7 +873,12 @@ These are failure lessons shared by both hosts, not a replacement for
   `createCursor({ cacheDir })`'s process-wide cache root set, so later files
   wrote into their removed dirs and failed tests that expected the default
   root. Wait for the writers, restore the root, then remove; `test/preload.ts`
-  fails any run that leaves an entry and lists its files. Killing only a
+  fails any run that leaves an entry and lists its files. The managed-spawn
+  adapter test added with #197 removed its root once `done` existed, while the
+  job's processes were still finishing their writes there, and often failed
+  that check on macOS; stop the processes naming the root first
+  (`stopProcessesUsing`, `runs a managed spawn` in
+  `test/shell-timeout.test.ts`). Killing only a
   background shell's marker PID leaves compound-command descendants alive;
   stop its tree and await exit (`test/background-spawn.test.ts`). A failed
   process listing or a writer surviving termination must fail cleanup, not
