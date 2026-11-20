@@ -2126,9 +2126,48 @@ describe("progress-only continuation pump", () => {
 
     expect(reopenCalls).toBe(1)
     expect(reopenSignal).toBe(abort.signal)
-    expect(parts.some((p) => p.type === "finish" && p.finishReason?.unified === "stop")).toBe(true)
+    expect(parts.filter((p) => p.type === "finish").map((p) => p.finishReason?.unified)).toEqual(["stop"])
     expect(session.closed).toBe(true)
   })
+
+  for (const value of ["0", "false", "OFF", " no "]) {
+    it(`does not reopen with CURSOR_PROGRESS_CONTINUATION=${JSON.stringify(value)} and finishes the original turn once`, async () => {
+      const saved = process.env.CURSOR_PROGRESS_CONTINUATION
+      process.env.CURSOR_PROGRESS_CONTINUATION = value
+      try {
+        const parts: any[] = []
+        const session = fakeSession([textDeltaPayload("Checking the workspace"), turnEndedPayload()], [])
+        const checkpoint = Uint8Array.of(1, 2, 3)
+        session.resumeCheckpoint = checkpoint
+        let reopenCalls = 0
+        session.reopenWithUserMessage = async () => {
+          reopenCalls++
+          session.frames = iteratorFrom([textDeltaPayload("Checking the workspace"), turnEndedPayload()])
+        }
+        const controller = {
+          enqueue(part: unknown) {
+            parts.push(part)
+          },
+          error(error: unknown) {
+            throw error
+          },
+        } as unknown as ReadableStreamDefaultController<any>
+
+        await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
+
+        expect(reopenCalls).toBe(0)
+        expect(parts.filter((p) => p.type === "text-delta").map((p) => p.delta)).toEqual(["Checking the workspace"])
+        expect(parts.filter((p) => p.type === "finish").map((p) => p.finishReason?.unified)).toEqual(["stop"])
+        expect(session.closed).toBe(true)
+        // Only a follow-up revokes the turn's checkpoint.
+        expect(session.checkpointRevoked).not.toBe(true)
+        expect(session.resumeCheckpoint).toBe(checkpoint)
+      } finally {
+        if (saved === undefined) delete process.env.CURSOR_PROGRESS_CONTINUATION
+        else process.env.CURSOR_PROGRESS_CONTINUATION = saved
+      }
+    })
+  }
 
   it("revokes the earlier checkpoint when a progress follow-up opens but drops", async () => {
     const session = fakeSession([textDeltaPayload("Checking the workspace"), turnEndedPayload()], [])
