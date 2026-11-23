@@ -76,6 +76,22 @@ export function isProgressOnlyAssistantText(text: string): boolean {
   return false
 }
 
+export const PROGRESS_CONTINUATION_ENV = "CURSOR_PROGRESS_CONTINUATION"
+
+const PROGRESS_CONTINUATION_OFF: ReadonlySet<string> = new Set(["0", "false", "off", "no"])
+
+/**
+ * The synthetic follow-up Run is on by default. `CURSOR_PROGRESS_CONTINUATION`
+ * set to `0`, `false`, `off` or `no` (any case, surrounding whitespace ignored)
+ * turns it off; any other value, including an empty one, leaves it on.
+ */
+export function progressContinuationEnabled(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+  const value = env[PROGRESS_CONTINUATION_ENV]?.trim().toLowerCase()
+  return value === undefined || !PROGRESS_CONTINUATION_OFF.has(value)
+}
+
 export function shouldContinueProgressOnlyTurn(input: {
   allowTools: boolean
   advertisedToolCount: number
@@ -83,8 +99,9 @@ export function shouldContinueProgressOnlyTurn(input: {
   emittedHostTools: number
   continuationAttempts: number
   pendingExecs: number
-}): boolean {
+}, env: Readonly<Record<string, string | undefined>> = process.env): boolean {
   return (
+    progressContinuationEnabled(env) &&
     input.allowTools &&
     input.advertisedToolCount > 0 &&
     input.pendingExecs === 0 &&

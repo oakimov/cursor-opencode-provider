@@ -164,6 +164,21 @@ describe("a test that breaks isolation", () => {
     expect({ pass: run.pass, fail: run.fail, exitCode: run.exitCode }).toEqual({ pass: 1, fail: 1, exitCode: 1 })
   }, 30_000)
 
+  it("ignores an inherited progress continuation opt-out while allowing an explicit test override", () => {
+    for (const value of ["0", "off", "1"]) {
+      const run = runFixture("progress-continuation", { ...process.env, CURSOR_PROGRESS_CONTINUATION: value })
+      expect(run.output).not.toContain("Tests left")
+      expect({ pass: run.pass, fail: run.fail, exitCode: run.exitCode }).toEqual({ pass: 3, fail: 0, exitCode: 0 })
+    }
+  }, 30_000)
+
+  it("fails a leaked progress continuation opt-out and restores the next test's default", () => {
+    const run = runFixture("progress-continuation-leak")
+    expect(run.output).toContain("left CURSOR_PROGRESS_CONTINUATION changed; restore what the test sets")
+    expect(run.output).toContain("(fail) leaves a progress continuation opt-out behind")
+    expect({ pass: run.pass, fail: run.fail, exitCode: run.exitCode }).toEqual({ pass: 1, fail: 1, exitCode: 1 })
+  }, 30_000)
+
   it("fails when it tried the network, even though the code swallowed the refusal", () => {
     const run = runFixture("network")
     expect(run.output).toContain("tried to reach the network (fetch https://192.0.2.1/models)")

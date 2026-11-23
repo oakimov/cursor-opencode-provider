@@ -27,6 +27,7 @@ import {
   shellPolicyFromMetadata,
 } from "../src/shell-timeout.js"
 import { reapBackgroundSpawn } from "./background-spawn.js"
+import { stopProcessesUsing } from "./process-cleanup.js"
 
 afterEach(() => resetCursorShellCalls())
 
@@ -1036,6 +1037,10 @@ describe("shell create adapter argv", () => {
       expect(record).toContain(`---\n${printed}\n\n---\nexit_code: 0\n`)
     } finally {
       releaseCursorShellEnv(id)
+      // `done` exists before the supervisor fills it, and the job's processes
+      // can still write into the root after that: removing it first lets them
+      // recreate files there.
+      await stopProcessesUsing(root)
       rmSync(root, { recursive: true, force: true })
     }
   }, 15_000)
