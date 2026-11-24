@@ -435,19 +435,16 @@ describe("modelInfoToConfig (context window selection)", () => {
   })
 
   it("advertises image input unless the live probe recorded text-only, not Cursor's flag", () => {
-    const [readsDespiteFlag, textDespiteFlag, unrecorded] = mapAvailableModelsResponse({ models: [
+    const [readsDespiteFlag, reprobedReads, unrecorded] = mapAvailableModelsResponse({ models: [
       { name: "composer-2.5", supports_images: false },
       { name: "kimi-k3", supports_images: true },
       { name: "unrecorded-model", supports_images: false },
     ] })
-    for (const model of [readsDespiteFlag!, unrecorded!]) {
+    for (const model of [readsDespiteFlag!, reprobedReads!, unrecorded!]) {
       const cfg = modelInfoToConfig(model)
       expect(cfg.attachment).toBe(true)
       expect(cfg.modalities).toEqual({ input: ["text", "image"], output: ["text"] })
     }
-    const textOnly = modelInfoToConfig(textDespiteFlag!)
-    expect(textOnly.attachment).toBe(false)
-    expect(textOnly.modalities).toEqual({ input: ["text"], output: ["text"] })
   })
 
   it("advertises a models.dev-parity output cap for the long-context tier", () => {

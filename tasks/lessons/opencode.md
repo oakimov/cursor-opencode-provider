@@ -792,8 +792,8 @@ These are failure lessons shared by both hosts, not a replacement for
   images for a text-only model without an error. Advertise image input unless
   the live probe record (`generate:images`) explicitly recorded `false`, never
   using Cursor's flag or a hardcoded guess — allowlisting broke newly launched
-  models (Gemini 4 Carbon/Hydrogen/Neon) until the next release, while 50 of 51
-  probed models read images
+  models (Gemini 4 Carbon/Hydrogen/Neon) until the next release, while all 51
+  probed models (including re-probed `kimi-k3`) read images
   (`test/image-input-probe.test.ts`, `test/model-selection-review.test.ts`).
   When a first probe fails only on transient capacity (`capacity_limit`) and
   blocks the release gate, models.dev may seed the record for that wire id if

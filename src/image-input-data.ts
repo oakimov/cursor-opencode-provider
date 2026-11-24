@@ -54,7 +54,7 @@ export const CURSOR_IMAGE_INPUT = {
   "grok-4.6": true,
   "grok-4.7": true,
   "kimi-k2.7-code": true,
-  "kimi-k3": false,
+  "kimi-k3": true,
   "muse-spark-1.3": true,
   "muse-wonder-1.0": true
 } as const

@@ -104,5 +104,10 @@ describe("live image-input probe", () => {
     expect(["unrecorded-model", "toString", "__proto__", ""].map((id) => cursorModelReadsImages(id))).toEqual([
       true, true, true, true,
     ])
+    const withTextOnly = { "reads-model": true, "text-only-model": false }
+    expect(cursorModelReadsImages("reads-model", withTextOnly)).toBe(true)
+    expect(cursorModelReadsImages("text-only-model", withTextOnly)).toBe(false)
+    expect(cursorModelReadsImages("unrecorded-model", withTextOnly)).toBe(true)
+    expect(cursorModelReadsImages("toString", withTextOnly)).toBe(true)
   })
 })

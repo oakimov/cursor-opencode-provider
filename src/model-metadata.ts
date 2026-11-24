@@ -19,9 +19,9 @@ export function getDocumentedCursorModelContext(
  * models default to image-capable, matching Cursor CLI / IDE behavior.
  * Cursor's AvailableModels flag is not used.
  */
-export function cursorModelReadsImages(modelId: string): boolean {
-  return !(
-    Object.hasOwn(CURSOR_IMAGE_INPUT, modelId) &&
-    (CURSOR_IMAGE_INPUT as Record<string, boolean>)[modelId] === false
-  )
+export function cursorModelReadsImages(
+  modelId: string,
+  record: Readonly<Record<string, boolean>> = CURSOR_IMAGE_INPUT,
+): boolean {
+  return !(Object.hasOwn(record, modelId) && record[modelId] === false)
 }
