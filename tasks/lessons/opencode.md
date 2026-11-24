@@ -788,9 +788,12 @@ These are failure lessons shared by both hosts, not a replacement for
   before config consumes it; live negative capabilities outrank docs
   (`test/model-metadata.test.ts`). Capability claims need our own evidence:
   `supports_images` marked Grok 4.7, Composer 2.5 and Kimi K2.7 Code text-only
-  though their Runs read images, Cursor CLI ignores it, and Cursor drops images
-  for a text-only model without an error. Advertise images only from the live
-  probe record (`generate:images`), never Cursor's flag or a hardcoded guess
+  though their Runs read images, Cursor CLI and IDE ignore it, and Cursor drops
+  images for a text-only model without an error. Advertise image input unless
+  the live probe record (`generate:images`) explicitly recorded `false`, never
+  using Cursor's flag or a hardcoded guess — allowlisting broke newly launched
+  models (Gemini 4 Carbon/Hydrogen/Neon) until the next release, while 50 of 51
+  probed models read images
   (`test/image-input-probe.test.ts`, `test/model-selection-review.test.ts`).
   When a first probe fails only on transient capacity (`capacity_limit`) and
   blocks the release gate, models.dev may seed the record for that wire id if

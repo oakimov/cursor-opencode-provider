@@ -14,9 +14,14 @@ export function getDocumentedCursorModelContext(
 }
 
 /**
- * Image input only where our live probe saw the model's Run read an image
- * (`bun run generate:images`). Cursor's AvailableModels flag is not used.
+ * Image input is advertised unless our live probe (`bun run generate:images`)
+ * explicitly recorded that the model's Run does not read images. Unrecorded
+ * models default to image-capable, matching Cursor CLI / IDE behavior.
+ * Cursor's AvailableModels flag is not used.
  */
 export function cursorModelReadsImages(modelId: string): boolean {
-  return (CURSOR_IMAGE_INPUT as Record<string, boolean>)[modelId] === true
+  return !(
+    Object.hasOwn(CURSOR_IMAGE_INPUT, modelId) &&
+    (CURSOR_IMAGE_INPUT as Record<string, boolean>)[modelId] === false
+  )
 }

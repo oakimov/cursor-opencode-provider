@@ -98,11 +98,11 @@ describe("live image-input probe", () => {
     )
   })
 
-  it("advertises image input only for a model recorded as reading images", () => {
+  it("advertises image input unless a model is explicitly recorded as text-only", () => {
     const record = CURSOR_IMAGE_INPUT as Record<string, boolean>
     expect(Object.fromEntries(Object.keys(record).map((id) => [id, cursorModelReadsImages(id)]))).toEqual(record)
     expect(["unrecorded-model", "toString", "__proto__", ""].map((id) => cursorModelReadsImages(id))).toEqual([
-      false, false, false, false,
+      true, true, true, true,
     ])
   })
 })
