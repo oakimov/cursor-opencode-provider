@@ -11,6 +11,7 @@
 ### Added
 
 - Gemini 4 Carbon, Hydrogen, and Neon token prices and context windows from Cursor's model docs (`gemini-4-carbon`, `gemini-4-hydrogen`, `gemini-4-neon`).
+- Advertise image input for Gemini 4 Carbon, Hydrogen, and Neon (`gemini-4-carbon`, `gemini-4-hydrogen`, `gemini-4-neon`) from live image-probe results.
 - `CURSOR_PROGRESS_CONTINUATION=0` (or `false`, `off`, `no`) turns off the follow-up Run opened when a tool-enabled turn ends with a short progress fragment. The turn then ends with that fragment. The follow-up stays on by default ([#186](https://github.com/oakimov/cursor-opencode-provider/issues/186), @adonm).
 - `CURSOR_PROVIDER_CACHE_TTL_MS` sets how long a persisted conversation snapshot stays eligible for reuse (24 h by default). Abandoned writer temps still expire after 24 h ([#184](https://github.com/oakimov/cursor-opencode-provider/pull/184), @adonm).
 - Native OpenCode 2.x session runs accept short effort aliases such as `#max` and `#high-fast` when they identify one choice. The picker keeps one entry under its original display label. ACP effort selectors use that label ([#183](https://github.com/oakimov/cursor-opencode-provider/pull/183), @adonm).
