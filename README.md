@@ -206,20 +206,6 @@ When a model has a published Fast rate, the plugin exposes a separate OpenCode e
 
 Combinations with long context use `<id>-1m-fast` where Cursor offers them. If you saved a Fast variant under a base model that now has a separate Fast entry, select the new model and pick its effort again.
 
-#### Gemini 4 and Kimi K3 prices
-
-Rates are in USD per million tokens and apply to the extended context options. [Cursor's pricing table](https://cursor.com/docs/models-and-pricing.md)
-
-| Model | Input | Cache read | Output |
-| --- | ---: | ---: | ---: |
-| Gemini 4 Carbon through November 30, 2026 | $2 | $0.10 | $10 |
-| Gemini 4 Carbon from December 1, 2026 | $4 | $0.20 | $20 |
-| Gemini 4 Hydrogen | $1.50 | $0.075 | $7.50 |
-| Gemini 4 Neon | $3 | $0.15 | $15 |
-| Kimi K3 | $3 | $0.30 | $15 |
-
-The bundled catalog uses the current pricing-table row. It needs a pricing refresh to reflect Carbon's December rate.
-
 #### Context limit sources
 
 The provider resolves each catalog context limit in this order:
@@ -243,9 +229,13 @@ OpenCode uses family metadata to select a small model for session titles (2.x: `
 
 #### Image input
 
-The provider advertises `text` + `image` input after a live Cursor probe confirms the model can read an image. This includes Gemini 4 Carbon, Hydrogen, Neon, and Kimi K3. Unprobed models default to text-only. Model output remains text. This applies to the classic plugin, the 1.18 v2 plugin, and OpenCode 2.x.
+OpenCode 1.x and 2.x advertise image input for models with a positive live
+Cursor probe in [`src/image-input-data.ts`](src/image-input-data.ts). Other
+models appear as text-only. Model output remains text.
 
-Cursor's `AvailableModels.supportsImages` has reported false negatives (Grok 4.7, Composer 2.5, Kimi K2.7 Code) and historically reported image support for Kimi K3 when its Run dropped the image without an error. `bun run generate:images` tests each model when it first appears, recording in `src/image-input-data.ts` whether a short Run transcribes the text drawn in a probe image. Retest a recorded result with `-- --model <id>` or `-- --all`. Use `-- --prune` to remove results for models your account no longer lists. The provider sends Cursor every image the host passes.
+Run `bun run generate:images` to probe newly listed models and
+`bun run generate:images:check` to check coverage for your account's catalog.
+Retest a recorded model with `bun run generate:images -- --model <id>`.
 
 OpenCode image file parts are decoded from bytes, base64/data URLs, local file URLs, or HTTP(S) URLs and sent through Cursor's `UserMessage.selected_context.selected_images` field. Fresh and rebased Runs normalize the same image formats as held-Run continuations, including AI SDK `image-data` / `image-url` and OpenCode attachment URLs. A Run that resumes a checkpoint skips the history images that exact checkpoint is known to hold (by content hash, recorded when a turn ends on a checkpoint of its own and kept in the restart snapshot); a Run without a checkpoint sends them all. Earlier images that no longer fit the 20 MiB image budget are left out with a note, so a text follow-up still works; this turn's own attachments past the budget fail the request.
 
