@@ -349,10 +349,10 @@ The **1.18 v2** API and **OpenCode 2.x** are source-incompatible:
 - SwitchMode never spawns a subagent. Apply native primary-agent switches only
   after the owning Run is terminal; lifecycle turns soft-ack without mutating
   mode. Same-mode switches auto-approve. Entering plan needs no execution gate.
-- Advertise image input unless `src/image-input-data.ts` explicitly records
-  `false` for the model (unrecorded new models default to image-capable, like
-  Cursor CLI / IDE). Never use Cursor's `supports_images` or a hardcoded model
-  id. Send Cursor every image the host passes, like Cursor CLI.
+- Advertise image input only where `src/image-input-data.ts` records that the
+  model's Run read the probe image; anything else is text-only. Never use
+  Cursor's `supports_images` or a hardcoded model id. Send Cursor every image
+  the host passes, like Cursor CLI.
 - Generated images arrive through binary write execs; display image data is
   preview only. Gate GenerateImage approval on advertised `cursor_image_save`.
   Stage bytes behind a single-use opaque `cursor_image_save` id,

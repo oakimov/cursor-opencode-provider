@@ -206,6 +206,20 @@ When a model has a published Fast rate, the plugin exposes a separate OpenCode e
 
 Combinations with long context use `<id>-1m-fast` where Cursor offers them. If you saved a Fast variant under a base model that now has a separate Fast entry, select the new model and pick its effort again.
 
+#### Gemini 4 and Kimi K3 prices
+
+Rates are in USD per million tokens and apply to the extended context options. [Cursor's pricing table](https://cursor.com/docs/models-and-pricing.md)
+
+| Model | Input | Cache read | Output |
+| --- | ---: | ---: | ---: |
+| Gemini 4 Carbon through November 30, 2026 | $2 | $0.10 | $10 |
+| Gemini 4 Carbon from December 1, 2026 | $4 | $0.20 | $20 |
+| Gemini 4 Hydrogen | $1.50 | $0.075 | $7.50 |
+| Gemini 4 Neon | $3 | $0.15 | $15 |
+| Kimi K3 | $3 | $0.30 | $15 |
+
+The bundled catalog uses the current pricing-table row. It needs a pricing refresh to reflect Carbon's December rate.
+
 #### Context limit sources
 
 The provider resolves each catalog context limit in this order:
@@ -229,9 +243,9 @@ OpenCode uses family metadata to select a small model for session titles (2.x: `
 
 #### Image input
 
-The provider advertises `text` + `image` input for Cursor models unless our live test explicitly recorded the model as text-only (`false` in `src/image-input-data.ts`). Newly added models that have not been probed yet therefore default to image-capable — matching Cursor CLI and IDE behavior — instead of waiting for a provider release. Model output remains text. This works in the classic plugin, the 1.18 v2 plugin, and OpenCode 2.x.
+The provider advertises `text` + `image` input after a live Cursor probe confirms the model can read an image. This includes Gemini 4 Carbon, Hydrogen, Neon, and Kimi K3. Unprobed models default to text-only. Model output remains text. This applies to the classic plugin, the 1.18 v2 plugin, and OpenCode 2.x.
 
-Cursor's `AvailableModels.supportsImages` is not used: it marks some models text-only whose Run reads images (Grok 4.7, Composer 2.5, Kimi K2.7 Code, DeepSeek V4.1 Flash) and has also marked models as reading images when their Run did not (e.g., Kimi K3 on earlier probes), and neither Cursor CLI nor IDE gates image input on it. For a model that cannot read images, Cursor's Run drops the image without an error. `bun run generate:images` tests each model once, when it first appears: one short Run with a probe image, recording in `src/image-input-data.ts` whether the reply transcribes the text drawn in it so confirmed text-only exceptions are excluded. A recorded result is retested only on request (`-- --model <id>` or `-- --all`), and removed only with `-- --prune`, since each account's model list differs. Like Cursor CLI, the provider sends Cursor every image the host passes.
+Cursor's `AvailableModels.supportsImages` has reported false negatives (Grok 4.7, Composer 2.5, Kimi K2.7 Code) and historically reported image support for Kimi K3 when its Run dropped the image without an error. `bun run generate:images` tests each model when it first appears, recording in `src/image-input-data.ts` whether a short Run transcribes the text drawn in a probe image. Retest a recorded result with `-- --model <id>` or `-- --all`. Use `-- --prune` to remove results for models your account no longer lists. The provider sends Cursor every image the host passes.
 
 OpenCode image file parts are decoded from bytes, base64/data URLs, local file URLs, or HTTP(S) URLs and sent through Cursor's `UserMessage.selected_context.selected_images` field. Fresh and rebased Runs normalize the same image formats as held-Run continuations, including AI SDK `image-data` / `image-url` and OpenCode attachment URLs. A Run that resumes a checkpoint skips the history images that exact checkpoint is known to hold (by content hash, recorded when a turn ends on a checkpoint of its own and kept in the restart snapshot); a Run without a checkpoint sends them all. Earlier images that no longer fit the 20 MiB image budget are left out with a note, so a text follow-up still works; this turn's own attachments past the budget fail the request.
 

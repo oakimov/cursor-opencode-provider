@@ -197,8 +197,8 @@ describe("opencode2 provider inventory", () => {
     expect(model!.name).toBe("Sonnet 4.5")
     expect(model!.modelID).toBe("claude-4.5-sonnet")
     expect(model!.capabilities.tools).toBe(true)
-    // Unrecorded models default to image-capable unless explicitly probed text-only.
-    expect(model!.capabilities.input).toEqual(["text", "image"])
+    // No live image probe recorded this id, so it is text-only.
+    expect(model!.capabilities.input).toEqual(["text"])
     expect(model!.capabilities.output).toEqual(["text"])
     expect(model!.limit.context).toBe(200_000)
     expect(model!.enabled).toBe(true)
