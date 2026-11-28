@@ -4,6 +4,7 @@
  * Cursor's Run endpoint. No network access.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test"
+import { hasSeedHistory } from "./seed-text.js"
 import fs from "node:fs"
 import http2 from "node:http2"
 import net from "node:net"
@@ -242,7 +243,7 @@ async function continueAfterStop(stop: Stop, abortedMessage: boolean) {
       checkpoint: state.root_prompt_messages_json ?? [],
       requestContextReused: JSON.stringify(next.action.user_message_action.request_context)
         === JSON.stringify(stopped.action.user_message_action.request_context),
-      reseeded: (next.action.user_message_action.user_message.text as string).includes("<conversation_history>"),
+      reseeded: hasSeedHistory(next.action.user_message_action),
     }
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
@@ -443,7 +444,7 @@ describe("a turn stopped mid-step, continued by the next process", () => {
       const first = runRequest(runs[0]!)
       const next = runRequest(runs[runs.length - 1]!)
       expect(next.conversation_id).toBe(first.conversation_id)
-      expect((next.action.user_message_action.user_message.text as string).includes("<conversation_history>")).toBe(false)
+      expect(hasSeedHistory(next.action.user_message_action)).toBe(false)
     } finally {
       setConversationPersistenceHookForTests(undefined)
       fs.rmSync(root, { recursive: true, force: true })

@@ -22,6 +22,7 @@ import { resetCheckpointsForTests } from "../src/protocol/checkpoint.js"
 import { resetConversationPersistenceForTests } from "../src/protocol/conversation-persistence.js"
 import { notifyHostInterrupt } from "../src/host-interrupt.js"
 import { CURSOR_COMPACTION_OPTION } from "../src/shared.js"
+import { seedText } from "./seed-text.js"
 
 const ORIGIN = "https://agentn.run-error-test.cursor.sh"
 const PROXY_KEYS = ["HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"] as const
@@ -212,7 +213,7 @@ describe("checkpoint eligibility across host results", () => {
         expect(requests[replacementIndex]!.conversation_group_id).toBe(requests[0]!.conversation_group_id)
         expect(requests[replacementIndex]!.conversation_state?.length ?? 0).toBe(0)
         expect(requests[replacementIndex]!.action.resume_action).toBeUndefined()
-        const seed = requests[replacementIndex]!.action.user_message_action!.user_message.text
+        const seed = seedText(requests[replacementIndex]!.action.user_message_action)
         expect(seed).toContain("COMPACTED_HOST_SUMMARY")
         expect(seed).not.toContain("Original large history")
         if (scenario === "held") expect(seed).toContain("COMPLETED_HOST_RESULT")
@@ -393,7 +394,7 @@ describe("checkpoint eligibility across host results", () => {
           expect(requests).toHaveLength(3)
           expect(requests[2]!.action.resume_action).toBeUndefined()
           expect(requests[2]!.conversation_id).not.toBe(requests[0]!.conversation_id)
-          const text = requests[2]!.action.user_message_action!.user_message.text
+          const text = seedText(requests[2]!.action.user_message_action)
           expect(text.match(/first command completed/g)).toHaveLength(1)
           expect(text.match(/second command completed/g)).toHaveLength(1)
         }
@@ -595,8 +596,10 @@ describe("checkpoint eligibility across host results", () => {
       }
       cacheHttp2SessionForTests(ORIGIN, client)
       try {
+        // A route with a measured silent cutoff (src/effective-context-data.ts) checks its seed; others do not.
         const model = createCursor({ name: "cursor", accessToken: "example-token", agentBaseURL: ORIGIN,
-          workspaceRoot: root, cacheDir: root, retry: { baseDelayMs: 1, maxDelayMs: 1 } }).languageModel("composer-2.5")
+          workspaceRoot: root, cacheDir: root, retry: { baseDelayMs: 1, maxDelayMs: 1 } })
+          .languageModel(scenario === "oversized" ? "gpt-5.4-mini" : "composer-2.5")
         const prompt: LanguageModelV3CallOptions["prompt"] = [{ role: "user", content: [{ type: "text", text: "Run both commands" }] }]
         const options = { prompt, headers: { "x-opencode-session-id": `ses_result_history_${scenario}` },
           tools: [
@@ -618,7 +621,7 @@ describe("checkpoint eligibility across host results", () => {
           }
           return parts
         }
-        // The rebuild seeds every result; this one cannot fit composer-2.5's window.
+        // The rebuild seeds every result; this one cannot fit gpt-5.4-mini's measured context.
         const secondOutput = scenario === "oversized" ? `second completed ${"z".repeat(1_000_000)}` : "second completed"
         for (const output of ["first completed", secondOutput]) {
           const parts = await read()
@@ -639,7 +642,7 @@ describe("checkpoint eligibility across host results", () => {
           expect(requests).toHaveLength(2)
           expect(requests[1]!.action.resume_action).toBeUndefined()
           expect(requests[1]!.conversation_id).not.toBe(requests[0]!.conversation_id)
-          const text = requests[1]!.action.user_message_action!.user_message.text
+          const text = seedText(requests[1]!.action.user_message_action)
           expect(text.match(/first completed/g)).toHaveLength(1)
           expect(text.match(/second completed/g)).toHaveLength(1)
           expect(text).toContain("Do not repeat completed work")
@@ -785,7 +788,7 @@ describe("checkpoint eligibility across host results", () => {
           expect(requests).toHaveLength(2)
           expect(requests[1]!.action.resume_action).toBeUndefined()
           expect(requests[1]!.conversation_id).not.toBe(requests[0]!.conversation_id)
-          const text = requests[1]!.action.user_message_action!.user_message.text
+          const text = seedText(requests[1]!.action.user_message_action)
           expect(text.match(/first completed/g)).toHaveLength(1)
           expect(text.match(/second completed/g)).toHaveLength(1)
           expect(text.match(/background job finished/g)).toHaveLength(1)
@@ -807,7 +810,7 @@ describe("checkpoint eligibility across host results", () => {
     }, 30_000)
   }
 
-  it("reports a foreign-history rebase that cannot fit as a context overflow, not a setup failure", async () => {
+  it("reports a foreign-history rebase over a measured route's context as an overflow, and sends it whole elsewhere", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-rebase-overflow-"))
     let requests = 0
     scripted = (stream, message) => {
@@ -821,8 +824,9 @@ describe("checkpoint eligibility across host results", () => {
     }
     cacheHttp2SessionForTests(ORIGIN, client)
     try {
-      const model = createCursor({ name: "cursor", accessToken: "example-token", agentBaseURL: ORIGIN,
-        workspaceRoot: root, cacheDir: root }).languageModel("composer-2.5")
+      const cursor = createCursor({ name: "cursor", accessToken: "example-token", agentBaseURL: ORIGIN,
+        workspaceRoot: root, cacheDir: root })
+      const model = cursor.languageModel("gpt-5.4-mini")
       // A tool-less call would be a lifecycle helper, which never rebases.
       const headers = { "x-opencode-session-id": "ses_rebase_overflow" }
       const tools = [{ type: "function" as const, name: "bash", inputSchema: { type: "object", properties: { command: { type: "string" } } } }]
@@ -838,6 +842,18 @@ describe("checkpoint eligibility across host results", () => {
       expect(error).toMatchObject({ statusCode: 413, isRetryable: false })
       expect((error as APICallError).message).toMatch(/^prompt is too long/)
       expect(requests).toBe(1)
+      // Like Cursor CLI, an unmeasured route gets the whole history; Cursor's harness summarizes what does not fit.
+      const other = { "x-opencode-session-id": "ses_rebase_whole" }
+      const hello = await cursor.languageModel("composer-2.5").doStream({ headers: other, tools,
+        prompt: [{ role: "user", content: [{ type: "text", text: "Hello" }] }] })
+      for (const reader = hello.stream.getReader(); !(await reader.read()).done;) { /* drain */ }
+      const whole = await cursor.languageModel("composer-2.5").doStream({ headers: other, tools, prompt: [
+        { role: "user", content: [{ type: "text", text: "Hello" }] },
+        { role: "assistant", content: [{ type: "text", text: `Other model ${"x".repeat(1_000_000)}` }] },
+        { role: "user", content: [{ type: "text", text: "Continue" }] },
+      ] })
+      for (const reader = whole.stream.getReader(); !(await reader.read()).done;) { /* drain */ }
+      expect(requests).toBe(3)
     } finally {
       sessionManager.dispose()
       await settleRunSavesForTests()
@@ -1265,14 +1281,18 @@ describe("a session that returns to a Location", () => {
     const otherConnect = await load("transport/connect.ts") as typeof import("../src/transport/connect.js")
     const otherModel = await load("language-model.ts") as typeof import("../src/language-model.js")
     const otherSessions = await load("session.ts") as typeof import("../src/session.js")
-    type Request = { conversation_id: string; conversation_state?: Uint8Array }
+    type Request = { conversation_id: string; conversation_state?: Uint8Array; action: { summarize_action?: unknown } }
     const requests: Request[] = []
     scripted = (stream, message) => {
       if (!message.run_request) return
       requests.push(message.run_request as Request)
       const send = (value: Record<string, unknown>) => stream.write(frame(encodeMessage("AgentServerMessage", value)))
+      if ((message.run_request as Request).action.summarize_action) {
+        send({ interaction_update: { summary: { summary: "SUMMARY" } } })
+      } else {
+        send({ interaction_update: { text_delta: { text: "Cursor answer" } } })
+      }
       send({ conversation_checkpoint_update: Uint8Array.of(0x2a, 5, 8, 42, 16, 0x80, requests.length) })
-      send({ interaction_update: { text_delta: { text: "Cursor answer" } } })
       send({ interaction_update: { turn_ended: {} } })
       stream.end()
     }
@@ -1291,17 +1311,21 @@ describe("a session that returns to a Location", () => {
       const locationA = createCursor(options).languageModel("composer-2.5")
       const locationB = other.createCursor(options).languageModel("composer-2.5")
       await read(locationA, { headers, tools, prompt: [user("Hello")] })
-      // Location A compacts on the Cursor model; its next Run would rebase from the summary.
+      // Location A compacts on the Cursor model: Cursor summarizes the conversation in place.
       await read(locationA, { headers, tools, prompt: [user("Hello"), answer, user("Summarize")],
         providerOptions: { cursor: { opencodeCompaction: true } } })
       await settleRunSavesForTests()
-      // The session moves to Location B, which rebases and continues there.
-      await read(locationB, { headers, tools, prompt: [user("SUMMARY"), user("Continue")] })
+      expect(requests[1]!.action.summarize_action).toEqual({})
+      expect(requests[1]!.conversation_id).toBe(requests[0]!.conversation_id)
+      // The session moves to Location B, which continues on the summary's checkpoint.
+      const summary = { role: "assistant" as const, content: [{ type: "text" as const, text: "SUMMARY" }] }
+      await read(locationB, { headers, tools, prompt: [user("Summarize"), summary, user("Continue")] })
       await otherModel.settleRunSavesForTests()
       const advanced = requests.at(-1)!
-      expect(advanced.conversation_state?.length ?? 0).toBe(0)
+      expect(advanced.conversation_id).toBe(requests[0]!.conversation_id)
+      expect(Array.from(advanced.conversation_state ?? [])).toEqual([0x2a, 5, 8, 42, 16, 0x80, 2])
       // Back in Location A, the next turn resumes B's conversation.
-      await read(locationA, { headers, tools, prompt: [user("SUMMARY"), user("Continue"), answer, user("Next")] })
+      await read(locationA, { headers, tools, prompt: [user("Summarize"), summary, user("Continue"), answer, user("Next")] })
       const returned = requests.at(-1)!
       expect(requests).toHaveLength(4)
       expect(returned.conversation_id).toBe(advanced.conversation_id)
@@ -1400,7 +1424,9 @@ describe("a session that returns to a Location", () => {
 
 describe("foreign compaction follow-ups", () => {
   type Request = { conversation_id: string; conversation_state?: Uint8Array
-    action: { resume_action?: unknown; user_message_action?: { user_message: { text: string } } } }
+    action: { resume_action?: unknown; summarize_action?: unknown; user_message_action?: { user_message: { text: string } } } }
+  const textOf = (parts: LanguageModelV3StreamPart[]) =>
+    parts.map(part => part.type === "text-delta" ? part.delta : "").join("")
   const tool = (name: string) => ({ type: "function" as const, name, inputSchema: { type: "object", properties: { command: { type: "string" } } } })
   const text = (value: string) => ({ role: "user" as const, content: [{ type: "text" as const, text: value }] })
   const readParts = async (model: LanguageModelV3, options: LanguageModelV3CallOptions) => {
@@ -1423,6 +1449,14 @@ describe("foreign compaction follow-ups", () => {
     if (!message.run_request) return
     requests.push(message.run_request as Request)
     const send = (value: Record<string, unknown>) => stream.write(frame(encodeMessage("AgentServerMessage", value)))
+    if ((message.run_request as Request).action.summarize_action) {
+      // Cursor's answer to summarize_action (live 2026-11-28).
+      send({ interaction_update: { summary: { summary: "CURSOR_SUMMARY" } } })
+      send({ conversation_checkpoint_update: Uint8Array.of(0x2a, 5, 8, 42, 16, 0x80, 0x7f) })
+      send({ interaction_update: { turn_ended: {} } })
+      stream.end()
+      return
+    }
     send({ conversation_checkpoint_update: Uint8Array.of(0x2a, 5, 8, 42, 16, 0x80, requests.length) })
     if (requests.length === 1) {
       send({ exec_server_message: { id: 1, shell_args: { command: "echo done", tool_call_id: "command" } } })
@@ -1457,7 +1491,7 @@ describe("foreign compaction follow-ups", () => {
         const options: LanguageModelV3CallOptions = { prompt, headers: { "x-opencode-session-id": key }, tools: [tool("bash")] }
         restorePersistedHostNotes(key, encodePersistedHostNotes(["<system-update>Use bazel for builds.</system-update>"]))
         const parts = await readParts(model, options)
-        expect(requests[0]!.action.user_message_action!.user_message.text).toContain("Use bazel for builds.")
+        expect(seedText(requests[0]!.action.user_message_action)).toContain("Use bazel for builds.")
         appendResult(prompt, parts, "COMPLETED_HOST_RESULT")
         const restarts = scenario !== "live"
         const rewrites = scenario !== "restart-without-rewrite"
@@ -1466,7 +1500,7 @@ describe("foreign compaction follow-ups", () => {
         if (restarts) await restart()
         if (rewrites) prompt[0] = text("COMPACTED_HOST_SUMMARY")
         await readParts(model, options)
-        const seed = requests.at(-1)!.action.user_message_action!.user_message.text
+        const seed = seedText(requests.at(-1)!.action.user_message_action)
         expect(requests.at(-1)!.conversation_state?.length ?? 0).toBe(0)
         if (rewrites) expect(seed).toContain("COMPACTED_HOST_SUMMARY")
         expect(seed.split("Use bazel for builds.")).toHaveLength(2)
@@ -1493,17 +1527,26 @@ describe("foreign compaction follow-ups", () => {
       appendResult(prompt, await readParts(model, options), "COMPLETED_HOST_RESULT")
       await notifyHostInterrupt(key, "shutdown")
       await restart()
-      // The host summarizes on Cursor; its compaction Run does not deliver the note.
-      await readParts(model, { prompt: [...prompt, text("Summarize the conversation.")], tools: [],
-        headers: { "x-opencode-session-id": key }, providerOptions: { cursor: { [CURSOR_COMPACTION_OPTION]: true } } })
-      expect(requests.at(-1)!.action.user_message_action!.user_message.text).not.toContain("Use bazel for builds.")
+      // The restored checkpoint predates the held call's host result, so the
+      // compaction imports the host history, then summarizes that conversation.
+      // Neither Run delivers the note.
+      const summary = textOf(await readParts(model, { prompt: [...prompt, text("Summarize the conversation.")], tools: [],
+        headers: { "x-opencode-session-id": key }, providerOptions: { cursor: { [CURSOR_COMPACTION_OPTION]: true } } }))
+      expect(summary).toBe("CURSOR_SUMMARY")
+      const [imported, summarized] = requests.slice(-2)
+      expect(imported!.conversation_id).not.toBe(requests[0]!.conversation_id)
+      expect(seedText(imported!.action.user_message_action)).toContain("COMPLETED_HOST_RESULT")
+      expect(seedText(imported!.action.user_message_action)).not.toContain("Use bazel for builds.")
+      expect(summarized!.action.summarize_action).toEqual({})
+      expect(summarized!.conversation_id).toBe(imported!.conversation_id)
       await restart()
       prompt.splice(0, prompt.length, text("COMPACTED_HOST_SUMMARY"), text("Continue."))
       await readParts(model, options)
-      const seed = requests.at(-1)!.action.user_message_action!.user_message.text
-      expect(requests.at(-1)!.conversation_state?.length ?? 0).toBe(0)
-      expect(seed).toContain("COMPACTED_HOST_SUMMARY")
-      expect(seed.split("Use bazel for builds.")).toHaveLength(2)
+      // The next turn continues on the summary's checkpoint and delivers the note once.
+      const next = requests.at(-1)!
+      expect(next.conversation_id).toBe(imported!.conversation_id)
+      expect(next.conversation_state?.length ?? 0).toBeGreaterThan(0)
+      expect(next.action.user_message_action!.user_message.text.split("Use bazel for builds.")).toHaveLength(2)
     } finally {
       sessionManager.dispose()
       await settleRunSavesForTests()
@@ -1540,9 +1583,9 @@ describe("foreign compaction follow-ups", () => {
       await readParts(model, options)
       expect(requests).toHaveLength(3)
       expect(requests[1]!.conversation_state!.length).toBeGreaterThan(0)
-      expect(requests[1]!.action.user_message_action!.user_message.text).not.toContain("Use bazel for builds.")
+      expect(seedText(requests[1]!.action.user_message_action)).not.toContain("Use bazel for builds.")
       expect(requests[2]!.conversation_state?.length ?? 0).toBe(0)
-      expect(requests[2]!.action.user_message_action!.user_message.text.split("Use bazel for builds.")).toHaveLength(2)
+      expect(seedText(requests[2]!.action.user_message_action).split("Use bazel for builds.")).toHaveLength(2)
     } finally {
       sessionManager.dispose()
       await settleRunSavesForTests()
@@ -1569,7 +1612,7 @@ describe("foreign compaction follow-ups", () => {
       await readParts(model, options)
       const main = requests.at(-1)!
       expect(main.conversation_state?.length ?? 0).toBe(0)
-      expect(main.action.user_message_action!.user_message.text).toContain("COMPACTED_HOST_SUMMARY")
+      expect(seedText(main.action.user_message_action)).toContain("COMPACTED_HOST_SUMMARY")
     } finally {
       sessionManager.dispose()
       await settleRunSavesForTests()

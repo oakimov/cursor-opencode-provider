@@ -29,7 +29,7 @@ function hex(b: Uint8Array): string {
  */
 export function handleKvServerMessage(
   ksm: Record<string, unknown>,
-  session: CursorSession,
+  session: Pick<CursorSession, "blobs" | "conversationId">,
 ): {
   reply: Uint8Array
   replyBlobBytes: number

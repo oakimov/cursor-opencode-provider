@@ -43,6 +43,28 @@ You do **not** need a hand-written `providers` entry, and there is no `enabled` 
 
 Synced models set `time.released` to `0` (Cursor AvailableModels does not expose release dates). OpenCode 2.x's picker sorts by `released` descending, so filter by provider **Cursor** or search a model id if the global list looks empty.
 
+## Compaction on a Cursor model
+
+The plugin answers OpenCode's session `compaction` hook with Cursor's own
+summary (`summarize_action`, as Cursor CLI's `/summarize`), so OpenCode skips
+its model request and its summary-template check. The conversation id stays the
+same and the next turn continues on the summarized checkpoint.
+
+- **Mid-turn** (Cursor waits on tool results): Cursor summarizes a copy of the
+  latest checkpoint; the waiting Run continues untouched, and the hook keeps the
+  current turn verbatim beside the summary (`keepID`). When the turn ends, the
+  conversation is summarized in place before the next turn opens, so OpenCode
+  does not compact again on every step.
+- **History Cursor does not hold** (another model answered, no checkpoint, a
+  history rewrite, a restart with unanswered tool calls): the hook's messages
+  are imported into a fresh conversation as earlier turns, then summarized.
+- **Background summaries** (`compaction.background`, on by default) are
+  declined without a Run: Cursor summarizes in the background itself. OpenCode
+  stops asking after two declines until the next compaction; set
+  `compaction.background: false` to skip them.
+- A failed summary fails the compaction (`compaction.failed`) without a 413 or
+  an overflow message, so OpenCode neither shrinks nor retries it.
+
 ## Compaction with another provider
 
 You can use another provider's model for the host's compaction summary. After
@@ -365,8 +387,10 @@ out with the shell still running.
 An early steer or host note Cursor took into that Run does not block the
 rebuild when host history holds it: a steer once OpenCode has added its copy,
 a note while its text is still in history.
-A rebuild too large for the model's context is reported as a context overflow
-(413), so OpenCode compacts instead of retrying. Recovery retains the latest eligible checkpoint across token renewal, including
+The rebuilt history goes in as earlier user turns, so Cursor summarizes what
+does not fit and keeps the request. A model with a measured silent cutoff
+([effective context](effective-context.md)) reports a rebuild over 80% of that
+limit as a context overflow (413), so OpenCode compacts instead of retrying. Recovery retains the latest eligible checkpoint across token renewal, including
 a rejected credential on an untouched resumed attempt. Checkpoints received
 while a completed tool result drains remain eligible only after Cursor acknowledges
 the matching tool completion. A late pre-result checkpoint cannot authorize replay.

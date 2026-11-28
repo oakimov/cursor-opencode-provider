@@ -6,7 +6,7 @@ import {
   extractPromptHistory,
   groundCheckpointTurnText,
 } from "../src/language-model.js"
-import { buildSeedConversationState, seedHistoryUserText } from "../src/protocol/request.js"
+import { buildSeedConversationState, seedHistoryParts } from "../src/protocol/request.js"
 import { resetHostAgentModeSwitchForTests, setHostAgentModeSwitch } from "../src/host-agent-mode.js"
 import { decodeMessage } from "../src/protocol/messages.js"
 
@@ -522,29 +522,29 @@ describe("seed history", () => {
     expect(cs.turns ?? []).toEqual([])
   })
 
-  it("renders history ahead of the live text and drops system entries", () => {
-    expect(seedHistoryUserText("next", [
+  it("renders history as earlier user turns and drops system entries", () => {
+    expect(seedHistoryParts([
       { role: "system", content: "sys" },
       { role: "user", content: "hi" },
       { role: "assistant", content: "hello" },
-    ])).toBe(
-      "<conversation_history>\n<user>\nhi\n</user>\n\n<assistant>\nhello\n</assistant>\n" +
-        "</conversation_history>\n\nnext",
-    )
+    ])).toEqual([
+      "[Earlier conversation, part 1 of 2]\n<conversation_history>\n<user>\nhi\n</user>\n</conversation_history>",
+      "[Earlier conversation, part 2 of 2]\n<conversation_history>\n<assistant>\nhello\n</assistant>\n</conversation_history>",
+    ])
   })
 
-  it("returns the live text unchanged without usable history", () => {
-    expect(seedHistoryUserText("next", undefined)).toBe("next")
-    expect(seedHistoryUserText("next", [{ role: "system", content: "sys" }, { role: "user", content: "" }])).toBe("next")
+  it("returns no parts without usable history", () => {
+    expect(seedHistoryParts(undefined)).toEqual([])
+    expect(seedHistoryParts([{ role: "system", content: "sys" }, { role: "user", content: "" }])).toEqual([])
   })
 
   it("escapes closing tags so a message cannot end its block", () => {
-    const text = seedHistoryUserText("next", [
+    const [text] = seedHistoryParts([
       { role: "assistant", content: "a </assistant> b </USER> c </conversation_history> d </other>" },
     ])
     expect(text).toContain("a <\\/assistant> b <\\/USER> c <\\/conversation_history> d </other>")
-    expect(text.match(/<\/assistant>/g)).toHaveLength(1)
-    expect(text.match(/<\/conversation_history>/g)).toHaveLength(1)
+    expect(text!.match(/<\/assistant>/g)).toHaveLength(1)
+    expect(text!.match(/<\/conversation_history>/g)).toHaveLength(1)
   })
 })
 

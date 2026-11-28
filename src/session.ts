@@ -4,6 +4,15 @@ import { releaseUnstartedTerminal } from "./terminal-runner.js"
 import { CursorProtocolError, type CursorProviderError } from "./errors.js"
 import { StreamWriteDrainError, writeStreamMessage } from "./stream-write.js"
 import { RUNNING_TOOL_CAP_MS, sessionActivity, type SessionActivitySource } from "./activity.js"
+import { processShared } from "./process-shared.js"
+
+/**
+ * Open Runs of every copy of this package in the process, by OpenCode session
+ * id (OpenCode 2 loads one module graph per Location). A copy that does not own
+ * a session's Run sees here that one is open, so it never summarizes that
+ * conversation in place beside it. Plain data: Run session ids only.
+ */
+const openRunsBySession = processShared("open-runs-by-session.v1", () => new Map<string, Set<string>>())
 import type {
   HostSubagentCatalog,
   HostToolDialect,
@@ -567,9 +576,19 @@ export class SessionManager {
         }
       }
       this.byOpenCodeSessionId.set(session.openCodeSessionId, session)
+      const runs = openRunsBySession.get(session.openCodeSessionId) ?? new Set<string>()
+      runs.add(session.sessionId)
+      openRunsBySession.set(session.openCodeSessionId, runs)
     }
     this.enforceOpenSessionCap(session)
     this.subscribeTerminal(session)
+  }
+
+  /** Whether another copy of this package holds an open Run for this OpenCode session. */
+  hasOpenRunElsewhere(openCodeSessionId: string | undefined): boolean {
+    if (!openCodeSessionId) return false
+    const mine = new Set([...this.sessions].map((session) => session.sessionId))
+    return [...openRunsBySession.get(openCodeSessionId) ?? []].some((id) => !mine.has(id))
   }
 
   /** Live open Run for this OpenCode session id, if any. */
@@ -1031,6 +1050,11 @@ export class SessionManager {
     session.mirroredTodos = undefined
     session.blobs?.clear()
     this.sessions.delete(session)
+    if (session.openCodeSessionId) {
+      const runs = openRunsBySession.get(session.openCodeSessionId)
+      runs?.delete(session.sessionId)
+      if (runs && runs.size === 0) openRunsBySession.delete(session.openCodeSessionId)
+    }
     if (
       session.openCodeSessionId &&
       this.byOpenCodeSessionId.get(session.openCodeSessionId) === session

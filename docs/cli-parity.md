@@ -15,7 +15,7 @@ Parity target is interactive `cursor-agent` (`Run` client: TUI and `--print`). `
 | Client msgs: run_request, exec, kv, conversation_action, exec_control, interaction_response, client_heartbeat, prewarm | All 8 | All except `prewarm_request` (RunRequest.mcp_tools is prewarm-only, empty on real turns) | 🔶 |
 | Server msgs: interaction_update, exec, checkpoint_update, kv, exec_control, interaction_query, ttft_breakdown | All | All except `ttft_breakdown` (not decoded) | 🔶 |
 | Run message compression | gzip from 1 KiB (connect-es `sendCompression`, `compressMinBytes`, async `zlib.gzip`) | gzip from 1 KiB with async `zlib.gzip`, in write order; a refused gzip Run is sent once more uncompressed, and later Runs to that host go uncompressed | ✅ |
-| ConversationActions | 15 oneof actions + 3 metadata fields (`triggering_auth_id`, `triggering_user_info`, `request_context_parts`): user_message, resume, cancel, summarize, shell_command, start/execute_plan, async_ask_question_completion, cancel_subagent, background_task/shell/subagent, subscription_notification, goal_continuation, inject_context | Schema encodes 5: user_message, resume, cancel, async_ask_question_completion, inject_context (`user_context` payload for host notes and early steers) — summarize emulated via compaction marker | 🔶 |
+| ConversationActions | 15 oneof actions + 3 metadata fields (`triggering_auth_id`, `triggering_user_info`, `request_context_parts`): user_message, resume, cancel, summarize, shell_command, start/execute_plan, async_ask_question_completion, cancel_subagent, background_task/shell/subagent, subscription_notification, goal_continuation, inject_context | Schema encodes 6: user_message (with `prepend_user_messages` for rebuilt history), resume, cancel, summarize, async_ask_question_completion, inject_context (`user_context` payload for host notes and early steers) | 🔶 |
 | Sparse protobuf decode w/ full schema | Native protobuf | Hand-rolled `struct.ts` sparse decoder + full schema table (`messages.ts`) | ✅ |
 | Checksums / framing / device id / client-version | Yes | Yes (`checksum.ts`, `framing.ts`, `device-id.ts`, `client-version.ts`) | ✅ |
 | Run response compression | Accepts gzip and br (connect-es `acceptCompression`) | Accepts gzip only, the one encoding `decodeFramePayload` inflates; Cursor answers in the request's encoding or the first accepted one | 🔶 |
@@ -67,7 +67,7 @@ Parity target is interactive `cursor-agent` (`Run` client: TUI and `--print`). `
 |---|---|---|---|
 | Tool-call display variants (read/write/edit/shell/mcp/web-search/image/ask/switch/plan/todos/…) | Full UI | Mirrors finalized todo/plan state and opens edit tool rows while arguments stream; unbound rows close without host execution ([bridge](../src/protocol/tool-call-bridge.ts), [early rows](../src/early-tool-rows.ts)) | 🔶 |
 | Thinking blocks (`thinking_delta`) | Yes (--show-thinking) | Yes (`thinking.ts`) | ✅ |
-| Compaction (`summarize_action` / checkpoint reset) | Native | Emulated via `compaction-marker.ts` + conversation rotation | 🔶 |
+| Compaction (`summarize_action`) | Native | Native `summarize_action` on the live conversation; a held Run's checkpoint is summarized as a fork; history Cursor lacks is imported as earlier turns first (`src/compaction-run.ts`, `compactionStream`) | ✅ |
 
 ## Persistence & state
 

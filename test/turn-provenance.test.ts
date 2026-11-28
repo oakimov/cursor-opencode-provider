@@ -18,7 +18,9 @@ import {
   trackTurnProvenance,
 } from "../src/protocol/turn-provenance.js"
 import {
-  assertForeignHistoryRebaseFits,
+  assertMeasuredContextFits,
+  measuredContextBudget,
+  trimHistoryToMeasuredContext,
   extractPromptHistory,
   pump,
   resetTurnStateForTests,
@@ -316,25 +318,23 @@ describe("foreign-history rebase", () => {
       .toBe(false)
   })
 
-  it("passes when the rebased history fits the model context", () => {
-    expect(() => assertForeignHistoryRebaseFits({
-      modelInfo: { id: "m", maxContext: 1_000, variants: [] },
-      cursorModelId: "m",
-      maxMode: false,
-      history: [{ role: "user", content: "x".repeat(3_000) }],
-      systemPrompt: "system",
-      userText: "next",
+  it("checks only routes with a measured silent cutoff, like Cursor CLI elsewhere", () => {
+    const huge = [{ role: "user" as const, content: "x".repeat(4_000_000) }]
+    expect(measuredContextBudget("composer-2.5")).toBeUndefined()
+    expect(() => assertMeasuredContextFits({ cursorModelId: "composer-2.5", history: huge, systemPrompt: "s", userText: "next" }))
+      .not.toThrow()
+    expect(measuredContextBudget("gpt-5.4-mini")).toBe(44_800)
+    expect(() => assertMeasuredContextFits({
+      cursorModelId: "gpt-5.4-mini", history: [{ role: "user", content: "x".repeat(100_000) }], systemPrompt: "s", userText: "next",
     })).not.toThrow()
   })
 
-  it("raises a host-recognised context overflow when it does not fit", () => {
+  it("raises a host-recognised context overflow for a seed over a measured route's budget", () => {
     let thrown: unknown
     try {
-      assertForeignHistoryRebaseFits({
-        modelInfo: { id: "m", maxContext: 1_000, maxContextForMaxMode: 100_000, variants: [] },
-        cursorModelId: "m",
-        maxMode: false,
-        history: [{ role: "user", content: "x".repeat(4_000) }],
+      assertMeasuredContextFits({
+        cursorModelId: "gpt-5.4-mini",
+        history: [{ role: "user", content: "x".repeat(400_000) }],
         systemPrompt: undefined,
         userText: "next",
       })
@@ -343,36 +343,17 @@ describe("foreign-history rebase", () => {
     }
     expect(APICallError.isInstance(thrown)).toBe(true)
     expect((thrown as APICallError).statusCode).toBe(413)
-    expect((thrown as APICallError).message).toMatch(/prompt is too long/i)
+    expect((thrown as APICallError).message).toMatch(/^prompt is too long/i)
   })
 
-  it("uses the long-context window in max mode", () => {
-    expect(() => assertForeignHistoryRebaseFits({
-      modelInfo: { id: "m", maxContext: 1_000, maxContextForMaxMode: 100_000, variants: [] },
-      cursorModelId: "m",
-      maxMode: true,
-      history: [{ role: "user", content: "x".repeat(4_000) }],
-      systemPrompt: undefined,
-      userText: "next",
-    })).not.toThrow()
-  })
-
-  it("budgets a max-mode variant by its own context, not the largest tier", () => {
-    // Live Claude Opus 300k Fast variants carry isMaxMode with a 300k window.
-    const input = {
-      modelInfo: { id: "m", maxContext: 1_000, maxContextForMaxMode: 100_000, variants: [] },
-      cursorModelId: "m",
-      maxMode: true,
-      history: [{ role: "user" as const, content: "x".repeat(4_000) }],
-      systemPrompt: undefined,
-      userText: "next",
-    }
-    expect(() => assertForeignHistoryRebaseFits({
-      ...input, parameters: [{ id: "context", value: "1k" }, { id: "fast", value: "true" }],
-    })).toThrow(/prompt is too long/i)
-    expect(() => assertForeignHistoryRebaseFits({
-      ...input, maxMode: false, parameters: [{ id: "context", value: "100k" }],
-    })).not.toThrow()
+  it("trims an import to the newest messages that fit and says how many it left out", () => {
+    const history = Array.from({ length: 10 }, (_, i) => ({ role: (i % 2 ? "assistant" : "user") as "user" | "assistant",
+      content: `m${i} ${"y".repeat(40_000)}` }))
+    const trimmed = trimHistoryToMeasuredContext("gpt-5.4-mini", history, 100)
+    expect(trimmed[0]!.content).toMatch(/^\[\d+ earlier message\(s\) omitted: over gpt-5\.4-mini's measured context\]$/)
+    expect(trimmed.at(-1)).toEqual(history.at(-1))
+    expect(trimmed.length).toBeLessThan(history.length)
+    expect(trimHistoryToMeasuredContext("composer-2.5", history, 100)).toEqual(history)
   })
 })
 

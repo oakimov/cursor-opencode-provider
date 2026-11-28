@@ -23,6 +23,7 @@ import { sessionManager } from "../src/session.js"
 import { notifyHostInterrupt } from "../src/host-interrupt.js"
 import { resetTurnStateForTests, restorePersistedHostNotes, settleRunSavesForTests } from "../src/language-model.js"
 import { decodePersistedHostNotes, encodePersistedHostNotes } from "../src/protocol/host-notes.js"
+import { seedText } from "./seed-text.js"
 import { getActiveCursorMode, resetActiveCursorModesForTests, setActiveCursorMode, takeActiveCursorModeReminder } from "../src/protocol/switch-mode.js"
 import { peekConversationId, resetConversationBindingsForTests, sessionIdToUuid } from "../src/protocol/conversation-bind.js"
 import { getCheckpoint, resetCheckpointsForTests } from "../src/protocol/checkpoint.js"
@@ -366,7 +367,7 @@ describe("seeded Runs through a full provider Run", () => {
     } finally { fs.rmSync(root, { recursive: true, force: true }) }
   })
 
-  it("rebuilds a closed Run with the history in the user text and the system-instructions rule intact", async () => {
+  it("rebuilds a closed Run with the history in earlier user turns and the system-instructions rule intact", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-seed-run-"))
     cacheHttp2SessionForTests(ORIGIN, client)
     try {
@@ -397,8 +398,10 @@ describe("seeded Runs through a full provider Run", () => {
       const request = runs[1]!.received.find((message) => message.run_request)!.run_request
       const state = decodeMessage<Record<string, any>>("ConversationStateStructure", request.conversation_state)
       expect(state.root_prompt_messages_json ?? []).toEqual([])
-      const text = request.action.user_message_action.user_message.text as string
-      expect(text).toStartWith("<conversation_history>\n<user>\nRead probe.txt.\n\nOpenCode host observation ")
+      const action = request.action.user_message_action
+      expect(action.user_message.text).toStartWith("Continue the interrupted turn")
+      const text = seedText(action)
+      expect(text).toStartWith("[Earlier conversation, part 1 of 1]\n<conversation_history>\n<user>\nRead probe.txt.\n\nOpenCode host observation ")
       expect(text).toContain("alpha\n</user>\n</conversation_history>\n\nContinue the interrupted turn")
       const rules = request.action.user_message_action.request_context.rules as Array<{ content: string }>
       expect(rules).toHaveLength(1)
@@ -700,7 +703,19 @@ describe("history images through a full provider Run", () => {
 
   it("sends every image again after a compaction", () => withRoot(async (root) => {
     const sessionKey = "ses_images_compaction"
-    onRun = (run, message) => { if (message.run_request) endTurnOn(run, checkpoint(runs.indexOf(run) + 1)) }
+    onRun = (run, message) => {
+      if (!message.run_request) return
+      if (message.run_request.action.summarize_action) {
+        // Cursor's answer to summarize_action (live 2026-11-28): summary, checkpoint, empty turn_ended.
+        run.send({ interaction_update: { summary_started: {} } })
+        run.send({ interaction_update: { summary: { summary: "Summary: a screenshot." } } })
+        run.send({ interaction_update: { summary_completed: {} } })
+        run.send({ conversation_checkpoint_update: checkpoint(40) })
+        run.send({ interaction_update: { turn_ended: {} } })
+        return
+      }
+      endTurnOn(run, checkpoint(runs.indexOf(run) + 1))
+    }
     const turn1: Prompt = [user("Here is the screenshot.", IMAGE_A)]
     await collect(model(root), turn1, sessionKey)
     const { stream } = await model(root).doStream({
@@ -710,11 +725,20 @@ describe("history images through a full provider Run", () => {
       headers: { "x-opencode-session-id": sessionKey },
     } as LanguageModelV3CallOptions)
     for (const reader = stream.getReader(); !(await reader.read()).done;);
-    await collect(model(root), [...turn1, assistant("Done."), user("Summary: a screenshot."), user("Next question.")], sessionKey)
+    // OpenCode 1.x after a compaction: the kept tail, its compaction request, the
+    // summary as the latest assistant message, then the next user message.
+    await collect(model(root), [
+      ...turn1, assistant("Done."), user("Summarize the conversation."), assistant("Summary: a screenshot."), user("Next question."),
+    ], sessionKey)
 
-    expect(sentCheckpoint(1)).toBeUndefined()
-    expect(sentImages(1)).toEqual([IMAGE_A])
-    expect(sentCheckpoint(2)).toBeUndefined()
+    // The compaction summarized the live conversation in place, on its checkpoint.
+    expect(request(1).action.summarize_action).toEqual({})
+    expect(request(1).conversation_id).toBe(request(0).conversation_id)
+    expect(sentCheckpoint(1)).toEqual(checkpoint(1))
+    // The next turn continues on the summary's checkpoint and sends the image again:
+    // a summarized image is no longer in Cursor's context.
+    expect(request(2).conversation_id).toBe(request(0).conversation_id)
+    expect(sentCheckpoint(2)).toEqual(checkpoint(40))
     expect(sentImages(2)).toEqual([IMAGE_A])
   }), 30_000)
 
@@ -1096,10 +1120,11 @@ describe("host notes through a full provider Run", () => {
       const previous = runs[0]!.received[0]!.run_request
       const request = runs[1]!.received[0]!.run_request
       expect(request.conversation_id).not.toBe(previous.conversation_id)
-      const text = request.action.user_message_action.user_message.text as string
+      const text = seedText(request.action.user_message_action)
       expect(text).toContain("already-read")
       expect(text).toContain("OpenCode host observation")
       expect(text).toEndWith("Summarize the completed read; do not read it again.")
+      expect(request.action.user_message_action.user_message.text).toBe("Summarize the completed read; do not read it again.")
       // A tool-less lifecycle Run remains ephemeral and cannot rotate the
       // owning conversation's binding merely because preparation was busy.
       if (!toolsEnabled) expect(peekConversationId(sessionKey)).toBe(previous.conversation_id)

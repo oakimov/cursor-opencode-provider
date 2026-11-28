@@ -1,5 +1,6 @@
 import {
   CURSOR_PROVIDER_ID,
+  CURSOR_COMPACTION_HOOK_OPTION,
   CURSOR_COMPACTION_OPTION,
   CURSOR_HOST_AGENT_OPTION,
   CURSOR_SESSION_EDITS_DENIED_OPTION,
@@ -49,6 +50,7 @@ import { registerCursorImageSaveTool } from "./opencode2/image-save-tool.js"
 import { OPENCODE_2_TOOL_DIALECT } from "./protocol/tools.js"
 import { clearSessionTodos } from "./todo-store.js"
 import { markCompactionSession } from "./compaction-marker.js"
+import { currentTurnStartId, hookPrompt, isBackgroundCompaction, summarizeThroughModel } from "./opencode2/compaction-hook.js"
 import { awaitHostHistoryRewrite, noteHostHistoryRewrite } from "./host-history-rewrite.js"
 import { getSessionDirectory, markSessionDirectory } from "./session-directory.js"
 import { rememberHostSkillFiles } from "./context/skills.js"
@@ -68,12 +70,14 @@ import {
 import { isHostPlanAgent, type HostPrimaryAgent } from "./protocol/cursor-mode.js"
 import { CursorPlugin } from "./plugin.js"
 import { nativeToolRefusal, preserveNativeToolResults, type ToolRefusal } from "./opencode2/tool-results.js"
+import type { LanguageModelV3, LanguageModelV3CallOptions } from "@ai-sdk/provider"
 import type { CreateCursorOptions } from "./index.js"
 import type {
   Cleanup,
   ConnectionInfo,
   PluginContext,
   Plugin2,
+  SessionCompaction,
   SessionContext,
 } from "./opencode2/types.js"
 
@@ -159,6 +163,8 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
 
   setup: async (ctx: PluginContext): Promise<Cleanup> => {
     const cacheDir = opencodeGlobalCacheDir()
+    // Language models this copy built, by OpenCode model id and Cursor wire id.
+    const compactionLanguages = new Map<string, LanguageModelV3>()
     const workspaceRoot = ctx.location?.directory || process.cwd()
     // CreatePlan writes where OpenCode 2.0's Plan agent keeps plan files.
     // OpenCode 2.0 sets a plugin up once per location instance and again on a
@@ -387,11 +393,17 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
 
     await track(
       ctx.aisdk.hook("language", (event) => {
-        if (event.language) return
         if (event.model.providerID !== CURSOR_PROVIDER_ID) return
-        if (typeof event.sdk?.languageModel !== "function") return
-        // `modelID` is the Cursor wire id; `id` may be a synthetic long-context entry.
-        event.language = event.sdk.languageModel(event.model.modelID || event.model.id)
+        if (!event.language && typeof event.sdk?.languageModel === "function") {
+          // `modelID` is the Cursor wire id; `id` may be a synthetic long-context entry.
+          event.language = event.sdk.languageModel(event.model.modelID || event.model.id)
+        }
+        // The compaction hook asks the same language model for Cursor's summary.
+        const language = event.language as LanguageModelV3 | undefined
+        if (typeof language?.doStream === "function") {
+          compactionLanguages.set(event.model.id, language)
+          if (event.model.modelID) compactionLanguages.set(event.model.modelID, language)
+        }
       }),
     )
 
@@ -538,6 +550,51 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
       }
     }
 
+    /**
+     * Cursor's own summary for an OpenCode 2 compaction (`summarize_action`).
+     * Never throws (a rejected hook is a defect in OpenCode); a declined or
+     * failed call marks the request so the host's model call fails at once.
+     */
+    const answerCursorCompaction = async (event: SessionCompaction): Promise<void> => {
+      event.options ??= {}
+      const decline = (reason: string) => {
+        trace(`compaction hook: ${reason} sessionID=${event.sessionID}`)
+        event.options![CURSOR_COMPACTION_HOOK_OPTION] = reason
+      }
+      try {
+        const context = ctx.session.context
+          ? await ctx.session.context({ sessionID: event.sessionID }).catch(() => undefined)
+          : undefined
+        if (isBackgroundCompaction(event.messages, context, CURSOR_PROVIDER_ID)) {
+          // A background precompute runs beside the live step; Cursor summarizes
+          // in the background itself, as for Cursor CLI. OpenCode stops asking
+          // after two declines until the next compaction.
+          return decline("declined")
+        }
+        const language = compactionLanguages.get(event.model.id)
+        if (!language) return decline("unavailable")
+        const { [CURSOR_COMPACTION_HOOK_OPTION]: _ignored, ...providerOptions } = event.options
+        const directory = getSessionDirectory(event.sessionID)
+        const { summary, mode } = await summarizeThroughModel(language, {
+          prompt: hookPrompt(event.system, event.messages),
+          headers: {
+            "x-opencode-session-id": event.sessionID,
+            ...(directory ? { "x-opencode-directory": encodeURIComponent(directory) } : {}),
+          },
+          providerOptions: {
+            cursor: { ...providerOptions, [CURSOR_COMPACTION_OPTION]: true, [CURSOR_COMPACTION_HOOK_OPTION]: "hook" },
+          },
+        } as LanguageModelV3CallOptions)
+        // A fork summarizes only up to the in-flight turn: keep that turn verbatim.
+        const keepID = mode === "fork" ? currentTurnStartId(event.messages) : undefined
+        event.result = { summary, ...(keepID ? { metadata: { keepID } } : {}) }
+        trace(`compaction hook: answered sessionID=${event.sessionID} mode=${mode ?? "-"} chars=${summary.length}`)
+      } catch (error) {
+        decline("failed")
+        trace(`compaction hook: summary failed sessionID=${event.sessionID}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+
     let refreshModelsOnContext: (() => void) | undefined
     await track(
       ctx.session.hook("context", async (event) => {
@@ -618,6 +675,8 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
         event.messages = preserveNativeToolResults(event.messages, refusals)
         markCompactionAndOptions(event, true)
         await rememberSessionDirectory(event.sessionID)
+        if (event.model?.providerID !== CURSOR_PROVIDER_ID) return
+        await answerCursorCompaction(event)
       }),
     )
 

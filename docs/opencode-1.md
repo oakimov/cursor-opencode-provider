@@ -121,6 +121,23 @@ and its quarantine copies without allocating a directory or inode. After a
 restart, the next turn builds from host history until a successful save lands.
 See [conversation persistence](../README.md#known-limitations).
 
+## Compaction
+
+OpenCode's compaction on a Cursor model is Cursor's own summary
+(`summarize_action`, as Cursor CLI's `/summarize`). The provider ignores the
+compaction prompt's template and streams Cursor's summary as the reply, so its
+sections follow Cursor's layout. The conversation id stays the same and the next
+turn continues on the summarized checkpoint. When the compaction comes while
+Cursor waits on tool results, Cursor summarizes a copy of the checkpoint, and
+the waiting Run continues. A result OpenCode compacted away before it reached
+Cursor is answered with a note that the tool ran but its output was removed,
+not a cancel. When that turn ends, the conversation is summarized in place
+before the next turn. When Cursor does not hold the session's history (another
+model answered, no checkpoint, a restart with unanswered tool calls), the
+provider imports OpenCode's transcript as earlier turns first, without the
+template's instructions, then summarizes it. A failed summary fails the
+compaction; nothing is reseeded.
+
 ## Planning and session edit rules
 
 Cursor tools use the route advertised for the current turn. Call a supplied
@@ -237,8 +254,10 @@ background, or an AwaitShell Cursor ran that slept its whole length or timed
 out with the shell still running.
 A host note Cursor took into that Run does not block the rebuild while its
 text is still in host history.
-A rebuild too large for the model's context is reported as a context overflow
-(413) so the host can compact. Recovery retains the latest eligible checkpoint across token renewal, including
+The rebuilt history goes in as earlier user turns, so Cursor summarizes what
+does not fit and keeps the request. A model with a measured silent cutoff
+([effective context](effective-context.md)) reports a rebuild over 80% of that
+limit as a context overflow (413) so the host can compact. Recovery retains the latest eligible checkpoint across token renewal, including
 a rejected credential on an untouched resumed attempt. Checkpoints received
 while a completed tool result drains remain eligible only after Cursor acknowledges
 the matching tool completion. A late pre-result checkpoint cannot authorize replay.

@@ -12,6 +12,7 @@ variables and limitations. Host setup belongs in the matching guide.
 | [Host acceptance](host-compat-acceptance.md) | Planning, patch tools, steering and caching checks |
 | [Execution self-verification](execution-self-verify.md) | Native shell, permissions, failures and cleanup |
 | [CLI parity](cli-parity.md) | Provider support inventory and historical CLI comparison |
+| [Effective context](effective-context.md) | Routes with a measured silent cutoff, and how to find and record one |
 | [Cache decisions](cache-aggressive-hold-approval.md) | Approved conversation-retention design and source guards |
 | [Review rules](review-rules.md) | PR review criteria |
 | [Review harness](review-harness.md) | First-time setup: credentials, use, what gets posted, architecture / tests / evals |

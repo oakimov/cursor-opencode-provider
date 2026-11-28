@@ -230,7 +230,7 @@ import {
 } from "./protocol/generate-image.js"
 import { distinctInputImagePath, stageCursorImage } from "./image-staging.js"
 import { IMAGE_PERMISSION_DENIED_PREFIX } from "./image-save.js"
-import { checkpointTokenDetails, getCheckpoint, setCheckpoint } from "./protocol/checkpoint.js"
+import { checkpointTokenDetails, clearCheckpoint, getCheckpoint, setCheckpoint } from "./protocol/checkpoint.js"
 import {
   EarlyToolRows,
   cursorEditAnnouncement,
@@ -259,10 +259,14 @@ import {
   type CursorConversationTokenDetails,
 } from "./protocol/token-details.js"
 import {
+  clearConversationBlobs,
   conversationBlobCount,
   inspectConversationBlobGraph,
+  snapshotConversationBlobs,
   type ConversationBlobGraphStats,
 } from "./protocol/blob-store.js"
+import { CursorSummarizeError, pumpSummarizeRun } from "./compaction-run.js"
+import { CURSOR_EFFECTIVE_CONTEXT, MEASURED_CONTEXT_SHARE } from "./effective-context-data.js"
 import {
   bindConversationId,
   isActiveConversationBinding,
@@ -275,6 +279,7 @@ import {
   finishEmittedStep,
   recordEmittedPart,
   resumeEmittedStep,
+  getTurnProvenance,
   trackTurnProvenance,
   type ForeignHistoryReason,
 } from "./protocol/turn-provenance.js"
@@ -322,8 +327,8 @@ import {
   retrySuppressedError,
   toCursorProviderError,
 } from "./errors.js"
-import { readCache, cacheFilePath, resolveVariantParameters, resolveVariantMaxMode, extractCursorVariantParameters, resolveCursorWireModelId, parseCursorContextLimit, type ModelInfo, type ModelParameterValue } from "./models.js"
-import { getFrozenRequestContext, getOrBuildRequestContext, resetFrozenRequestContextsForTests } from "./context/frozen.js"
+import { readCache, cacheFilePath, resolveVariantParameters, resolveVariantMaxMode, extractCursorVariantParameters, resolveCursorWireModelId, type ModelInfo, type ModelParameterValue } from "./models.js"
+import { getFrozenRequestContext, getLatestRequestContext, getOrBuildRequestContext, resetFrozenRequestContextsForTests } from "./context/frozen.js"
 import { systemInstructionsRuleText, type SystemInstructions } from "./context/build.js"
 import { loadMergedConfig, type OpencodeJson } from "./context/rules.js"
 import {
@@ -343,6 +348,7 @@ import {
 import { resolveAgentUrl } from "./agent-url.js"
 import {
   CURSOR_API_HOST,
+  CURSOR_COMPACTION_HOOK_OPTION,
   CURSOR_COMPACTION_OPTION,
   CURSOR_HISTORY_REWRITE_OPTION,
   CURSOR_HOST_AGENT_OPTION,
@@ -359,7 +365,6 @@ import {
   MAX_CURSOR_IMAGE_INPUT_BYTES,
   type CursorImageInput,
 } from "./image-input.js"
-import { getDocumentedCursorModelContext } from "./model-metadata.js"
 import {
   CURSOR_TIMEOUT_BACKGROUND,
   consumeCursorShellResult,
@@ -451,6 +456,24 @@ const interruptedRunHostNotesBySession = new Map<string, HostNoteBatch>()
 // suppresses OpenCode's compacted prompt/system seed and makes Cursor narrate
 // tool use instead of emitting exec requests. Rebase once on the next turn.
 const postCompactionRebaseBySession = new Set<string>()
+/**
+ * Sessions whose last compaction was answered by a fork of a held Run (the
+ * live conversation was not summarized): sessionKey → live conversation id.
+ * When that conversation's turn ends, the provider summarizes it in place so
+ * the next turn starts small (plan §12.1), and a pending exec whose result the
+ * host compacted away gets an explicit note instead of a cancel (§14.1).
+ */
+const forkCompactionBySession = new Map<string, string>()
+
+function markForkCompaction(sessionKey: string, conversationId: string): void {
+  forkCompactionBySession.delete(sessionKey)
+  forkCompactionBySession.set(sessionKey, conversationId)
+  while (forkCompactionBySession.size > MAX_TURN_STATE_SESSIONS) {
+    const oldest = forkCompactionBySession.keys().next().value as string | undefined
+    if (oldest === undefined) break
+    forkCompactionBySession.delete(oldest)
+  }
+}
 type PromptIdentity = { hostAgent?: string; systemPromptHash?: string }
 const promptIdentityBySession = new Map<string, PromptIdentity>()
 export const MAX_TURN_STATE_SESSIONS = 256
@@ -1177,6 +1200,385 @@ function resolveRunBearerToken(options: CreateCursorOptions, forceRefresh = fals
   })
 }
 
+// ── Native compaction (Cursor CLI `/summarize`) ──
+//
+// A host compaction never sends its transcript to Cursor as a prompt. Cursor
+// summarizes the session's own conversation with `summarize_action`, under
+// the same conversation id (issue 203; private live run 2026-11-28):
+// - idle conversation that holds the host history → summarize it in place;
+// - a Run held mid-turn (Cursor waits on tool results) → summarize a fork of
+//   its latest checkpoint under a new id, as Cursor CLI's fork copies blobs and
+//   the latest root, and leave the held Run alone;
+// - Cursor does not hold the host history (no checkpoint, another model
+//   answered, a pending host-history rewrite) → import the host history as
+//   earlier user turns into a fresh conversation, then summarize that.
+
+/** The user text of a history-import turn; its reply is discarded. */
+export const HISTORY_IMPORT_ACK = "The earlier turns above are this session's conversation so far, imported from OpenCode. Reply only: OK"
+
+export type CompactionMode = "live" | "fork" | "import"
+
+type CompactionTarget = {
+  token: string
+  agentBaseUrl: string
+  cursorModelId: string
+  parameterValues: ModelParameterValue[]
+  maxMode: boolean
+}
+
+async function resolveCompactionTarget(
+  modelId: string,
+  options: CreateCursorOptions,
+  callOptions: LanguageModelV3CallOptions,
+): Promise<CompactionTarget> {
+  const token = await resolveRunBearerToken(options)
+  const agentBaseUrl = resolveExplicitAgentBaseURL(options) ?? await resolveAgentUrl(token, {
+    apiBaseURL: resolveApiBaseURL(options),
+    telemetryEnabled: resolveTelemetryEnabled(options),
+  })
+  const providerOptions = callOptions.providerOptions?.cursor as Record<string, unknown> | undefined
+  const picked = extractCursorVariantParameters(providerOptions)
+  const cursorModelId = resolveCursorWireModelId(providerOptions, modelId)
+  const hintMaxMode = !!(providerOptions?.maxMode ?? false)
+  const modelInfo = (await loadAvailableModels(opencodeGlobalCacheDir()))?.find((m) => m.id === cursorModelId)
+  const parameterValues = resolveVariantParameters(modelInfo, {
+    reasoningEffort: typeof providerOptions?.reasoningEffort === "string" ? providerOptions.reasoningEffort : undefined,
+    maxMode: hintMaxMode,
+    picked,
+  })
+  const maxMode = resolveVariantMaxMode(parameterValues, { picked, maxMode: hintMaxMode, model: modelInfo })
+  return { token, agentBaseUrl, cursorModelId, parameterValues, maxMode }
+}
+
+/**
+ * One `summarize_action` Run. `persist` stores the returned checkpoint as the
+ * conversation's own and saves the snapshot; a fork's checkpoint is dropped.
+ */
+async function runSummarizeAction(input: {
+  target: CompactionTarget
+  options: CreateCursorOptions
+  sessionKey: string | undefined
+  conversationId: string
+  /** Whose RequestContext answers Cursor's probe: a fork's source conversation. */
+  contextConversationId?: string
+  checkpoint: Uint8Array
+  preload?: Map<string, Uint8Array>
+  persist: boolean
+  /**
+   * OpenCode 1.x replays the summary as the latest assistant message: record
+   * it as this provider's step on this conversation id, before the snapshot
+   * save, so another copy or a restart does not take it for foreign history.
+   */
+  recordStepFor?: string
+  signal?: AbortSignal
+  requestedAt: number
+}): Promise<string> {
+  const { target, sessionKey, conversationId } = input
+  const requestContext = getLatestRequestContext(input.contextConversationId ?? conversationId) ?? {}
+  const request = buildRunRequest({
+    text: "",
+    modelId: target.cursorModelId,
+    conversationId,
+    conversationGroupId: resolveConversationGroupId(sessionKey, conversationId),
+    conversationState: input.checkpoint,
+    parameterValues: target.parameterValues,
+    maxMode: target.maxMode,
+    action: "summarize",
+  })
+  trace(`summarize: conversationId=${conversationId} persist=${input.persist} model=${target.cursorModelId} ` +
+    `checkpointBytes=${input.checkpoint.length}`)
+  const stream = await openRunWithRequest(target.token, {
+    baseURL: target.agentBaseUrl,
+    headers: input.options.headers,
+  }, request, "summarize", { signal: input.signal, stoppedWithSessionId: sessionKey, requestedAt: input.requestedAt })
+  const result = await pumpSummarizeRun(stream, {
+    conversationId,
+    blobs: { conversationId, preload: input.preload },
+    requestContext,
+    heartbeatMs: resolveContinuationPolicy(input.options.continuation).heartbeatMs,
+    signal: input.signal,
+    onCheckpoint: input.persist ? (bytes) => setCheckpoint(conversationId, bytes) : undefined,
+  }, { endStreamError: connectFrameError })
+  trace(`summarize: done conversationId=${conversationId} source=${result.source} chars=${result.summary.length}`)
+  if (sessionKey && input.recordStepFor) {
+    beginEmittedStep(sessionKey, input.recordStepFor)
+    recordEmittedPart(sessionKey, input.recordStepFor, { type: "text-delta", delta: result.summary })
+    finishEmittedStep(sessionKey, input.recordStepFor)
+  }
+  if (input.persist && sessionKey) {
+    // Summarized images are no longer in Cursor's context; the host's tail resends its own.
+    forgetHeldHistoryImages(sessionKey)
+    const identity = promptIdentityBySession.get(sessionKey)
+    await persistConversationState(opencodeGlobalCacheDir(), {
+      sessionKey,
+      conversationId,
+      requestContext,
+      toolCatalog: snapshotToolCatalog(sessionKey),
+      hostAgent: identity?.hostAgent,
+      systemPromptHash: identity?.systemPromptHash,
+      hostNote: encodePersistedHostNotes(undeliveredHostNotes(sessionKey)),
+    }).catch((error) => {
+      trace(`summarize: snapshot save failed sessionKey=${sessionKey}: ${String(error)}`)
+    })
+  }
+  return result.summary
+}
+
+/**
+ * After a fork compaction answered a mid-turn compaction, Cursor's live
+ * conversation still holds the whole turn, so the host would compact again on
+ * every step (OpenCode 2 sizes requests from Cursor's occupancy). Once that
+ * turn has ended, summarize the conversation in place, as Cursor CLI's
+ * `/summarize` does. It runs inside the next request, before that request's
+ * Run opens, so the request waits for it and never races it on the same
+ * conversation id. A failure only logs: the next turn goes on from the
+ * unsummarized checkpoint, whose occupancy Cursor's harness still manages.
+ */
+async function summarizeAfterForkCompaction(input: {
+  sessionKey: string
+  modelId: string
+  options: CreateCursorOptions
+  callOptions: LanguageModelV3CallOptions
+  requestedAt: number
+  /** The next turn rebuilds from host history anyway; nothing to summarize. */
+  rebasing: boolean
+}): Promise<void> {
+  const { sessionKey } = input
+  const forkedId = forkCompactionBySession.get(sessionKey)
+  if (!forkedId) return
+  if (sessionManager.findOpenByOpenCodeSessionId(sessionKey)) return
+  forkCompactionBySession.delete(sessionKey)
+  const checkpoint = getCheckpoint(forkedId)
+  if (input.rebasing || peekConversationId(sessionKey) !== forkedId || !checkpoint?.length) return
+  try {
+    const target = await resolveCompactionTarget(input.modelId, input.options, input.callOptions)
+    await runSummarizeAction({
+      target, options: input.options, sessionKey, conversationId: forkedId, checkpoint, persist: true,
+      signal: input.callOptions.abortSignal, requestedAt: input.requestedAt,
+    })
+  } catch (error) {
+    if (input.callOptions.abortSignal?.aborted) throw error
+    trace(`summarize: live summary after a fork compaction failed sessionKey=${sessionKey}: ` +
+      `${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+/** A stream controller that drops every part: the history-import turn's reply is not shown. */
+function discardingController(): ReadableStreamDefaultController<V3Part> {
+  return {
+    desiredSize: 1,
+    enqueue() {},
+    close() {},
+    error() {},
+  } as unknown as ReadableStreamDefaultController<V3Part>
+}
+
+/**
+ * Summarize the session's Cursor conversation for a host compaction. `history`
+ * is the host transcript to import when Cursor does not hold it (Decision B).
+ */
+export async function summarizeForHostCompaction(input: {
+  modelId: string
+  options: CreateCursorOptions
+  callOptions: LanguageModelV3CallOptions
+  history: LanguageModelV3CallOptions["prompt"]
+  /** The host replays the summary as an assistant message (OpenCode 1.x). */
+  recordStep: boolean
+  requestedAt: number
+}): Promise<{ summary: string; mode: CompactionMode; conversationId: string }> {
+  const { modelId, options, callOptions, requestedAt } = input
+  const sessionKey = opencodeSessionKey(callOptions)
+  const cacheDir = opencodeGlobalCacheDir()
+  const target = await resolveCompactionTarget(modelId, options, callOptions)
+  const signal = callOptions.abortSignal
+
+  let isolate = false
+  if (sessionKey) {
+    const held = sessionManager.findOpenByOpenCodeSessionId(sessionKey)
+    if (!held && sessionManager.hasOpenRunElsewhere(sessionKey)) {
+      // Another OpenCode Location's copy holds this session's Run; its
+      // checkpoint and blobs are not here to fork, and summarizing in place
+      // would race that Run.
+      throw new CursorSummarizeError("Cursor compaction: this session's Run is open in another OpenCode location")
+    }
+    const liveId = peekConversationId(sessionKey)
+    const rewrite = await awaitHostHistoryRewrite(cacheDir, sessionKey)
+    // A held Run before its first checkpoint has nothing to fork: import into
+    // an isolated conversation, so the held Run keeps its own.
+    isolate = !!held && !held.closed && !rewrite && !getCheckpoint(held.conversationId)?.length
+    if (held && !held.closed && !rewrite) {
+      // Cursor is still inside a turn: summarizing in place would race it.
+      const checkpoint = getCheckpoint(held.conversationId)
+      if (checkpoint?.length) {
+        const forkId = crypto.randomUUID()
+        const preload = new Map(snapshotConversationBlobs(held.conversationId).map((blob) => [blob.id, blob.data] as const))
+        try {
+          const summary = await runSummarizeAction({
+            target, options, sessionKey, conversationId: forkId, contextConversationId: held.conversationId,
+            checkpoint, preload, persist: false, signal, requestedAt,
+            ...(input.recordStep ? { recordStepFor: held.conversationId } : {}),
+          })
+          markForkCompaction(sessionKey, held.conversationId)
+          return { summary, mode: "fork", conversationId: held.conversationId }
+        } finally {
+          clearConversationBlobs(forkId)
+        }
+      }
+    }
+    const checkpoint = held ? undefined : getCheckpoint(liveId)
+    const foreign = checkpoint?.length && !rewrite
+      ? detectForeignHistory({ sessionKey, conversationId: liveId, prompt: input.history })
+      : undefined
+    // The provider's last step ended in tool calls but no Run holds them (a
+    // restart or a lost Run): the checkpoint predates results the host has.
+    const step = getTurnProvenance(sessionKey)
+    const owesResults = !held && step?.conversationId === liveId && step.toolCallIds.length > 0
+    if (checkpoint?.length && !rewrite && !foreign && !owesResults) {
+      const summary = await runSummarizeAction({
+        target, options, sessionKey, conversationId: liveId, checkpoint, persist: true, signal, requestedAt,
+        ...(input.recordStep ? { recordStepFor: liveId } : {}),
+      })
+      return { summary, mode: "live", conversationId: liveId }
+    }
+    trace(`summarize: importing host history first sessionKey=${sessionKey} ` +
+      `reason=${rewrite ? "host-history-rewrite" : foreign ? `foreign-history:${foreign}`
+        : owesResults ? "unanswered-tool-calls" : "no-checkpoint"}`)
+  }
+
+  const history = input.history.filter((message) => message.role !== "system")
+  if (!history.some((message) => message.role === "user" || message.role === "assistant")) {
+    throw new CursorSummarizeError("Nothing to compact yet")
+  }
+  const cursorOptions = callOptions.providerOptions?.cursor as Record<string, unknown> | undefined
+  const importCall: LanguageModelV3CallOptions = {
+    ...callOptions,
+    prompt: [
+      ...input.history,
+      { role: "user", content: [{ type: "text", text: HISTORY_IMPORT_ACK }] },
+    ],
+    tools: callOptions.tools ?? [],
+    toolChoice: { type: "none" },
+    providerOptions: {
+      ...callOptions.providerOptions,
+      cursor: { ...cursorOptions, [CURSOR_COMPACTION_OPTION]: false, [CURSOR_COMPACTION_HOOK_OPTION]: undefined },
+    },
+  }
+  const openImport = async (recovery?: CursorRunRecovery) =>
+    startSession(modelId, await resolveRunBearerToken(options), importCall, options, {
+      recovery, importHistory: true, requestedAt, ...(isolate ? { isolate: true } : {}),
+    })
+  let session = await openImport()
+  session = await pumpWithRecovery({
+    initialSession: session,
+    controller: discardingController(),
+    abortSignal: signal,
+    recover: (recovery) => openImport(recovery),
+    onSession: (next) => { session = next },
+  })
+  const conversationId = session.conversationId
+  const checkpoint = getCheckpoint(conversationId)
+  if (!checkpoint?.length) throw new CursorSummarizeError("Cursor's import turn returned no checkpoint")
+  const heldId = isolate && sessionKey ? sessionManager.findOpenByOpenCodeSessionId(sessionKey)?.conversationId : undefined
+  const summary = await runSummarizeAction({
+    target, options, sessionKey, conversationId, checkpoint, persist: !isolate, signal, requestedAt,
+    ...(input.recordStep ? { recordStepFor: heldId ?? conversationId } : {}),
+  })
+  if (isolate && sessionKey) {
+    clearCheckpoint(conversationId)
+    clearConversationBlobs(conversationId)
+    const held = sessionManager.findOpenByOpenCodeSessionId(sessionKey)
+    if (held) markForkCompaction(sessionKey, held.conversationId)
+    return { summary, mode: "fork", conversationId: held?.conversationId ?? conversationId }
+  }
+  return { summary, mode: "import", conversationId }
+}
+
+/**
+ * The host history a compaction call carries, for the import (Decision B),
+ * without the host's own summary instructions. OpenCode 1.x sends one user
+ * message: its serialized transcript inside `<conversation>` (upstream 1.19.6
+ * `buildPrompt`), an optional `<prior-summary>`, then its template; the
+ * transcript is split at each `[User]:` entry so it fills the 5 prepended
+ * turns. A host that sends the conversation as messages gets them all but its
+ * final user message (the summary request). Any other single message (a
+ * plugin's custom `experimental.session.compacting` prompt) imports whole.
+ */
+export function compactionCallHistory(prompt: LanguageModelV3CallOptions["prompt"]): LanguageModelV3CallOptions["prompt"] {
+  const turns = prompt.filter((message) => message.role !== "system")
+  let lastIndex = prompt.length - 1
+  while (lastIndex >= 0 && prompt[lastIndex]!.role !== "user") lastIndex--
+  if (turns.length > 1 && lastIndex >= 0) return prompt.slice(0, lastIndex)
+  const last = lastIndex >= 0 ? prompt[lastIndex] : undefined
+  const text = last ? extractUserText(last as unknown as Record<string, unknown>) : ""
+  if (!text || text === ".") return []
+  const block = (tag: string) => {
+    const open = text.indexOf(`<${tag}>\n`)
+    const close = text.lastIndexOf(`\n</${tag}>`)
+    return open >= 0 && close > open ? text.slice(open + tag.length + 3, close) : undefined
+  }
+  const conversation = block("conversation")
+  const user = (body: string) => ({ role: "user" as const, content: [{ type: "text" as const, text: body }] })
+  if (conversation === undefined) return [user(text)]
+  const prior = block("prior-summary")
+  const entries = conversation.split(/\n\n(?=\[User\]: )/).map((entry) => entry.trim()).filter(Boolean)
+  return [...(prior ? [user(`[Summary of the conversation before these turns]\n${prior}`)] : []), ...entries.map(user)]
+}
+
+/** The stream a compaction call returns: the summary as text, nothing billed. */
+function compactionSummaryStream(summary: string, mode: CompactionMode): ReadableStream<V3Part> {
+  return new ReadableStream<V3Part>({
+    start(controller) {
+      controller.enqueue({ type: "stream-start", warnings: [] } as V3Part)
+      controller.enqueue({ type: "text-start", id: "cursor-summary" })
+      controller.enqueue({ type: "text-delta", id: "cursor-summary", delta: summary })
+      controller.enqueue({ type: "text-end", id: "cursor-summary" })
+      controller.enqueue({
+        type: "finish",
+        finishReason: { unified: "stop", raw: undefined },
+        usage: emptyLanguageModelV3Usage(),
+        providerMetadata: {
+          copilot: { totalNanoAiu: 0 },
+          cursor: { usageVersion: 3, occupancyOnly: true, compactionMode: mode },
+        },
+      } as V3Part)
+      controller.close()
+    },
+  })
+}
+
+/**
+ * A compaction call (1.x: the compaction agent's doStream; 2.x: only the
+ * hook's own call, since the hook answers the host before its model call).
+ */
+async function compactionStream(
+  modelId: string,
+  options: CreateCursorOptions,
+  callOptions: LanguageModelV3CallOptions,
+  requestedAt: number,
+): Promise<LanguageModelV3StreamResult> {
+  const cursorOptions = callOptions.providerOptions?.cursor as Record<string, unknown> | undefined
+  const hookMark = cursorOptions?.[CURSOR_COMPACTION_HOOK_OPTION]
+  if (typeof hookMark === "string" && hookMark !== "hook") {
+    // 2.x: the compaction hook declined (background precompute) or failed. A
+    // final error, never a 413 or an overflow phrase, so OpenCode neither
+    // shrinks nor retries and records `compaction.failed`.
+    trace(`compaction: host model call after hook=${hookMark} — failing without a Run`)
+    throw new CursorSummarizeError(`Cursor compaction ${hookMark}`)
+  }
+  // Failures reject like any Run setup failure (doStream's wrapper): host-shaped,
+  // final unless replay-safe and offline, and a Stop is a local cancellation.
+  const { summary, mode } = await summarizeForHostCompaction({
+    modelId,
+    options,
+    callOptions,
+    history: hookMark === "hook" ? callOptions.prompt : compactionCallHistory(callOptions.prompt),
+    // 2.x opens its next request with the summary as a checkpoint message, not an assistant turn.
+    recordStep: hookMark !== "hook",
+    requestedAt,
+  })
+  return { stream: compactionSummaryStream(summary, mode) }
+}
+
 async function doStreamImpl(
   modelId: string,
   options: CreateCursorOptions,
@@ -1186,6 +1588,9 @@ async function doStreamImpl(
   requestedAt: number,
 ): Promise<LanguageModelV3StreamResult> {
   await restoreSessionState(opencodeSessionKey(callOptions), opencodeGlobalCacheDir())
+  if (isCompactionCall(callOptions, opencodeSessionKey(callOptions))) {
+    return compactionStream(modelId, options, callOptions, requestedAt)
+  }
   const rewriteSessionKey = opencodeSessionKey(callOptions)
   const rewriteTools = extractTools(callOptions)
   const hostHistoryRewrite = rewriteSessionKey
@@ -1404,8 +1809,13 @@ async function doStreamImpl(
         // Without TurnEnded, the checkpoint may predate completed side effects.
         // Include their host results instead of resuming that model step.
         const newUserTurn = liveUserTurn(prompt)
-        if (!lifecycleCall && !isCompactionCall(callOptions, sessionKey) && newUserTurn && newUserTurn.text !== ".") {
+        if (!lifecycleCall && newUserTurn && newUserTurn.text !== ".") {
           clearPlanOperations(sessionKey)
+        }
+        // The turn a fork compaction answered has ended: summarize its
+        // conversation in place before the next turn opens on it (plan §12.1).
+        if (sessionKey && !lifecycleCall) {
+          await summarizeAfterForkCompaction({ sessionKey, modelId, options, callOptions, requestedAt, rebasing: unfinishedPrior })
         }
         session = await openSession(unfinishedPrior
           ? { recovery: { kind: "rebase", reason: "unfinished-prior-run" } }
@@ -2117,7 +2527,18 @@ async function startSession(
   token: string,
   callOptions: LanguageModelV3CallOptions,
   options: CreateCursorOptions,
-  startOptions?: { recovery?: CursorRunRecovery; isolate?: boolean; requestedAt?: number },
+  startOptions?: {
+    recovery?: CursorRunRecovery
+    isolate?: boolean
+    requestedAt?: number
+    /**
+     * A history-import turn (compaction, Decision B): reseed the host history
+     * into a fresh conversation as earlier user turns, refuse every exec, and
+     * deliver no host notes or reminders. Its reply is discarded; the caller
+     * then summarizes the new conversation with `summarize_action`.
+     */
+    importHistory?: boolean
+  },
 ): Promise<CursorSession> {
   const continuationPolicy = resolveContinuationPolicy(options.continuation)
   const prompt = callOptions.prompt
@@ -2128,7 +2549,9 @@ async function startSession(
   const providerOptions = callOptions.providerOptions?.cursor as Record<string, unknown> | undefined
   const hostAgent = hostAgentFromCallOptions(callOptions)
   const sessionEditsDenied = sessionEditsDeniedFromCallOptions(callOptions)
-  const isCompaction = isCompactionCall(callOptions, sessionKey)
+  // A compaction call never opens a turn Run (see `compactionStream`); only
+  // the provider's own history-import turn takes these branches.
+  const isCompaction = startOptions?.importHistory === true
   const toolState = await resolveTurnToolState({
     sessionKey,
     incomingTools,
@@ -2172,9 +2595,11 @@ async function startSession(
   // and warm turns must not pay for a second disk read.
   const mergedConfig = await loadMergedConfig(workspaceRoot)
   const knownMcpServers = Object.keys(mergedConfig.mcp ?? {})
-  const interactionGuidance = buildOpenCodeInteractionGuidance(cursorTools, isCompaction, workspaceRoot, {
+  // An import turn starts the conversation the next turns continue, so its
+  // frozen baseline carries the ordinary guidance.
+  const interactionGuidance = buildOpenCodeInteractionGuidance(cursorTools, false, workspaceRoot, {
     knownMcpServers,
-    allowTools,
+    allowTools: allowTools || isCompaction,
   })
   // Prompt-identity diagnostics are filled after Context Epoch admission below
   // (baseline hash is the epoch baseline, not a per-turn host hash).
@@ -2182,7 +2607,7 @@ async function startSession(
   const resetState = resolveTurnConversationReset({
     // Title/helpers cannot consume the durable main conversation's rebase.
     sessionKey: ephemeralRun ? undefined : sessionKey,
-    isCompaction,
+    historyImport: isCompaction,
     historyRewrite: !ephemeralRun && (providerOptions?.[CURSOR_HISTORY_REWRITE_OPTION] === true
       || (!!sessionKey && await awaitHostHistoryRewrite(cacheDir, sessionKey))),
   })
@@ -2312,7 +2737,7 @@ async function startSession(
     && !cursorTools.some((tool) => tool.name === CURSOR_PLAN_STAGE_TOOL)
   // Mode reminders are chronological Mid-Conversation updates (V2), including on
   // checkpoint Turns — never folded into the frozen system baseline.
-  const history = extractPromptHistory(prompt, {
+  let history = extractPromptHistory(prompt, {
     liveTurnStart: liveTurn?.start,
     preserveTrailingUser: recovery?.kind === "rebase" && !checkpointUnusable && !unfinishedPriorRun,
     // A foreign-history rebase replays the other model's tool results too.
@@ -2365,8 +2790,8 @@ async function startSession(
   // message, which Cursor does not follow.
   let systemPrompt: string | undefined
   let systemInstructions: SystemInstructions | undefined
-  if (isCompaction || lifecycle) {
-    // Ephemeral summary/title Runs — do not initialize a sticky Context Epoch.
+  if (lifecycle) {
+    // Ephemeral title/helper Runs — do not initialize a sticky Context Epoch.
     systemPrompt = startedWithCheckpoint
       ? undefined
       : [baseSystemPrompt, interactionGuidance, ...oneShotReminders].filter(Boolean).join("\n\n")
@@ -2470,16 +2895,12 @@ async function startSession(
     model: modelInfo,
   })
 
-  if (foreignHistory || checkpointUnusable || unfinishedPriorRun || completedResultsRebase) {
-    assertForeignHistoryRebaseFits({
-      modelInfo,
-      cursorModelId,
-      maxMode,
-      parameters: parameterValues,
-      history,
-      systemPrompt,
-      userText,
-    })
+  if (!conversationState?.length && history.length > 0) {
+    if (isCompaction) {
+      history = trimHistoryToMeasuredContext(cursorModelId, history, (systemPrompt?.length ?? 0) + userText.length)
+    } else {
+      assertMeasuredContextFits({ cursorModelId, history, systemPrompt, userText })
+    }
   }
 
   // Freeze RequestContext per conversation_id (CLI parity). Rebuilding every
@@ -2572,7 +2993,7 @@ async function startSession(
       `conversationId=${conversationId} conversationGroupId=${conversationGroupId} ` +
       `params=${JSON.stringify(parameterValues ?? [])} ` +
       `maxMode=${maxMode} cursorMode=${cursorMode ?? "-"} systemPromptLen=${systemPrompt?.length ?? 0} ` +
-      `tools=${tools.length} incomingTools=${incomingTools.length} compaction=${isCompaction} ` +
+      `tools=${tools.length} incomingTools=${incomingTools.length} historyImport=${isCompaction} ` +
       `hooks=${hooksCtx ? hooksCtx.split("\n").length : 0} ` +
       `availableModels=${availableModels?.length ?? 0} userTextLen=${userText.length} ` +
       `images=${images.length} imageBytes=${images.reduce((total, image) => total + image.data.length, 0)} ` +
@@ -2661,7 +3082,7 @@ async function startSession(
     ...(sessionEditsDenied ? { sessionEditsDenied: true } : {}),
     sessionPermissionsUnavailable: sessionPermissionsUnavailableFromCallOptions(callOptions),
     stableSystemPromptHash: frozenSystemPromptHash,
-    postCompactionRebase: isCompaction,
+    postCompactionRebase: false,
     toolCatalog: sessionKey ? snapshotToolCatalog(sessionKey) : structuredClone(tools),
     knownMcpServers,
     stream,
@@ -2959,7 +3380,12 @@ export async function preparePriorSessionForFreshTurn(
     await persistPlanOperations(prior)
   }
 
-  const cancelled = await cancelPendingExecsForFreshTurn(prior)
+  // After a fork compaction, a result missing from the host prompt was compacted
+  // away, not abandoned: the host ran the tool (plan §14.1).
+  const compactedAway = !!prior.openCodeSessionId
+    && forkCompactionBySession.get(prior.openCodeSessionId) === prior.conversationId
+  const cancelled = await cancelPendingExecsForFreshTurn(prior,
+    compactedAway ? COMPACTED_TOOL_RESULT_NOTE : FRESH_TURN_PENDING_CANCEL_REASON)
   if (cancelled > 0) {
     trace(
       `fresh turn: cancelled ${cancelled} pending exec(s) on prior session ${prior.sessionId} ` +
@@ -3008,7 +3434,19 @@ export async function preparePriorSessionForFreshTurn(
  *
  * @returns number of pendings successfully cancelled
  */
-export async function cancelPendingExecsForFreshTurn(session: CursorSession): Promise<number> {
+/**
+ * Result text for an exec the host ran whose output OpenCode 1.x compacted away
+ * before it reached Cursor (a fork compaction mid-turn; its verbatim tail is
+ * only 2k–15k tokens). True, unlike a cancel: the side effects happened.
+ */
+export const COMPACTED_TOOL_RESULT_NOTE =
+  "The tool ran on the OpenCode host, but its output was removed by context compaction before it reached you. " +
+  "Re-check the state it changed before relying on it."
+
+export async function cancelPendingExecsForFreshTurn(
+  session: CursorSession,
+  reason: string = FRESH_TURN_PENDING_CANCEL_REASON,
+): Promise<number> {
   if (session.closed || session.pending.size === 0) return 0
   const synthetic: ExtractedToolResult[] = []
   for (const [execId, pending] of session.pending.entries()) {
@@ -3025,8 +3463,8 @@ export async function cancelPendingExecsForFreshTurn(session: CursorSession): Pr
       sessionId: session.sessionId,
       execId,
       toolName: pending.toolName ?? "unknown",
-      output: FRESH_TURN_PENDING_CANCEL_REASON,
-      error: FRESH_TURN_PENDING_CANCEL_REASON,
+      output: reason,
+      error: reason,
     })
   }
   if (synthetic.length === 0) return 0
@@ -8531,51 +8969,73 @@ function appendSeedHistory(
   out.push({ role, content })
 }
 
-/** Share of the target context a foreign-history rebase may fill before compaction. */
-export const FOREIGN_HISTORY_REBASE_CONTEXT_SHARE = 0.8
+/** The seed budget of a route with a measured silent cutoff, or undefined (no check, like Cursor CLI). */
+export function measuredContextBudget(cursorModelId: string): number | undefined {
+  const limit = CURSOR_EFFECTIVE_CONTEXT[cursorModelId]
+  return limit === undefined ? undefined : Math.floor(limit * MEASURED_CONTEXT_SHARE)
+}
+
+function seedTokens(history: readonly SeedHistoryMessage[], extraChars: number): number {
+  return estimateTokens(history.reduce((sum, message) => sum + message.content.length, 0) + extraChars)
+}
 
 /**
- * A foreign-history rebase replays the full host history. When that cannot fit,
- * fail before opening a Run with an error hosts classify as context overflow
- * (HTTP 413 + "prompt is too long"), so the host compacts and retries.
+ * Cursor CLI sends history without a size check and Cursor's harness
+ * summarizes what does not fit. A route measured to drop older input silently
+ * instead (`src/effective-context-data.ts`) would lose the oldest turns
+ * without notice, so a seed over its budget fails before opening a Run with
+ * the error hosts classify as context overflow (HTTP 413 + "prompt is too
+ * long"), and the host compacts. Other models are not checked.
  */
-export function assertForeignHistoryRebaseFits(input: {
-  modelInfo: ModelInfo | undefined
+export function assertMeasuredContextFits(input: {
   cursorModelId: string
-  maxMode: boolean
-  /** Resolved variant tuple; its `context` is the Run's window when present. */
-  parameters?: ModelParameterValue[]
-  history: SeedHistoryMessage[]
+  history: readonly SeedHistoryMessage[]
   systemPrompt: string | undefined
   userText: string
 }): void {
-  const documented = getDocumentedCursorModelContext(input.cursorModelId)
-  // Max mode does not imply the model's largest tier: Opus 300k Fast is a
-  // max-mode variant with a 300k window.
-  const variantContext = parseCursorContextLimit(
-    input.parameters?.find((parameter) => parameter.id === "context")?.value,
-  )
-  const limit = variantContext ?? (input.maxMode
-    ? (input.modelInfo?.maxContextForMaxMode ?? documented?.maxContextForMaxMode ?? 1_000_000)
-    : (input.modelInfo?.maxContext ?? documented?.maxContext ?? 200_000))
-  const chars = input.history.reduce((sum, message) => sum + message.content.length, 0)
-    + (input.systemPrompt?.length ?? 0)
-    + input.userText.length
-  const tokens = estimateTokens(chars)
-  const budget = Math.floor(limit * FOREIGN_HISTORY_REBASE_CONTEXT_SHARE)
+  const budget = measuredContextBudget(input.cursorModelId)
+  if (budget === undefined) return
+  const tokens = seedTokens(input.history, (input.systemPrompt?.length ?? 0) + input.userText.length)
   if (tokens <= budget) return
-  trace(
-    `foreign-history rebase too large: model=${input.cursorModelId} estimatedTokens=${tokens} ` +
-      `budget=${budget} limit=${limit} → requesting host compaction`,
-  )
+  trace(`seed over measured context: model=${input.cursorModelId} estimatedTokens=${tokens} budget=${budget} ` +
+    "→ requesting host compaction")
   throw new APICallError({
-    message: `prompt is too long: rebasing this session onto Cursor needs ~${tokens} tokens, ` +
-      `over ${budget} of the ${limit}-token context`,
+    message: `prompt is too long: rebuilding this session on ${input.cursorModelId} needs ~${tokens} tokens, ` +
+      `over the ${budget} its route reliably keeps`,
     url: "cursor://agent.v1.AgentService/Run",
     requestBodyValues: {},
     statusCode: 413,
     isRetryable: false,
   })
+}
+
+/**
+ * The history-import turn of a compaction cannot refuse on size: compaction is
+ * what has to shrink. On a route with a measured cutoff it keeps the newest
+ * messages that fit and says, like Cursor's summarizer, how many it left out,
+ * so the loss is explicit instead of silent.
+ */
+export function trimHistoryToMeasuredContext(
+  cursorModelId: string,
+  history: readonly SeedHistoryMessage[],
+  extraChars: number,
+): SeedHistoryMessage[] {
+  const budget = measuredContextBudget(cursorModelId)
+  if (budget === undefined || seedTokens(history, extraChars) <= budget) return [...history]
+  const kept: SeedHistoryMessage[] = []
+  let chars = extraChars
+  for (let index = history.length - 1; index >= 0; index--) {
+    const message = history[index]!
+    if (estimateTokens(chars + message.content.length) > budget) break
+    kept.unshift(message)
+    chars += message.content.length
+  }
+  const omitted = history.length - kept.length
+  trace(`history import trimmed to measured context: model=${cursorModelId} omitted=${omitted} kept=${kept.length}`)
+  return [
+    { role: "user", content: `[${omitted} earlier message(s) omitted: over ${cursorModelId}'s measured context]` },
+    ...kept,
+  ]
 }
 
 /** OpenCode session id header, if present. */
@@ -8620,12 +9080,11 @@ export async function refreshHeldSessionToolCatalog(
   const sessionKey = session.openCodeSessionId
   const previousAdvertised = session.toolCatalog?.length ?? 0
   const incomingTools = extractTools(callOptions)
-  const isCompaction = isCompactionCall(callOptions, sessionKey)
   const toolState = await resolveTurnToolState({
     sessionKey,
     incomingTools,
     toolChoice: callOptions.toolChoice,
-    isCompaction,
+    isCompaction: false,
     abortSignal: callOptions.abortSignal,
   })
   // A standalone caller has no host session key for the process catalog cache.
@@ -8869,18 +9328,19 @@ export async function resolveTurnToolState(input: {
 
 export function resolveTurnConversationReset(input: {
   sessionKey?: string
-  isCompaction: boolean
+  /** The provider's history-import turn always starts a fresh conversation. */
+  historyImport?: boolean
   historyRewrite?: boolean
   /** @deprecated Ignored — prompt identity never remints. Kept for call-site compat. */
   promptIdentity?: PromptIdentity
 }): {
   reset: boolean
-  reason?: "compaction" | "post-compaction-rebase" | "history-rewrite"
+  reason?: "history-import" | "post-compaction-rebase" | "history-rewrite"
 } {
-  const { sessionKey, isCompaction } = input
-  if (isCompaction) {
-    if (sessionKey) rememberPostCompactionRebase(sessionKey)
-    return { reset: true, reason: "compaction" }
+  const { sessionKey } = input
+  if (input.historyImport) {
+    if (sessionKey) postCompactionRebaseBySession.delete(sessionKey)
+    return { reset: true, reason: "history-import" }
   }
   if (input.historyRewrite) {
     if (sessionKey) postCompactionRebaseBySession.delete(sessionKey)
@@ -8907,6 +9367,7 @@ export function resetTurnStateForTests(): void {
   resetToolRequestsListedSeenForTests()
   toolCatalogBySession.clear()
   postCompactionRebaseBySession.clear()
+  forkCompactionBySession.clear()
   promptIdentityBySession.clear()
   mirroredTodosBySession.clear()
   resetHeldHistoryImagesForTests()
