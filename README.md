@@ -229,9 +229,13 @@ OpenCode uses family metadata to select a small model for session titles (2.x: `
 
 #### Image input
 
-The provider advertises `text` + `image` input only for Cursor models that our own live test saw read an image; every other model is text-only, including one Cursor added after the last test. Model output remains text. This works in the classic plugin, the 1.18 v2 plugin, and OpenCode 2.x.
+OpenCode 1.x and 2.x advertise image input for models with a positive live
+Cursor probe in [`src/image-input-data.ts`](src/image-input-data.ts). Other
+models appear as text-only. Model output remains text.
 
-Cursor's `AvailableModels.supportsImages` is not used: it marks some models text-only whose Run reads images (Grok 4.7, Composer 2.5, Kimi K2.7 Code) and Kimi K3 as reading images though its Run does not, and for a model that cannot read images Cursor's Run drops the image without an error. `bun run generate:images` tests each model once, when it first appears: one short Run with a probe image, recording in `src/image-input-data.ts` whether the reply transcribes the text drawn in it. A recorded result is retested only on request (`-- --model <id>` or `-- --all`), and removed only with `-- --prune`, since each account's model list differs. Like Cursor CLI, the provider sends Cursor every image the host passes.
+Run `bun run generate:images` to probe newly listed models and
+`bun run generate:images:check` to check coverage for your account's catalog.
+Retest a recorded model with `bun run generate:images -- --model <id>`.
 
 OpenCode image file parts are decoded from bytes, base64/data URLs, local file URLs, or HTTP(S) URLs and sent through Cursor's `UserMessage.selected_context.selected_images` field. Fresh and rebased Runs normalize the same image formats as held-Run continuations, including AI SDK `image-data` / `image-url` and OpenCode attachment URLs. A Run that resumes a checkpoint skips the history images that exact checkpoint is known to hold (by content hash, recorded when a turn ends on a checkpoint of its own and kept in the restart snapshot); a Run without a checkpoint sends them all. Earlier images that no longer fit the 20 MiB image budget are left out with a note, so a text follow-up still works; this turn's own attachments past the budget fail the request.
 

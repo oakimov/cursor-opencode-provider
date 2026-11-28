@@ -48,6 +48,30 @@ describe("selectable catalog pricing", () => {
     expect(uncovered).toEqual([])
   })
 
+  it("publishes probed image input and flat Gemini 4 and Kimi K3 rates on both hosts", () => {
+    const models = [
+      { id: "gemini-4-carbon", input: 2, output: 10, cacheRead: 0.1, hasLongEntry: true },
+      { id: "gemini-4-hydrogen", input: 1.5, output: 7.5, cacheRead: 0.075, hasLongEntry: true },
+      { id: "gemini-4-neon", input: 3, output: 15, cacheRead: 0.15, hasLongEntry: true },
+      { id: "kimi-k3", input: 3, output: 15, cacheRead: 0.3, hasLongEntry: false },
+    ]
+    for (const { id, input, output, cacheRead, hasLongEntry } of models) {
+      const entries = hasLongEntry ? [id, `${id}-1m`] : [id]
+      for (const entry of entries) {
+        expect(config[entry]).toMatchObject({
+          attachment: true,
+          modalities: { input: ["text", "image"], output: ["text"] },
+        })
+        expect(config[entry].cost).toEqual({ input, output, cache_read: cacheRead })
+        expect(catalog2[entry]).toMatchObject({
+          modelID: id,
+          capabilities: { input: ["text", "image"], output: ["text"] },
+          cost: [{ input, output, cache: { read: cacheRead, write: 0 } }],
+        })
+      }
+    }
+  })
+
   it("keeps effort and thinking variants on the entry price, and splits Fast", () => {
     expect(Object.keys(config["gpt-5.4"].variants).length).toBeGreaterThan(1)
     expect(Object.values(config["gpt-5.4"].variants).every((variant) =>

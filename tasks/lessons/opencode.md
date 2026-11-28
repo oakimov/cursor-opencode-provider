@@ -792,6 +792,9 @@ These are failure lessons shared by both hosts, not a replacement for
   for a text-only model without an error. Advertise images only from the live
   probe record (`generate:images`), never Cursor's flag or a hardcoded guess
   (`test/image-input-probe.test.ts`, `test/model-selection-review.test.ts`).
+  Kimi K3 later transcribed the probe after previously dropping images. Retest
+  a specific wire id when backend behavior changes. A client forwarding images
+  unconditionally does not establish that an untested model can read them.
   When a first probe fails only on transient capacity (`capacity_limit`) and
   blocks the release gate, models.dev may seed the record for that wire id if
   its matching entry has `attachment: true` and `modalities.input` includes

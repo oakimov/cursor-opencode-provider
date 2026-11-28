@@ -33,6 +33,9 @@ export const CURSOR_IMAGE_INPUT = {
   "gemini-3.7-flash": true,
   "gemini-3.8-flash": true,
   "gemini-4-argon": true,
+  "gemini-4-carbon": true,
+  "gemini-4-hydrogen": true,
+  "gemini-4-neon": true,
   "glm-5.2": true,
   "glm-5p3": true,
   "glm-5p3-flash": true,
@@ -51,7 +54,7 @@ export const CURSOR_IMAGE_INPUT = {
   "grok-4.6": true,
   "grok-4.7": true,
   "kimi-k2.7-code": true,
-  "kimi-k3": false,
+  "kimi-k3": true,
   "muse-spark-1.3": true,
   "muse-wonder-1.0": true
 } as const

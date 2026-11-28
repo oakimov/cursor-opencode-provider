@@ -435,15 +435,15 @@ describe("modelInfoToConfig (context window selection)", () => {
   })
 
   it("advertises image input only where the live probe recorded it, not Cursor's flag", () => {
-    const [readsDespiteFlag, textDespiteFlag, unrecorded] = mapAvailableModelsResponse({ models: [
+    const [readsDespiteFlag, unrecordedWithFlag, unrecordedWithoutFlag] = mapAvailableModelsResponse({ models: [
       { name: "composer-2.5", supports_images: false },
-      { name: "kimi-k3", supports_images: true },
-      { name: "unrecorded-model", supports_images: true },
+      { name: "unrecorded-with-flag", supports_images: true },
+      { name: "unrecorded-without-flag", supports_images: false },
     ] })
     const reads = modelInfoToConfig(readsDespiteFlag!)
     expect(reads.attachment).toBe(true)
     expect(reads.modalities).toEqual({ input: ["text", "image"], output: ["text"] })
-    for (const model of [textDespiteFlag!, unrecorded!]) {
+    for (const model of [unrecordedWithFlag!, unrecordedWithoutFlag!]) {
       const cfg = modelInfoToConfig(model)
       expect(cfg.attachment).toBe(false)
       expect(cfg.modalities).toEqual({ input: ["text"], output: ["text"] })
