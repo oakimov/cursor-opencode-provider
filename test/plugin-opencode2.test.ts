@@ -3144,6 +3144,130 @@ describe("opencode2 setup", () => {
     expect(event.options.opencodeCompaction).toBe(true)
   })
 
+  describe("session.compaction answers with Cursor's summary", () => {
+    /** A Cursor language model that answers through `doStream` and records what it got. */
+    function fakeLanguage(parts: unknown[] | Error) {
+      const calls: any[] = []
+      const language = {
+        specificationVersion: "v3", provider: "cursor", modelId: "composer-2.5", supportedUrls: {},
+        doGenerate: async () => { throw new Error("unused") },
+        doStream: async (options: any) => {
+          calls.push(options)
+          return {
+            stream: new ReadableStream({
+              start(controller) {
+                if (parts instanceof Error) controller.error(parts)
+                else { for (const part of parts) controller.enqueue(part); controller.close() }
+              },
+            }),
+          }
+        },
+      }
+      return { language, calls }
+    }
+    const summaryParts = (mode: string) => [
+      { type: "stream-start", warnings: [] },
+      { type: "text-delta", id: "s", delta: "Summary:\n1. Primary Request" },
+      { type: "finish", finishReason: { unified: "stop" }, usage: {}, providerMetadata: { cursor: { compactionMode: mode } } },
+    ]
+    const compactionEvent = (messages: unknown[]) => ({
+      sessionID: "s-native",
+      agent: "compaction",
+      model: { providerID: "cursor", id: "composer-2.5" },
+      system: [{ type: "text", text: "Host system prompt" }],
+      messages,
+      tools: {},
+      options: { cursorVariant: "fast" },
+    })
+    const transcript = [
+      { id: "m1", role: "user", content: [{ type: "text", text: "Build it" }] },
+      { id: "m2", role: "assistant", content: [{ type: "tool-call", id: "call-1", name: "bash", input: { command: "make" } }] },
+      { id: "m3", role: "tool", content: [{ type: "tool-result", id: "call-1", name: "bash", result: { type: "text", value: "ok" } }] },
+      { id: "m4", role: "user", content: [{ type: "text", text: "Now test it" }] },
+    ]
+    async function setupWith(language: unknown, context?: unknown[]) {
+      const { ctx, hooks, sessionLocations } = fakeContext()
+      sessionLocations.set("s-native", "/proj")
+      if (context) ctx.session.context = async () => context
+      await setupPlugin(ctx)
+      hooks.get("aisdk.language")!({ model: { providerID: "cursor", id: "composer-2.5", modelID: "composer-2.5" }, language })
+      return hooks
+    }
+
+    test("sets the result from the model's summary, skipping OpenCode's own request", async () => {
+      const { language, calls } = fakeLanguage(summaryParts("live"))
+      const hooks = await setupWith(language)
+      const event: any = compactionEvent(transcript)
+      await hooks.get("session.compaction")!(event)
+      expect(event.result).toEqual({ summary: "Summary:\n1. Primary Request" })
+      expect(calls).toHaveLength(1)
+      const call = calls[0]
+      expect(call.headers["x-opencode-session-id"]).toBe("s-native")
+      expect(call.providerOptions.cursor).toMatchObject({ opencodeCompaction: true, opencodeCompactionHook: "hook", cursorVariant: "fast" })
+      expect(call.prompt).toEqual([
+        { role: "system", content: "Host system prompt" },
+        { role: "user", content: [{ type: "text", text: "Build it" }] },
+        { role: "assistant", content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { command: "make" } }] },
+        { role: "tool", content: [{ type: "tool-result", toolCallId: "call-1", toolName: "bash", output: { type: "text", value: "ok" },
+          providerOptions: expect.anything() }] },
+        { role: "user", content: [{ type: "text", text: "Now test it" }] },
+      ])
+    })
+
+    test("keeps the in-flight turn verbatim when a fork answered", async () => {
+      const { language } = fakeLanguage(summaryParts("fork"))
+      const hooks = await setupWith(language)
+      const event: any = compactionEvent(transcript)
+      await hooks.get("session.compaction")!(event)
+      expect(event.result.metadata).toEqual({ keepID: "m4" })
+    })
+
+    test("declines a background precompute without asking the model", async () => {
+      const { language, calls } = fakeLanguage(summaryParts("live"))
+      // The latest measured Cursor response (m5) is beyond the precompute's prefix.
+      const hooks = await setupWith(language, [
+        { id: "m4", type: "user" },
+        { id: "m5", type: "assistant", model: { providerID: "cursor" }, tokens: { input: 900, output: 10, cache: { read: 0, write: 0 } } },
+      ])
+      const event: any = compactionEvent(transcript)
+      await hooks.get("session.compaction")!(event)
+      expect(event.result).toBeUndefined()
+      expect(event.options.opencodeCompactionHook).toBe("declined")
+      expect(calls).toHaveLength(0)
+    })
+
+    test("a foreground compaction holding the latest Cursor response goes ahead", async () => {
+      const { language, calls } = fakeLanguage(summaryParts("live"))
+      const hooks = await setupWith(language, [
+        { id: "m2", type: "assistant", model: { providerID: "cursor" }, tokens: { input: 900, output: 10, cache: { read: 0, write: 0 } } },
+        { id: "m4", type: "user" },
+      ])
+      const event: any = compactionEvent(transcript)
+      await hooks.get("session.compaction")!(event)
+      expect(calls).toHaveLength(1)
+      expect(event.result.summary).toContain("Primary Request")
+    })
+
+    test("a failed summary marks the request instead of throwing", async () => {
+      const { language } = fakeLanguage(new Error("Cursor's summary Run returned no summary"))
+      const hooks = await setupWith(language)
+      const event: any = compactionEvent(transcript)
+      await expect(hooks.get("session.compaction")!(event)).resolves.toBeUndefined()
+      expect(event.result).toBeUndefined()
+      expect(event.options.opencodeCompactionHook).toBe("failed")
+    })
+
+    test("leaves another provider's compaction alone", async () => {
+      const { language, calls } = fakeLanguage(summaryParts("live"))
+      const hooks = await setupWith(language)
+      const event: any = { ...compactionEvent(transcript), model: { providerID: "openai", id: "gpt" } }
+      await hooks.get("session.compaction")!(event)
+      expect(calls).toHaveLength(0)
+      expect(event.result).toBeUndefined()
+      expect(event.options.opencodeCompactionHook).toBeUndefined()
+    })
+  })
+
   test("session.generate explicitly clears the request-local compaction option", async () => {
     const { ctx, hooks, sessionLocations } = fakeContext()
     sessionLocations.set("s-g", "/proj")

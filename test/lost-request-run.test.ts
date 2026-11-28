@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test"
+import { seedText } from "./seed-text.js"
 import fs from "node:fs"
 import http2 from "node:http2"
 import net from "node:net"
@@ -55,7 +56,7 @@ beforeAll(async () => {
         const message = decodeMessage<Record<string, any>>("AgentClientMessage", decodeFramePayload({ flags: pending[0]!, payload: pending.subarray(5, 5 + length) }))
         pending = pending.subarray(5 + length)
         if (!message.run_request) continue
-        sentTexts.push(String(message.run_request.action?.user_message_action?.user_message?.text ?? ""))
+        sentTexts.push(seedText(message.run_request.action?.user_message_action))
         stream.write(frame(encodeMessage("AgentServerMessage", {
           interaction_update: { text_delta: { text: PARTIAL } },
         })))

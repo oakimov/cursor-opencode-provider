@@ -3,6 +3,7 @@
  * local HTTP/2 server that plays Cursor's Run endpoint. No network access.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test"
+import { seedText } from "./seed-text.js"
 import fs from "node:fs"
 import http2 from "node:http2"
 import net from "node:net"
@@ -175,7 +176,7 @@ const textOf = (parts: LanguageModelV3StreamPart[]) =>
   parts.filter((part) => part.type === "text-delta").map((part) => (part as { delta: string }).delta).join("")
 const injectionsOf = (run: FakeRun) =>
   run.received.map((message) => message.conversation_action?.inject_context_action).filter(Boolean)
-const userText = (run: FakeRun) => run.received[0]!.run_request.action.user_message_action.user_message.text as string
+const userText = (run: FakeRun) => seedText(run.received[0]!.run_request.action.user_message_action)
 const user = (text: string) => ({ role: "user", content: [{ type: "text", text }] }) as Prompt[number]
 const assistant = (text: string) => ({ role: "assistant", content: [{ type: "text", text }] }) as Prompt[number]
 const ask = user("Wait for the background job.")

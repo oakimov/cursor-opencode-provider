@@ -13,6 +13,12 @@ export const CURSOR_PROVIDER_ID = "cursor"
 export const CURSOR_COMPACTION_OPTION = "opencodeCompaction"
 /** OpenCode host rebuilt its history without a provider compaction turn. */
 export const CURSOR_HISTORY_REWRITE_OPTION = "opencodeHistoryRewrite"
+/**
+ * OpenCode 2's compaction hook already answered (or declined) this compaction:
+ * `"declined"` (or a reason) makes the host's model call that follows fail at
+ * once, without a Run. `"hook"` marks the hook's own call into the model.
+ */
+export const CURSOR_COMPACTION_HOOK_OPTION = "opencodeCompactionHook"
 /** Current OpenCode primary agent; used to invalidate incompatible checkpoints. */
 export const CURSOR_HOST_AGENT_OPTION = "opencodeHostAgent"
 /**

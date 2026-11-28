@@ -74,6 +74,17 @@ export function getFrozenRequestContext(
   return frozen
 }
 
+/**
+ * The RequestContext this conversation's latest Run sent (base plus live
+ * overlays), else the frozen base. A `summarize_action` Run answers Cursor's
+ * `request_context_args` exec with it, as a turn answers with its own.
+ */
+export function getLatestRequestContext(
+  conversationId: string,
+): Record<string, unknown> | undefined {
+  return materializedByConversationId.get(conversationId)?.context ?? getFrozenRequestContext(conversationId)
+}
+
 /** Replace the frozen stable base, stripping any live capability fields. */
 export function setFrozenRequestContext(
   conversationId: string,

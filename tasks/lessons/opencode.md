@@ -568,8 +568,17 @@ These are failure lessons shared by both hosts, not a replacement for
   (`test/frozen-request-context.test.ts`).
 - **Hold an epoch without freezing capability truth.** Equal name sets retain
   descriptors/order; new names append. Permission is independently current.
-  Compaction rotates state but transfers workspace context
+  A reminted conversation (history import, rebase) transfers workspace context
   (`test/context-epoch.test.ts`, `test/prompt-history.test.ts`).
+- **Never put history inside the request.** When a seed overflows the window,
+  Cursor's harness summarizes the live user message, request included, and the
+  model answers something else (#203: OpenCode's "did not match the required
+  template"). Earlier turns (`prepend_user_messages`, at most 5: Cursor keeps the
+  last 5 silently) are summarized while the request is kept. Compaction is
+  Cursor's `summarize_action`, not a remint plus seed. `conversation_history`
+  is ignored by Cursor's cloud. Verify protocol claims live: the CLI's own
+  import path looked right in source and did nothing on the wire
+  (`test/native-compaction.test.ts`, `test/compaction-run.test.ts`).
 - **Do not seed Cursor's rendered root prompt.** Client entries suppressed rules
   and subagents. Rebuilt history belongs in the user transcript; host instructions
   need the typed `global` rule, not a seeded system message, untyped rule or

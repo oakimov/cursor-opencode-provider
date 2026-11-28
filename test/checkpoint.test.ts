@@ -115,7 +115,7 @@ describe("buildRunRequest checkpoint echo", () => {
     )
   })
 
-  it("carries seed history in the user text, never in root_prompt_messages_json", () => {
+  it("carries seed history as prepended user turns, never in root_prompt_messages_json", () => {
     const data = buildRunRequest({
       text: "hi",
       modelId: "m",
@@ -133,10 +133,12 @@ describe("buildRunRequest checkpoint echo", () => {
     )
     // A client root prompt stops Cursor rendering RequestContext rules.
     expect(cs.root_prompt_messages_json ?? []).toEqual([])
-    expect(decoded.run_request.action.user_message_action.user_message.text).toBe(
-      "<conversation_history>\n<user>\nearlier\n</user>\n\n<assistant>\nnoted\n</assistant>\n" +
-        "</conversation_history>\n\nhi",
-    )
+    const action = decoded.run_request.action.user_message_action
+    expect(action.user_message.text).toBe("hi")
+    expect(action.prepend_user_messages.map((part: { text: string }) => part.text)).toEqual([
+      "[Earlier conversation, part 1 of 2]\n<conversation_history>\n<user>\nearlier\n</user>\n</conversation_history>",
+      "[Earlier conversation, part 2 of 2]\n<conversation_history>\n<assistant>\nnoted\n</assistant>\n</conversation_history>",
+    ])
   })
 
   it("keeps a checkpointed Run's user text free of seed history", () => {
@@ -149,6 +151,7 @@ describe("buildRunRequest checkpoint echo", () => {
     })
     const decoded = decodeMessage<any>("AgentClientMessage", data)
     expect(decoded.run_request.action.user_message_action.user_message.text).toBe("follow up")
+    expect(decoded.run_request.action.user_message_action.prepend_user_messages ?? []).toEqual([])
   })
 
   it("encodes checkpoint recovery as ResumeAction without replaying user text", () => {

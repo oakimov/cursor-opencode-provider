@@ -15,17 +15,17 @@ export type RunRequestInput = {
   /** Stable parent group; unlike conversationId, this survives compaction/rebase. */
   conversationGroupId?: string
   /**
-   * Prior chat turns for a Run without a checkpoint, carried in the live user
-   * text (see {@link seedHistoryUserText}). Tool outputs, when required for
-   * compaction/recovery, are represented as user-role OpenCode host
-   * observations rather than assistant-authored prose.
+   * Prior chat turns for a Run without a checkpoint, carried as earlier user
+   * turns (see {@link seedHistoryParts}). Tool outputs, when required for
+   * recovery, are represented as user-role OpenCode host observations rather
+   * than assistant-authored prose.
    */
   history?: SeedHistoryMessage[]
   /**
    * Opaque ConversationStateStructure bytes from the last
    * conversation_checkpoint_update for this conversation_id. When set, echoed
    * as AgentRunRequest.conversation_state (CLI parity). When absent, an empty
-   * seed state is sent and `history` travels in the user text.
+   * seed state is sent and `history` travels as prepended earlier user turns.
    */
   conversationState?: Uint8Array
   parameterValues?: Array<{ id: string; value: string }>
@@ -36,8 +36,12 @@ export type RunRequestInput = {
   toolDescriptors?: Array<Record<string, unknown>>
   /** Prebuilt RequestContext (OpenCode-sourced). */
   requestContext?: Record<string, unknown>
-  /** Resume the supplied checkpoint instead of submitting another user turn. */
-  action?: "user" | "resume"
+  /**
+   * `resume` resumes the supplied checkpoint instead of submitting another user
+   * turn; `summarize` asks Cursor to summarize the conversation in place
+   * (`summarize_action`, Cursor CLI `/summarize`).
+   */
+  action?: "user" | "resume" | "summarize"
   /**
    * Cursor mode of this user turn (`UserMessage.mode`, an `agent.v1.AgentMode`
    * value). Cursor CLI sends its current mode on every user message.
@@ -47,7 +51,7 @@ export type RunRequestInput = {
 
 /**
  * Empty ConversationStateStructure for a Run without a checkpoint (turn 1,
- * compaction, rebase, reseed). After the first checkpoint arrives we stop
+ * import, rebase, reseed). After the first checkpoint arrives we stop
  * inventing state and echo the server's opaque structure instead (CLI behavior).
  *
  * Nothing goes in `root_prompt_messages_json` (#1). Neither Cursor client
@@ -57,8 +61,10 @@ export type RunRequestInput = {
  * host system-instructions rule included. Verified live 2026-10-09
  * (claude-sonnet-5-5): two seeded history messages there gave checkpoint
  * categories `rules:0, subagents:0` and a reply that ignored the rule; the same
- * history in the user text kept both. History therefore travels in the user
- * text ({@link seedHistoryUserText}).
+ * history in user messages kept both. History therefore travels as prepended
+ * earlier user turns ({@link seedHistoryParts}).
+ * `UserMessageAction.conversation_history` (#7), Cursor CLI's own import, is
+ * ignored by Cursor's cloud for this client (live 2026-11-28).
  *
  * We deliberately do NOT use `AgentRunRequest.custom_system_prompt` (#8): that
  * field is the internal `--system-prompt` CLI override and the server rejects
@@ -72,22 +78,49 @@ export function buildSeedConversationState(): Uint8Array {
 const SEED_HISTORY_TAGS = /<\/(conversation_history|user|assistant)>/gi
 
 /**
- * Prior turns of a Run without a checkpoint, as a transcript ahead of the live
- * user text. `system` entries are dropped: host system context travels as the
- * system-instructions rule in RequestContext. Closing tags inside a message are
- * escaped so a message cannot end its own block early.
+ * Cursor keeps only the last 5 `prepend_user_messages` and drops older ones
+ * without notice (agent harness `maxPrependedUserMessages ?? 5`; live
+ * 2026-11-28: of 7 prepended notes only 3–7 reached the model).
  */
-export function seedHistoryUserText(
-  text: string,
-  history: readonly SeedHistoryMessage[] | undefined,
-): string {
-  const entries = (history ?? []).filter((entry) => entry.content && entry.role !== "system")
-  if (entries.length === 0) return text
-  const transcript = entries
-    .map((entry) =>
-      `<${entry.role}>\n${entry.content.replace(SEED_HISTORY_TAGS, "<\\/$1>")}\n</${entry.role}>`)
-    .join("\n\n")
-  return `<conversation_history>\n${transcript}\n</conversation_history>\n\n${text}`
+export const MAX_PREPENDED_HISTORY_PARTS = 5
+
+/**
+ * Prior turns of a Run without a checkpoint, as at most
+ * {@link MAX_PREPENDED_HISTORY_PARTS} earlier user turns
+ * (`UserMessageAction.prepend_user_messages`). The live user message then
+ * holds only the request. History in the live message is summarized together
+ * with the request when it overflows the window, so the model loses the
+ * request (#203); earlier turns are summarized while the request is kept
+ * (live A/B 2026-11-28). `system` entries are dropped: host system context
+ * travels as the system-instructions rule in RequestContext. Closing tags
+ * inside a message are escaped so a message cannot end its own block early.
+ * Parts split at message boundaries and are balanced by size.
+ */
+export function seedHistoryParts(history: readonly SeedHistoryMessage[] | undefined): string[] {
+  const entries = (history ?? [])
+    .filter((entry) => entry.content && entry.role !== "system")
+    .map((entry) => `<${entry.role}>\n${entry.content.replace(SEED_HISTORY_TAGS, "<\\/$1>")}\n</${entry.role}>`)
+  if (entries.length === 0) return []
+  const count = Math.min(MAX_PREPENDED_HISTORY_PARTS, entries.length)
+  const total = entries.reduce((sum, entry) => sum + entry.length, 0)
+  const parts: string[][] = []
+  let current: string[] = []
+  let size = 0
+  entries.forEach((entry, index) => {
+    const partsAfterCurrent = count - parts.length - 1
+    const remaining = entries.length - index
+    if (current.length > 0 && partsAfterCurrent > 0
+      && (size >= (total * (parts.length + 1)) / count || remaining <= partsAfterCurrent)) {
+      parts.push(current)
+      current = []
+    }
+    current.push(entry)
+    size += entry.length
+  })
+  parts.push(current)
+  return parts.map((part, index) =>
+    `[Earlier conversation, part ${index + 1} of ${parts.length}]\n` +
+      `<conversation_history>\n${part.join("\n\n")}\n</conversation_history>`)
 }
 
 /**
@@ -106,7 +139,7 @@ export function buildRunRequest(input: RunRequestInput): Uint8Array {
 
   const seeded = !(input.conversationState && input.conversationState.length > 0)
   const userMessage: Record<string, unknown> = {
-    text: seeded ? seedHistoryUserText(input.text, input.history) : input.text,
+    text: input.text,
     message_id: msgId,
   }
   if (input.mode !== undefined) userMessage.mode = input.mode
@@ -122,9 +155,17 @@ export function buildRunRequest(input: RunRequestInput): Uint8Array {
   }
   const userMessageAction: Record<string, unknown> = { user_message: userMessage }
   if (requestContext) userMessageAction.request_context = requestContext
+  const prepended = seeded ? seedHistoryParts(input.history) : []
+  if (prepended.length > 0) {
+    userMessageAction.prepend_user_messages = prepended.map((text) => ({ text, message_id: crypto.randomUUID() }))
+  }
+  // Cursor CLI `/summarize` sends an empty SummarizeAction and no request
+  // context; Cursor asks for it with a `request_context_args` exec.
   const action = input.action === "resume"
     ? { resume_action: {} }
-    : { user_message_action: userMessageAction }
+    : input.action === "summarize"
+      ? { summarize_action: {} }
+      : { user_message_action: userMessageAction }
 
   const conversationState = seeded
     ? buildSeedConversationState()

@@ -308,7 +308,9 @@ export type SessionContext = {
 
 export type SessionCompactionResult = {
   summary: string
-  providerState?: unknown
+  /** A provider replacement window (`native.messages`), replayed instead of `summary`. Unused here. */
+  native?: unknown
+  /** `keepID` chooses the first message kept verbatim beside the summary. */
   metadata?: Record<string, unknown>
   tokens?: unknown
 }
@@ -371,6 +373,11 @@ export type SessionInfo = {
 export type SessionDomain = {
   readonly hook: ModelHooks<SessionHooks>
   readonly get: (input: { sessionID: string }) => Promise<SessionInfo>
+  /**
+   * The session's current context messages (stored `SessionMessage.Info`).
+   * Read only for their `id`, `type`, `model.providerID`, `tokens` and `error`.
+   */
+  readonly context?: (input: { sessionID: string }) => Promise<readonly unknown[]>
   readonly switchAgent?: (input: { sessionID: string; agent: string }) => Promise<void>
   readonly synthetic?: (input: {
     sessionID: string

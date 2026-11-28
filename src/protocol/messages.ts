@@ -515,6 +515,18 @@ export function createMessageTypes(): protobuf.Root {
     { id: 1, name: "user_message", type: "UserMessage" },
   ])
 
+  // Conversation summarization (Cursor CLI `/summarize`): the server streams
+  // SummaryStartedUpdate (#10), SummaryUpdate (#9) with the summary text and
+  // SummaryCompletedUpdate (#11) for a `summarize_action` Run.
+  addType(root, "SummaryUpdate", [
+    { id: 1, name: "summary", type: "string" },
+  ])
+  addType(root, "SummaryStartedUpdate", [])
+  addType(root, "SummaryCompletedUpdate", [
+    // PreCompact hook text; the provider configures no such hook.
+    { id: 1, name: "hook_message", type: "string" },
+  ])
+
   // InteractionUpdate — the core streaming update message
   addType(
     root,
@@ -526,6 +538,9 @@ export function createMessageTypes(): protobuf.Root {
       { id: 4, name: "thinking_delta", type: "ThinkingDeltaUpdate" },
       { id: 6, name: "user_message_appended", type: "UserMessageAppendedUpdate" },
       { id: 7, name: "partial_tool_call", type: "PartialToolCall" },
+      { id: 9, name: "summary", type: "SummaryUpdate" },
+      { id: 10, name: "summary_started", type: "SummaryStartedUpdate" },
+      { id: 11, name: "summary_completed", type: "SummaryCompletedUpdate" },
       { id: 13, name: "heartbeat", type: "Heartbeat" },
       { id: 14, name: "turn_ended", type: "TurnEnded" },
       { id: 15, name: "tool_call_delta", type: "ToolCallDeltaUpdate" },
@@ -534,7 +549,7 @@ export function createMessageTypes(): protobuf.Root {
       { id: 23, name: "context_injection_state", type: "ContextInjectionStateUpdate" },
       { id: 27, name: "tool_requests_listed", type: "ToolRequestsListedUpdate" },
     ],
-    [{ name: "update", fields: ["text_delta", "tool_call_started", "tool_call_completed", "thinking_delta", "user_message_appended", "partial_tool_call", "heartbeat", "turn_ended", "tool_call_delta", "step_started", "step_completed", "context_injection_state", "tool_requests_listed"] }],
+    [{ name: "update", fields: ["text_delta", "tool_call_started", "tool_call_completed", "thinking_delta", "user_message_appended", "partial_tool_call", "summary", "summary_started", "summary_completed", "heartbeat", "turn_ended", "tool_call_delta", "step_started", "step_completed", "context_injection_state", "tool_requests_listed"] }],
   )
 
   // Server status for an `inject_context_action` (InteractionUpdate #23).
@@ -1795,6 +1810,16 @@ export function createMessageTypes(): protobuf.Root {
   addType(root, "UserMessageAction", [
     { id: 1, name: "user_message", type: "UserMessage" },
     { id: 2, name: "request_context", type: "RequestContext" },
+    // Earlier user turns created before `user_message`. Cursor keeps only the
+    // last 5 (harness `maxPrependedUserMessages ?? 5`) and drops older ones
+    // silently, so callers send at most 5.
+    { id: 4, name: "prepend_user_messages", type: "UserMessage", repeated: true },
+  ])
+
+  // Cursor CLI `/summarize`: an empty action; the harness picks what to summarize.
+  addType(root, "SummarizeAction", [])
+  addType(root, "ConversationSummary", [
+    { id: 1, name: "summary", type: "string" },
   ])
 
   addType(root, "ResumeAction", [
@@ -1844,6 +1869,7 @@ export function createMessageTypes(): protobuf.Root {
       { id: 1, name: "user_message_action", type: "UserMessageAction" },
       { id: 2, name: "resume_action", type: "ResumeAction" },
       { id: 3, name: "cancel_action", type: "CancelAction" },
+      { id: 4, name: "summarize_action", type: "SummarizeAction" },
       { id: 8, name: "async_ask_question_completion_action", type: "AsyncAskQuestionCompletionAction" },
       { id: 19, name: "inject_context_action", type: "InjectContextAction" },
     ],
@@ -1853,6 +1879,7 @@ export function createMessageTypes(): protobuf.Root {
         "user_message_action",
         "resume_action",
         "cancel_action",
+        "summarize_action",
         "async_ask_question_completion_action",
         "inject_context_action",
       ],
@@ -1914,7 +1941,11 @@ export function createMessageTypes(): protobuf.Root {
   addType(root, "ConversationStateStructure", [
     { id: 1, name: "root_prompt_messages_json", type: "string", repeated: true },
     { id: 5, name: "token_details", type: "ConversationTokenDetails" },
+    // Blob id of the latest ConversationSummary (read-only, after summarize_action).
+    { id: 6, name: "summary", type: "bytes" },
     { id: 8, name: "turns", type: "ConversationTurn", repeated: true },
+    // Blob ids of ConversationSummaryArchive entries (diagnostics only).
+    { id: 13, name: "summary_archives", type: "bytes", repeated: true },
   ])
 
   addType(root, "ModelDetails", [

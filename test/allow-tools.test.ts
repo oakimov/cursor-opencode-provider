@@ -245,53 +245,45 @@ describe("compaction tool catalog", () => {
     })
   })
 
-  it("rebases after the summary checkpoint, restores execution, then stays stable", async () => {
+  it("a history-import turn remints once, refuses execution, and the next turn keeps its conversation", async () => {
     const sessionKey = "ses_transition"
     const tools = [{ name: "bash" }, { name: "grep" }]
 
     await resolveTurnToolState({ sessionKey, incomingTools: tools, isCompaction: false })
-    const beforeCompaction = bindConversationId(sessionKey).conversationId
+    const beforeImport = bindConversationId(sessionKey).conversationId
 
-    const compactionReset = resolveTurnConversationReset({ sessionKey, isCompaction: true })
-    const compacted = await resolveTurnToolState({
+    const importReset = resolveTurnConversationReset({ sessionKey, historyImport: true })
+    const imported = await resolveTurnToolState({
       sessionKey,
       incomingTools: [],
       isCompaction: true,
     })
-    const afterCompaction = bindConversationId(sessionKey, compactionReset).conversationId
-    expect(afterCompaction).not.toBe(beforeCompaction)
-    expect(compactionReset).toEqual({ reset: true, reason: "compaction" })
-    expect(compacted).toEqual({ advertisedTools: [], allowTools: false })
+    const afterImport = bindConversationId(sessionKey, importReset).conversationId
+    expect(afterImport).not.toBe(beforeImport)
+    expect(importReset).toEqual({ reset: true, reason: "history-import" })
+    expect(imported).toEqual({ advertisedTools: [], allowTools: false })
 
-    const resumedReset = resolveTurnConversationReset({ sessionKey, isCompaction: false })
-    const resumed = await resolveTurnToolState({
-      sessionKey,
-      incomingTools: tools,
-      isCompaction: false,
-    })
-    const afterRebase = bindConversationId(sessionKey, resumedReset).conversationId
-    expect(resumedReset).toEqual({ reset: true, reason: "post-compaction-rebase" })
-    expect(afterRebase).not.toBe(afterCompaction)
+    // Native compaction summarizes that conversation in place: no rebase follows.
+    const next = resolveTurnConversationReset({ sessionKey })
+    const resumed = await resolveTurnToolState({ sessionKey, incomingTools: tools, isCompaction: false })
+    expect(next).toEqual({ reset: false })
+    expect(bindConversationId(sessionKey, next).conversationId).toBe(afterImport)
     expect(resumed).toEqual({ advertisedTools: tools, allowTools: true })
-
-    expect(resolveTurnConversationReset({ sessionKey, isCompaction: false }))
-      .toEqual({ reset: false })
-    expect(bindConversationId(sessionKey).conversationId).toBe(afterRebase)
   })
 
   it("does not reset ordinary no-tool turns", () => {
-    expect(resolveTurnConversationReset({ sessionKey: "ses_no_tools", isCompaction: false }))
+    expect(resolveTurnConversationReset({ sessionKey: "ses_no_tools" }))
       .toEqual({ reset: false })
   })
 
   it("rebases once when the host rewrites history without a model compaction turn", () => {
     const sessionKey = "ses_local_rewrite"
     const before = bindConversationId(sessionKey).conversationId
-    const reset = resolveTurnConversationReset({ sessionKey, isCompaction: false, historyRewrite: true })
+    const reset = resolveTurnConversationReset({ sessionKey, historyRewrite: true })
     expect(reset).toEqual({ reset: true, reason: "history-rewrite" })
     const after = bindConversationId(sessionKey, reset).conversationId
     expect(after).not.toBe(before)
-    expect(resolveTurnConversationReset({ sessionKey, isCompaction: false }))
+    expect(resolveTurnConversationReset({ sessionKey }))
       .toEqual({ reset: false })
   })
 
@@ -299,49 +291,41 @@ describe("compaction tool catalog", () => {
     const sessionKey = "ses_prompt_identity"
     expect(resolveTurnConversationReset({
       sessionKey,
-      isCompaction: false,
       promptIdentity: { hostAgent: "build", systemPromptHash: "prompt-a" },
     })).toEqual({ reset: false })
     // Title/generate lifecycle calls deliberately omit promptIdentity.
     expect(resolveTurnConversationReset({
       sessionKey,
-      isCompaction: false,
     })).toEqual({ reset: false })
     expect(resolveTurnConversationReset({
       sessionKey,
-      isCompaction: false,
       promptIdentity: { hostAgent: "build", systemPromptHash: "prompt-a" },
     })).toEqual({ reset: false })
     // Agent flip must not remint (CLI keeps agentId across mode changes).
     expect(resolveTurnConversationReset({
       sessionKey,
-      isCompaction: false,
       promptIdentity: { hostAgent: "plan", systemPromptHash: "prompt-a" },
     })).toEqual({ reset: false })
     // Remint path ignores promptIdentity entirely (hash is frozen separately).
     expect(resolveTurnConversationReset({
       sessionKey,
-      isCompaction: false,
       promptIdentity: { hostAgent: "plan", systemPromptHash: "prompt-b" },
     })).toEqual({ reset: false })
   })
 
-  it("bounds cached tool catalogs and pending post-compaction rebases", async () => {
+  it("bounds cached tool catalogs", async () => {
     await resolveTurnToolState({
       sessionKey: "oldest",
       incomingTools: [{ name: "read" }],
       isCompaction: false,
     })
-    resolveTurnConversationReset({ sessionKey: "oldest", isCompaction: true })
 
     for (let i = 0; i < MAX_TURN_STATE_SESSIONS; i++) {
-      const sessionKey = `new-${i}`
       await resolveTurnToolState({
-        sessionKey,
+        sessionKey: `new-${i}`,
         incomingTools: [{ name: "bash" }],
         isCompaction: false,
       })
-      resolveTurnConversationReset({ sessionKey, isCompaction: true })
     }
 
     // An evicted catalog cannot block a host-empty lifecycle request.
@@ -351,7 +335,7 @@ describe("compaction tool catalog", () => {
       isCompaction: true,
     })
     expect(evicted).toEqual({ advertisedTools: [], allowTools: false })
-    expect(resolveTurnConversationReset({ sessionKey: "oldest", isCompaction: false }))
+    expect(resolveTurnConversationReset({ sessionKey: "oldest" }))
       .toEqual({ reset: false })
   })
 })
